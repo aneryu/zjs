@@ -81,9 +81,15 @@ pub const h_field = coldStd(struct {
         _ = try vm_property_field.field(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
     }
 }.b);
-pub const h_array_element = coldStd(struct {
+pub const h_get_array_element = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_field.arrayElement(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
+        _ = try vm_property_field.getArrayElement(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
+    }
+}.b);
+pub const h_put_array_element = coldStd(struct {
+    fn b(vm: *Vm, pc: [*]const u8) HostError!void {
+        _ = pc;
+        _ = try vm_property_field.putArrayElementAfterFastMiss(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
     }
 }.b);
 pub const h_get_var = coldStd(struct {
@@ -422,7 +428,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             _ = try vm_property_private.definePrivateFieldVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    inline for ([_]u8{ op.get_array_el, op.get_array_el2, op.get_array_el3, op.put_array_el }) |o| t[o] = h_array_element;
+    inline for ([_]u8{ op.get_array_el, op.get_array_el2, op.get_array_el3 }) |o| t[o] = h_get_array_element;
+    t[op.put_array_el] = h_put_array_element;
     t[op.get_super] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try class_vm.getSuper(vm.ctx, vm.stack, vm.frame);
@@ -894,8 +901,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
-    t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_array_element
-    t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_array_element
+    t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element
+    t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_put_array_element
     t[op.get_length] = td.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
     // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)
     // are register-resident single-`bl` inlines, quickjs.c:17961/19269/18239). Without

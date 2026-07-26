@@ -12482,6 +12482,77 @@ test "computed named reads preserve prototype accessors proxies and operand owne
     try std.testing.expect(result.isUndefined());
 }
 
+test "computed integer write misses preserve generic set semantics" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const own = { 0: 1 };
+        \\own[0] = 2;
+        \\assert.sameValue(own[0], 2);
+        \\const negativeKey = -1;
+        \\own[negativeKey] = 3;
+        \\assert.sameValue(own["-1"], 3);
+        \\let setterReceiver;
+        \\let setterValue;
+        \\const prototype = {};
+        \\Object.defineProperty(prototype, "0", {
+        \\    set(value) {
+        \\        setterReceiver = this;
+        \\        setterValue = value;
+        \\    },
+        \\});
+        \\const inherited = Object.create(prototype);
+        \\inherited[0] = 4;
+        \\assert.sameValue(setterReceiver, inherited);
+        \\assert.sameValue(setterValue, 4);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(inherited, "0"), false);
+        \\let trapReceiver;
+        \\const target = { 0: 5 };
+        \\const proxy = new Proxy(target, {
+        \\    set(object, key, value, receiver) {
+        \\        trapReceiver = receiver;
+        \\        object[key] = value + 1;
+        \\        return true;
+        \\    },
+        \\});
+        \\proxy[0] = 6;
+        \\assert.sameValue(target[0], 7);
+        \\assert.sameValue(trapReceiver, proxy);
+        \\function mapped(value) {
+        \\    arguments[0] = 8;
+        \\    return [value, arguments[0]];
+        \\}
+        \\const mappedResult = mapped(1);
+        \\assert.sameValue(mappedResult[0], 8);
+        \\assert.sameValue(mappedResult[1], 8);
+        \\let coerced = 0;
+        \\const typed = new Int32Array(1);
+        \\typed[0] = { valueOf() { coerced++; return 9; } };
+        \\assert.sameValue(typed[0], 9);
+        \\assert.sameValue(coerced, 1);
+        \\const frozen = {};
+        \\Object.defineProperty(frozen, "0", { value: 10, writable: false });
+        \\frozen[0] = 11;
+        \\assert.sameValue(frozen[0], 10);
+        \\function strictWrite() {
+        \\    "use strict";
+        \\    frozen[0] = 12;
+        \\}
+        \\let rejected = false;
+        \\try {
+        \\    strictWrite();
+        \\} catch (error) {
+        \\    rejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(rejected, true);
+        \\assert.sameValue(frozen[0], 10);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "static named getter and proxy fast paths preserve receivers throws and invariants" {
     engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);

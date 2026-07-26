@@ -2825,7 +2825,7 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 // [obj, key, value] triple. This is qjs set_value / direct append ownership:
 // value is consumed by the slot and the proven-int key needs no release.
 // Typed arrays (not is_array), string keys, out-of-range / holey, and exotic
-// receivers fall to the cold h_array_element with all operands still owned.
+// receivers fall to the cold h_put_array_element with all operands still owned.
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     const key = (sp - 2)[0];

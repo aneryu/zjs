@@ -866,7 +866,93 @@ fn stringFromCharCodeInt32Value(rt: *core.JSRuntime, code: i32) !core.JSValue {
     return (try core.string.String.createUtf16(rt, &.{unit})).value();
 }
 
-pub noinline fn arrayElement(
+/// OP_put_array_el continuation after the resident handler misses. The caller
+/// has already published pc/sp, so this is the direct counterpart of qjs's
+/// put_array_el_slow_path -> JS_SetPropertyValue call, without the shared
+/// get/put opcode switch.
+pub inline fn putArrayElementAfterFastMiss(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.FunctionBytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+) !Step {
+    const value = try stack.pop();
+    defer value.free(ctx.runtime);
+    const key = try stack.pop();
+    defer key.free(ctx.runtime);
+    const obj = try stack.pop();
+    defer obj.free(ctx.runtime);
+    // The resident OP_put_array_el handler already ran qjs
+    // JS_SetPropertyValue's object+int class switch (Array, slow Array, then
+    // TypedArray). On that exact miss, continue at qjs's JS_ValueToAtom ->
+    // JS_SetPropertyInternal slow-path boundary instead of repeating the same
+    // typed/dense probes here.
+    const int_object_fast_miss = key.isInt() and obj.isObject();
+    if (!int_object_fast_miss) {
+        switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        }) {
+            .handled => return .continue_loop,
+            .not_typed_array => {},
+        }
+        switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) {
+            .handled => return .continue_loop,
+            .out_of_memory => return error.OutOfMemory,
+            .miss => {},
+        }
+    }
+    if (int_object_fast_miss) {
+        const index = key.asInt32().?;
+        if (index >= 0) {
+            // qjs JS_ValueToAtom -> __JS_AtomFromUInt32: a non-negative int32
+            // key is already a tagged integer atom. No JSValue copy/string
+            // conversion or dynamic atom ownership is needed.
+            const atom_id = core.atom.atomFromUInt32(@intCast(index));
+            const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
+            result.free(ctx.runtime);
+            return .done;
+        }
+    }
+    const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    defer key_value.free(ctx.runtime);
+    // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
+    // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish base
+    // TypeError, so user key-coercion side effects fire first.
+    if (obj.isNull() or obj.isUndefined()) {
+        _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key_value) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
+        unreachable;
+    }
+    if (!int_object_fast_miss) {
+        switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key_value, value)) {
+            .handled => return .continue_loop,
+            .out_of_memory => return error.OutOfMemory,
+            .miss => {},
+        }
+    }
+    const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
+    defer ctx.runtime.atoms.free(atom_id);
+    const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    result.free(ctx.runtime);
+    return .done;
+}
+
+pub noinline fn getArrayElement(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1025,53 +1111,6 @@ pub noinline fn arrayElement(
             key_value_owned = false;
             old_key.free(ctx.runtime);
             try stack.pushOwned(value);
-        },
-        op.put_array_el => {
-            const value = try stack.pop();
-            defer value.free(ctx.runtime);
-            const key = try stack.pop();
-            defer key.free(ctx.runtime);
-            const obj = try stack.pop();
-            defer obj.free(ctx.runtime);
-            switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            }) {
-                .handled => return .continue_loop,
-                .not_typed_array => {},
-            }
-            switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) {
-                .handled => return .continue_loop,
-                .out_of_memory => return error.OutOfMemory,
-                .miss => {},
-            }
-            const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            };
-            defer key_value.free(ctx.runtime);
-            // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
-            // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish
-            // base TypeError, so user key-coercion side effects fire first.
-            if (obj.isNull() or obj.isUndefined()) {
-                _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key_value) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                    return err;
-                };
-                unreachable;
-            }
-            switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key_value, value)) {
-                .handled => return .continue_loop,
-                .out_of_memory => return error.OutOfMemory,
-                .miss => {},
-            }
-            const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-            defer ctx.runtime.atoms.free(atom_id);
-            const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            };
-            result.free(ctx.runtime);
         },
         else => unreachable,
     }
