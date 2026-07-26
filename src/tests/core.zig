@@ -4628,6 +4628,35 @@ test "dense array element self-assignment keeps stored object alive" {
     try std.testing.expectEqual(&stored.header, array.arrayElements()[0].refHeader().?);
 }
 
+test "owned dense array writes consume values only on success" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array = try core.Object.createArray(rt, null);
+    defer array.value().free(rt);
+    const initial = try core.Object.create(rt, core.class.ids.object, null);
+    const initial_witness = initial.value().dup();
+    defer initial_witness.free(rt);
+    const index_0 = core.atom.atomFromUInt32(0);
+
+    try std.testing.expect(try array.appendDenseArrayIndexOwned(rt, 0, index_0, initial.value()));
+    try std.testing.expectEqual(@as(i32, 2), initial.header.meta().rc);
+
+    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+    const replacement_witness = replacement.value().dup();
+    defer replacement_witness.free(rt);
+    try std.testing.expect(array.setFastArrayElementOwned(rt, 0, replacement.value()));
+    try std.testing.expectEqual(@as(i32, 1), initial.header.meta().rc);
+    try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
+    try std.testing.expectEqual(&replacement.header, array.arrayElements()[0].refHeader().?);
+
+    const rejected = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expect(!array.setFastArrayElementOwned(rt, 2, rejected.value()));
+    try std.testing.expect(!try array.appendDenseArrayIndexOwned(rt, 3, core.atom.atomFromUInt32(3), rejected.value()));
+    try std.testing.expectEqual(@as(i32, 1), rejected.header.meta().rc);
+    rejected.value().free(rt);
+}
+
 test "prototype replacement clones shared transition shape" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

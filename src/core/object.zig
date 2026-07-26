@@ -4970,6 +4970,15 @@ pub const Object = extern struct {
         return true;
     }
 
+    /// Owned-value counterpart of `setFastArrayElementDup`. The value is
+    /// consumed only when this returns true; false leaves ownership with the
+    /// caller. Mirrors QuickJS `set_value` for OP_put_array_el.
+    pub fn setFastArrayElementOwned(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        if (!self.isFastArrayIndexInBounds(index)) return false;
+        replaceOwnedValue(rt, &self.u.array.values[@intCast(index)], new_value);
+        return true;
+    }
+
     pub fn adoptDenseArrayElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
         std.debug.assert(self.isArray());
         std.debug.assert(self.u.array.count == 0);
@@ -10143,6 +10152,17 @@ pub const Object = extern struct {
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
+        return self.appendDenseArrayIndexMode(rt, index, atom_id, new_value, false);
+    }
+
+    /// Owned-value counterpart of `appendDenseArrayIndex`. The value is
+    /// consumed only when this returns true; false/error leave ownership with
+    /// the caller. Mirrors QuickJS OP_put_array_el's direct stack-to-slot move.
+    pub fn appendDenseArrayIndexOwned(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
+        return self.appendDenseArrayIndexMode(rt, index, atom_id, new_value, true);
+    }
+
+    fn appendDenseArrayIndexMode(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue, comptime take_ownership: bool) !bool {
         // qjs add_fast_array_element (quickjs.c:9542-9570): the dense append
         // gate is `idx == count`, NOT `idx == length`. A holey array (length >
         // count) can append at `count`; `length` is bumped to `index+1` only
@@ -10153,7 +10173,7 @@ pub const Object = extern struct {
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = new_value.dup();
+        element_slot.* = if (take_ownership) new_value else new_value.dup();
         if (index + 1 > self.u.array.length) self.u.array.length = index + 1;
         self.markIndexedProperties(rt);
         return true;

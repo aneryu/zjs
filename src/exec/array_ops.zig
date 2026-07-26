@@ -5971,6 +5971,41 @@ pub noinline fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core
     return if (appended) .handled else .miss;
 }
 
+pub const DenseArrayOverwriteFastResult = enum(u8) {
+    miss,
+    handled,
+    append_candidate,
+};
+
+/// Consuming overwrite form for the resident OP_put_array_el handler. QuickJS
+/// checks the exact Array/int-tag/count window before entering its append or
+/// slow paths and moves sp[-1] directly into an existing dense slot.
+pub noinline fn putDenseArrayElementOverwriteOwnedFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) callconv(.c) DenseArrayOverwriteFastResult {
+    const object = property_ops.expectObject(object_value) catch return .miss;
+    if (!object.isArray()) return .miss;
+    const index_i32 = key.asInt32() orelse return .miss;
+    if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
+    const index: u32 = @intCast(index_i32);
+    if (object.setFastArrayElementOwned(rt, index, value)) return .handled;
+    if (!object.isFastArray()) return .miss;
+    return .append_candidate;
+}
+
+/// Append remainder for a proven Array/int candidate. Revalidate the operands
+/// at this public boundary; false/OOM leave the owned stack value untouched.
+pub noinline fn putDenseArrayElementAppendOwnedFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) callconv(.c) DenseArrayElementFastResult {
+    const object = property_ops.expectObject(object_value) catch return .miss;
+    if (!object.isArray()) return .miss;
+    const index_i32 = key.asInt32() orelse return .miss;
+    if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
+    const index: u32 = @intCast(index_i32);
+    if (index > core.atom.max_int_atom) return .miss;
+    const appended = object.appendDenseArrayIndexOwned(rt, index, core.atom.atomFromUInt32(index), value) catch |err| switch (err) {
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return if (appended) .handled else .miss;
+}
+
 /// qjs `JS_MAX_LOCAL_VARS` (quickjs.c:210): the build_arg_list argument cap.
 pub const max_apply_arguments: usize = 65534;
 

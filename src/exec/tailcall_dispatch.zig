@@ -2820,25 +2820,31 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 }
 
 // Hot inline put_array_el — qjs OP_put_array_el's dense fast path: a[i] = v on a
-// fast array with a non-negative int32 index writes the (dup'd) value into the
-// dense slot (or appends), then pops the [obj, key, value] triple. The value is
-// dup'd into the array (setFastArrayElementDup), so all three operands are freed
-// here exactly as the cold path's defers do. Typed arrays (not is_array), string
-// keys, out-of-range / holey, and exotic receivers fall to the cold h_array_element.
+// fast array with a non-negative int32 index moves the owned stack value into
+// the dense slot (or appends), frees the receiver, then drops the
+// [obj, key, value] triple. This is qjs set_value / direct append ownership:
+// value is consumed by the slot and the proven-int key needs no release.
+// Typed arrays (not is_array), string keys, out-of-range / holey, and exotic
+// receivers fall to the cold h_array_element with all operands still owned.
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     const key = (sp - 2)[0];
     const obj = (sp - 3)[0];
     const rt = vm.ctx.runtime;
-    switch (array_ops.putDenseArrayElementFast(rt, obj, key, value)) {
+    switch (array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value)) {
         .handled => {
-            value.free(rt);
-            key.free(rt);
             obj.free(rt);
             return cont(pc + 1, sp - 3, var_buf, vm);
         },
-        .out_of_memory => return vm.fail(error.OutOfMemory),
         .miss => {},
+        .append_candidate => switch (array_ops.putDenseArrayElementAppendOwnedFast(rt, obj, key, value)) {
+            .handled => {
+                obj.free(rt);
+                return cont(pc + 1, sp - 3, var_buf, vm);
+            },
+            .out_of_memory => return vm.fail(error.OutOfMemory),
+            .miss => {},
+        },
     }
     if (key.isInt() and obj.isObject()) {
         // Slow/sparse Array existing own integer element overwrite (crypto
