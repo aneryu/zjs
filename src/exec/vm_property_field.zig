@@ -742,7 +742,7 @@ pub inline fn cachedStringPropertyValueForFastPath(
             const index_value = core.JSValue.int32(@intCast(index));
             if (fastDenseArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
             if (fastStringIndexValue(rt, receiver, index_value)) |value| return .{ .owned = value };
-            if (fastTypedArrayElementValue(rt, receiver, index_value)) |value| return .{ .owned = value };
+            if (fastTypedArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
         }
     }
     return atomPropertyValueForFastPath(rt, global, receiver, atom_id);
@@ -914,7 +914,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
+            if (fastTypedArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -957,7 +957,7 @@ pub noinline fn arrayElement(
                 old_value.free(ctx.runtime);
                 return .done;
             }
-            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
+            if (fastTypedArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 const old_value = stack.values[stack.len() - 1];
                 stack.values[stack.len() - 1] = value;
@@ -1002,7 +1002,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
+            if (fastTypedArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -1077,9 +1077,9 @@ pub noinline fn arrayElement(
 // Uint8Clamped/Int16/Uint16/Int32/Uint32/Float16/Float32/Float64 — kinds 1..10),
 // which are all allocation-free; BigInt64/BigUint64 (kinds 11/12) return null so
 // the value flows through the (correct, allocating) generic path. The byte→value
-// mapping is delegated to the canonical `typedArrayGetIndex` (one source of truth
-// with the slow path / DataView), so no kind-specific decoder is duplicated here.
-pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue) ?core.JSValue {
+// mapping is delegated to the canonical `readNumericElement`, which is also used
+// by the generic core reader, so no kind-specific decoder is duplicated here.
+pub fn fastTypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JSValue {
     const object = objectFromValue(obj) orelse return null;
     const key_int = key.asInt32() orelse return null;
     if (key_int < 0) return null;
@@ -1096,7 +1096,7 @@ pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: c
     const width: usize = payload.element_size;
     if (width == 0) return null;
     const element_offset = @as(usize, index) * width;
-    return core.typed_array.readElement(rt, kind, data[element_offset .. element_offset + width]) catch null;
+    return core.typed_array.readNumericElement(kind, data[element_offset .. element_offset + width]);
 }
 
 pub const TypedArrayWriteFast = enum { not_typed_array, handled };

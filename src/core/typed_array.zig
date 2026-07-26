@@ -842,7 +842,15 @@ fn f64ToFloat16(value: f64) u16 {
     return @bitCast(@as(f16, @floatCast(value)));
 }
 
-pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
+/// Decode one non-BigInt TypedArray element without entering the allocating
+/// BigInt/error-union path. QuickJS's JS_GetPropertyValue typed-array arm
+/// switches on the concrete numeric class and returns the value directly; keep
+/// the same split here so the VM's already-validated numeric fast path does not
+/// acquire the stack frame needed by kinds 11/12.
+///
+/// This is also the single source of truth for numeric decoding: readElement
+/// delegates kinds 1..10 here before handling the allocating BigInt kinds.
+pub noinline fn readNumericElement(kind: u8, bytes: []const u8) JSValue {
     return switch (kind) {
         1 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
         2 => JSValue.int32(bytes[0]),
@@ -854,6 +862,13 @@ pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
         8 => numberResult(float16ToF64(std.mem.readInt(u16, bytes[0..2], .little))),
         9 => numberResult(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))))),
         10 => numberResult(@bitCast(std.mem.readInt(u64, bytes[0..8], .little))),
+        else => unreachable,
+    };
+}
+
+pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
+    if (kind >= 1 and kind <= 10) return readNumericElement(kind, bytes);
+    return switch (kind) {
         11 => bigIntResult(rt, std.mem.readInt(i64, bytes[0..8], .little)),
         12 => bigIntResult(rt, @intCast(std.mem.readInt(u64, bytes[0..8], .little))),
         else => error.TypeError,

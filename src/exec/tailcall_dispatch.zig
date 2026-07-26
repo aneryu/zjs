@@ -3160,7 +3160,7 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
             (sp - 2)[0] = value;
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
-        if (vm_property_field.fastTypedArrayElementValue(rt, obj, key)) |value| {
+        if (vm_property_field.fastTypedArrayElementValue(obj, key)) |value| {
             obj.free(rt);
             // key is an int (no refcount); nothing to free.
             (sp - 2)[0] = value;
