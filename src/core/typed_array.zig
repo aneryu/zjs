@@ -875,36 +875,68 @@ pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
     };
 }
 
-pub fn writeElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+/// Coerce and encode one non-BigInt TypedArray element. QuickJS groups the
+/// JS_SetPropertyValue class-id arms by conversion mechanism: truncating
+/// integer arrays use JS_ToInt32Free, Uint8Clamped uses JS_ToUint8ClampFree,
+/// and floating arrays use JS_ToFloat64Free. Preserve those three groups here.
+/// In particular, an existing int32 value reaches integer storage as raw bits
+/// instead of making a round trip through f64 and the generic 2^32 modulo.
+///
+/// The VM's numeric element fast path calls this directly; writeElement also
+/// delegates kinds 1..10 here so the encoding remains canonical.
+pub inline fn writeNumericElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+    if (value.isBigInt()) return error.TypeError;
     switch (kind) {
-        1, 2 => {
-            if (value.isBigInt()) return error.TypeError;
-            bytes[0] = @truncate(numberToUint32(try coerceNumber(rt, value)));
-        },
-        3 => {
-            if (value.isBigInt()) return error.TypeError;
-            bytes[0] = numberToUint8Clamp(try coerceNumber(rt, value));
-        },
-        4, 5 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u16, bytes[0..2], @truncate(numberToUint32(try coerceNumber(rt, value))), .little);
-        },
-        6, 7 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u32, bytes[0..4], numberToUint32(try coerceNumber(rt, value)), .little);
-        },
-        8 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(try coerceNumber(rt, value)), .little);
-        },
-        9 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(try coerceNumber(rt, value)))), .little);
-        },
-        10 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u64, bytes[0..8], @bitCast(try coerceNumber(rt, value)), .little);
-        },
+        1, 2, 4, 5, 6, 7 => return writeTruncatingIntegerElement(rt, kind, bytes, value),
+        3 => return writeClampedElement(rt, bytes, value),
+        8 => return writeFloatingElement(8, rt, bytes, value),
+        9 => return writeFloatingElement(9, rt, bytes, value),
+        10 => return writeFloatingElement(10, rt, bytes, value),
+        else => unreachable,
+    }
+}
+
+noinline fn writeTruncatingIntegerElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+    const bits: u32 = if (value.asInt32()) |integer|
+        @bitCast(integer)
+    else
+        numberToUint32(try coerceNumber(rt, value));
+    switch (kind) {
+        1, 2 => bytes[0] = @truncate(bits),
+        4, 5 => std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little),
+        6, 7 => std.mem.writeInt(u32, bytes[0..4], bits, .little),
+        else => unreachable,
+    }
+}
+
+noinline fn writeClampedElement(rt: *JSRuntime, bytes: []u8, value: JSValue) !void {
+    bytes[0] = if (value.asInt32()) |integer|
+        if (integer <= 0)
+            0
+        else if (integer >= 255)
+            255
+        else
+            @intCast(integer)
+    else
+        numberToUint8Clamp(try coerceNumber(rt, value));
+}
+
+noinline fn writeFloatingElement(comptime kind: u8, rt: *JSRuntime, bytes: []u8, value: JSValue) !void {
+    const number = try coerceNumber(rt, value);
+    if (kind == 8) {
+        std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(number), .little);
+    } else if (kind == 9) {
+        std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(number))), .little);
+    } else if (kind == 10) {
+        std.mem.writeInt(u64, bytes[0..8], @bitCast(number), .little);
+    } else {
+        unreachable;
+    }
+}
+
+pub fn writeElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+    if (kind >= 1 and kind <= 10) return writeNumericElement(rt, kind, bytes, value);
+    switch (kind) {
         11, 12 => std.mem.writeInt(u64, bytes[0..8], try valueToBigInt64Bits(rt, value), .little),
         else => return error.TypeError,
     }

@@ -1147,7 +1147,7 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     const width = payload.element_size;
     if (width == 0) return .not_typed_array;
     var scratch: [8]u8 = undefined;
-    try core.typed_array.writeElement(rt, kind, scratch[0..width], value); // coerce FIRST
+    try core.typed_array.writeNumericElement(rt, kind, scratch[0..width], value); // coerce FIRST
     const index: u32 = @intCast(key_int);
     if (index >= payload.live_length) return .handled;
     const data = payload.data orelse return .handled;
