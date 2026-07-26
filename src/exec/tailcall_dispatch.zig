@@ -3527,12 +3527,12 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
-// The boolean fast path (a comparison result — the hot loop condition) inlines; a
-// non-boolean condition routes to cold_table[pc[0]] (the generic branch8 handler).
+// The QuickJS immediate-scalar fast path (int/bool/null/undefined) inlines; values
+// needing full ToBoolean route to cold_table[pc[0]] (the generic branch8 handler).
 // That routing is INDIRECT, which LLVM cannot inline back — so the hot handler stays
 // prologue-free (a direct tail-call to a local slow shell got re-inlined, dragging in
 // its 64B frame + callee-saved spills, which pressured the store buffer and stalled
-// the boolean's store→load forward from opCompare). Booleans need no free / no call.
+// the immediate value's store→load forward). Immediate values need no free / no call.
 // Plain objects take qjs JS_ToBoolFree's object leg inline (quickjs.c:11205-11211,
 // called by OP_if_{true,false}8 at 18881-18919); HTMLDDA objects stay cold because
 // `core.value_semantics.toBoolean` makes their is_html_dda flag falsy.
@@ -3540,7 +3540,7 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
 // invariant under unrelated text-size changes elsewhere in the dispatch unit.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     const value = (sp - 1)[0];
-    if (value.asBool()) |b| {
+    if (value.asBranchImmediateBool()) |b| {
         // Cadence tick only (qjs js_poll_interrupts inline leg); a hit routes
         // to the cold branch8, which re-executes the untouched operand with
         // the publishing poll (see op_goto8).
@@ -3565,7 +3565,7 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 }
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
-    if (value.asBool()) |b| {
+    if (value.asBranchImmediateBool()) |b| {
         if (vm.ctx.pollInterruptTick())
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });

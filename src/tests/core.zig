@@ -124,6 +124,30 @@ test "every JSValue constructor recovers its QuickJS semantic tag" {
     for (cases) |case| try std.testing.expectEqual(case.tag, case.value.tagOf());
 }
 
+test "QuickJS branch immediate range admits int bool null and undefined only" {
+    var object_header: core.gc.Header = undefined;
+    const cases = [_]struct {
+        value: core.JSValue,
+        expected: ?bool,
+    }{
+        .{ .value = core.JSValue.int32(-1), .expected = true },
+        .{ .value = core.JSValue.int32(0), .expected = false },
+        .{ .value = core.JSValue.int32(1), .expected = true },
+        .{ .value = core.JSValue.boolean(false), .expected = false },
+        .{ .value = core.JSValue.boolean(true), .expected = true },
+        .{ .value = core.JSValue.nullValue(), .expected = false },
+        .{ .value = core.JSValue.undefinedValue(), .expected = false },
+        .{ .value = core.JSValue.object(&object_header), .expected = null },
+        .{ .value = core.JSValue.float64(1), .expected = null },
+        .{ .value = core.JSValue.uninitialized(), .expected = null },
+        .{ .value = core.JSValue.shortBigInt(1), .expected = null },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, case.value.asBranchImmediateBool());
+    }
+}
+
 test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
     const RawWideValue = extern struct {
         payload: u64,

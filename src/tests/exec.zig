@@ -17144,6 +17144,35 @@ test "reflect construct roots argument list while resolving prototype" {
 // Each test pins the observable completion value.
 // ===========================================================================
 
+test "short conditional branches preserve immediate and full ToBoolean semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function choose(value) { if (value) return 1; return 0; }
+        \\function orValue(value) { return value || 9; }
+        \\function andValue(value) { return value && 9; }
+        \\assert.sameValue(choose(-1), 1);
+        \\assert.sameValue(choose(0), 0);
+        \\assert.sameValue(choose(1), 1);
+        \\assert.sameValue(choose(false), 0);
+        \\assert.sameValue(choose(true), 1);
+        \\assert.sameValue(choose(null), 0);
+        \\assert.sameValue(choose(undefined), 0);
+        \\assert.sameValue(choose(-0), 0);
+        \\assert.sameValue(choose(0.5), 1);
+        \\assert.sameValue(choose(""), 0);
+        \\assert.sameValue(choose("x"), 1);
+        \\assert.sameValue(choose({}), 1);
+        \\assert.sameValue(orValue(0), 9);
+        \\assert.sameValue(orValue(4), 4);
+        \\assert.sameValue(andValue(0), 0);
+        \\assert.sameValue(andValue(4), 9);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "if-throw fall-off form returns undefined (if_false8 branch-to-end)" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -443,6 +443,17 @@ pub const JSValue = extern struct {
         return numberValue(self);
     }
 
+    /// QuickJS OP_if_{true,false} classifies the contiguous immediate tag
+    /// range [int, undefined] with one unsigned comparison, then reads the
+    /// payload as its truth value. Null and undefined have a zero payload;
+    /// references and floats return null so the caller can use full ToBoolean.
+    pub inline fn asBranchImmediateBool(self: JSValue) ?bool {
+        const tag: u32 = @bitCast(self.tagOf());
+        const last_immediate: u32 = @intCast(Tag.undefined_value);
+        if (tag > last_immediate) return null;
+        return self.payloadOf() != 0;
+    }
+
     pub fn asBool(self: JSValue) ?bool {
         if (self.hasTag(Tag.boolean)) return self.payloadOf() != 0;
         return null;
