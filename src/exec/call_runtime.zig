@@ -2155,6 +2155,26 @@ const SimpleFieldConstructorPattern = struct {
     len: usize = 0,
 };
 
+/// Populate `rt.simple_ctor_memo` for `fb` unless it already holds it. The
+/// pattern is a pure function of the (immutable) bytecode, so a hit avoids the
+/// per-construct bytecode scan; the destructor clears the memo so a reused FB
+/// address never reads a stale entry.
+fn ensureSimpleCtorMemo(rt: *core.JSRuntime, fb: *const bytecode.FunctionBytecode) void {
+    const key = @intFromPtr(fb);
+    if (rt.simple_ctor_memo.fb == key) return;
+    rt.simple_ctor_memo.fb = key;
+    if (simpleFieldConstructorPattern(fb)) |pattern| {
+        rt.simple_ctor_memo.is_simple = true;
+        rt.simple_ctor_memo.len = @intCast(pattern.len);
+        for (0..pattern.len) |i| {
+            rt.simple_ctor_memo.atoms[i] = pattern.atoms[i];
+            rt.simple_ctor_memo.args[i] = pattern.arg_indices[i];
+        }
+    } else {
+        rt.simple_ctor_memo.is_simple = false;
+    }
+}
+
 fn constructSimpleFieldConstructor(
     ctx: *core.JSContext,
     caller_global: *core.Object,
@@ -2166,12 +2186,23 @@ fn constructSimpleFieldConstructor(
     copy_argv: bool,
 ) !?core.JSValue {
     if (!new_target.sameValue(func)) return null;
-    const pattern = simpleFieldConstructorPattern(fb) orelse return null;
-    const prototype = (function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch return null) orelse return null;
-    if (prototypeChainBlocksSimpleFieldStore(prototype, pattern)) return null;
+    const rt = ctx.runtime;
+    // Memoize the (immutable) bytecode pattern per FB — the scan was the top
+    // self-cost of the fast-path construct, re-run on every `new F()`. The memo
+    // is invalidated in the FB destructor, so keying on the FB pointer is safe.
+    ensureSimpleCtorMemo(rt, fb);
+    if (!rt.simple_ctor_memo.is_simple) return null;
+    const prototype = (function_object.getOwnConstructorPrototypeObject(rt) catch return null) orelse return null;
+    // The prototype materialization above can allocate/GC on the FIRST construct
+    // only, and never re-enters construction, so the memo stays valid for this
+    // (live) FB — read the field arrays after it. Slices borrow the rt memo.
+    const memo_len = rt.simple_ctor_memo.len;
+    const memo_atoms = rt.simple_ctor_memo.atoms[0..memo_len];
+    const memo_args = rt.simple_ctor_memo.args[0..memo_len];
+    if (prototypeChainBlocksSimpleFieldStore(prototype, memo_atoms)) return null;
 
-    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
+    const instance = try core.Object.create(rt, core.class.ids.object, prototype);
+    errdefer core.Object.destroyFromHeader(rt, &instance.header);
     // This fast path replaces the bytecode JS_CallInternal body, but not its
     // caller-Realm entry poll. QuickJS creates the base instance first and then
     // takes this second constructor poll before executing field stores.
@@ -2182,9 +2213,9 @@ fn constructSimpleFieldConstructor(
         call_vm.qjsBytecodeFrameAllocaSize(fb, args.len, copy_argv),
     );
     defer call_depth_guard.deinit();
-    for (pattern.atoms[0..pattern.len], pattern.arg_indices[0..pattern.len]) |atom_id, arg_index| {
+    for (memo_atoms, memo_args) |atom_id, arg_index| {
         const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
-        try instance.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+        try instance.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, true, true, true));
     }
     return instance.value();
 }
@@ -2313,11 +2344,11 @@ fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
     return null;
 }
 
-fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, pattern: SimpleFieldConstructorPattern) bool {
+fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, atoms: []const core.Atom) bool {
     var current: ?*core.Object = prototype;
     while (current) |object| {
         if (object.hasExoticMethods() or object.proxyTarget() != null) return true;
-        for (pattern.atoms[0..pattern.len]) |atom_id| {
+        for (atoms) |atom_id| {
             if (object.hasOwnProperty(atom_id)) return true;
         }
         current = object.getPrototype();

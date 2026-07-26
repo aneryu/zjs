@@ -2672,6 +2672,11 @@ pub const function_bytecode = struct {
 
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
+        // Drop this FB from the simple-field-constructor pattern memo before its
+        // storage is reused, so a later FB allocated at the same address cannot
+        // read a stale (pointer-keyed) match. (No-op unless this exact FB was
+        // the last constructor whose pattern was scanned.)
+        if (rt.simple_ctor_memo.fb == @intFromPtr(self)) rt.simple_ctor_memo.fb = 0;
         const layout_value = self.layout();
         self.deinitWithLayout(rt, layout_value);
         // Cycle removal and runtime deinit both defer the struct-free until all
