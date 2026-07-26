@@ -5977,9 +5977,9 @@ pub const DenseArrayOverwriteFastResult = enum(u8) {
     append_candidate,
 };
 
-/// Consuming overwrite form for the resident OP_put_array_el handler. QuickJS
-/// checks the exact Array/int-tag/count window before entering its append or
-/// slow paths and moves sp[-1] directly into an existing dense slot.
+/// Consuming overwrite/reserved-append form for the resident OP_put_array_el
+/// handler. QuickJS keeps one exact Array/int-tag/count classification across
+/// both arms and moves sp[-1] directly into the selected dense slot.
 pub noinline fn putDenseArrayElementOverwriteOwnedFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) callconv(.c) DenseArrayOverwriteFastResult {
     const object = property_ops.expectObject(object_value) catch return .miss;
     if (!object.isArray()) return .miss;
@@ -5988,7 +5988,21 @@ pub noinline fn putDenseArrayElementOverwriteOwnedFast(rt: *core.JSRuntime, obje
     const index: u32 = @intCast(index_i32);
     if (object.setFastArrayElementOwned(rt, index, value)) return .handled;
     if (!object.isFastArray()) return .miss;
-    return .append_candidate;
+
+    // qjs OP_put_array_el keeps the exact Array/int classification live across
+    // its overwrite and reserved-capacity append arms. Preserve the overwrite
+    // leaf above, then complete the allocation-free append here without
+    // re-reading the JSValue tags through a second helper.
+    if (index != object.fastArrayCount() or !object.flags.length_writable) return .miss;
+    if (object.hasExoticMethods() or !object.canExtendFastArray()) return .miss;
+    if (object.shape_ref.prop_count != 0) return .append_candidate;
+    const new_count = index + 1;
+    if (new_count > object.fastArrayCapacity()) return .append_candidate;
+    object.fastArraySlotAssumeCapacity(index).* = value;
+    object.setFastArrayCountAssumeCapacity(new_count);
+    if (new_count > object.arrayLength()) object.setArrayLength(new_count);
+    object.markIndexedProperties(rt);
+    return .handled;
 }
 
 /// Append remainder for a proven Array/int candidate. Revalidate the operands

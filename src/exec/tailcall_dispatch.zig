@@ -2831,20 +2831,20 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     const key = (sp - 2)[0];
     const obj = (sp - 3)[0];
     const rt = vm.ctx.runtime;
-    switch (array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value)) {
-        .handled => {
-            obj.free(rt);
-            return cont(pc + 1, sp - 3, var_buf, vm);
-        },
-        .miss => {},
-        .append_candidate => switch (array_ops.putDenseArrayElementAppendOwnedFast(rt, obj, key, value)) {
+    const overwrite_result = array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value);
+    if (overwrite_result == .handled) {
+        obj.free(rt);
+        return cont(pc + 1, sp - 3, var_buf, vm);
+    }
+    if (overwrite_result == .append_candidate) {
+        switch (array_ops.putDenseArrayElementAppendOwnedFast(rt, obj, key, value)) {
             .handled => {
                 obj.free(rt);
                 return cont(pc + 1, sp - 3, var_buf, vm);
             },
             .out_of_memory => return vm.fail(error.OutOfMemory),
             .miss => {},
-        },
+        }
     }
     if (key.isInt() and obj.isObject()) {
         // Slow/sparse Array existing own integer element overwrite (crypto

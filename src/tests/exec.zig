@@ -11,6 +11,7 @@ const function_def = zjs.bytecode.function_def;
 const op = zjs.bytecode.opcode.op;
 const property_ops = zjs.exec.property_ops;
 const object_ops = zjs.exec.object_ops;
+const array_ops = zjs.exec.array_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
 
@@ -12551,6 +12552,70 @@ test "computed integer write misses preserve generic set semantics" {
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
+}
+
+test "dense write leaf consumes reserved appends only inside the qjs capacity window" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array = try core.Object.createArray(rt, null);
+    defer array.value().free(rt);
+    try array.fastArrayEnsureCapacity(rt, 2);
+
+    const stored = try core.Object.create(rt, core.class.ids.object, null);
+    const stored_witness = stored.value().dup();
+    defer stored_witness.free(rt);
+    try std.testing.expectEqual(
+        array_ops.DenseArrayOverwriteFastResult.handled,
+        array_ops.putDenseArrayElementOverwriteOwnedFast(
+            rt,
+            array.value(),
+            core.JSValue.int32(0),
+            stored.value(),
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 1), array.fastArrayCount());
+    try std.testing.expectEqual(@as(u32, 1), array.arrayLength());
+    try std.testing.expectEqual(&stored.header, array.fastArrayElementAt(0).refHeader().?);
+    try std.testing.expectEqual(@as(i32, 2), stored.header.meta().rc);
+
+    const growth_array = try core.Object.createArray(rt, null);
+    defer growth_array.value().free(rt);
+    const retained = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expectEqual(
+        array_ops.DenseArrayOverwriteFastResult.append_candidate,
+        array_ops.putDenseArrayElementOverwriteOwnedFast(
+            rt,
+            growth_array.value(),
+            core.JSValue.int32(0),
+            retained.value(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i32, 1), retained.header.meta().rc);
+    retained.value().free(rt);
+
+    const shaped_array = try core.Object.createArray(rt, null);
+    defer shaped_array.value().free(rt);
+    try shaped_array.fastArrayEnsureCapacity(rt, 1);
+    const extra_atom = try rt.internAtom("extra");
+    defer rt.atoms.free(extra_atom);
+    try shaped_array.defineOwnProperty(
+        rt,
+        extra_atom,
+        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+    );
+    const shaped_retained = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expectEqual(
+        array_ops.DenseArrayOverwriteFastResult.append_candidate,
+        array_ops.putDenseArrayElementOverwriteOwnedFast(
+            rt,
+            shaped_array.value(),
+            core.JSValue.int32(0),
+            shaped_retained.value(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i32, 1), shaped_retained.header.meta().rc);
+    shaped_retained.value().free(rt);
 }
 
 test "static named getter and proxy fast paths preserve receivers throws and invariants" {

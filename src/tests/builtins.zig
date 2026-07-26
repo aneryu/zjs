@@ -104,6 +104,7 @@ test "dense array writer readers retain their semantic guard class" {
         .{ .class = .create_data_property, .source = vm_literal_source, .needle = ".defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
         .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".appendDenseArrayIndex(rt,", .count = 2 },
         .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".appendDenseArrayIndexOwned(rt,", .count = 1 },
+        .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".fastArraySlotAssumeCapacity(index).* = value", .count = 1 },
         .{ .class = .prewalk_set, .source = object_ops_source, .needle = ".appendDenseArrayIndex(ctx.runtime,", .count = 1 },
         .{ .class = .already_walked_set, .source = object_source, .needle = "try self.defineOwnDataPropertyForSetKnownNoOwn(rt, atom_id, new_value);", .count = 1 },
         .{ .class = .qjs_bulk_set, .source = array_ops_source, .needle = ".appendDenseArrayValues(ctx.runtime,", .count = 1 },
