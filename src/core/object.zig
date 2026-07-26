@@ -10540,7 +10540,26 @@ pub const Object = extern struct {
         while (prototype) |proto| {
             if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
             if (isTypedArrayObjectForSetFastPath(proto)) return false;
-            if (proto.findProperty(atom_id) != null) return false;
+            if (proto.findProperty(atom_id)) |proto_index| {
+                // qjs JS_SetPropertyInternal's prototype loop (quickjs.c:9840-
+                // 9853) stops at the FIRST prototype that owns the key and reads
+                // `prs->flags` straight off the shape. A GETSET accessor takes
+                // the setter path, an AUTOINIT/VARREF entry needs
+                // materialization, and a non-writable data entry is read-only --
+                // all of those must defer to the full resolver. A plain WRITABLE
+                // DATA property does NOT shadow the create: qjs `break`s and
+                // `add_property`s an own C_W_E data property on the receiver
+                // (quickjs.c:9852, 9884). Mirror that here so the ubiquitous
+                // "assign an instance field whose prototype declares a default"
+                // pattern (raytrace `this.x = ...`, `result.red = ...`) creates
+                // the own slot directly instead of falling through to
+                // `callAccessorSetter`, whose `findPropertyDescriptor` ->
+                // `getOwnProperty` rebuilds an allocating Descriptor up the same
+                // chain only to discover the entry is data, not an accessor.
+                const proto_flags = proto.propFlagsAt(proto_index);
+                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return false;
+                break;
+            }
             prototype = proto.getPrototype();
         }
 
