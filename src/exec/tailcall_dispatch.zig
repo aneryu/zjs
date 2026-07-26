@@ -2833,13 +2833,16 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     const rt = vm.ctx.runtime;
     const overwrite_result = array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value);
     if (overwrite_result == .handled) {
-        obj.free(rt);
+        // QuickJS still uses generic JS_FreeValue for sp[-3] here: preserve
+        // its refcount-tag check and omit only zjs's active-impossible deinit
+        // phase gate.
+        obj.freeDuringActiveBytecode(rt);
         return cont(pc + 1, sp - 3, var_buf, vm);
     }
     if (overwrite_result == .append_candidate) {
         switch (array_ops.putDenseArrayElementAppendOwnedFast(rt, obj, key, value)) {
             .handled => {
-                obj.free(rt);
+                obj.freeDuringActiveBytecode(rt);
                 return cont(pc + 1, sp - 3, var_buf, vm);
             },
             .out_of_memory => return vm.fail(error.OutOfMemory),

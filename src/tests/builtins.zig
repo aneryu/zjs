@@ -90,7 +90,7 @@ test "dense array writer readers retain their semantic guard class" {
     const vm_literal_source = @embedFile("../exec/vm_literal.zig");
     const readers = [_]Reader{
         .{ .class = .own_overwrite, .source = array_ops_source, .needle = ".setFastArrayElementDup(rt, index, value)", .count = 2 },
-        .{ .class = .own_overwrite, .source = array_ops_source, .needle = ".setFastArrayElementOwned(rt, index, value)", .count = 1 },
+        .{ .class = .own_overwrite, .source = array_ops_source, .needle = ".setFastArrayElementOwnedDuringActiveBytecode(rt, index, value)", .count = 1 },
         .{ .class = .create_data_property, .source = core_array_source, .needle = ".initDenseArrayLiteralValuesAssumingEmpty(rt, values)", .count = 1 },
         .{ .class = .create_data_property, .source = core_array_source, .needle = ".appendDenseArrayLiteralIndex(rt,", .count = 1 },
         .{ .class = .create_data_property, .source = array_builtin_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 1 },

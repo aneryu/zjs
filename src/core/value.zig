@@ -644,6 +644,39 @@ pub const JSValue = extern struct {
         self.releaseCommonRefCount(rt);
     }
 
+    /// QuickJS-shaped release for an owner held by an active bytecode frame.
+    ///
+    /// Runtime teardown hard-fails before entering `gc.deinit` while any
+    /// bytecode call-depth owner is live (`JSRuntime.assertIdleForTeardown`).
+    /// A VM handler may therefore prove the deinit exclusion once at bytecode
+    /// entry instead of re-reading `gc.phase` for every `JS_FreeValue`-shaped
+    /// release. Keep the proof explicit here: Debug/ReleaseSafe catch a caller
+    /// outside that window, while ReleaseFast retains only QuickJS's tag-range
+    /// check, refcount decrement, profile hook, and zero-ref tail.
+    ///
+    /// Generic/runtime teardown code must continue to use `free`.
+    pub inline fn freeDuringActiveBytecode(self: JSValue, rt: anytype) void {
+        comptime {
+            @setEvalBranchQuota(10_000);
+        }
+        std.debug.assert(rt.hot.call_depth != 0);
+        std.debug.assert(rt.gc.phase != .deinit);
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
+            if (comptime build_options.zjs_enable_opcode_profile) {
+                if (rt.opcode_profile) |prof| prof.recordValueFree();
+            }
+            self.releaseCommonRefCount(rt);
+            return;
+        }
+        if (!self.requiresRefCount()) return;
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
+        self.releaseCommonRefCount(rt);
+    }
+
     /// Release a value whose caller has already proved the semantic tag is
     /// `object`. This is the typed counterpart of QuickJS's direct Object
     /// owner release: it preserves deinit/profile/zero-ref behavior while

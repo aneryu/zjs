@@ -4979,6 +4979,19 @@ pub const Object = extern struct {
         return true;
     }
 
+    /// Active-bytecode counterpart of `setFastArrayElementOwned`. The VM owns
+    /// `new_value` and has already established the runtime-teardown exclusion
+    /// carried by `freeDuringActiveBytecode`; false still leaves ownership with
+    /// the caller.
+    pub fn setFastArrayElementOwnedDuringActiveBytecode(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        if (!self.isFastArrayIndexInBounds(index)) return false;
+        const slot = &self.u.array.values[@intCast(index)];
+        const old_value = slot.*;
+        slot.* = new_value;
+        old_value.freeDuringActiveBytecode(rt);
+        return true;
+    }
+
     pub fn adoptDenseArrayElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
         std.debug.assert(self.isArray());
         std.debug.assert(self.u.array.count == 0);

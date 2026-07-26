@@ -5986,7 +5986,7 @@ pub noinline fn putDenseArrayElementOverwriteOwnedFast(rt: *core.JSRuntime, obje
     const index_i32 = key.asInt32() orelse return .miss;
     if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
     const index: u32 = @intCast(index_i32);
-    if (object.setFastArrayElementOwned(rt, index, value)) return .handled;
+    if (object.setFastArrayElementOwnedDuringActiveBytecode(rt, index, value)) return .handled;
     if (!object.isFastArray()) return .miss;
 
     // qjs OP_put_array_el keeps the exact Array/int classification live across

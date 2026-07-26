@@ -216,6 +216,26 @@ test "proven object release preserves generic JSValue ownership semantics" {
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
+test "active bytecode release preserves generic ownership" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline_objects = rt.gc.liveCount();
+    rt.hot.call_depth = 1;
+    defer rt.hot.call_depth = 0;
+
+    const generic_object = try core.Object.create(rt, core.class.ids.object, null);
+    const generic_value = generic_object.value();
+    const generic_retained = generic_value.dup();
+    generic_retained.freeDuringActiveBytecode(rt);
+    try std.testing.expectEqual(@as(i32, 1), generic_object.header.meta().rc);
+    generic_value.freeDuringActiveBytecode(rt);
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+
+    core.JSValue.int32(1).freeDuringActiveBytecode(rt);
+    core.JSValue.undefinedValue().freeDuringActiveBytecode(rt);
+}
+
 test "primitive value predicates match QuickJS helpers" {
     try std.testing.expect(core.JSValue.int32(1).isNumber());
     try std.testing.expect(core.JSValue.float64(1.5).isNumber());
