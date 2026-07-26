@@ -1243,15 +1243,13 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64)
     // done: epilogue. Derived-ctor return legality is a SEPARATE opcode there
     // (OP_check_ctor_return, quickjs.c:18273, emitted at parse time 28459) and
     // the depth-0/generator hand-off lives at the JS_CallInternal boundary —
-    // neither is ever inline in OP_return's value dataflow. zjs's compiler does
-    // not yet emit the qjs check-ctor sequence for every derived return, so the
-    // depth-0 cold helper retains that legality check. InlineTarget rejects
-    // class and derived constructors before a Machine frame is pushed, leaving
-    // the hot leg to carry the value as a plain JSValue (no `!JSValue` error
-    // union, no memory phi) into popAndResume.
+    // neither is ever inline in OP_return's value dataflow. zjs likewise emits
+    // OP_check_ctor_return before a derived constructor reaches OP_return, so
+    // the cold helper only handles the depth-0/generator boundary; resident
+    // ordinary and derived frames keep the hot leg's plain JSValue flow into
+    // popAndResume.
     if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_cold, .{ pc, sp, vb, vm });
-    std.debug.assert(!vm.frame.function.isDerivedClassConstructor());
     // qjs moves the result out of the operand region before the done: cleanup
     // with the check-free `ret_val = *--sp` (quickjs.c:18266). Valid `return`
     // bytecode always has one result; valueless returns use `return_undef`.
@@ -1288,7 +1286,6 @@ fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) ali
     // `ret_val = JS_UNDEFINED; goto done;`, check-free and infallible.
     if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_undef_cold, .{ pc, sp, vb, vm });
-    std.debug.assert(!vm.frame.function.isDerivedClassConstructor());
     vm.syncSp(sp);
     return popAndResume(vm, JSValue.undefinedValue());
 }
@@ -1624,10 +1621,59 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
     }
 }
 
-/// Ordinary base-bytecode construction stays in the active Machine. General
-/// [[Construct]] policy remains authoritative: this handler admits only the
-/// same-Realm `new_target == func` shape resolved by call_runtime, and falls
-/// through unchanged for proxy/bound/native/class/derived/cross-Realm cases.
+/// Same-Realm direct ordinary and derived bytecode construction stays in the
+/// active Machine. General [[Construct]] policy remains authoritative: base
+/// classes, proxy, bound, native, cross-Realm, and differing-new-target cases
+/// (including super()) fall through unchanged.
+const DerivedConstructorEntryResult = union(enum) {
+    entry: *inline_calls.Entry,
+    handled,
+    threw,
+};
+
+/// Outline the derived-only frame setup so the established ordinary
+/// constructor handler retains its measured register and branch shape.
+/// Direct derived construction has no instance-creation phase, but preserves
+/// the same two qjs interrupt polls: JS_CallConstructorInternal entry, then
+/// JS_CallInternal bytecode entry before stack preflight.
+noinline fn pushDerivedConstructorEntry(
+    vm: *Vm,
+    region_base: usize,
+    region_start: [*]JSValue,
+    func: JSValue,
+    candidate: *const call_runtime.SameMachineConstructorTarget,
+    argc: u16,
+) DerivedConstructorEntryResult {
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    const interrupt_global = vm.ctx.global orelse vm.global;
+    exception_ops.pollInterrupt(vm.ctx, interrupt_global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+
+    vm.frame.pc += 2;
+    const displaced_func = region_start[0];
+    const constructor_this = JSValue.uninitialized();
+    region_start[0] = constructor_this;
+    displaced_func.free(vm.rt);
+    const target = candidate.resolved.bind(constructor_this, func);
+    vm.stack.setTopPtr(region_start);
+    const entry = vm.machine.pushDerivedConstructorCall(
+        vm.global,
+        vm.stack,
+        &target,
+        region_start,
+        argc,
+    ) catch |err| {
+        if (!constructorSetupRecover(vm, err)) return .threw;
+        return .handled;
+    };
+    return .{ .entry = entry };
+}
+
 fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp); // frame.pc points at the u16 argc operand
     const argc = readInt(u16, pc + 1);
@@ -1638,6 +1684,24 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
         const func = region_start[0];
         const new_target = region_start[1];
         if (call_runtime.resolveSameMachineConstructor(vm.global, func, new_target)) |candidate| {
+            if (candidate.resolved.fb.isDerivedClassConstructor()) {
+                return switch (pushDerivedConstructorEntry(
+                    vm,
+                    region_base,
+                    region_start,
+                    func,
+                    &candidate,
+                    argc,
+                )) {
+                    .entry => |entry| enterEntry(
+                        vm,
+                        entry,
+                        candidate.resolved.fb.byteCodeAssumeMaterialized().ptr,
+                    ),
+                    .handled => coldNext(vb, vm),
+                    .threw => .threw,
+                };
+            }
             // First JS_CallConstructorInternal poll: before instance creation,
             // constructibility effects, and the inner bytecode-call poll.
             exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {

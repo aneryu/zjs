@@ -2768,6 +2768,89 @@ test "ordinary constructor Machine completion preserves bindings eval recursion 
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
+test "derived constructor Machine completion preserves inherited new target and teardown" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    const result = try js.eval(
+        \\let baseNewTarget;
+        \\function OrdinaryBase(value) { this.value = value; }
+        \\class Base {
+        \\  constructor(value, mode) {
+        \\    baseNewTarget = new.target;
+        \\    this.value = value;
+        \\    if (mode === "object") return { replacement: value + 1 };
+        \\    if (mode === "throw") throw value;
+        \\  }
+        \\}
+        \\class Derived extends Base {
+        \\  constructor(value, mode) {
+        \\    super(value, mode);
+        \\    this.derived = true;
+        \\  }
+        \\}
+        \\class FromOrdinary extends OrdinaryBase {
+        \\  constructor(value) { super(value); }
+        \\}
+        \\
+        \\const direct = new Derived(3);
+        \\assert.sameValue(direct.value, 3);
+        \\assert.sameValue(direct.derived, true);
+        \\assert.sameValue(baseNewTarget, Derived);
+        \\assert.sameValue(Object.getPrototypeOf(direct), Derived.prototype);
+        \\const fromOrdinary = new FromOrdinary(5);
+        \\assert.sameValue(fromOrdinary.value, 5);
+        \\assert.sameValue(Object.getPrototypeOf(fromOrdinary), FromOrdinary.prototype);
+        \\
+        \\function Replacement() {}
+        \\Replacement.prototype = { marker: 7 };
+        \\const reflected = Reflect.construct(Derived, [11], Replacement);
+        \\assert.sameValue(reflected.value, 11);
+        \\assert.sameValue(reflected.derived, true);
+        \\assert.sameValue(baseNewTarget, Replacement);
+        \\assert.sameValue(Object.getPrototypeOf(reflected), Replacement.prototype);
+        \\const reflectedOrdinary = Reflect.construct(FromOrdinary, [13], Replacement);
+        \\assert.sameValue(reflectedOrdinary.value, 13);
+        \\assert.sameValue(Object.getPrototypeOf(reflectedOrdinary), Replacement.prototype);
+        \\
+        \\const replacement = new Derived(17, "object");
+        \\assert.sameValue(replacement.replacement, 18);
+        \\assert.sameValue(replacement.derived, true);
+        \\let caught;
+        \\try { new Derived(19, "throw"); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 19);
+        \\
+        \\class ReturnsObject extends Base {
+        \\  constructor() { return { selected: 23 }; }
+        \\}
+        \\class ReturnsPrimitive extends Base {
+        \\  constructor() { return 29; }
+        \\}
+        \\assert.sameValue(new ReturnsObject().selected, 23);
+        \\assert.throws(TypeError, function () { new ReturnsPrimitive(); });
+        \\
+        \\class Recursive extends Base {
+        \\  constructor(depth) {
+        \\    super(depth);
+        \\    if (depth !== 0) this.child = new Recursive(depth - 1);
+        \\  }
+        \\}
+        \\const recursive = new Recursive(24);
+        \\let count = 0;
+        \\for (let cursor = recursive; cursor; cursor = cursor.child) count++;
+        \\assert.sameValue(count, 25);
+        \\$262.gc();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
 test "Reflect.construct keeps a fresh prototype getter result alive through instance allocation" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

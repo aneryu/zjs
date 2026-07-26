@@ -1638,9 +1638,9 @@ pub fn constructValueOrBytecodeWithNewTargetInternal(
 
 /// Same-Machine constructor admission record for OP_call_constructor.
 /// Resolution is deliberately narrower than general [[Construct]]: only a
-/// same-Realm ordinary bytecode function with `new_target == func` enters.
-/// Proxy, bound, native, class/derived, differing-new-target and cross-Realm
-/// construction retain the authoritative recursive adapter below.
+/// same-Realm direct ordinary or derived bytecode function enters. Base class,
+/// proxy, bound, native, cross-Realm, and differing-new-target construction
+/// retain the authoritative recursive adapter below.
 pub const SameMachineConstructorTarget = struct {
     resolved: inline_calls.ResolvedInlineFunction,
     function_object: *core.Object,
@@ -1652,7 +1652,7 @@ pub fn resolveSameMachineConstructor(
     new_target: core.JSValue,
 ) ?SameMachineConstructorTarget {
     if (!new_target.sameValue(func)) return null;
-    const resolved = inline_calls.resolveInlineFunction(global, func) orelse return null;
+    const resolved = inline_calls.resolveInlineDirectConstructorFunction(global, func) orelse return null;
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
@@ -1673,9 +1673,10 @@ pub const SameMachineConstructorPreparation = union(enum) {
 /// Continue an admitted constructor after OP_call_constructor has paid the
 /// outer JS_CallConstructorInternal interrupt poll. Keep the existing
 /// simple-field writer first; only its miss creates an instance for a
-/// same-Machine bytecode frame. The second poll remains after instance
-/// creation and before bytecode-frame stack preflight, matching
-/// JS_CallInternal's constructor entry ordering.
+/// same-Machine bytecode frame. Derived entry is handled separately by the
+/// opcode adapter, so this ordinary path keeps its established shape. The
+/// second poll remains after instance creation and before bytecode-frame stack
+/// preflight, matching JS_CallInternal's constructor entry ordering.
 pub fn prepareSameMachineConstructorAfterFirstPoll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1686,6 +1687,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!SameMachineConstructorPreparation {
+    std.debug.assert(!target.resolved.fb.isDerivedClassConstructor());
     if (try constructSimpleFieldConstructor(
         ctx,
         global,
