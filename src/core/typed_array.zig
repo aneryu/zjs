@@ -82,7 +82,7 @@ pub fn sharedArrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_
     // re-identifies the backing store.
     const store = try object.SharedBufferStore.create(rt, max_byte_length orelse byte_length);
     obj.installSharedByteStorage(rt, store);
-    obj.byteStorageSlot().* = store.bytes[0..byte_length];
+    try obj.setSharedByteStorageLength(byte_length);
     obj.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return obj.value();
 }
@@ -273,7 +273,7 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
     // Atomics waiter keys valid.
     if (buffer.sharedByteStorageStore()) |store| {
         if (store.bytes.len >= new_length) {
-            buffer.byteStorageSlot().* = store.bytes[0..new_length];
+            try buffer.setSharedByteStorageLength(new_length);
             return JSValue.undefinedValue();
         }
     }
@@ -390,11 +390,7 @@ pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u
     } else null;
     const obj = try createTypedArrayInstance(rt, kind, prototype);
     errdefer Object.destroyFromHeader(rt, &obj.header);
-    try obj.setOptionalValueSlot(rt, obj.typedArrayBufferSlot(), buffer.value().dup());
-    obj.typedArrayByteOffsetSlot().* = byte_offset;
-    obj.typedArrayElementSizeSlot().* = element_size;
-    obj.typedArrayFixedLengthSlot().* = fixed_length;
-    obj.typedArrayKindSlot().* = kind;
+    try obj.initTypedArrayView(rt, buffer.value().dup(), byte_offset, element_size, fixed_length, kind);
     return obj.value();
 }
 
@@ -415,12 +411,9 @@ pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kin
 
     const obj = try createTypedArrayInstance(rt, kind, prototype);
     errdefer Object.destroyFromHeader(rt, &obj.header);
-    try obj.setOptionalValueSlot(rt, obj.typedArrayBufferSlot(), owned_buffer_value);
+    const view_buffer = owned_buffer_value;
     owned_buffer_value = JSValue.undefinedValue();
-    obj.typedArrayByteOffsetSlot().* = 0;
-    obj.typedArrayElementSizeSlot().* = element_size;
-    obj.typedArrayFixedLengthSlot().* = @intCast(length);
-    obj.typedArrayKindSlot().* = kind;
+    try obj.initTypedArrayView(rt, view_buffer, 0, element_size, @intCast(length), kind);
     return obj.value();
 }
 
@@ -443,21 +436,27 @@ pub fn dataViewConstruct(rt: *JSRuntime, args: []const JSValue, prototype: ?*Obj
     const obj = try Object.create(rt, class.ids.dataview, prototype);
     errdefer Object.destroyFromHeader(rt, &obj.header);
     if (view_length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-    try obj.setOptionalValueSlot(rt, obj.typedArrayBufferSlot(), buffer.value().dup());
-    obj.typedArrayByteOffsetSlot().* = byte_offset;
-    obj.typedArrayFixedLengthSlot().* = @intCast(view_length);
-    obj.typedArrayKindSlot().* = if (auto_length) 1 else 0;
+    try obj.initTypedArrayView(
+        rt,
+        buffer.value().dup(),
+        byte_offset,
+        0,
+        @intCast(view_length),
+        if (auto_length) 1 else 0,
+    );
     return obj.value();
 }
 
 // --- TypedArray element read / write (engine core) --------------------------
 
 pub fn typedArrayGetIndex(rt: *JSRuntime, obj: *Object, index: u32) !JSValue {
-    const length = try object.typedArrayLength(rt, obj);
-    if (index >= length) return JSValue.undefinedValue();
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * obj.typedArrayElementSize();
-    return readElement(rt, obj.typedArrayKind(), buffer.byteStorage()[offset..][0..obj.typedArrayElementSize()]);
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0) return error.TypeError;
+    if (index >= payload.live_length) return JSValue.undefinedValue();
+    const data = payload.data orelse return JSValue.undefinedValue();
+    const width: usize = payload.element_size;
+    const offset = @as(usize, index) * width;
+    return readElement(rt, payload.kind, data[offset .. offset + width]);
 }
 
 pub fn typedArrayCoerceElementValue(rt: *JSRuntime, obj: *Object, value: JSValue) !void {
@@ -466,24 +465,30 @@ pub fn typedArrayCoerceElementValue(rt: *JSRuntime, obj: *Object, value: JSValue
 }
 
 pub fn typedArraySetElement(rt: *JSRuntime, obj: *Object, index: u32, value: JSValue) !bool {
-    if (try object.typedArrayImmutableBuffer(rt, obj)) return false;
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (backing.immutable) return false;
     var scratch: [8]u8 = undefined;
-    const width = obj.typedArrayElementSize();
-    try writeElement(rt, obj.typedArrayKind(), scratch[0..width], value);
-    if (!try object.typedArrayIndexValid(rt, obj, index)) return false;
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * width;
-    @memcpy(buffer.byteStorage()[offset..][0..width], scratch[0..width]);
+    const width: usize = payload.element_size;
+    if (width == 0) return error.TypeError;
+    try writeElement(rt, payload.kind, scratch[0..width], value);
+    if (index >= payload.live_length) return false;
+    const data = payload.data orelse return false;
+    const offset = @as(usize, index) * width;
+    @memcpy(data[offset .. offset + width], scratch[0..width]);
     return true;
 }
 
 pub fn typedArraySetIndex(rt: *JSRuntime, obj: *Object, index: u32, value: JSValue) !bool {
-    if (try object.typedArrayImmutableBuffer(rt, obj)) return false;
-    const length = try object.typedArrayLength(rt, obj);
-    if (index >= length) return true;
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * obj.typedArrayElementSize();
-    try writeElement(rt, obj.typedArrayKind(), buffer.byteStorage()[offset..][0..obj.typedArrayElementSize()], value);
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (backing.immutable) return false;
+    const width: usize = payload.element_size;
+    if (width == 0) return error.TypeError;
+    if (index >= payload.live_length) return true;
+    const data = payload.data orelse return true;
+    const offset = @as(usize, index) * width;
+    try writeElement(rt, payload.kind, data[offset .. offset + width], value);
     return true;
 }
 
@@ -495,35 +500,37 @@ pub fn typedArraySetIndex(rt: *JSRuntime, obj: *Object, index: u32, value: JSVal
 /// re-validated detach/out-of-bounds and clamped `final` to the live length.
 pub fn typedArrayFillRange(rt: *JSRuntime, obj: *Object, start: u32, final: u32, value: JSValue) !void {
     if (start >= final) return;
-    const kind = obj.typedArrayKind();
-    const width = obj.typedArrayElementSize();
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const kind = payload.kind;
+    const width: usize = payload.element_size;
+    if (width == 0) return error.TypeError;
     var scratch: [8]u8 = undefined;
     try writeElement(rt, kind, scratch[0..width], value);
 
-    const buffer = try typedArrayBufferObject(obj);
-    const storage = buffer.byteStorage();
-    const base = obj.typedArrayByteOffset();
-    var offset = base + @as(usize, start) * width;
-    const end = base + @as(usize, final) * width;
+    const data = payload.data orelse return error.TypeError;
+    var offset = @as(usize, start) * width;
+    const end = @as(usize, final) * width;
     switch (width) {
-        1 => @memset(storage[offset..end], scratch[0]),
+        1 => @memset(data[offset..end], scratch[0]),
         else => {
             const cell = scratch[0..width];
             while (offset < end) : (offset += width) {
-                @memcpy(storage[offset..][0..width], cell);
+                @memcpy(data[offset .. offset + width], cell);
             }
         },
     }
 }
 
 pub fn typedArraySetInt32IndexFast(rt: *JSRuntime, obj: *Object, index: u32, value: i32) !bool {
-    if (obj.typedArrayKind() != 6) return false;
-    if (try object.typedArrayImmutableBuffer(rt, obj)) return false;
-    const length = try object.typedArrayLength(rt, obj);
-    if (index >= length) return true;
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * 4;
-    std.mem.writeInt(i32, buffer.byteStorage()[offset..][0..4], value, .little);
+    _ = rt;
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.kind != 6) return false;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (backing.immutable) return false;
+    if (index >= payload.live_length) return true;
+    const data = payload.data orelse return true;
+    const offset = @as(usize, index) * 4;
+    std.mem.writeInt(i32, data[offset .. offset + 4], value, .little);
     return true;
 }
 

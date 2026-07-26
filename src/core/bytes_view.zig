@@ -450,12 +450,7 @@ test "JSBytes views TypedArray byte range without copying" {
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
     defer view_value.free(rt);
-    try view.ensureTypedArrayPayload(rt);
-    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
-    view.typedArrayByteOffsetSlot().* = 2;
-    view.typedArrayElementSizeSlot().* = 2;
-    view.typedArrayFixedLengthSlot().* = 2;
-    view.typedArrayKindSlot().* = 2;
+    try view.initTypedArrayView(rt, buffer_value.dup(), 2, 2, 2, 2);
 
     const bytes = try view_value.asBytes(undefined);
     try std.testing.expectEqualSlices(u8, &.{ 2, 3, 4, 5 }, bytes.slice());
@@ -488,12 +483,7 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
     defer view_value.free(rt);
-    try view.ensureTypedArrayPayload(rt);
-    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
-    view.typedArrayByteOffsetSlot().* = 1;
-    view.typedArrayElementSizeSlot().* = 2; // Uint16Array
-    view.typedArrayFixedLengthSlot().* = null; // length-tracking (auto length)
-    view.typedArrayKindSlot().* = 5;
+    try view.initTypedArrayView(rt, buffer_value.dup(), 1, 2, null, 5);
 
     const bytes = try view_value.asBytes(undefined);
     // 6 bytes (3 elements), floored from the 6 trailing bytes — already aligned
@@ -522,12 +512,7 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
     defer view_value.free(rt);
-    try view.ensureTypedArrayPayload(rt);
-    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
-    view.typedArrayByteOffsetSlot().* = 0;
-    view.typedArrayElementSizeSlot().* = 2; // Uint16Array
-    view.typedArrayFixedLengthSlot().* = null; // length-tracking
-    view.typedArrayKindSlot().* = 5;
+    try view.initTypedArrayView(rt, buffer_value.dup(), 0, 2, null, 5);
 
     const bytes = try view_value.asBytes(undefined);
     try std.testing.expectEqual(@as(usize, 4), bytes.len);
@@ -552,10 +537,7 @@ test "JSBytes views DataView byte range without copying" {
     const view = try Object.create(rt, class_ids.dataview, null);
     const view_value = view.value();
     defer view_value.free(rt);
-    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
-    view.typedArrayByteOffsetSlot().* = 1;
-    view.typedArrayFixedLengthSlot().* = 3;
-    view.typedArrayKindSlot().* = 0;
+    try view.initTypedArrayView(rt, buffer_value.dup(), 1, 0, 3, 0);
 
     const bytes = try view_value.asBytes(undefined);
     try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13 }, bytes.slice());
@@ -579,10 +561,7 @@ test "JSBytes views length-tracking DataView to end of buffer" {
     const view = try Object.create(rt, class_ids.dataview, null);
     const view_value = view.value();
     defer view_value.free(rt);
-    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
-    view.typedArrayByteOffsetSlot().* = 2;
-    view.typedArrayFixedLengthSlot().* = null; // length-tracking DataView
-    view.typedArrayKindSlot().* = 1; // DataView is byte-addressed (kind 1)
+    try view.initTypedArrayView(rt, buffer_value.dup(), 2, 0, null, 1);
 
     // A length-tracking DataView spans to the end of the buffer (byte-addressed,
     // so no element-size flooring): 5 - 2 = 3 trailing bytes.

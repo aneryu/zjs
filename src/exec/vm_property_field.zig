@@ -1083,33 +1083,20 @@ pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: c
     const object = objectFromValue(obj) orelse return null;
     const key_int = key.asInt32() orelse return null;
     if (key_int < 0) return null;
-    // Non-BigInt, fixed-length, real typed array only. element_size==0 means the
-    // object is not a typed array; kinds 11/12 are BigInt (skip — they allocate).
-    const kind = object.typedArrayKind();
+    // QuickJS keeps the live element count and base pointer on the TypedArray
+    // object and refreshes them from the ArrayBuffer's view list on every
+    // detach/resize. Read that state once: one bounds check, then one typed
+    // load. DataView (`element_size == 0`) and allocating BigInt kinds punt.
+    const payload = object.typedArrayPayloadFast() orelse return null;
+    const kind = payload.kind;
     if (kind < 1 or kind > 10) return null;
-    const fixed_len = object.typedArrayFixedLength() orelse return null;
-    const element_size = object.typedArrayElementSize();
-    const buffer_value = object.typedArrayBuffer() orelse return null;
-    const buffer = objectFromValue(buffer_value) orelse return null;
-    if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return null;
-    if (buffer.arrayBufferDetached()) return core.JSValue.undefinedValue();
-
-    const bytes = buffer.byteStorage();
-    const byte_offset = object.typedArrayByteOffset();
-    if (byte_offset > bytes.len) return core.JSValue.undefinedValue();
-    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, element_size)) catch return null;
-    if (byte_len > bytes.len - byte_offset) return core.JSValue.undefinedValue();
     const index: u32 = @intCast(key_int);
-    if (index >= fixed_len) return core.JSValue.undefinedValue();
-    // Inline the typed load using the buffer/offset/kind already resolved above,
-    // mirroring qjs JS_GetPropertyValue's per-class typed arm (quickjs.c:9048-
-    // 9083) which is a single bounds check + typed load off cached state. The
-    // former `typedArrayGetIndex` call RE-resolved the payload, buffer, and
-    // length a second time (the 2.78x-vs-qjs helper-chain redundancy). Bounds
-    // are already guaranteed by the byte_len/index checks above, so for
-    // kinds 1..10 (non-BigInt) readElement cannot error.
-    const element_offset = byte_offset + @as(usize, index) * @as(usize, element_size);
-    return core.typed_array.readElement(rt, kind, bytes[element_offset..][0..element_size]) catch null;
+    if (index >= payload.live_length) return core.JSValue.undefinedValue();
+    const data = payload.data orelse return core.JSValue.undefinedValue();
+    const width: usize = payload.element_size;
+    if (width == 0) return null;
+    const element_offset = @as(usize, index) * width;
+    return core.typed_array.readElement(rt, kind, data[element_offset .. element_offset + width]) catch null;
 }
 
 pub const TypedArrayWriteFast = enum { not_typed_array, handled };
@@ -1148,53 +1135,30 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     // string / boolean / null / undefined have non-throwing conversions, so the
     // validity-check-first order is observably identical for them — they stay fast.)
     if (value.isBigInt() or value.isSymbol()) return .not_typed_array;
-    // Resolve the payload ONCE (was re-resolved ~5x across isTypedArrayObject +
-    // typedArrayKind + typedArraySetElement's immutable/element_size/kind/
-    // index-valid/buffer/byte_offset accessor calls — the write-side twin of the
-    // read collapse). Same operation SEQUENCE as typedArraySetElement, which is
-    // qjs-exact: immutable reject (silent no-op) -> convert into scratch FIRST
-    // (number/string/bool/null/undefined values never run user code, so no
-    // mid-write detach; object/BigInt/Symbol already punted above) -> re-check
-    // live in-bounds/attached -> store, OOB/detached a silent no-op
-    // (qjs `ta_out_of_bound: return TRUE`).
+    // Resolve the payload once. Its live count/data pair is maintained from the
+    // backing ArrayBuffer's view list, exactly like qjs `u.array.count/u.ptr`.
+    // Keep the qjs operation order: immutable reject -> coerce -> RE-check the
+    // live pair -> store; detach/OOB after conversion is a silent no-op.
     const payload = object.typedArrayPayloadFast() orelse return .not_typed_array;
     const kind = payload.kind;
-    if (kind == 11 or kind == 12) return .not_typed_array; // BigInt -> slow (JS_ToBigInt64)
-    const buffer_obj = objectFromValue(payload.buffer orelse return .not_typed_array) orelse return .not_typed_array;
-    if (buffer_obj.class_id != core.class.ids.array_buffer and buffer_obj.class_id != core.class.ids.shared_array_buffer) return .not_typed_array;
-    if (core.object.arrayBufferIsImmutable(rt, buffer_obj)) return .handled; // silent no-op
+    if (kind < 1 or kind > 10) return .not_typed_array; // BigInt / non-TA -> slow
+    const backing = payload.backing_payload orelse return .not_typed_array;
+    if (backing.immutable) return .handled; // silent no-op
     const width = payload.element_size;
+    if (width == 0) return .not_typed_array;
     var scratch: [8]u8 = undefined;
     try core.typed_array.writeElement(rt, kind, scratch[0..width], value); // coerce FIRST
     const index: u32 = @intCast(key_int);
-    const fixed_len = payload.fixed_length orelse {
-        // Length-tracking (resizable): recompute the live length via the
-        // canonical validity check, then store the already-coerced bytes.
-        if (!(try core.object.typedArrayIndexValid(rt, object, index))) return .handled;
-        const off = payload.byte_offset + @as(usize, index) * @as(usize, width);
-        storeElementBytes(buffer_obj.byteStorage()[off..], &scratch, width);
-        return .handled;
-    };
-    // Live validity, identical to the read leg's proven-correct check: a
-    // detached buffer, or a fixed-length TA whose backing (resizable) buffer
-    // shrank so the WHOLE TA no longer fits, makes every index out-of-bounds
-    // (IsTypedArrayOutOfBounds) -> silent no-op, not just indices past the new
-    // buffer end. `byte_len > bytes.len - byte_offset` is the whole-TA check the
-    // per-element bound would have missed (test262 out-of-bounds-get-and-set).
-    if (buffer_obj.arrayBufferDetached()) return .handled;
-    const bytes = buffer_obj.byteStorage();
-    const byte_offset = payload.byte_offset;
-    if (byte_offset > bytes.len) return .handled;
-    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, width)) catch return .handled;
-    if (byte_len > bytes.len - byte_offset) return .handled;
-    if (index >= fixed_len) return .handled;
-    const off = byte_offset + @as(usize, index) * @as(usize, width);
+    if (index >= payload.live_length) return .handled;
+    const data = payload.data orelse return .handled;
+    const byte_width: usize = width;
+    const off = @as(usize, index) * byte_width;
     // Store the coerced element with a direct sized copy. `width` is a runtime
     // value (payload.element_size), so a plain @memcpy lowers to a memcpyFast
     // CALL even for a 1-byte Uint8 store — the top self-cost of typed-array-heavy
     // code (gbemu VRAM/memory writes). Switch to comptime lengths so each arm is
     // a single sized load+store. Widths are always one of {1,2,4,8}.
-    storeElementBytes(bytes[off..], &scratch, width);
+    storeElementBytes(data[off .. off + byte_width], &scratch, width);
     return .handled;
 }
 

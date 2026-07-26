@@ -477,12 +477,21 @@ pub const BufferPayload = struct {
     detached: bool = false,
     immutable: bool = false,
     max_byte_length: ?usize = null,
+    first_view: ?*TypedArrayPayload = null,
 
     pub fn destroy(self: *BufferPayload, rt: *JSRuntime) void {
+        // QuickJS's ArrayBuffer finalizer can run before the TypedArray /
+        // DataView finalizers during cycle removal. Sever every weak view link
+        // first so a later view finalizer never dereferences this payload.
+        self.unlinkAllViews();
         self.releaseStorage(rt);
     }
 
     fn releaseStorage(self: *BufferPayload, rt: *JSRuntime) void {
+        // Any release may invalidate or move the data pointer. Clear cached
+        // view state before the old storage is returned to its owner; install
+        // paths republish the new state after committing the replacement.
+        self.invalidateViews();
         if (self.shared_store) |store| {
             store.release();
         } else if (self.external_deinit) |deinit| {
@@ -501,6 +510,58 @@ pub const BufferPayload = struct {
         self.external_deinit = null;
         self.external_context = null;
     }
+
+    fn attachView(self: *BufferPayload, view: *TypedArrayPayload) void {
+        std.debug.assert(view.backing_payload == null);
+        std.debug.assert(view.buffer_prev == null);
+        std.debug.assert(view.buffer_next == null);
+
+        view.backing_payload = self;
+        view.buffer_next = self.first_view;
+        if (self.first_view) |first| first.buffer_prev = view;
+        self.first_view = view;
+        view.updateLiveState(self);
+    }
+
+    fn detachView(self: *BufferPayload, view: *TypedArrayPayload) void {
+        if (view.backing_payload != self) {
+            std.debug.assert(view.backing_payload == null);
+            return;
+        }
+
+        const previous = view.buffer_prev;
+        const next = view.buffer_next;
+        if (previous) |prev| {
+            prev.buffer_next = next;
+        } else {
+            std.debug.assert(self.first_view == view);
+            self.first_view = next;
+        }
+        if (next) |following| following.buffer_prev = previous;
+
+        view.backing_payload = null;
+        view.buffer_prev = null;
+        view.buffer_next = null;
+        view.clearLiveState();
+    }
+
+    fn invalidateViews(self: *BufferPayload) void {
+        var current = self.first_view;
+        while (current) |view| : (current = view.buffer_next) {
+            view.clearLiveState();
+        }
+    }
+
+    fn updateViews(self: *BufferPayload) void {
+        var current = self.first_view;
+        while (current) |view| : (current = view.buffer_next) {
+            view.updateLiveState(self);
+        }
+    }
+
+    fn unlinkAllViews(self: *BufferPayload) void {
+        while (self.first_view) |view| self.detachView(view);
+    }
 };
 
 pub const TypedArrayPayload = struct {
@@ -509,9 +570,69 @@ pub const TypedArrayPayload = struct {
     element_size: u32 = 0,
     fixed_length: ?u32 = null,
     kind: u8 = 0,
+    live_length: u32 = 0,
+    data: ?[*]u8 = null,
+    backing_payload: ?*BufferPayload = null,
+    buffer_prev: ?*TypedArrayPayload = null,
+    buffer_next: ?*TypedArrayPayload = null,
 
     pub fn destroy(self: *TypedArrayPayload, rt: *JSRuntime) void {
+        // Mirrors js_typed_array_finalizer: unlink before releasing the strong
+        // buffer value because that release may immediately finalize the
+        // ArrayBuffer payload.
+        if (self.backing_payload) |backing| backing.detachView(self);
         destroyOptionalValue(rt, &self.buffer);
+    }
+
+    fn clearLiveState(self: *TypedArrayPayload) void {
+        self.live_length = 0;
+        self.data = null;
+    }
+
+    fn updateLiveState(self: *TypedArrayPayload, backing: *BufferPayload) void {
+        self.clearLiveState();
+        if (backing.detached) return;
+
+        const offset = self.byte_offset;
+        const storage = backing.bytes;
+        if (offset > storage.len) return;
+        const remaining = storage.len - offset;
+
+        // DataView is byte-addressed (`element_size == 0`). QuickJS updates a
+        // length-tracking DataView's byte length from the ArrayBuffer list; the
+        // fixed-length form stays live only while its complete range fits.
+        if (self.element_size == 0) {
+            const tracks_buffer = self.kind == 1 and backing.max_byte_length != null;
+            const live: usize = if (!tracks_buffer) blk: {
+                const fixed = self.fixed_length orelse return;
+                if (@as(usize, fixed) > remaining) return;
+                break :blk fixed;
+            } else blk: {
+                // qjs requires offset < byte_length for a tracking DataView to
+                // have a non-zero live range.
+                if (offset == storage.len) return;
+                break :blk remaining;
+            };
+            self.live_length = std.math.cast(u32, live) orelse return;
+            self.data = storage.ptr + offset;
+            return;
+        }
+
+        const width: usize = self.element_size;
+        if (self.fixed_length) |fixed| {
+            const byte_length = std.math.mul(usize, fixed, width) catch return;
+            if (byte_length > remaining) return;
+            self.live_length = fixed;
+            self.data = storage.ptr + offset;
+            return;
+        }
+
+        // QuickJS only publishes a pointer for a length-tracking TypedArray
+        // when at least one complete element remains. Partial trailing bytes
+        // are not addressable.
+        if (remaining < width) return;
+        self.live_length = std.math.cast(u32, @divTrunc(remaining, width)) orelse return;
+        self.data = storage.ptr + offset;
     }
 };
 
@@ -4256,6 +4377,47 @@ pub const Object = extern struct {
         self.flags.class_payload_kind = .typed_array;
     }
 
+    /// Initialize a TypedArray/DataView payload and link it into its backing
+    /// ArrayBuffer's weak view list. Takes ownership of `buffer_value`.
+    ///
+    /// This is the zjs counterpart of QuickJS `typed_array_init`: all view
+    /// constructors go through one operation so cached count/data state and
+    /// finalizer-safe list membership cannot diverge from the strong buffer
+    /// edge.
+    pub fn initTypedArrayView(
+        self: *Object,
+        rt: *JSRuntime,
+        buffer_value: JSValue,
+        byte_offset: usize,
+        element_size: u32,
+        fixed_length: ?u32,
+        kind: u8,
+    ) !void {
+        var owned_buffer = buffer_value;
+        errdefer owned_buffer.free(rt);
+
+        const backing_object = objectFromValue(owned_buffer) orelse return error.TypeError;
+        if (backing_object.class_id != class.ids.array_buffer and backing_object.class_id != class.ids.shared_array_buffer) {
+            return error.TypeError;
+        }
+        const backing_payload = backing_object.bufferPayload() orelse return error.TypeError;
+
+        try self.ensureTypedArrayPayload(rt);
+        const payload = self.typedArrayPayload() orelse unreachable;
+        if (payload.backing_payload) |old_backing| old_backing.detachView(payload);
+
+        // Publish the owned edge before the weak link. Replacing an old edge
+        // can immediately finalize its ArrayBuffer; it is already unlinked.
+        const next_buffer = owned_buffer;
+        owned_buffer = JSValue.undefinedValue();
+        try self.setOptionalValueSlot(rt, &payload.buffer, next_buffer);
+        payload.byte_offset = byte_offset;
+        payload.element_size = element_size;
+        payload.fixed_length = fixed_length;
+        payload.kind = kind;
+        backing_payload.attachView(payload);
+    }
+
     pub fn byteStorageSlot(self: *Object) *[]u8 {
         if (self.bufferPayload()) |payload| return &payload.bytes;
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4276,6 +4438,7 @@ pub const Object = extern struct {
             payload.inline_length = 0;
             payload.external_memory = external_memory;
             payload.detached = false;
+            payload.updateViews();
             return;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4294,6 +4457,7 @@ pub const Object = extern struct {
             payload.inline_length = @intCast(byte_length);
             payload.bytes = payload.inline_bytes[0..byte_length];
             payload.detached = false;
+            payload.updateViews();
             return true;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4316,6 +4480,7 @@ pub const Object = extern struct {
             payload.external_deinit = deinit_fn;
             payload.external_context = context;
             payload.detached = false;
+            payload.updateViews();
             return;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4346,10 +4511,22 @@ pub const Object = extern struct {
             payload.inline_length = 0;
             payload.external_memory = .{};
             payload.detached = false;
+            payload.updateViews();
             return;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
         unreachable;
+    }
+
+    /// Change the visible prefix of an already-committed SharedArrayBuffer
+    /// store, then refresh all linked view state. This is QuickJS's shared
+    /// resize branch: the store identity and pointer stay stable.
+    pub fn setSharedByteStorageLength(self: *Object, new_length: usize) !void {
+        const payload = self.bufferPayload() orelse return error.TypeError;
+        const store = payload.shared_store orelse return error.TypeError;
+        if (new_length > store.bytes.len) return error.RangeError;
+        payload.bytes = store.bytes[0..new_length];
+        payload.updateViews();
     }
 
     pub fn arrayBufferDetachedSlot(self: *Object) *bool {
@@ -11697,35 +11874,32 @@ fn typedArrayBackingBufferObject(object: *Object) !*Object {
 }
 
 pub fn isTypedArrayObject(object: *const Object) bool {
-    return object.typedArrayBuffer() != null and object.typedArrayElementSize() != 0;
+    const payload = object.typedArrayPayloadFast() orelse return false;
+    return payload.buffer != null and payload.element_size != 0;
 }
 
 pub fn typedArrayOutOfBounds(object: *Object) !bool {
-    const buffer = try typedArrayBackingBufferObject(object);
-    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return true;
-    if (object.typedArrayFixedLength()) |fixed| {
-        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
-        return bytes > buffer.byteStorage().len - object.typedArrayByteOffset();
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (payload.byte_offset > backing.bytes.len) return true;
+    if (payload.fixed_length) |fixed| {
+        const bytes = std.math.mul(usize, fixed, payload.element_size) catch return true;
+        return bytes > backing.bytes.len - payload.byte_offset;
     }
     return false;
 }
 
 pub fn typedArrayDetached(object: *Object) !bool {
-    const buffer = try typedArrayBackingBufferObject(object);
-    return buffer.arrayBufferDetached();
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    return backing.detached;
 }
 
 pub fn typedArrayLength(rt: *JSRuntime, object: *Object) !u32 {
     _ = rt;
-    const buffer = try typedArrayBackingBufferObject(object);
-    if (buffer.arrayBufferDetached()) return 0;
-    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return 0;
-    if (object.typedArrayFixedLength()) |fixed| {
-        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
-        if (bytes > buffer.byteStorage().len - object.typedArrayByteOffset()) return 0;
-        return fixed;
-    }
-    return @intCast(@divTrunc(buffer.byteStorage().len - object.typedArrayByteOffset(), object.typedArrayElementSize()));
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
+    return payload.live_length;
 }
 
 pub fn typedArrayByteLength(rt: *JSRuntime, object: *Object) !usize {
@@ -11740,8 +11914,10 @@ pub fn typedArrayEffectiveByteOffset(object: *Object) !usize {
 }
 
 pub fn typedArrayIndexValid(rt: *JSRuntime, object: *Object, index: u32) !bool {
-    const length = try typedArrayLength(rt, object);
-    return index < length;
+    _ = rt;
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
+    return index < payload.live_length;
 }
 
 pub const TypedArrayCanonicalIndex = union(enum) {
@@ -11782,8 +11958,9 @@ pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !Type
 
 pub fn typedArrayBackedByResizableBuffer(object: *Object) bool {
     if (!isTypedArrayObject(object)) return false;
-    const buffer = typedArrayBackingBufferObject(object) catch return false;
-    return buffer.arrayBufferMaxByteLength() != null;
+    const payload = object.typedArrayPayloadFast() orelse return false;
+    const backing = payload.backing_payload orelse return false;
+    return backing.max_byte_length != null;
 }
 
 pub fn arrayBufferIsImmutable(rt: *JSRuntime, object: *Object) bool {
@@ -11797,8 +11974,10 @@ pub fn markArrayBufferImmutable(rt: *JSRuntime, object: *Object) !void {
 }
 
 pub fn typedArrayImmutableBuffer(rt: *JSRuntime, object: *Object) !bool {
-    const buffer = try typedArrayBackingBufferObject(object);
-    return arrayBufferIsImmutable(rt, buffer);
+    _ = rt;
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    return backing.immutable;
 }
 
 pub fn typedArrayRejectImmutableBuffer(rt: *JSRuntime, object: *Object) !void {
