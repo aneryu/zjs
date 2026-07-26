@@ -5242,6 +5242,18 @@ pub const pipeline_resolve_variables = struct {
         return isEvalVarObjectAtom(atom_id) or atom_id == atom.ids.with_object;
     }
 
+    fn functionHasDynamicEnvObjects(ctx: *const JSContext) bool {
+        const fd = ctx.function_def orelse return false;
+        if (fd.var_object_idx >= 0 or fd.arg_var_object_idx >= 0) return true;
+        for (fd.vars) |vd| {
+            if (vd.var_name == atom.ids.with_object) return true;
+        }
+        for (fd.closure_var) |cv| {
+            if (closureVarIsRuntimeVarRef(cv) and isDynamicEnvObjectAtom(cv.var_name)) return true;
+        }
+        return false;
+    }
+
     fn scopeUsesArgumentEnvironmentOnly(fd: *const function_def_mod.FunctionDef, scope_level: i32) bool {
         if (!fd.has_parameter_expressions or scope_level < 0 or
             @as(usize, @intCast(scope_level)) >= fd.scopes.len) return false;
@@ -5411,6 +5423,200 @@ pub const pipeline_resolve_variables = struct {
         return if (plan.count == 0) null else plan;
     }
 
+    const ScopeVarAction = struct {
+        selected: ShortLocForm,
+        index: u16 = 0,
+
+        fn size(self: ScopeVarAction) usize {
+            return self.selected.size;
+        }
+
+        fn atomCount(self: ScopeVarAction) usize {
+            return @intFromBool(self.selected.op_id == opcode.op.throw_error);
+        }
+
+        fn form(selected: ShortLocForm, index: u16) ScopeVarAction {
+            return .{ .selected = selected, .index = index };
+        }
+
+        fn throwReadonly() ScopeVarAction {
+            return .{ .selected = .{
+                .op_id = opcode.op.throw_error,
+                .size = @intCast(throw_error_instr_size),
+                .operand_size = 0,
+            } };
+        }
+
+        fn dropAction() ScopeVarAction {
+            return .{ .selected = .{
+                .op_id = opcode.op.drop,
+                .size = 1,
+                .operand_size = 0,
+            } };
+        }
+    };
+
+    const ScopeVarProbePlan = struct {
+        count: u32 = 0,
+        prefix_size: u32 = 0,
+
+        fn from(plan: ?EvalVarObjectProbePlan) Error!ScopeVarProbePlan {
+            const resolved = plan orelse return .{};
+            if (resolved.count > std.math.maxInt(u32) or
+                resolved.prefix_size > std.math.maxInt(u32))
+            {
+                return error.BytecodeOverflow;
+            }
+            return .{
+                .count = @intCast(resolved.count),
+                .prefix_size = @intCast(resolved.prefix_size),
+            };
+        }
+    };
+
+    /// Transactional equivalent of QuickJS's one-pass `resolve_scope_var`
+    /// decision. zjs sizes exact output buffers before writing them, so retain
+    /// the already-resolved final form rather than repeating scope, closure,
+    /// and dynamic-environment scans in the write pass.
+    const ScopeVarLoweringPlan = struct {
+        action: ScopeVarAction,
+        probe: ScopeVarProbePlan = .{},
+    };
+    const inline_scope_var_plan_capacity = 8;
+
+    fn scopeVarProbeKind(op_id: u8, no_dynamic_env: bool) ?EvalVarObjectProbeKind {
+        if (op_id == opcode.op.scope_put_var) {
+            return if (no_dynamic_env) null else .put;
+        }
+        if (op_id == opcode.op.scope_get_var or op_id == opcode.op.scope_get_var_undef) {
+            return .read;
+        }
+        return null;
+    }
+
+    fn globalScopeVarAction(ctx: *const JSContext, atom_id: atom.Atom, op_id: u8) Error!ScopeVarAction {
+        const ref_idx = lookupGlobalClosureVar(ctx, atom_id) orelse return error.ClosureVarNotFound;
+        return ScopeVarAction.form(
+            .{
+                .op_id = lowerScopeVarOpGlobal(op_id),
+                .size = 3,
+                .operand_size = 2,
+            },
+            ref_idx,
+        );
+    }
+
+    fn closureScopeVarAction(
+        ctx: *const JSContext,
+        atom_id: atom.Atom,
+        ref_idx: u16,
+        op_id: u8,
+    ) ScopeVarAction {
+        if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
+            return ScopeVarAction.throwReadonly();
+        }
+        if (op_id == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
+            return ScopeVarAction.dropAction();
+        }
+        const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
+        return ScopeVarAction.form(selectVarRefForm(ctx, ref_op, ref_idx), ref_idx);
+    }
+
+    // Keep the full binding classifier out of resolve_variables.run: it is
+    // compile-time-only, while the caller also owns both bytecode walks and
+    // their transactional allocation state.
+    noinline fn planScopeVarAction(
+        ctx: *const JSContext,
+        atom_id: atom.Atom,
+        scope_level: i32,
+        op_id: u8,
+    ) Error!ScopeVarAction {
+        if (scope_level < 0) return globalScopeVarAction(ctx, atom_id, op_id);
+        if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
+            return closureScopeVarAction(ctx, atom_id, ref_idx, op_id);
+        }
+        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
+            .arg => |arg_idx| {
+                const arg_op = lowerScopeVarOpArg(op_id).?;
+                return ScopeVarAction.form(selectArgForm(ctx, arg_op, arg_idx), arg_idx);
+            },
+            .local => |loc_idx| {
+                if (isEvalNonLexicalLocal(ctx, loc_idx)) {
+                    return globalScopeVarAction(ctx, atom_id, op_id);
+                }
+                if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
+                    return closureScopeVarAction(ctx, atom_id, ref_idx, op_id);
+                }
+                if (op_id == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
+                    return ScopeVarAction.throwReadonly();
+                }
+                if (op_id == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) {
+                    return ScopeVarAction.dropAction();
+                }
+                if (localLexicalAccessNeedsCheck(ctx, atom_id, loc_idx, op_id)) {
+                    return ScopeVarAction.form(
+                        .{
+                            .op_id = lowerScopeVarOpLexical(op_id),
+                            .size = 3,
+                            .operand_size = 2,
+                        },
+                        loc_idx,
+                    );
+                }
+                const local_op = lowerScopeVarOpLocal(op_id);
+                return ScopeVarAction.form(selectLocForm(ctx, local_op, loc_idx), loc_idx);
+            },
+        };
+        if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+            return closureScopeVarAction(ctx, atom_id, ref_idx, op_id);
+        }
+        return globalScopeVarAction(ctx, atom_id, op_id);
+    }
+
+    fn planScopeVarLowering(
+        ctx: *const JSContext,
+        atom_id: atom.Atom,
+        scope_operand: ScopeOperand,
+        op_id: u8,
+        has_dynamic_env_objects: bool,
+    ) Error!ScopeVarLoweringPlan {
+        var plan = ScopeVarLoweringPlan{
+            .action = try planScopeVarAction(ctx, atom_id, scope_operand.level, op_id),
+        };
+        if (has_dynamic_env_objects) {
+            const kind = scopeVarProbeKind(op_id, scope_operand.no_dynamic_env) orelse return plan;
+            plan.probe = try ScopeVarProbePlan.from(evalVarObjectProbePlan(
+                ctx,
+                atom_id,
+                scope_operand.level,
+                op_id,
+                kind,
+            ));
+        }
+        return plan;
+    }
+
+    fn writeScopeVarAction(
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: atom.Atom,
+        action: ScopeVarAction,
+    ) Error!void {
+        if (out_idx.* + action.size() > output.len) return error.InvalidBytecode;
+        if (action.selected.op_id == opcode.op.throw_error) {
+            if (out_atom_idx.* >= output_atoms.len) return error.InvalidBytecode;
+            writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
+        } else if (action.selected.op_id == opcode.op.drop) {
+            output[out_idx.*] = opcode.op.drop;
+            out_idx.* += 1;
+        } else {
+            writeSelectedLocForm(output, out_idx, action.selected, action.index);
+        }
+    }
+
     fn evalVarObjectProbeAccessorSize(ctx: *const JSContext, probe: EvalVarObjectProbe) usize {
         return switch (probe) {
             .local, .with_local => |idx| selectLocForm(ctx, opcode.op.get_loc, idx).size,
@@ -5502,33 +5708,6 @@ pub const pipeline_resolve_variables = struct {
                 1;
         }
         return 1;
-    }
-
-    fn evalVarObjectProbeFallbackSize(ctx: *const JSContext, atom_id: u32, scope_level: i32, op_id: u8) Error!usize {
-        if (scope_level < 0) return 3;
-        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-            .local => |loc_idx| {
-                if (isEvalNonLexicalLocal(ctx, loc_idx)) return 3;
-                if (op_id == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
-                    return throw_error_instr_size;
-                }
-                if (op_id == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) return 1;
-            },
-            .arg => {},
-        };
-        if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
-            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) return throw_error_instr_size;
-            if (op_id == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) return 1;
-            const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
-            return selectVarRefForm(ctx, ref_op, ref_idx).size;
-        }
-        if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) return throw_error_instr_size;
-            if (op_id == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) return 1;
-            const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
-            return selectVarRefForm(ctx, ref_op, ref_idx).size;
-        }
-        return 3;
     }
 
     fn writeEvalVarObjectProbeAccessor(ctx: *const JSContext, output: []u8, out_idx: *usize, probe: EvalVarObjectProbe) Error!void {
@@ -6673,6 +6852,7 @@ pub const pipeline_resolve_variables = struct {
     const Phase1Topology = struct {
         nodes: []Phase1CfgNode,
         has_make_ref: bool,
+        scope_var_count: usize,
     };
 
     /// QuickJS `resolve_variables` phase-2 dead-code boundary
@@ -6800,9 +6980,19 @@ pub const pipeline_resolve_variables = struct {
                 try enqueuePhase1Reachable(nodes, worklist, &worklist_len, next);
             }
         }
+        var scope_var_count: usize = 0;
+        for (worklist[0..worklist_len]) |reachable_pc| {
+            if (reachable_pc < func.code.len and
+                nodes[reachable_pc].is_temp and
+                isScopeVarOp(func.code[reachable_pc]))
+            {
+                scope_var_count += 1;
+            }
+        }
         return .{
             .nodes = nodes,
             .has_make_ref = has_make_ref,
+            .scope_var_count = scope_var_count,
         };
     }
 
@@ -7177,6 +7367,13 @@ pub const pipeline_resolve_variables = struct {
         const phase1_topology = try computePhase1Topology(ctx);
         const phase1_reachability = phase1_topology.nodes;
         defer ctx.memory.free(Phase1CfgNode, phase1_reachability);
+        var inline_scope_var_plans: [inline_scope_var_plan_capacity]ScopeVarLoweringPlan = undefined;
+        const scope_var_plans: []ScopeVarLoweringPlan = if (phase1_topology.scope_var_count <= inline_scope_var_plans.len)
+            inline_scope_var_plans[0..phase1_topology.scope_var_count]
+        else
+            try ctx.memory.alloc(ScopeVarLoweringPlan, phase1_topology.scope_var_count);
+        defer if (scope_var_plans.ptr != inline_scope_var_plans[0..].ptr)
+            ctx.memory.free(ScopeVarLoweringPlan, scope_var_plans);
 
         // QuickJS creates no auxiliary tail state for functions without
         // scope_make_ref. These ledgers are zjs's transactional representation
@@ -7208,6 +7405,7 @@ pub const pipeline_resolve_variables = struct {
             make_ref_reads_value,
         );
         if (ctx.function_def) |fd| try resolveEvalGlobalVarTargets(fd);
+        const has_dynamic_env_objects = functionHasDynamicEnvObjects(ctx);
 
         // First pass: compute output size (in bytes) and atom count.
         // Temporary scope-var opcodes shrink from 7 bytes to 5 bytes. The
@@ -7230,6 +7428,7 @@ pub const pipeline_resolve_variables = struct {
         var jump_count: usize = 0;
         var i: usize = 0;
         var scan_atom_idx: usize = 0;
+        var planned_scope_var_count: usize = 0;
         while (i < func.code.len) {
             const op = func.code[i];
             const instr = topologyInstruction(func.code, func.atom_operands, i, scan_atom_idx);
@@ -7335,75 +7534,18 @@ pub const pipeline_resolve_variables = struct {
                 if (i + 7 > func.code.len) return error.InvalidBytecode;
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
                 const scope_operand = decodeScopeOperand(func.code[i + 5 ..][0..2]);
-                const scope_level = scope_operand.level;
-                if (!scope_operand.no_dynamic_env) {
-                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .put)) |probe| {
-                        output_size += probe.prefix_size;
-                        output_atom_count += probe.count;
-                    }
-                }
-                if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .read)) |probe| {
-                    output_size += probe.prefix_size;
-                    output_atom_count += probe.count;
-                }
-                if (scope_level < 0) {
-                    output_size += 3;
-                } else if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
-                        // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
-                        output_size += throw_error_instr_size;
-                        output_atom_count += 1;
-                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
-                        output_size += 1;
-                    } else {
-                        const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
-                        const form = selectVarRefForm(ctx, ref_op, ref_idx);
-                        output_size += form.size;
-                    }
-                } else if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-                    .arg => |arg_idx| {
-                        const arg_op = lowerScopeVarOpArg(op).?;
-                        const form = selectArgForm(ctx, arg_op, arg_idx);
-                        output_size += form.size;
-                    },
-                    .local => |loc_idx| {
-                        if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                            output_size += 3;
-                        } else if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
-                            const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
-                            const form = selectVarRefForm(ctx, ref_op, ref_idx);
-                            output_size += form.size;
-                        } else if (op == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
-                            output_size += throw_error_instr_size;
-                            output_atom_count += 1;
-                        } else if (op == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) {
-                            output_size += 1;
-                        } else if (localLexicalAccessNeedsCheck(ctx, atom_id, loc_idx, op)) {
-                            // Lexical: 3-byte TDZ-check variant.
-                            output_size += 3;
-                        } else {
-                            // var: shortest form (1, 2, or 3 bytes).
-                            const local_op = lowerScopeVarOpLocal(op);
-                            const form = selectLocForm(ctx, local_op, loc_idx);
-                            output_size += form.size;
-                        }
-                    },
-                } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
-                        // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
-                        output_size += throw_error_instr_size;
-                        output_atom_count += 1;
-                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
-                        output_size += 1;
-                    } else {
-                        const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
-                        const form = selectVarRefForm(ctx, ref_op, ref_idx);
-                        output_size += form.size;
-                    }
-                } else {
-                    // Global: QuickJS `var_ref` u16 form.
-                    output_size += 3;
-                }
+                if (planned_scope_var_count >= scope_var_plans.len) return error.InvalidBytecode;
+                const plan = try planScopeVarLowering(
+                    ctx,
+                    atom_id,
+                    scope_operand,
+                    op,
+                    has_dynamic_env_objects,
+                );
+                scope_var_plans[planned_scope_var_count] = plan;
+                planned_scope_var_count += 1;
+                output_size += @as(usize, plan.probe.prefix_size) + plan.action.size();
+                output_atom_count += @as(usize, plan.probe.count) + plan.action.atomCount();
                 scan_atom_idx += 1;
                 i += 7;
             } else if (isScopePrivateFieldAt(func, i, scan_atom_idx)) {
@@ -7532,6 +7674,7 @@ pub const pipeline_resolve_variables = struct {
         var out_idx: usize = 0;
         var in_atom_idx: usize = 0;
         var out_jump_idx: usize = 0;
+        var scope_var_plan_idx: usize = 0;
 
         // Direct-eval lexical redeclaration checks precede every binding
         // initializer. resolve_labels' normal dead-code pass removes the
@@ -7680,116 +7823,36 @@ pub const pipeline_resolve_variables = struct {
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
                 const scope_operand = decodeScopeOperand(func.code[i + 5 ..][0..2]);
                 const scope_level = scope_operand.level;
-                if (!scope_operand.no_dynamic_env) {
-                    if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .put)) |probe| {
-                        const fallback_size = try evalVarObjectProbeFallbackSize(ctx, atom_id, scope_level, op);
-                        const done_pc = out_idx + probe.prefix_size + fallback_size;
-                        try writeDynamicEnvProbes(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level, opcode.op.with_put_var, done_pc);
-                    }
+                if (scope_var_plan_idx >= planned_scope_var_count) return error.InvalidBytecode;
+                const plan = scope_var_plans[scope_var_plan_idx];
+                scope_var_plan_idx += 1;
+                if (plan.probe.count != 0) {
+                    const kind = scopeVarProbeKind(op, scope_operand.no_dynamic_env) orelse
+                        return error.InvalidBytecode;
+                    const done_pc = out_idx + @as(usize, plan.probe.prefix_size) + plan.action.size();
+                    try writeDynamicEnvProbes(
+                        ctx,
+                        func,
+                        output,
+                        &out_idx,
+                        output_atoms,
+                        &out_atom_idx,
+                        atom_id,
+                        scope_level,
+                        kind.probeOpcode(),
+                        done_pc,
+                    );
                 }
-                if (evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .read)) |probe| {
-                    const fallback_size = try evalVarObjectProbeFallbackSize(ctx, atom_id, scope_level, op);
-                    const done_pc = out_idx + probe.prefix_size + fallback_size;
-                    try writeDynamicEnvProbes(ctx, func, output, &out_idx, output_atoms, &out_atom_idx, atom_id, scope_level, opcode.op.with_get_var, done_pc);
-                }
-                if (scope_level < 0) {
-                    try emitGlobalVarOp(ctx, output, &out_idx, lowerScopeVarOpGlobal(op), atom_id);
-                    in_atom_idx += 1;
-                } else if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
-                        // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
-                        writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
-                        in_atom_idx += 1;
-                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
-                        output[out_idx] = opcode.op.drop;
-                        out_idx += 1;
-                        in_atom_idx += 1;
-                    } else {
-                        const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
-                        const form = selectVarRefForm(ctx, ref_op, ref_idx);
-                        output[out_idx] = form.op_id;
-                        switch (form.operand_size) {
-                            0 => {},
-                            2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], ref_idx, .little),
-                            else => unreachable,
-                        }
-                        out_idx += form.size;
-                        in_atom_idx += 1;
-                    }
-                } else if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-                    .arg => |arg_idx| {
-                        const arg_op = lowerScopeVarOpArg(op).?;
-                        const form = selectArgForm(ctx, arg_op, arg_idx);
-                        output[out_idx] = form.op_id;
-                        switch (form.operand_size) {
-                            0 => {},
-                            2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], arg_idx, .little),
-                            else => unreachable,
-                        }
-                        out_idx += form.size;
-                        in_atom_idx += 1;
-                    },
-                    .local => |loc_idx| {
-                        if (isEvalNonLexicalLocal(ctx, loc_idx)) {
-                            try emitGlobalVarOp(ctx, output, &out_idx, lowerScopeVarOpGlobal(op), atom_id);
-                        } else if (preferTopLevelModuleClassBinding(ctx, atom_id, loc_idx)) |ref_idx| {
-                            const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
-                            const form = selectVarRefForm(ctx, ref_op, ref_idx);
-                            output[out_idx] = form.op_id;
-                            switch (form.operand_size) {
-                                0 => {},
-                                2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], ref_idx, .little),
-                                else => unreachable,
-                            }
-                            out_idx += form.size;
-                        } else if (op == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
-                            writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
-                        } else if (op == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) {
-                            output[out_idx] = opcode.op.drop;
-                            out_idx += 1;
-                        } else if (localLexicalAccessNeedsCheck(ctx, atom_id, loc_idx, op)) {
-                            output[out_idx] = lowerScopeVarOpLexical(op);
-                            std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
-                            out_idx += 3;
-                        } else {
-                            const local_op = lowerScopeVarOpLocal(op);
-                            const form = selectLocForm(ctx, local_op, loc_idx);
-                            output[out_idx] = form.op_id;
-                            switch (form.operand_size) {
-                                0 => {},
-                                1 => output[out_idx + 1] = @intCast(loc_idx),
-                                2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little),
-                                else => unreachable,
-                            }
-                            out_idx += form.size;
-                        }
-                        in_atom_idx += 1;
-                    },
-                } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
-                        // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
-                        writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
-                        in_atom_idx += 1;
-                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
-                        output[out_idx] = opcode.op.drop;
-                        out_idx += 1;
-                        in_atom_idx += 1;
-                    } else {
-                        const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
-                        const form = selectVarRefForm(ctx, ref_op, ref_idx);
-                        output[out_idx] = form.op_id;
-                        switch (form.operand_size) {
-                            0 => {},
-                            2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], ref_idx, .little),
-                            else => unreachable,
-                        }
-                        out_idx += form.size;
-                        in_atom_idx += 1;
-                    }
-                } else {
-                    try emitGlobalVarOp(ctx, output, &out_idx, lowerScopeVarOpGlobal(op), atom_id);
-                    in_atom_idx += 1;
-                }
+                try writeScopeVarAction(
+                    func,
+                    output,
+                    &out_idx,
+                    output_atoms,
+                    &out_atom_idx,
+                    atom_id,
+                    plan.action,
+                );
+                in_atom_idx += 1;
                 i += 7;
             } else if (isScopePrivateFieldAt(func, i, in_atom_idx)) {
                 const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
@@ -7910,7 +7973,8 @@ pub const pipeline_resolve_variables = struct {
         if (in_atom_idx != func.atom_operands.len or
             out_idx > output.len or
             out_atom_idx > output_atoms.len or
-            out_jump_idx > jump_sites.len)
+            out_jump_idx > jump_sites.len or
+            scope_var_plan_idx != planned_scope_var_count)
         {
             return error.InvalidBytecode;
         }
