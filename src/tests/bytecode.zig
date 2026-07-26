@@ -2373,7 +2373,10 @@ test "resolve_variables empty finalizer removal is transactional across every al
     while (try runEmptyFinalizerPhase2AllocationFailure(cleanup_rt, fail_offset)) {
         fail_offset += 1;
     }
-    try std.testing.expect(fail_offset >= 8);
+    // No scope_make_ref appears in this topology, so the five tail ledgers are
+    // deliberately absent. Keep the remaining transactional allocation
+    // surface exact: every one was failed, checked unchanged, and retried.
+    try std.testing.expectEqual(@as(usize, 7), fail_offset);
 }
 
 test "resolve_variables: scope_put_var → put_var" {
@@ -6689,7 +6692,9 @@ test "resolve_variables logical fold is transactional across every post-bind all
     while (try runLogicalPhaseOwnerAllocationFailure(cleanup_rt, fail_offset)) {
         fail_offset += 1;
     }
-    try std.testing.expect(fail_offset >= 8);
+    // The no-make-ref topology has six transactional allocations after
+    // folding jump-target state into the CFG.
+    try std.testing.expectEqual(@as(usize, 6), fail_offset);
 }
 
 fn runTaggedLogicalPhaseOwnerAllocationFailure(
@@ -6793,7 +6798,9 @@ test "resolve_variables tagged logical labels are leak-free and retryable across
     while (try runTaggedLogicalPhaseOwnerAllocationFailure(cleanup_rt, fail_offset)) {
         fail_offset += 1;
     }
-    try std.testing.expect(fail_offset >= 9);
+    // Tagged-label binding contributes one allocation before the same six
+    // no-make-ref phase-owner allocations.
+    try std.testing.expectEqual(@as(usize, 7), fail_offset);
 }
 
 test "resolve_labels null comparison strict_eq folds both constants with QuickJS source mapping" {

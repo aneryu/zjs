@@ -6663,32 +6663,16 @@ pub const pipeline_resolve_variables = struct {
         return labelOperandOffset(op_id);
     }
 
-    fn collectPhase1JumpTargets(func: *const bytecode_function.Bytecode, targets: []bool) Error!void {
-        if (targets.len != func.code.len + 1) return error.InvalidBytecode;
-        @memset(targets, false);
-
-        var pc: usize = 0;
-        var atom_index: usize = 0;
-        while (pc < func.code.len) {
-            const op_id = func.code[pc];
-            const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
-            const size: usize = instr.size;
-            if (size == 0 or pc + size > func.code.len) return error.InvalidBytecode;
-            if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
-                if (offset + 4 > size) return error.InvalidBytecode;
-                const target = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
-                if (target <= func.code.len) targets[target] = true;
-            }
-            if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-            pc += size;
-        }
-        if (atom_index != func.atom_operands.len) return error.InvalidBytecode;
-    }
-
     const Phase1CfgNode = struct {
         size: u8 = 0,
         is_temp: bool = false,
         is_live: bool = false,
+        is_target: bool = false,
+    };
+
+    const Phase1Topology = struct {
+        nodes: []Phase1CfgNode,
+        has_make_ref: bool,
     };
 
     /// QuickJS `resolve_variables` phase-2 dead-code boundary
@@ -6753,11 +6737,14 @@ pub const pipeline_resolve_variables = struct {
             code[target] == opcode.op.ret;
     }
 
-    /// Build phase-1 instruction boundaries and solve reachability from entry.
+    /// Build phase-1 instruction boundaries, record every jump target, and
+    /// solve reachability from entry in one topology pass. QuickJS carries this
+    /// information in LabelSlot rows; keeping it on the CFG nodes avoids a
+    /// second bytecode scan and a parallel per-byte target bitmap.
     /// This is intentionally an explicit CFG rather than a "referenced label"
     /// scan: references originating in unreachable code must not keep a dead
     /// jump cycle, binding event, or atom owner alive.
-    fn computePhase1Reachability(ctx: *const JSContext) Error![]Phase1CfgNode {
+    fn computePhase1Topology(ctx: *const JSContext) Error!Phase1Topology {
         const func = ctx.function;
         const nodes = try ctx.memory.alloc(Phase1CfgNode, func.code.len + 1);
         errdefer ctx.memory.free(Phase1CfgNode, nodes);
@@ -6765,6 +6752,7 @@ pub const pipeline_resolve_variables = struct {
 
         var pc: usize = 0;
         var atom_index: usize = 0;
+        var has_make_ref = false;
         while (pc < func.code.len) {
             const op_id = func.code[pc];
             const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
@@ -6772,8 +6760,14 @@ pub const pipeline_resolve_variables = struct {
             if (size == 0 or pc + size > func.code.len) return error.InvalidBytecode;
             if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
                 if (offset + 4 > size) return error.InvalidBytecode;
+                const target = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
+                if (target <= func.code.len) nodes[target].is_target = true;
             }
-            nodes[pc] = .{ .size = instr.size, .is_temp = instr.is_temp };
+            nodes[pc].size = instr.size;
+            nodes[pc].is_temp = instr.is_temp;
+            if (instr.is_temp and op_id == opcode.op.scope_make_ref) {
+                has_make_ref = true;
+            }
             if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
             pc += size;
         }
@@ -6806,7 +6800,10 @@ pub const pipeline_resolve_variables = struct {
                 try enqueuePhase1Reachable(nodes, worklist, &worklist_len, next);
             }
         }
-        return nodes;
+        return .{
+            .nodes = nodes,
+            .has_make_ref = has_make_ref,
+        };
     }
 
     fn isPhase1Reachable(nodes: []const Phase1CfgNode, pc: usize) bool {
@@ -6815,12 +6812,12 @@ pub const pipeline_resolve_variables = struct {
 
     /// QuickJS `resolve_variables` discard fold (quickjs.c:34343): once the
     /// assignment value is unused, the stack permutation itself can disappear.
-    fn discardedIndexedStoreOp(code: []const u8, jump_targets: []const bool, pc: usize) ?u8 {
-        if (pc + 3 > code.len or jump_targets.len != code.len + 1) return null;
+    fn discardedIndexedStoreOp(code: []const u8, nodes: []const Phase1CfgNode, pc: usize) ?u8 {
+        if (pc + 3 > code.len or nodes.len != code.len + 1) return null;
         if (code[pc] != opcode.op.insert3 or code[pc + 2] != opcode.op.drop) return null;
         const put_op = code[pc + 1];
         if (put_op != opcode.op.put_array_el and put_op != opcode.op.put_ref_value) return null;
-        if (jump_targets[pc + 1] or jump_targets[pc + 2]) return null;
+        if (nodes[pc + 1].is_target or nodes[pc + 2].is_target) return null;
         return put_op;
     }
 
@@ -6847,11 +6844,11 @@ pub const pipeline_resolve_variables = struct {
 
     fn phase1LogicalPrefix(
         code: []const u8,
-        jump_targets: []const bool,
+        nodes: []const Phase1CfgNode,
         pc: usize,
         guard_consumed_suffix: bool,
     ) ?Phase1LogicalPrefix {
-        if (pc >= code.len or code[pc] != opcode.op.dup or jump_targets.len != code.len + 1) return null;
+        if (pc >= code.len or code[pc] != opcode.op.dup or nodes.len != code.len + 1) return null;
 
         const branch_pc = skipPhase1LineMarkers(code, pc + 1) orelse return null;
         if (branch_pc + 5 > code.len) return null;
@@ -6862,8 +6859,8 @@ pub const pipeline_resolve_variables = struct {
         if (drop_pc >= code.len or code[drop_pc] != opcode.op.drop) return null;
         const end_pc = drop_pc + 1;
         if (guard_consumed_suffix) {
-            for (jump_targets[pc + 1 .. end_pc]) |is_target| {
-                if (is_target) return null;
+            for (nodes[pc + 1 .. end_pc]) |node| {
+                if (node.is_target) return null;
             }
         }
 
@@ -6911,10 +6908,10 @@ pub const pipeline_resolve_variables = struct {
     /// The consumed branch/drop suffix must not be an independent entry point.
     fn matchPhase1LogicalChain(
         code: []const u8,
-        jump_targets: []const bool,
+        nodes: []const Phase1CfgNode,
         pc: usize,
     ) ?Phase1LogicalChain {
-        const first = phase1LogicalPrefix(code, jump_targets, pc, true) orelse return null;
+        const first = phase1LogicalPrefix(code, nodes, pc, true) orelse return null;
         var target = first.target;
         var hops: usize = 0;
         while (hops < code.len) : (hops += 1) {
@@ -6929,7 +6926,7 @@ pub const pipeline_resolve_variables = struct {
                 };
             }
 
-            const next = phase1LogicalPrefix(code, jump_targets, target_pc, false) orelse return null;
+            const next = phase1LogicalPrefix(code, nodes, target_pc, false) orelse return null;
             if (next.branch_op != first.branch_op) return null;
             target = next.target;
         }
@@ -7180,21 +7177,23 @@ pub const pipeline_resolve_variables = struct {
     pub fn run(ctx: *JSContext) !void {
         const func = ctx.function;
         try bindParserLabels(ctx);
-        const phase1_reachability = try computePhase1Reachability(ctx);
+        const phase1_topology = try computePhase1Topology(ctx);
+        const phase1_reachability = phase1_topology.nodes;
         defer ctx.memory.free(Phase1CfgNode, phase1_reachability);
-        const phase1_jump_targets = try ctx.memory.alloc(bool, func.code.len + 1);
-        defer ctx.memory.free(bool, phase1_jump_targets);
-        try collectPhase1JumpTargets(func, phase1_jump_targets);
 
-        const global_ref_tail_atoms: []atom.Atom = if (func.code.len == 0) &.{} else try ctx.memory.alloc(atom.Atom, func.code.len);
+        // QuickJS creates no auxiliary tail state for functions without
+        // scope_make_ref. These ledgers are zjs's transactional representation
+        // of the same fold plan, so allocate them only when that feature is
+        // present in the already-validated phase-1 topology.
+        const global_ref_tail_atoms: []atom.Atom = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(atom.Atom, func.code.len);
         defer if (global_ref_tail_atoms.len != 0) ctx.memory.free(atom.Atom, global_ref_tail_atoms);
-        const global_ref_tail_kinds: []u8 = if (func.code.len == 0) &.{} else try ctx.memory.alloc(u8, func.code.len);
+        const global_ref_tail_kinds: []u8 = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(u8, func.code.len);
         defer if (global_ref_tail_kinds.len != 0) ctx.memory.free(u8, global_ref_tail_kinds);
-        const local_ref_tail_indices: []u16 = if (func.code.len == 0) &.{} else try ctx.memory.alloc(u16, func.code.len);
+        const local_ref_tail_indices: []u16 = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(u16, func.code.len);
         defer if (local_ref_tail_indices.len != 0) ctx.memory.free(u16, local_ref_tail_indices);
-        const make_ref_tail_pc: []usize = if (func.code.len == 0) &.{} else try ctx.memory.alloc(usize, func.code.len);
+        const make_ref_tail_pc: []usize = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(usize, func.code.len);
         defer if (make_ref_tail_pc.len != 0) ctx.memory.free(usize, make_ref_tail_pc);
-        const make_ref_reads_value: []bool = if (func.code.len == 0) &.{} else try ctx.memory.alloc(bool, func.code.len);
+        const make_ref_reads_value: []bool = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(bool, func.code.len);
         defer if (make_ref_reads_value.len != 0) ctx.memory.free(bool, make_ref_reads_value);
         if (global_ref_tail_atoms.len != 0) @memset(global_ref_tail_atoms, atom.null_atom);
         if (global_ref_tail_kinds.len != 0) @memset(global_ref_tail_kinds, GLOBAL_REF_TAIL_NONE);
@@ -7260,12 +7259,12 @@ pub const pipeline_resolve_variables = struct {
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
                 continue;
             }
-            if (discardedIndexedStoreOp(func.code, phase1_jump_targets, i) != null) {
+            if (discardedIndexedStoreOp(func.code, phase1_reachability, i) != null) {
                 output_size += 1;
                 i += 3;
                 continue;
             }
-            if (matchPhase1LogicalChain(func.code, phase1_jump_targets, i)) |logical| {
+            if (matchPhase1LogicalChain(func.code, phase1_reachability, i)) |logical| {
                 output_size += 5;
                 jump_count += 1;
                 i = logical.end_pc;
@@ -7585,7 +7584,7 @@ pub const pipeline_resolve_variables = struct {
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
                 continue;
             }
-            if (discardedIndexedStoreOp(func.code, phase1_jump_targets, i)) |put_op| {
+            if (discardedIndexedStoreOp(func.code, phase1_reachability, i)) |put_op| {
                 pc_map[i + 1] = out_idx;
                 output[out_idx] = put_op;
                 out_idx += 1;
@@ -7593,7 +7592,7 @@ pub const pipeline_resolve_variables = struct {
                 i += 3;
                 continue;
             }
-            if (matchPhase1LogicalChain(func.code, phase1_jump_targets, i)) |logical| {
+            if (matchPhase1LogicalChain(func.code, phase1_reachability, i)) |logical| {
                 output[out_idx] = logical.branch_op;
                 std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], @intCast(logical.target), .little);
                 jump_sites[out_jump_idx] = .{ .operand_pos = out_idx + 1 };
