@@ -15,17 +15,24 @@ Keeping the verifier in a separate standard-library-only runtime preserves the
 collector/verifier boundary and lets the phase-close policy run even on a host
 where `node` is not on `PATH`.
 
-The fixed seven-case `P0_SENTINEL_NAMES` tuple in the verifier is deliberately
-the same policy set as `p0SentinelNames` in
-`tools/perf/same_runtime/run_same_runtime.js`. When that runner-side policy set
-changes, both lists must be reviewed together. The verifier never derives this
-set from an artifact's `requested_cases`, because a one-case artifact must not
-be able to declare itself complete.
+`tools/perf/same_runtime/policy.json` is the single checked-in policy authority.
+Both runtimes load that exact file directly; there is no generated copy, drift
+check, built-in fallback list, or second hand-maintained sentinel tuple. The
+verifier resolves the policy relative to its own installed path, validates its
+complete schema, and exits `2` if it is absent or damaged.
+
+Reading a checked-in policy is distinct from trusting the artifact under test.
+Changing the policy requires a reviewed code change. The verifier never derives
+sentinels or limits from `requested_cases`, `policy`, or any other artifact
+field, so a one-case artifact cannot declare itself complete and forged limits
+cannot relax the gate. An artifact's `policy` object is an identity declaration
+only: `policy_id` and `policy_version`.
 
 ## Usage
 
 ```sh
 tools/perf/verify_same_runtime \
+  --require-policy-declaration \
   --require-complete \
   --require-canonical-provenance \
   --require-output-match \
@@ -35,10 +42,16 @@ tools/perf/verify_same_runtime \
 
 All policy switches are opt-in:
 
+- `--require-policy-declaration` requires an artifact's `policy_id` and
+  `policy_version` to match the checked-in policy. Without this option, an old
+  artifact with no `policy` field takes an explicitly reported legacy
+  compatibility path; it is never silently described as having declared the
+  policy. A declaration that is present is always compared and reported in the
+  advisory check.
 - `--require-complete` requires `aggregate.complete` to be the JSON boolean
-  `true`, an empty `aggregate.missing_cases`, and all seven fixed sentinels in
-  both the case set and aggregate participants. Current collector artifacts do
-  not publish top-level `aggregate.participants`; for those artifacts, empty
+  `true`, an empty `aggregate.missing_cases`, and every policy sentinel in both
+  the case set and aggregate participants. Current collector artifacts do not
+  publish top-level `aggregate.participants`; for those artifacts, empty
   `missing_cases` plus complete `cases` coverage is the specified fallback.
 - `--require-canonical-provenance` checks each aggregate participant for
   `canonical_source: true`, rejects `overridden` and `custom` case shapes,
@@ -60,8 +73,8 @@ All policy switches are opt-in:
 With no `--require-*` options, valid JSON-object parsing is the only enforced
 condition. The command prints an advisory PASS/FAIL summary for all policy
 checks but exits zero regardless of those advisory results. Invalid JSON,
-duplicate JSON fields, a non-object root, CLI errors, and unreadable artifacts
-exit `2`.
+duplicate JSON fields, a non-object root, CLI errors, unreadable artifacts, and
+an unreadable or invalid checked-in policy exit `2`.
 
 Use `--json` to make stdout contain one JSON verdict and no human-readable
 text:

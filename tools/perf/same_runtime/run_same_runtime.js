@@ -9,53 +9,133 @@ const { spawnSync } = require('node:child_process');
 
 const expectedQjsHead = '04be246001599f5995fa2f2d8c91a0f198d3f34c';
 const expectedQjsVersion = '2026-06-04';
-const p0SentinelNames = [
-    'global_write_loop',
-    'prop_read_mono_loop',
-    'fib_rec',
-    'call_body_loop',
-    'method_call_loop',
-    'typed_array_read',
-    'typed_array_write',
-];
-const caseMetadata = {
-    global_write_loop: {
-        checksum_required: true,
-        case_shape: 'retained-global-with-callable-run',
-        provenance: 'Adapted from tools/compare/hotpath_cases.js global_write_loop: the strict global write loop is retained, while run() makes repeated same-runtime invocation possible.',
-    },
-    prop_read_mono_loop: {
-        checksum_required: true,
-        case_shape: 'function-local',
-        provenance: 'Adapted from tools/compare/hotpath_cases.js prop_read_mono_loop: object and accumulator move from top-level lexical bindings into each run() invocation.',
-    },
-    fib_rec: {
-        checksum_required: true,
-        case_shape: 'function-local-inner-closure',
-        provenance: 'Adapted from tools/compare/hotpath_cases.js fib_rec: fib moves from a top-level function declaration to an inner closure created by each run() invocation.',
-    },
-    call_body_loop: {
-        checksum_required: true,
-        case_shape: 'function-local-inner-closure',
-        provenance: 'Adapted from tools/compare/hotpath_cases.js call_body_loop: f and the accumulator move into run(), recreating f once per retained run() call.',
-    },
-    method_call_loop: {
-        checksum_required: true,
-        case_shape: 'function-local',
-        provenance: 'Adapted from tools/compare/hotpath_cases.js method_call_loop: the receiver object and accumulator are created inside each run() invocation.',
-    },
-    typed_array_read: {
-        checksum_required: true,
-        case_shape: 'function-local-loop',
-        provenance: 'Distinct same-name workload from tools/compare/microbench_cases.js typed_array_read: this case performs initialization plus 250000 indexed reads instead of a zero-loop length observation.',
-    },
-    typed_array_write: {
-        checksum_required: true,
-        case_shape: 'function-local-loop',
-        provenance: 'Distinct same-name workload from tools/compare/microbench_cases.js typed_array_write: this case performs 250000 indexed writes plus a checksum loop instead of one indexed write.',
-    },
-};
 const scriptDir = __dirname;
+const policyPath = path.join(scriptDir, 'policy.json');
+
+function exactObjectKeys(value, expectedKeys, label) {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`${label} must be an object`);
+    }
+    const expected = new Set(expectedKeys);
+    const missing = expectedKeys.filter(
+        (key) => !Object.prototype.hasOwnProperty.call(value, key),
+    );
+    const unexpected = Object.keys(value).filter((key) => !expected.has(key));
+    if (missing.length > 0) {
+        throw new Error(`${label} is missing field(s): ${missing.join(', ')}`);
+    }
+    if (unexpected.length > 0) {
+        throw new Error(
+            `${label} has unexpected field(s): ${unexpected.join(', ')}`,
+        );
+    }
+}
+
+function loadSameRuntimePolicy(filePath) {
+    let contents;
+    try {
+        contents = fs.readFileSync(filePath, 'utf8');
+    } catch (error) {
+        throw new Error(`cannot read ${filePath}: ${error.message}`);
+    }
+
+    let parsed;
+    try {
+        parsed = JSON.parse(contents);
+    } catch (error) {
+        throw new Error(`invalid JSON in ${filePath}: ${error.message}`);
+    }
+
+    exactObjectKeys(
+        parsed,
+        ['policy_id', 'policy_version', 'sentinels', 'exit_line'],
+        'policy',
+    );
+    if (
+        typeof parsed.policy_id !== 'string' ||
+        parsed.policy_id.trim().length === 0
+    ) {
+        throw new Error('policy.policy_id must be a non-empty string');
+    }
+    if (
+        !Number.isSafeInteger(parsed.policy_version) ||
+        parsed.policy_version < 1
+    ) {
+        throw new Error('policy.policy_version must be a positive integer');
+    }
+    if (!Array.isArray(parsed.sentinels) || parsed.sentinels.length === 0) {
+        throw new Error('policy.sentinels must be a non-empty array');
+    }
+
+    const seenNames = new Set();
+    const sentinels = parsed.sentinels.map((entry, index) => {
+        const label = `policy.sentinels[${index}]`;
+        exactObjectKeys(
+            entry,
+            ['name', 'checksum_required', 'case_shape', 'provenance'],
+            label,
+        );
+        if (
+            typeof entry.name !== 'string' ||
+            !/^[A-Za-z0-9_.-]+$/.test(entry.name)
+        ) {
+            throw new Error(`${label}.name must be a valid case name`);
+        }
+        if (seenNames.has(entry.name)) {
+            throw new Error(`duplicate sentinel name: ${entry.name}`);
+        }
+        seenNames.add(entry.name);
+        if (typeof entry.checksum_required !== 'boolean') {
+            throw new Error(`${label}.checksum_required must be a boolean`);
+        }
+        for (const field of ['case_shape', 'provenance']) {
+            if (
+                typeof entry[field] !== 'string' ||
+                entry[field].trim().length === 0
+            ) {
+                throw new Error(`${label}.${field} must be a non-empty string`);
+            }
+        }
+        return Object.freeze({ ...entry });
+    });
+
+    exactObjectKeys(
+        parsed.exit_line,
+        ['geomean_limit', 'per_case_limit'],
+        'policy.exit_line',
+    );
+    for (const field of ['geomean_limit', 'per_case_limit']) {
+        const value = parsed.exit_line[field];
+        if (!Number.isFinite(value) || value <= 0) {
+            throw new Error(
+                `policy.exit_line.${field} must be a positive finite number`,
+            );
+        }
+    }
+
+    return Object.freeze({
+        policy_id: parsed.policy_id,
+        policy_version: parsed.policy_version,
+        sentinels: Object.freeze(sentinels),
+        exit_line: Object.freeze({ ...parsed.exit_line }),
+    });
+}
+
+let sameRuntimePolicy;
+try {
+    sameRuntimePolicy = loadSameRuntimePolicy(policyPath);
+} catch (error) {
+    fail(`cannot load checked-in same-runtime policy: ${error.message}`);
+}
+const p0SentinelNames = sameRuntimePolicy.sentinels.map(
+    (sentinel) => sentinel.name,
+);
+const caseMetadata = Object.fromEntries(
+    sameRuntimePolicy.sentinels.map(({ name, ...metadata }) => [
+        name,
+        Object.freeze(metadata),
+    ]),
+);
 const repoRoot = process.env.ZJS_REPO_ROOT
     ? path.resolve(process.env.ZJS_REPO_ROOT)
     : path.resolve(scriptDir, '../../..');
@@ -95,7 +175,7 @@ function usage() {
 Runs paired zjs/QuickJS compile-once, execute-many samples pinned to one CPU.
 
 Options:
-  --cases a,b,c          Cases to run (default: all seven)
+  --cases a,b,c          Cases to run (default: all policy sentinels)
   --case-source NAME=PATH
                          Override/add a case source; use --cases NAME to select a custom name
   --iterations N         Timed run() calls per harness invocation (default: 200)
@@ -2026,7 +2106,10 @@ function buildAggregate(cases) {
             )
             : null;
     const overLimitCases = steady.participants
-        .filter((item) => item.ratio > 1.2)
+        .filter(
+            (item) =>
+                item.ratio > sameRuntimePolicy.exit_line.per_case_limit,
+        )
         .map((item) => ({ name: item.name, ratio: item.ratio }));
     const instructions = aggregateMetric(
         cases,
@@ -2046,11 +2129,12 @@ function buildAggregate(cases) {
         partial_max_case_ratio: partialMaxParticipant?.ratio ?? null,
         partial_max_case_name: partialMaxParticipant?.name ?? null,
         exit_line: {
-            geomean_limit: 1.1,
-            per_case_limit: 1.2,
+            geomean_limit: sameRuntimePolicy.exit_line.geomean_limit,
+            per_case_limit: sameRuntimePolicy.exit_line.per_case_limit,
             geomean_pass:
                 steady.complete &&
-                steady.p0_sentinel_geomean <= 1.1,
+                steady.p0_sentinel_geomean <=
+                    sameRuntimePolicy.exit_line.geomean_limit,
             per_case_pass:
                 steady.complete && overLimitCases.length === 0,
             over_limit_cases: overLimitCases,
@@ -2170,17 +2254,17 @@ const summary = {
     samples: config.samples,
     phase_ratio_floor_ns: phaseRatioFloorNs,
     pmu_enabled: config.pmu,
+    policy: {
+        policy_id: sameRuntimePolicy.policy_id,
+        policy_version: sameRuntimePolicy.policy_version,
+    },
     requested_cases: config.cases,
     comparability_formula:
         'source_comparable && checksum_comparable && metric_comparable && provenance_comparable',
     checksum_requirements: Object.fromEntries(
-        Object.entries(caseMetadata).map(([name, metadata]) => [
+        config.cases.map((name) => [
             name,
-            {
-                required: metadata.checksum_required,
-                declared:
-                    typeof metadata.checksum_required === 'boolean',
-            },
+            checksumRequirementForCase(name),
         ]),
     ),
     case_sources: Object.fromEntries(

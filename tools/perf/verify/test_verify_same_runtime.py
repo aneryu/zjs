@@ -12,15 +12,15 @@ from pathlib import Path
 
 VERIFY_DIR = Path(__file__).resolve().parent
 VERIFIER = VERIFY_DIR.parent / "verify_same_runtime"
-P0_SENTINELS = (
-    "global_write_loop",
-    "prop_read_mono_loop",
-    "fib_rec",
-    "call_body_loop",
-    "method_call_loop",
-    "typed_array_read",
-    "typed_array_write",
+POLICY_PATH = VERIFY_DIR.parent / "same_runtime" / "policy.json"
+POLICY = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+P0_SENTINELS = tuple(
+    sentinel["name"] for sentinel in POLICY["sentinels"]
 )
+GEOMEAN_LIMIT = POLICY["exit_line"]["geomean_limit"]
+PER_CASE_LIMIT = POLICY["exit_line"]["per_case_limit"]
+GEOMEAN_LIMIT_TEXT = f"{GEOMEAN_LIMIT:.2f}"
+PER_CASE_LIMIT_TEXT = f"{PER_CASE_LIMIT:.2f}"
 
 
 def passing_case(name: str) -> dict:
@@ -40,7 +40,13 @@ def passing_case(name: str) -> dict:
         "validation": {},
         "sample_pairs": [],
         "pmu": None,
-        "paired_ratios": {},
+        # The verifier re-derives the exit line from these ratios instead of
+        # trusting aggregate. A fixture with an empty paired_ratios cannot
+        # satisfy --require-exit-line, and should not: an artifact carrying no
+        # recomputable evidence must not pass on its own say-so.
+        "paired_ratios": {
+            "steady_execute_median_ns": {"median": 1.0},
+        },
         "status_before_comparability": "ok",
         "reason": None,
         "comparable": True,
@@ -85,6 +91,10 @@ def passing_artifact() -> dict:
         "samples": 3,
         "phase_ratio_floor_ns": 1000,
         "pmu_enabled": False,
+        "policy": {
+            "policy_id": POLICY["policy_id"],
+            "policy_version": POLICY["policy_version"],
+        },
         "requested_cases": list(P0_SENTINELS),
         "comparability_formula": (
             "source_comparable && checksum_comparable && "
@@ -96,7 +106,11 @@ def passing_artifact() -> dict:
             for name in P0_SENTINELS
         },
         "environment": {},
-        "status_counts": {"ok": 7, "mismatch": 0, "invalid": 0},
+        "status_counts": {
+            "ok": len(P0_SENTINELS),
+            "mismatch": 0,
+            "invalid": 0,
+        },
         "aggregate": {
             "status": "complete",
             "complete": True,
@@ -110,8 +124,8 @@ def passing_artifact() -> dict:
             "partial_max_case_ratio": None,
             "partial_max_case_name": None,
             "exit_line": {
-                "geomean_limit": 1.1,
-                "per_case_limit": 1.2,
+                "geomean_limit": GEOMEAN_LIMIT,
+                "per_case_limit": PER_CASE_LIMIT,
                 "geomean_pass": True,
                 "per_case_pass": True,
                 "over_limit_cases": [],
@@ -145,6 +159,7 @@ class VerifierTests(unittest.TestCase):
     def test_all_requirements_pass(self) -> None:
         completed = self.run_verifier(
             passing_artifact(),
+            "--require-policy-declaration",
             "--require-complete",
             "--require-canonical-provenance",
             "--require-output-match",
@@ -153,6 +168,50 @@ class VerifierTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assertIn("PASS require-complete [required]", completed.stdout)
         self.assertIn("Overall: PASS (exit 0)", completed.stdout)
+
+    def test_policy_identity_mismatch_is_explicit_and_opt_in(self) -> None:
+        artifact = passing_artifact()
+        artifact["policy"] = {
+            "policy_id": "forged-policy",
+            "policy_version": POLICY["policy_version"] + 1,
+        }
+
+        advisory = self.run_verifier(artifact)
+        self.assertEqual(advisory.returncode, 0, advisory.stdout)
+        self.assertIn(
+            "FAIL require-policy-declaration [not requested]",
+            advisory.stdout,
+        )
+        self.assertIn(
+            "does not match checked-in policy_id", advisory.stdout
+        )
+        self.assertIn(
+            "does not match checked-in policy_version", advisory.stdout
+        )
+
+        required = self.run_verifier(
+            artifact, "--require-policy-declaration"
+        )
+        self.assertEqual(required.returncode, 1, required.stdout)
+
+    def test_missing_policy_uses_explicit_legacy_path(self) -> None:
+        artifact = passing_artifact()
+        del artifact["policy"]
+
+        advisory = self.run_verifier(artifact)
+        self.assertEqual(advisory.returncode, 0, advisory.stdout)
+        self.assertIn("policy declaration: absent", advisory.stdout)
+        self.assertIn(
+            "explicit legacy compatibility path", advisory.stdout
+        )
+
+        required = self.run_verifier(
+            artifact, "--require-policy-declaration"
+        )
+        self.assertEqual(required.returncode, 1, required.stdout)
+        self.assertIn(
+            "artifact has no policy declaration", required.stdout
+        )
 
     def test_exit_line_is_opt_in_and_reports_concrete_ratios(self) -> None:
         artifact = passing_artifact()
@@ -165,10 +224,13 @@ class VerifierTests(unittest.TestCase):
                 "per_case_pass": False,
                 "over_limit_cases": [
                     {
-                        "name": "global_write_loop",
+                        "name": P0_SENTINELS[0],
                         "ratio": 1.6889821098939986,
                     },
-                    {"name": "fib_rec", "ratio": 1.347454778406315},
+                    {
+                        "name": P0_SENTINELS[2],
+                        "ratio": 1.347454778406315,
+                    },
                 ],
             }
         )
@@ -188,19 +250,23 @@ class VerifierTests(unittest.TestCase):
         )
         self.assertEqual(required.returncode, 1, required.stdout)
         self.assertIn(
-            "geomean 1.1524 > limit 1.10", required.stdout
+            f"geomean 1.1524 > limit {GEOMEAN_LIMIT_TEXT}",
+            required.stdout,
         )
         self.assertIn(
-            "global_write_loop 1.6890 > 1.20", required.stdout
+            f"{P0_SENTINELS[0]} 1.6890 > {PER_CASE_LIMIT_TEXT}",
+            required.stdout,
         )
-        self.assertIn("fib_rec 1.3475 > 1.20", required.stdout)
+        self.assertIn(
+            f"{P0_SENTINELS[2]} 1.3475 > {PER_CASE_LIMIT_TEXT}",
+            required.stdout,
+        )
 
     def test_incomplete_artifact_fails_closed(self) -> None:
         artifact = passing_artifact()
         artifact["aggregate"]["complete"] = False
-        artifact["aggregate"]["missing_cases"] = [
-            "typed_array_write"
-        ]
+        missing_sentinel = P0_SENTINELS[-1]
+        artifact["aggregate"]["missing_cases"] = [missing_sentinel]
         artifact["cases"] = artifact["cases"][:-1]
 
         completed = self.run_verifier(
@@ -211,7 +277,7 @@ class VerifierTests(unittest.TestCase):
             "aggregate.complete is not true", completed.stdout
         )
         self.assertIn(
-            "missing P0 sentinel in cases: typed_array_write",
+            f"missing P0 sentinel in cases: {missing_sentinel}",
             completed.stdout,
         )
 
@@ -242,15 +308,16 @@ class VerifierTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1, completed.stdout)
         self.assertIn(
             "missing P0 sentinel in aggregate.participants: "
-            "typed_array_write",
+            f"{P0_SENTINELS[-1]}",
             completed.stdout,
         )
 
     def test_canonical_false_and_override_fail(self) -> None:
         artifact = passing_artifact()
+        first_sentinel = P0_SENTINELS[0]
         artifact["cases"][0]["canonical_source"] = False
         artifact["cases"][0]["case_shape"] = "overridden"
-        artifact["case_sources"]["global_write_loop"] = (
+        artifact["case_sources"][first_sentinel] = (
             "/tmp/replacement.js"
         )
 
@@ -259,16 +326,16 @@ class VerifierTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 1, completed.stdout)
         self.assertIn(
-            "case global_write_loop canonical_source is not true",
+            f"case {first_sentinel} canonical_source is not true",
             completed.stdout,
         )
         self.assertIn(
-            "case global_write_loop has non-canonical case_shape: "
+            f"case {first_sentinel} has non-canonical case_shape: "
             "overridden",
             completed.stdout,
         )
         self.assertIn(
-            "case_sources.global_write_loop overrides canonical source",
+            f"case_sources.{first_sentinel} overrides canonical source",
             completed.stdout,
         )
 
@@ -289,7 +356,7 @@ class VerifierTests(unittest.TestCase):
             "missing field: cases[0].status", completed.stdout
         )
         self.assertIn(
-            "case prop_read_mono_loop checksums do not match "
+            f"case {P0_SENTINELS[1]} checksums do not match "
             "across all invocations",
             completed.stdout,
         )
@@ -306,7 +373,7 @@ class VerifierTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assertIn(
-            "explicit checksum exemptions: global_write_loop",
+            f"explicit checksum exemptions: {P0_SENTINELS[0]}",
             completed.stdout,
         )
 
@@ -336,6 +403,45 @@ class VerifierTests(unittest.TestCase):
             "missing field: aggregate.exit_line", completed.stdout
         )
 
+    def test_artifact_cannot_launder_its_own_exit_line(self) -> None:
+        """Rewriting aggregate while cases[] keep failing ratios must fail.
+
+        The policy identity and both limits stay honest here; only the
+        self-reported conclusions are forged. A gate that reads the audited
+        object's own verdict is not a gate.
+        """
+        artifact = passing_artifact()
+        failing = P0_SENTINELS[0]
+        for case in artifact["cases"]:
+            if case["name"] == failing:
+                case["paired_ratios"]["steady_execute_median_ns"][
+                    "median"
+                ] = 1.90
+        # aggregate still claims everything passed.
+        completed = self.run_verifier(artifact, "--require-exit-line")
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("cases recompute to", completed.stdout)
+        self.assertIn(
+            f"recomputed {failing}", completed.stdout
+        )
+
+    def test_missing_case_ratios_cannot_pass_exit_line(self) -> None:
+        artifact = passing_artifact()
+        artifact["cases"][0]["paired_ratios"] = {}
+        completed = self.run_verifier(artifact, "--require-exit-line")
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("cannot recompute exit line", completed.stdout)
+
+    def test_over_limit_case_list_must_match_recomputation(self) -> None:
+        artifact = passing_artifact()
+        artifact["aggregate"]["exit_line"]["over_limit_cases"] = [
+            {"name": P0_SENTINELS[1], "ratio": 1.5}
+        ]
+        artifact["aggregate"]["exit_line"]["per_case_pass"] = False
+        completed = self.run_verifier(artifact, "--require-exit-line")
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("but cases recompute to", completed.stdout)
+
     def test_artifact_cannot_relax_fixed_exit_limits(self) -> None:
         artifact = passing_artifact()
         artifact["aggregate"]["p0_sentinel_geomean"] = 5.0
@@ -353,13 +459,61 @@ class VerifierTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 1, completed.stdout)
         self.assertIn(
-            "expected policy limit 1.10", completed.stdout
+            f"expected policy limit {GEOMEAN_LIMIT_TEXT}",
+            completed.stdout,
         )
         self.assertIn(
-            "expected policy limit 1.20", completed.stdout
+            f"expected policy limit {PER_CASE_LIMIT_TEXT}",
+            completed.stdout,
         )
         self.assertIn(
-            "geomean 5.0000 > limit 1.10", completed.stdout
+            f"geomean 5.0000 > limit {GEOMEAN_LIMIT_TEXT}",
+            completed.stdout,
+        )
+
+    def test_artifact_policy_limits_are_ignored(self) -> None:
+        artifact = passing_artifact()
+        artifact["policy"]["exit_line"] = {
+            "geomean_limit": 10.0,
+            "per_case_limit": 10.0,
+        }
+        artifact["aggregate"]["p0_sentinel_geomean"] = 5.0
+        artifact["aggregate"]["exit_line"]["geomean_pass"] = True
+
+        completed = self.run_verifier(
+            artifact, "--require-exit-line"
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn(
+            "artifact policy declaration has unsupported field(s): "
+            "exit_line; policy definitions are ignored",
+            completed.stdout,
+        )
+        self.assertIn(
+            f"geomean 5.0000 > limit {GEOMEAN_LIMIT_TEXT}",
+            completed.stdout,
+        )
+
+    def test_artifact_policy_sentinel_set_is_ignored(self) -> None:
+        artifact = passing_artifact()
+        missing_sentinel = P0_SENTINELS[-1]
+        artifact["policy"]["sentinels"] = list(P0_SENTINELS[:-1])
+        artifact["cases"] = artifact["cases"][:-1]
+        artifact["requested_cases"] = list(P0_SENTINELS[:-1])
+        artifact["case_sources"].pop(missing_sentinel)
+
+        completed = self.run_verifier(
+            artifact, "--require-complete"
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn(
+            "artifact policy declaration has unsupported field(s): "
+            "sentinels; policy definitions are ignored",
+            completed.stdout,
+        )
+        self.assertIn(
+            f"missing P0 sentinel in cases: {missing_sentinel}",
+            completed.stdout,
         )
 
     def test_json_stdout_is_one_valid_document(self) -> None:

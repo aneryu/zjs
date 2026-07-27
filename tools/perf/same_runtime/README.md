@@ -6,11 +6,18 @@ Timing samples are ABBA-interleaved and pinned with `taskset`.
 
 ## Case and phase declarations
 
-`caseMetadata` is the canonical case registry. Every current P0 sentinel
-explicitly declares `checksum_required: true`. Unregistered/custom cases default
-to requiring a checksum, but cannot become source- or provenance-comparable.
-`--case-source` changes the recorded provenance to `canonical_source: false`;
-it cannot make a replacement workload count as the named P0 sentinel.
+`policy.json` is the single checked-in policy authority shared directly by this
+Node collector and the Python verifier. Each sentinel entry owns its name,
+checksum requirement, case shape, and provenance in one object; the exit-line
+limits live in the same static policy. The collector resolves the file relative
+to its own script, validates the complete schema, and fails closed if the file
+is absent or damaged. It has no built-in fallback list.
+
+Every current P0 sentinel explicitly declares `checksum_required: true`.
+Unregistered/custom cases default to requiring a checksum, but cannot become
+source- or provenance-comparable. `--case-source` changes the recorded
+provenance to `canonical_source: false`; it cannot make a replacement workload
+count as the named P0 sentinel.
 
 Required checksums must be non-empty strings in preflight and every timed
 sample, and must match across engines. Only an explicit
@@ -68,3 +75,7 @@ completeness, and comparability. `aggregate.exit_line.geomean_pass` and
 `per_case_pass` are recorded results only: either may be false while a complete,
 valid run exits zero. Enforcing performance targets belongs to an opt-in
 verifier, not this collector.
+
+Artifacts declare only `policy_id` and `policy_version`, alongside the cases
+actually requested/run and the computed results. They do not copy the policy
+sentinel set or use artifact-provided limits as authority.

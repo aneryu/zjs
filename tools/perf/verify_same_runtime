@@ -8,26 +8,16 @@ import argparse
 import json
 import math
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 
-# This fixed policy set must stay in sync with p0SentinelNames in
-# tools/perf/same_runtime/run_same_runtime.js. It is intentionally not derived
-# from requested_cases in the artifact.
-P0_SENTINEL_NAMES = (
-    "global_write_loop",
-    "prop_read_mono_loop",
-    "fib_rec",
-    "call_body_loop",
-    "method_call_loop",
-    "typed_array_read",
-    "typed_array_write",
-)
-GEOMEAN_LIMIT = 1.10
-PER_CASE_LIMIT = 1.20
+SCRIPT_DIR = Path(__file__).resolve().parent
+POLICY_PATH = SCRIPT_DIR / "same_runtime" / "policy.json"
 
 CHECK_DEFINITIONS = (
+    ("require-policy-declaration", "require_policy_declaration"),
     ("require-complete", "require_complete"),
     ("require-canonical-provenance", "require_canonical_provenance"),
     ("require-output-match", "require_output_match"),
@@ -45,6 +35,19 @@ class ArtifactError(Exception):
     """Raised when an artifact cannot be structurally parsed."""
 
 
+class PolicyError(Exception):
+    """Raised when the checked-in policy cannot be loaded."""
+
+
+@dataclass(frozen=True)
+class SameRuntimePolicy:
+    policy_id: str
+    policy_version: int
+    sentinel_names: tuple[str, ...]
+    geomean_limit: float
+    per_case_limit: float
+
+
 class ArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise CliError(message)
@@ -60,9 +63,17 @@ def build_parser() -> ArgumentParser:
         allow_abbrev=False,
     )
     parser.add_argument(
+        "--require-policy-declaration",
+        action="store_true",
+        help=(
+            "require the artifact to declare the checked-in policy identity "
+            "and version"
+        ),
+    )
+    parser.add_argument(
         "--require-complete",
         action="store_true",
-        help="require a complete aggregate containing all fixed P0 sentinels",
+        help="require a complete aggregate containing all policy P0 sentinels",
     )
     parser.add_argument(
         "--require-canonical-provenance",
@@ -121,6 +132,130 @@ def load_artifact(path: Path) -> dict[str, Any]:
     if not isinstance(artifact, dict):
         raise ArtifactError("artifact root must be a JSON object")
     return artifact
+
+
+def require_exact_policy_keys(
+    value: Any, expected: set[str], label: str
+) -> None:
+    if not isinstance(value, dict):
+        raise PolicyError(f"{label} must be a JSON object")
+    actual = set(value)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing:
+        raise PolicyError(
+            f"{label} is missing field(s): {', '.join(missing)}"
+        )
+    if unexpected:
+        raise PolicyError(
+            f"{label} has unexpected field(s): {', '.join(unexpected)}"
+        )
+
+
+def load_policy(path: Path) -> SameRuntimePolicy:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise PolicyError(f"cannot read policy: {error}") from error
+
+    try:
+        policy = json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_json_number,
+        )
+    except ArtifactError as error:
+        raise PolicyError(str(error)) from error
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PolicyError(f"invalid JSON: {error}") from error
+
+    require_exact_policy_keys(
+        policy,
+        {"policy_id", "policy_version", "sentinels", "exit_line"},
+        "policy",
+    )
+    policy_id = policy["policy_id"]
+    if not isinstance(policy_id, str) or not policy_id.strip():
+        raise PolicyError("policy.policy_id must be a non-empty string")
+    policy_version = policy["policy_version"]
+    if (
+        not isinstance(policy_version, (int, float))
+        or isinstance(policy_version, bool)
+        or not math.isfinite(policy_version)
+        or not float(policy_version).is_integer()
+        or policy_version < 1
+    ):
+        raise PolicyError("policy.policy_version must be a positive integer")
+    policy_version = int(policy_version)
+
+    sentinels = policy["sentinels"]
+    if not isinstance(sentinels, list) or not sentinels:
+        raise PolicyError("policy.sentinels must be a non-empty array")
+    sentinel_names: list[str] = []
+    for index, sentinel in enumerate(sentinels):
+        label = f"policy.sentinels[{index}]"
+        require_exact_policy_keys(
+            sentinel,
+            {"name", "checksum_required", "case_shape", "provenance"},
+            label,
+        )
+        name = sentinel["name"]
+        if (
+            not isinstance(name, str)
+            or not name
+            or any(
+                not (
+                    character.isascii()
+                    and (
+                        character.isalnum()
+                        or character in "_.-"
+                    )
+                )
+                for character in name
+            )
+        ):
+            raise PolicyError(f"{label}.name must be a valid case name")
+        if name in sentinel_names:
+            raise PolicyError(f"duplicate sentinel name: {name}")
+        sentinel_names.append(name)
+        if not isinstance(sentinel["checksum_required"], bool):
+            raise PolicyError(
+                f"{label}.checksum_required must be a boolean"
+            )
+        for field in ("case_shape", "provenance"):
+            value = sentinel[field]
+            if not isinstance(value, str) or not value.strip():
+                raise PolicyError(
+                    f"{label}.{field} must be a non-empty string"
+                )
+
+    exit_line = policy["exit_line"]
+    require_exact_policy_keys(
+        exit_line,
+        {"geomean_limit", "per_case_limit"},
+        "policy.exit_line",
+    )
+    limits: dict[str, float] = {}
+    for field in ("geomean_limit", "per_case_limit"):
+        value = exit_line[field]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise PolicyError(
+                f"policy.exit_line.{field} must be a positive finite number"
+            )
+        limits[field] = float(value)
+
+    return SameRuntimePolicy(
+        policy_id=policy_id,
+        policy_version=policy_version,
+        sentinel_names=tuple(sentinel_names),
+        geomean_limit=limits["geomean_limit"],
+        per_case_limit=limits["per_case_limit"],
+    )
 
 
 def field_name(path: tuple[str | int, ...]) -> str:
@@ -264,6 +399,7 @@ def participant_names(
     artifact: dict[str, Any],
     failures: list[str],
     by_name: dict[str, tuple[int, dict[str, Any]]],
+    policy: SameRuntimePolicy,
 ) -> tuple[list[str], str]:
     aggregate = require_field(
         artifact, ("aggregate",), failures, is_object, "object"
@@ -274,7 +410,7 @@ def participant_names(
     participants = lookup(artifact, ("aggregate", "participants"))
     if participants is MISSING:
         fallback = [
-            name for name in P0_SENTINEL_NAMES if name in by_name
+            name for name in policy.sentinel_names if name in by_name
         ]
         return fallback, "cases coverage fallback"
     if not isinstance(participants, list):
@@ -333,7 +469,85 @@ def result(
     }
 
 
-def check_complete(artifact: dict[str, Any]) -> dict[str, Any]:
+def check_policy_declaration(
+    artifact: dict[str, Any], policy: SameRuntimePolicy
+) -> dict[str, Any]:
+    failures: list[str] = []
+    details = [
+        "loaded checked-in policy "
+        f"{policy.policy_id}@{policy.policy_version}"
+    ]
+    declaration = lookup(artifact, ("policy",))
+    if declaration is MISSING:
+        add_failure(failures, "artifact has no policy declaration")
+        details.append(
+            "policy declaration: absent; using explicit legacy compatibility "
+            "path (use --require-policy-declaration to reject)"
+        )
+        return result("require-policy-declaration", failures, details)
+    if not isinstance(declaration, dict):
+        add_failure(
+            failures,
+            "invalid field: policy "
+            f"(expected object, got {json_type_name(declaration)})",
+        )
+        return result("require-policy-declaration", failures, details)
+
+    unsupported = sorted(
+        set(declaration) - {"policy_id", "policy_version"}
+    )
+    if unsupported:
+        add_failure(
+            failures,
+            "artifact policy declaration has unsupported field(s): "
+            f"{', '.join(unsupported)}; policy definitions are ignored",
+        )
+
+    policy_id = require_field(
+        artifact,
+        ("policy", "policy_id"),
+        failures,
+        is_string,
+        "string",
+    )
+    policy_version = require_field(
+        artifact,
+        ("policy", "policy_version"),
+        failures,
+        lambda value: (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 1
+        ),
+        "positive integer",
+    )
+    if policy_id is not MISSING and policy_id != policy.policy_id:
+        add_failure(
+            failures,
+            "artifact policy_id "
+            f"{policy_id!r} does not match checked-in policy_id "
+            f"{policy.policy_id!r}",
+        )
+    if (
+        policy_version is not MISSING
+        and policy_version != policy.policy_version
+    ):
+        add_failure(
+            failures,
+            "artifact policy_version "
+            f"{policy_version} does not match checked-in policy_version "
+            f"{policy.policy_version}",
+        )
+    if not failures:
+        details.append(
+            "artifact policy declaration matches checked-in identity/version"
+        )
+    return result("require-policy-declaration", failures, details)
+
+
+def check_complete(
+    artifact: dict[str, Any], policy: SameRuntimePolicy
+) -> dict[str, Any]:
     failures: list[str] = []
     details: list[str] = []
 
@@ -377,7 +591,7 @@ def check_complete(artifact: dict[str, Any]) -> dict[str, Any]:
 
     _named, by_name = named_cases(artifact, failures)
     missing_from_cases = [
-        name for name in P0_SENTINEL_NAMES if name not in by_name
+        name for name in policy.sentinel_names if name not in by_name
     ]
     for name in missing_from_cases:
         add_failure(failures, f"missing P0 sentinel in cases: {name}")
@@ -385,9 +599,9 @@ def check_complete(artifact: dict[str, Any]) -> dict[str, Any]:
     participants = lookup(artifact, ("aggregate", "participants"))
     if participants is not MISSING:
         participant_list, source = participant_names(
-            artifact, failures, by_name
+            artifact, failures, by_name, policy
         )
-        for name in P0_SENTINEL_NAMES:
+        for name in policy.sentinel_names:
             if name not in participant_list:
                 add_failure(
                     failures,
@@ -395,18 +609,18 @@ def check_complete(artifact: dict[str, Any]) -> dict[str, Any]:
                 )
     else:
         participant_list = [
-            name for name in P0_SENTINEL_NAMES if name in by_name
+            name for name in policy.sentinel_names if name in by_name
         ]
         source = "cases coverage fallback"
 
     details.append(
         f"P0 sentinels in cases: "
-        f"{len(P0_SENTINEL_NAMES) - len(missing_from_cases)}/"
-        f"{len(P0_SENTINEL_NAMES)}"
+        f"{len(policy.sentinel_names) - len(missing_from_cases)}/"
+        f"{len(policy.sentinel_names)}"
     )
     details.append(
         f"aggregate participants: {len(participant_list)}/"
-        f"{len(P0_SENTINEL_NAMES)} via {source}"
+        f"{len(policy.sentinel_names)} via {source}"
     )
     if isinstance(missing_cases, list):
         details.append(f"aggregate.missing_cases: {len(missing_cases)}")
@@ -430,12 +644,15 @@ def canonical_source_path(name: str, value: str) -> bool:
 
 def check_canonical_provenance(
     artifact: dict[str, Any],
+    policy: SameRuntimePolicy,
 ) -> dict[str, Any]:
     failures: list[str] = []
     details: list[str] = []
 
     _named, by_name = named_cases(artifact, failures)
-    participants, source = participant_names(artifact, failures, by_name)
+    participants, source = participant_names(
+        artifact, failures, by_name, policy
+    )
     if not participants:
         add_failure(
             failures,
@@ -551,7 +768,7 @@ def check_canonical_provenance(
     # Even a non-participating sentinel must not carry an override that could
     # later be mistaken for canonical provenance.
     if isinstance(case_sources, dict):
-        for name in P0_SENTINEL_NAMES:
+        for name in policy.sentinel_names:
             source_path = case_sources.get(name, MISSING)
             if source_path is MISSING:
                 continue
@@ -702,7 +919,62 @@ def format_limit(value: float) -> str:
     return f"{value:.2f}"
 
 
-def check_exit_line(artifact: dict[str, Any]) -> dict[str, Any]:
+STEADY_RATIO_PATH = ("paired_ratios", "steady_execute_median_ns", "median")
+
+
+def recompute_sentinel_ratios(
+    artifact: dict[str, Any],
+    policy: SameRuntimePolicy,
+    failures: list[str],
+) -> dict[str, float] | None:
+    """Recompute every sentinel ratio from cases[], ignoring aggregate.
+
+    A gate that reads the conclusion the audited object wrote about itself is
+    not a gate. Without this, an artifact whose cases[] still hold the real
+    (failing) ratios passes simply by rewriting aggregate.p0_sentinel_geomean
+    and clearing over_limit_cases -- the policy identity and the limits can all
+    stay honest. Everything the exit-line check decides is derived here and the
+    artifact's own numbers are only cross-checked against it.
+    """
+    cases = artifact.get("cases")
+    if not isinstance(cases, list):
+        add_failure(
+            failures, "cannot recompute exit line: cases is not an array"
+        )
+        return None
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for case in cases:
+        if isinstance(case, dict) and isinstance(case.get("name"), str):
+            by_name[case["name"]] = case
+
+    ratios: dict[str, float] = {}
+    for name in policy.sentinel_names:
+        case = by_name.get(name)
+        if case is None:
+            add_failure(
+                failures,
+                f"cannot recompute exit line: case {name} is absent "
+                "from cases",
+            )
+            return None
+        node: Any = case
+        for key in STEADY_RATIO_PATH:
+            node = node.get(key) if isinstance(node, dict) else None
+        if not is_positive_number(node):
+            add_failure(
+                failures,
+                f"cannot recompute exit line: case {name} has no positive "
+                "paired_ratios.steady_execute_median_ns.median",
+            )
+            return None
+        ratios[name] = float(node)
+    return ratios
+
+
+def check_exit_line(
+    artifact: dict[str, Any], policy: SameRuntimePolicy
+) -> dict[str, Any]:
     failures: list[str] = []
     details: list[str] = []
 
@@ -740,32 +1012,32 @@ def check_exit_line(artifact: dict[str, Any]) -> dict[str, Any]:
 
     if (
         geomean_limit is not MISSING
-        and geomean_limit != GEOMEAN_LIMIT
+        and geomean_limit != policy.geomean_limit
     ):
         add_failure(
             failures,
             "aggregate.exit_line.geomean_limit is "
             f"{format_limit(geomean_limit)}, expected policy limit "
-            f"{format_limit(GEOMEAN_LIMIT)}",
+            f"{format_limit(policy.geomean_limit)}",
         )
 
     if geomean is not MISSING:
         details.append(
             f"geomean {format_ratio(geomean)} "
-            f"(policy limit {format_limit(GEOMEAN_LIMIT)})"
+            f"(policy limit {format_limit(policy.geomean_limit)})"
         )
-        if geomean > GEOMEAN_LIMIT:
+        if geomean > policy.geomean_limit:
             add_failure(
                 failures,
                 f"geomean {format_ratio(geomean)} > "
-                f"limit {format_limit(GEOMEAN_LIMIT)}",
+                f"limit {format_limit(policy.geomean_limit)}",
             )
         elif geomean_pass is not MISSING and geomean_pass is not True:
             add_failure(
                 failures,
                 "aggregate.exit_line.geomean_pass is not true "
                 f"(geomean {format_ratio(geomean)} <= "
-                f"limit {format_limit(GEOMEAN_LIMIT)})",
+                f"limit {format_limit(policy.geomean_limit)})",
             )
     elif geomean_pass is not MISSING and geomean_pass is not True:
         add_failure(
@@ -797,13 +1069,13 @@ def check_exit_line(artifact: dict[str, Any]) -> dict[str, Any]:
     rendered_over_limit: list[str] = []
     if (
         per_case_limit is not MISSING
-        and per_case_limit != PER_CASE_LIMIT
+        and per_case_limit != policy.per_case_limit
     ):
         add_failure(
             failures,
             "aggregate.exit_line.per_case_limit is "
             f"{format_limit(per_case_limit)}, expected policy limit "
-            f"{format_limit(PER_CASE_LIMIT)}",
+            f"{format_limit(policy.per_case_limit)}",
         )
     if isinstance(over_limit, list):
         for index, item in enumerate(over_limit):
@@ -847,17 +1119,17 @@ def check_exit_line(artifact: dict[str, Any]) -> dict[str, Any]:
             ):
                 message = (
                     f"{name} {format_ratio(ratio)} > "
-                    f"{format_limit(PER_CASE_LIMIT)}"
+                    f"{format_limit(policy.per_case_limit)}"
                 )
                 rendered_over_limit.append(message)
-                if ratio > PER_CASE_LIMIT:
+                if ratio > policy.per_case_limit:
                     add_failure(failures, message)
                 else:
                     add_failure(
                         failures,
                         "invalid over_limit_cases entry: "
                         f"{name} ratio {format_ratio(ratio)} <= "
-                        f"limit {format_limit(PER_CASE_LIMIT)}",
+                        f"limit {format_limit(policy.per_case_limit)}",
                     )
 
     if per_case_pass is not MISSING and per_case_pass is not True:
@@ -875,21 +1147,82 @@ def check_exit_line(artifact: dict[str, Any]) -> dict[str, Any]:
 
     if per_case_limit is not MISSING:
         details.append(
-            f"per-case policy limit {format_limit(PER_CASE_LIMIT)}; "
+            f"per-case policy limit {format_limit(policy.per_case_limit)}; "
             f"over-limit cases: "
             f"{len(over_limit) if isinstance(over_limit, list) else 'unknown'}"
+        )
+
+    # Everything above validated the artifact's own conclusions against the
+    # policy. That is not sufficient on its own: an artifact can keep honest
+    # limits and an honest policy identity while simply writing a passing
+    # geomean over cases[] that still hold failing ratios. Re-derive the exit
+    # line from cases[] and let the recomputed values decide.
+    recomputed = recompute_sentinel_ratios(artifact, policy, failures)
+    if recomputed is None:
+        return result("require-exit-line", failures, details)
+
+    recomputed_geomean = math.exp(
+        sum(math.log(value) for value in recomputed.values())
+        / len(recomputed)
+    )
+    recomputed_over = sorted(
+        name
+        for name, value in recomputed.items()
+        if value > policy.per_case_limit
+    )
+    details.append(
+        f"recomputed from cases: geomean "
+        f"{format_ratio(recomputed_geomean)}, over-limit "
+        f"{len(recomputed_over)}"
+    )
+
+    if geomean is not MISSING and not math.isclose(
+        geomean, recomputed_geomean, rel_tol=1e-9, abs_tol=0.0
+    ):
+        add_failure(
+            failures,
+            f"aggregate.p0_sentinel_geomean is {format_ratio(geomean)} but "
+            f"cases recompute to {format_ratio(recomputed_geomean)}",
+        )
+    declared_over = sorted(
+        item["name"]
+        for item in (over_limit if isinstance(over_limit, list) else [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    )
+    if declared_over != recomputed_over:
+        add_failure(
+            failures,
+            "aggregate.exit_line.over_limit_cases names are "
+            f"{declared_over or 'empty'} but cases recompute to "
+            f"{recomputed_over or 'empty'}",
+        )
+
+    if recomputed_geomean > policy.geomean_limit:
+        add_failure(
+            failures,
+            f"recomputed geomean {format_ratio(recomputed_geomean)} > "
+            f"limit {format_limit(policy.geomean_limit)}",
+        )
+    for name in recomputed_over:
+        add_failure(
+            failures,
+            f"recomputed {name} {format_ratio(recomputed[name])} > "
+            f"limit {format_limit(policy.per_case_limit)}",
         )
     return result("require-exit-line", failures, details)
 
 
 def evaluate(
-    artifact: dict[str, Any], args: argparse.Namespace
+    artifact: dict[str, Any],
+    args: argparse.Namespace,
+    policy: SameRuntimePolicy,
 ) -> dict[str, Any]:
     checks = [
-        check_complete(artifact),
-        check_canonical_provenance(artifact),
+        check_policy_declaration(artifact, policy),
+        check_complete(artifact, policy),
+        check_canonical_provenance(artifact, policy),
         check_output_match(artifact),
-        check_exit_line(artifact),
+        check_exit_line(artifact, policy),
     ]
     requested_by_name = {
         name: bool(getattr(args, destination))
@@ -904,6 +1237,10 @@ def evaluate(
     exit_code = 0 if passed else 1
     return {
         "artifact": args.artifact,
+        "loaded_policy": {
+            "policy_id": policy.policy_id,
+            "policy_version": policy.policy_version,
+        },
         "checks": checks,
         "passed": passed,
         "exit_code": exit_code,
@@ -967,11 +1304,20 @@ def main(argv: list[str] | None = None) -> int:
         return emit_error(None, str(error), json_mode)
 
     try:
+        policy = load_policy(POLICY_PATH)
+    except PolicyError as error:
+        return emit_error(
+            args.artifact,
+            f"cannot load checked-in policy {POLICY_PATH}: {error}",
+            args.json,
+        )
+
+    try:
         artifact = load_artifact(Path(args.artifact))
     except ArtifactError as error:
         return emit_error(args.artifact, str(error), args.json)
 
-    verdict = evaluate(artifact, args)
+    verdict = evaluate(artifact, args, policy)
     if args.json:
         print(json.dumps(verdict, separators=(",", ":")))
     else:
