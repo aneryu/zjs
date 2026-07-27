@@ -1,4 +1,16 @@
 const std = @import("std");
+// Dossier variant identity. The A/B/C attribution candidates differ only by
+// this comptime option, and every artifact must be able to say which one
+// produced its numbers. It is read here rather than exposed through the zjs
+// CLI on purpose: adding a code path to the CLI perturbs the very binary the
+// process layer measures (21 symbols changed instruction counts in the
+// rejected --build-info approach), whereas the harness writes it once, outside
+// any timed window.
+const dossier_build_options = @import("dossier_options");
+const dossier_variant = dossier_build_options.zjs_dossier_simple_ctor;
+const dossier_bypass = !std.mem.eql(u8, dossier_variant, "c");
+const dossier_memo = std.mem.eql(u8, dossier_variant, "a");
+
 const builtin = @import("builtin");
 const zjs = @import("zjs");
 
@@ -88,7 +100,7 @@ fn emitResult(out: *std.Io.Writer, result: BenchResult, peak_rss_kb: ?u64) !void
     const ns_per_op = @as(f64, @floatFromInt(result.ns_total)) /
         @as(f64, @floatFromInt(result.iterations));
     try out.print(
-        "{{\"category\":\"{s}\",\"case\":\"{s}\",\"engine\":\"zjs\",\"iterations\":{d},\"warmup\":{d},\"ns_total\":{d},\"ns_per_op\":{d:.6},\"checksum\":\"{x:0>16}\",\"fidelity\":\"{s}\",\"entry\":\"{s}\",\"comparable\":{},\"checksum_comparable\":{},\"caliber_note\":\"{s}\"",
+        "{{\"category\":\"{s}\",\"case\":\"{s}\",\"engine\":\"zjs\",\"dossier_variant\":\"" ++ dossier_variant ++ "\",\"iterations\":{d},\"warmup\":{d},\"ns_total\":{d},\"ns_per_op\":{d:.6},\"checksum\":\"{x:0>16}\",\"fidelity\":\"{s}\",\"entry\":\"{s}\",\"comparable\":{},\"checksum_comparable\":{},\"caliber_note\":\"{s}\"",
         .{
             result.category,
             result.case_name,

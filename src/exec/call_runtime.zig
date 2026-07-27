@@ -1,5 +1,6 @@
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
+const build_options = @import("build_options");
 const bytecode = @import("../bytecode.zig");
 const bignum = @import("../libs/bigint.zig");
 const core = @import("../core/root.zig");
@@ -32,6 +33,10 @@ const runWithArgs = zjs_vm.runWithArgs;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
 const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
 const exceptions = @import("exceptions.zig");
+
+const dossier_simple_ctor = build_options.zjs_dossier_simple_ctor;
+const simple_ctor_bypass_enabled = !std.mem.eql(u8, dossier_simple_ctor, "c");
+const simple_ctor_memo_enabled = std.mem.eql(u8, dossier_simple_ctor, "a");
 
 const string_ops = @import("string_ops.zig");
 
@@ -1688,17 +1693,19 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!SameMachineConstructorPreparation {
     std.debug.assert(!target.resolved.fb.isDerivedClassConstructor());
-    if (try constructSimpleFieldConstructor(
-        ctx,
-        global,
-        func,
-        target.function_object,
-        target.resolved.fb,
-        args,
-        func,
-        false,
-    )) |constructed| {
-        return .{ .completed = constructed };
+    if (comptime simple_ctor_bypass_enabled) {
+        if (try constructSimpleFieldConstructor(
+            ctx,
+            global,
+            func,
+            target.function_object,
+            target.resolved.fb,
+            args,
+            func,
+            false,
+        )) |constructed| {
+            return .{ .completed = constructed };
+        }
     }
 
     const instance = try createBytecodeConstructorInstance(
@@ -1742,7 +1749,9 @@ fn constructOrdinaryBytecodeFunctionObject(
     if (fb.isDerivedClassConstructor()) {
         return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     }
-    if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
+    if (comptime simple_ctor_bypass_enabled) {
+        if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
+    }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     errdefer instance.free(ctx.runtime);
     const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
@@ -2268,19 +2277,36 @@ fn constructSimpleFieldConstructor(
 ) !?core.JSValue {
     if (!new_target.sameValue(func)) return null;
     const rt = ctx.runtime;
-    // Memoize the (immutable) bytecode pattern per FB — the scan was the top
-    // self-cost of the fast-path construct, re-run on every `new F()`. The memo
-    // is invalidated in the FB destructor, so keying on the FB pointer is safe.
-    ensureSimpleCtorMemo(rt, fb);
-    if (!rt.simple_ctor_memo.is_simple) return null;
+    const scanned_pattern: ?SimpleFieldConstructorPattern = if (comptime simple_ctor_memo_enabled)
+        null
+    else
+        simpleFieldConstructorPattern(fb) orelse return null;
+    if (comptime simple_ctor_memo_enabled) {
+        // Memoize the (immutable) bytecode pattern per FB — the scan was the top
+        // self-cost of the fast-path construct, re-run on every `new F()`. The
+        // memo is invalidated in the FB destructor, so keying on the FB pointer
+        // is safe.
+        ensureSimpleCtorMemo(rt, fb);
+        if (!rt.simple_ctor_memo.is_simple) return null;
+    }
     const prototype = (function_object.getOwnConstructorPrototypeObject(rt) catch return null) orelse return null;
-    // The prototype materialization above can allocate/GC on the FIRST construct
-    // only, and never re-enters construction, so the memo stays valid for this
-    // (live) FB — read the field arrays after it. Slices borrow the rt memo.
-    const memo_len = rt.simple_ctor_memo.len;
-    const memo_atoms = rt.simple_ctor_memo.atoms[0..memo_len];
-    const memo_args = rt.simple_ctor_memo.args[0..memo_len];
-    if (prototypeChainBlocksSimpleFieldStore(prototype, memo_atoms)) return null;
+    // The prototype materialization above can allocate/GC on the FIRST
+    // construct only and never re-enters construction. Select the field slices
+    // afterwards: A borrows the still-valid runtime memo, while B borrows its
+    // per-call stack scan.
+    const field_len = if (comptime simple_ctor_memo_enabled)
+        @as(usize, rt.simple_ctor_memo.len)
+    else
+        scanned_pattern.?.len;
+    const field_atoms = if (comptime simple_ctor_memo_enabled)
+        rt.simple_ctor_memo.atoms[0..field_len]
+    else
+        scanned_pattern.?.atoms[0..field_len];
+    const field_args = if (comptime simple_ctor_memo_enabled)
+        rt.simple_ctor_memo.args[0..field_len]
+    else
+        scanned_pattern.?.arg_indices[0..field_len];
+    if (prototypeChainBlocksSimpleFieldStore(prototype, field_atoms)) return null;
 
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -2294,7 +2320,7 @@ fn constructSimpleFieldConstructor(
         call_vm.qjsBytecodeFrameAllocaSize(fb, args.len, copy_argv),
     );
     defer call_depth_guard.deinit();
-    for (memo_atoms, memo_args) |atom_id, arg_index| {
+    for (field_atoms, field_args) |atom_id, arg_index| {
         const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
         try instance.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, true, true, true));
     }

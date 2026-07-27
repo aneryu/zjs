@@ -1,4 +1,16 @@
 const std = @import("std");
+// Dossier variant identity. The A/B/C attribution candidates differ only by
+// this comptime option, and every artifact must be able to say which one
+// produced its numbers. It is read here rather than exposed through the zjs
+// CLI on purpose: adding a code path to the CLI perturbs the very binary the
+// process layer measures (21 symbols changed instruction counts in the
+// rejected --build-info approach), whereas the harness writes it once, outside
+// any timed window.
+const dossier_build_options = @import("dossier_options");
+const dossier_variant = dossier_build_options.zjs_dossier_simple_ctor;
+const dossier_bypass = !std.mem.eql(u8, dossier_variant, "c");
+const dossier_memo = std.mem.eql(u8, dossier_variant, "a");
+
 const zjs = @import("zjs");
 const builtin = @import("builtin");
 
@@ -335,7 +347,10 @@ fn writeResult(
     samples: []const u64,
     stats: SampleStats,
 ) !void {
-    try output.writeAll("{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\",\n  \"case\": ");
+    try output.print(
+        "{{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\",\n  \"dossier_variant\": \"{s}\",\n  \"dossier_simple_ctor_bypass\": {},\n  \"dossier_simple_ctor_memo\": {},\n  \"case\": ",
+        .{ dossier_variant, dossier_bypass, dossier_memo },
+    );
     try writeJsonString(output, options.case_name);
     try output.writeAll(",\n  \"source_sha256\": ");
     try writeJsonString(output, source_sha256);
