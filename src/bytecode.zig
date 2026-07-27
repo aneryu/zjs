@@ -9628,7 +9628,7 @@ pub const pipeline_resolve_labels = struct {
     fn computeLayout(
         ctx: *const JSContext,
         positions: []usize,
-        sizes: []usize,
+        sizes: []u32,
         topology: *const TargetTopology,
         use_short_opcodes: bool,
         initial_pc: usize,
@@ -9654,7 +9654,7 @@ pub const pipeline_resolve_labels = struct {
                 const previous_output_pc = positions[pc];
                 positions[pc] = out_pc;
                 const op = code[pc];
-                const old_size = sizes[pc];
+                const old_size: usize = sizes[pc];
                 const in_size = if (op == opcode.op.label) 5 else instrSize(op);
                 if (pc + in_size > code.len) return error.InvalidBytecode;
 
@@ -9775,7 +9775,8 @@ pub const pipeline_resolve_labels = struct {
                 };
 
                 if (pass != 0 and new_size > old_size) return error.InvalidBytecode;
-                sizes[pc] = new_size;
+                if (new_size > std.math.maxInt(u32)) return error.InvalidBytecode;
+                sizes[pc] = @intCast(new_size);
                 if (old_size != new_size) {
                     changed = true;
                 }
@@ -10023,8 +10024,11 @@ pub const pipeline_resolve_labels = struct {
 
         const positions = try ctx.memory.alloc(usize, func.code.len + 1);
         defer ctx.memory.free(usize, positions);
-        const sizes = try ctx.memory.alloc(usize, func.code.len + 1);
-        defer ctx.memory.free(usize, sizes);
+        // Final bytecode positions are u32-addressed, and a layout entry is
+        // only one instruction width (or zero for a label/dead boundary).
+        // Keep that scratch ledger in the same natural arithmetic width.
+        const sizes = try ctx.memory.alloc(u32, func.code.len + 1);
+        defer ctx.memory.free(u32, sizes);
         const topology = try computeTargetTopology(ctx);
         defer ctx.memory.free(u8, topology.states);
 
