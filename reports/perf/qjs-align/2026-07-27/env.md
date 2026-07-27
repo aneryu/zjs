@@ -1,6 +1,6 @@
 # zjs performance environment
 
-- Generated: 2026-07-27T13:43:16.758Z
+- Generated: 2026-07-27T14:46:57.163Z
 - Zig version: 0.16.0
 - C compiler: cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
 - Bun version: 1.3.13
@@ -14,13 +14,13 @@
 - Logical CPUs: 20
 - CPU reported MHz: 2808
 - tool repository: /home/aneryu/zjs
-- tool repository commit: 9dae15cdcc0f6f830e50e11587f63780ac014d2b
-- tool repository dirty: true
+- tool repository commit: c84a58face258ffce901276b2c7159f75d92a993
+- tool repository dirty: false
 - zjs repository: /home/aneryu/zjs
-- zjs repository commit: 9dae15cdcc0f6f830e50e11587f63780ac014d2b
-- zjs repository dirty: true
+- zjs repository commit: c84a58face258ffce901276b2c7159f75d92a993
+- zjs repository dirty: false
 - zjs binary: `/home/aneryu/zjs/zig-out/bin/zjs`
-- zjs binary SHA-256: cb416fc5d5dc2cef2e30c73857538c78665e50ebaf6ad0abfade53a28acf3f73
+- zjs binary SHA-256: 6ad056d7039f416e0677cd286e5bc2f2dbb68302c7cb53d75bc965bdfbbb039c
 - zjs build mode: ReleaseFast
 - zjs JSValue representation: 16-byte (default)
 - zjs provenance note: repository state is inferred from the binary realpath; SHA-256 is the authoritative binary identity
