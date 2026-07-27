@@ -7239,7 +7239,8 @@ pub const Object = extern struct {
     }
 
     const DecrefVisitor = struct {
-        rt: *JSRuntime,
+        registry: *gc.Registry,
+        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7281,9 +7282,14 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
-            _ = self;
             if (h.meta().rc == 0) return;
             h.meta().rc -= 1;
+            // QuickJS gc_decref_child immediately moves an already-scanned
+            // child whose trial refcount reaches zero to tmp_obj_list.
+            if (h.meta().rc == 0 and h.meta().flags.mark) {
+                self.registry.detachCycleCandidate(h);
+                self.garbage.append(h);
+            }
         }
     };
 
@@ -7526,25 +7532,18 @@ pub const Object = extern struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                traceChildren(rt, h, DecrefVisitor{ .rt = rt });
-                // qjs gc_decref marks the current node immediately after
-                // visiting its children (quickjs.c:6736-6738). zjs partitions
-                // trial-zero nodes after the full walk, so the earlier
-                // mark-all pre-pass carried no semantic information and only
-                // walked the intrusive list twice.
+                traceChildren(rt, h, DecrefVisitor{
+                    .registry = &rt.gc,
+                    .garbage = &garbage,
+                });
+                // Match qjs gc_decref: mark the current node after visiting
+                // its children, then move it immediately if its trial count
+                // is zero. GcObjectIterator captured `next` before tracing.
                 h.meta().flags.mark = true;
-            }
-
-            // QJS moves trial-zero nodes to tmp_obj_list. Partitioning after
-            // the decref walk is equivalent and keeps the visitor itself tiny.
-            var cursor = rt.gc.gc_object_head;
-            while (cursor) |h| {
-                const next = h.next;
                 if (h.meta().rc == 0) {
                     rt.gc.detachCycleCandidate(h);
                     garbage.append(h);
                 }
-                cursor = next;
             }
         }
 
