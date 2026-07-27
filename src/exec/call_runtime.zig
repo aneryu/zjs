@@ -151,18 +151,18 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
     // Mirror qjs OP_call_method teardown (quickjs.c:18232): `call_argv` is a
     // register-held local and the loop just `JS_FreeValue(call_argv[i])` — no
     // per-slot poison-store and no re-derivation of the operand-stack base.
-    // `free`/`releaseAndDestroy` runs GC-release + object destructors; none of
-    // those push to this operand stack, so `stack.values` is loop-invariant.
-    // Holding it in a local lets LLVM keep the base in a register instead of
-    // reloading `stack.values` each iteration (opaque free() otherwise
-    // forces the reload). Slots above the shrunk length are logically dead —
-    // every `push*` overwrites its target and GC scans only `values[0..len]` —
-    // so the qjs form omits the undefined poison-store entirely.
+    // This helper is reached only while the owning bytecode Machine is active,
+    // so the runtime cannot be in teardown. `freeDuringActiveBytecode` keeps
+    // QuickJS's tag/refcount/zero-ref behavior while omitting that impossible
+    // per-value phase probe. Destruction cannot push to this operand stack, so
+    // `stack.values` remains loop-invariant. Slots above the shrunk length are
+    // logically dead — every `push*` overwrites its target and GC scans only
+    // `values[0..len]` — so the qjs form omits the undefined poison-store.
     const base = stack.values;
     var index = stack.len();
     while (index > region_base) {
         index -= 1;
-        base[index].free(rt);
+        base[index].freeDuringActiveBytecode(rt);
     }
     stack.setLen(region_base);
 }
