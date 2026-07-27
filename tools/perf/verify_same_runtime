@@ -1,0 +1,983 @@
+#!/usr/bin/env python3
+
+"""Fail-closed policy verifier for same-runtime performance artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+
+# This fixed policy set must stay in sync with p0SentinelNames in
+# tools/perf/same_runtime/run_same_runtime.js. It is intentionally not derived
+# from requested_cases in the artifact.
+P0_SENTINEL_NAMES = (
+    "global_write_loop",
+    "prop_read_mono_loop",
+    "fib_rec",
+    "call_body_loop",
+    "method_call_loop",
+    "typed_array_read",
+    "typed_array_write",
+)
+GEOMEAN_LIMIT = 1.10
+PER_CASE_LIMIT = 1.20
+
+CHECK_DEFINITIONS = (
+    ("require-complete", "require_complete"),
+    ("require-canonical-provenance", "require_canonical_provenance"),
+    ("require-output-match", "require_output_match"),
+    ("require-exit-line", "require_exit_line"),
+)
+
+MISSING = object()
+
+
+class CliError(Exception):
+    """Raised for command-line usage errors."""
+
+
+class ArtifactError(Exception):
+    """Raised when an artifact cannot be structurally parsed."""
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CliError(message)
+
+
+def build_parser() -> ArgumentParser:
+    parser = ArgumentParser(
+        prog="verify_same_runtime",
+        description=(
+            "Read a same-runtime JSON artifact and optionally enforce "
+            "phase-close policy checks."
+        ),
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="require a complete aggregate containing all fixed P0 sentinels",
+    )
+    parser.add_argument(
+        "--require-canonical-provenance",
+        action="store_true",
+        help="require canonical, non-overridden aggregate participants",
+    )
+    parser.add_argument(
+        "--require-output-match",
+        action="store_true",
+        help="require successful cases and explicit cross-engine output agreement",
+    )
+    parser.add_argument(
+        "--require-exit-line",
+        action="store_true",
+        help="require both aggregate geomean and per-case exit lines to pass",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="write one machine-readable JSON verdict to stdout",
+    )
+    parser.add_argument("artifact", help="same-runtime JSON artifact to verify")
+    return parser
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ArtifactError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def reject_non_json_number(value: str) -> None:
+    raise ArtifactError(f"invalid JSON number: {value}")
+
+
+def load_artifact(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ArtifactError(f"cannot read artifact: {error}") from error
+
+    try:
+        artifact = json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_json_number,
+        )
+    except ArtifactError:
+        raise
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ArtifactError(f"invalid JSON: {error}") from error
+
+    if not isinstance(artifact, dict):
+        raise ArtifactError("artifact root must be a JSON object")
+    return artifact
+
+
+def field_name(path: tuple[str | int, ...]) -> str:
+    output = ""
+    for component in path:
+        if isinstance(component, int):
+            output += f"[{component}]"
+        else:
+            output += ("." if output else "") + component
+    return output
+
+
+def lookup(root: Any, path: tuple[str | int, ...]) -> Any:
+    value = root
+    for component in path:
+        if isinstance(component, int):
+            if not isinstance(value, list) or component >= len(value):
+                return MISSING
+            value = value[component]
+        else:
+            if not isinstance(value, dict) or component not in value:
+                return MISSING
+            value = value[component]
+    return value
+
+
+def json_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    return type(value).__name__
+
+
+def add_failure(failures: list[str], message: str) -> None:
+    if message not in failures:
+        failures.append(message)
+
+
+def require_field(
+    root: Any,
+    path: tuple[str | int, ...],
+    failures: list[str],
+    predicate: Callable[[Any], bool],
+    expected: str,
+) -> Any:
+    value = lookup(root, path)
+    name = field_name(path)
+    if value is MISSING:
+        add_failure(failures, f"missing field: {name}")
+        return MISSING
+    if not predicate(value):
+        add_failure(
+            failures,
+            f"invalid field: {name} (expected {expected}, got {json_type_name(value)})",
+        )
+        return MISSING
+    return value
+
+
+def is_object(value: Any) -> bool:
+    return isinstance(value, dict)
+
+
+def is_array(value: Any) -> bool:
+    return isinstance(value, list)
+
+
+def is_string(value: Any) -> bool:
+    return isinstance(value, str)
+
+
+def is_boolean(value: Any) -> bool:
+    return isinstance(value, bool)
+
+
+def is_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def is_positive_number(value: Any) -> bool:
+    return is_number(value) and value > 0
+
+
+def case_entries(
+    artifact: dict[str, Any], failures: list[str]
+) -> list[tuple[int, dict[str, Any]]]:
+    cases = require_field(artifact, ("cases",), failures, is_array, "array")
+    if cases is MISSING:
+        return []
+
+    entries: list[tuple[int, dict[str, Any]]] = []
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            add_failure(
+                failures,
+                f"invalid field: cases[{index}] "
+                f"(expected object, got {json_type_name(case)})",
+            )
+            continue
+        entries.append((index, case))
+    return entries
+
+
+def named_cases(
+    artifact: dict[str, Any], failures: list[str]
+) -> tuple[list[tuple[int, dict[str, Any], str]], dict[str, tuple[int, dict[str, Any]]]]:
+    named: list[tuple[int, dict[str, Any], str]] = []
+    by_name: dict[str, tuple[int, dict[str, Any]]] = {}
+    for index, case in case_entries(artifact, failures):
+        name = require_field(
+            artifact,
+            ("cases", index, "name"),
+            failures,
+            is_string,
+            "string",
+        )
+        if name is MISSING:
+            continue
+        if name in by_name:
+            add_failure(failures, f"duplicate cases[].name: {name}")
+            continue
+        named.append((index, case, name))
+        by_name[name] = (index, case)
+    return named, by_name
+
+
+def participant_names(
+    artifact: dict[str, Any],
+    failures: list[str],
+    by_name: dict[str, tuple[int, dict[str, Any]]],
+) -> tuple[list[str], str]:
+    aggregate = require_field(
+        artifact, ("aggregate",), failures, is_object, "object"
+    )
+    if aggregate is MISSING:
+        return [], "unavailable"
+
+    participants = lookup(artifact, ("aggregate", "participants"))
+    if participants is MISSING:
+        fallback = [
+            name for name in P0_SENTINEL_NAMES if name in by_name
+        ]
+        return fallback, "cases coverage fallback"
+    if not isinstance(participants, list):
+        add_failure(
+            failures,
+            "invalid field: aggregate.participants "
+            f"(expected array, got {json_type_name(participants)})",
+        )
+        return [], "invalid aggregate.participants"
+
+    names: list[str] = []
+    for index, participant in enumerate(participants):
+        path = ("aggregate", "participants", index)
+        if isinstance(participant, str):
+            name = participant
+        elif isinstance(participant, dict):
+            name = require_field(
+                artifact,
+                path + ("name",),
+                failures,
+                is_string,
+                "string",
+            )
+            if name is MISSING:
+                continue
+        else:
+            add_failure(
+                failures,
+                f"invalid field: {field_name(path)} "
+                "(expected string or object with name, "
+                f"got {json_type_name(participant)})",
+            )
+            continue
+        if name in names:
+            add_failure(
+                failures, f"duplicate aggregate participant: {name}"
+            )
+            continue
+        names.append(name)
+        if name not in by_name:
+            add_failure(
+                failures,
+                f"aggregate participant has no matching case: {name}",
+            )
+    return names, "aggregate.participants"
+
+
+def result(
+    name: str, failures: list[str], details: list[str]
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "passed": len(failures) == 0,
+        "failures": failures,
+        "details": details,
+    }
+
+
+def check_complete(artifact: dict[str, Any]) -> dict[str, Any]:
+    failures: list[str] = []
+    details: list[str] = []
+
+    complete = require_field(
+        artifact,
+        ("aggregate", "complete"),
+        failures,
+        is_boolean,
+        "boolean",
+    )
+    if complete is not MISSING and complete is not True:
+        add_failure(
+            failures, "aggregate.complete is not true (got false)"
+        )
+
+    missing_cases = require_field(
+        artifact,
+        ("aggregate", "missing_cases"),
+        failures,
+        is_array,
+        "array",
+    )
+    if missing_cases is not MISSING:
+        malformed = [
+            index
+            for index, name in enumerate(missing_cases)
+            if not isinstance(name, str)
+        ]
+        for index in malformed:
+            add_failure(
+                failures,
+                f"invalid field: aggregate.missing_cases[{index}] "
+                f"(expected string, got {json_type_name(missing_cases[index])})",
+            )
+        if missing_cases:
+            rendered = ", ".join(str(name) for name in missing_cases)
+            add_failure(
+                failures,
+                f"aggregate.missing_cases is not empty: {rendered}",
+            )
+
+    _named, by_name = named_cases(artifact, failures)
+    missing_from_cases = [
+        name for name in P0_SENTINEL_NAMES if name not in by_name
+    ]
+    for name in missing_from_cases:
+        add_failure(failures, f"missing P0 sentinel in cases: {name}")
+
+    participants = lookup(artifact, ("aggregate", "participants"))
+    if participants is not MISSING:
+        participant_list, source = participant_names(
+            artifact, failures, by_name
+        )
+        for name in P0_SENTINEL_NAMES:
+            if name not in participant_list:
+                add_failure(
+                    failures,
+                    f"missing P0 sentinel in aggregate.participants: {name}",
+                )
+    else:
+        participant_list = [
+            name for name in P0_SENTINEL_NAMES if name in by_name
+        ]
+        source = "cases coverage fallback"
+
+    details.append(
+        f"P0 sentinels in cases: "
+        f"{len(P0_SENTINEL_NAMES) - len(missing_from_cases)}/"
+        f"{len(P0_SENTINEL_NAMES)}"
+    )
+    details.append(
+        f"aggregate participants: {len(participant_list)}/"
+        f"{len(P0_SENTINEL_NAMES)} via {source}"
+    )
+    if isinstance(missing_cases, list):
+        details.append(f"aggregate.missing_cases: {len(missing_cases)}")
+    return result("require-complete", failures, details)
+
+
+def canonical_source_path(name: str, value: str) -> bool:
+    components: list[str] = []
+    for component in value.replace("\\", "/").split("/"):
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if components:
+                components.pop()
+            continue
+        components.append(component)
+    normalized = "/".join(components)
+    expected = f"tools/perf/same_runtime/cases/{name}.js"
+    return normalized == expected or normalized.endswith(f"/{expected}")
+
+
+def check_canonical_provenance(
+    artifact: dict[str, Any],
+) -> dict[str, Any]:
+    failures: list[str] = []
+    details: list[str] = []
+
+    _named, by_name = named_cases(artifact, failures)
+    participants, source = participant_names(artifact, failures, by_name)
+    if not participants:
+        add_failure(
+            failures,
+            "no aggregate participants available to prove canonical provenance",
+        )
+
+    case_sources = require_field(
+        artifact,
+        ("case_sources",),
+        failures,
+        is_object,
+        "object",
+    )
+
+    for name in participants:
+        entry = by_name.get(name)
+        if entry is None:
+            continue
+        index, _case = entry
+        canonical = require_field(
+            artifact,
+            ("cases", index, "canonical_source"),
+            failures,
+            is_boolean,
+            "boolean",
+        )
+        if canonical is not MISSING and canonical is not True:
+            add_failure(
+                failures,
+                f"case {name} canonical_source is not true",
+            )
+
+        shape = require_field(
+            artifact,
+            ("cases", index, "case_shape"),
+            failures,
+            is_string,
+            "string",
+        )
+        if shape in {"overridden", "custom"}:
+            add_failure(
+                failures,
+                f"case {name} has non-canonical case_shape: {shape}",
+            )
+
+        comparability = lookup(
+            artifact, ("cases", index, "comparability")
+        )
+        if comparability is not MISSING:
+            if not isinstance(comparability, dict):
+                add_failure(
+                    failures,
+                    f"invalid field: cases[{index}].comparability "
+                    f"(expected object, got {json_type_name(comparability)})",
+                )
+            else:
+                provenance = lookup(
+                    artifact,
+                    ("cases", index, "comparability", "provenance"),
+                )
+                if provenance is not MISSING:
+                    if not isinstance(provenance, dict):
+                        add_failure(
+                            failures,
+                            f"invalid field: cases[{index}]."
+                            "comparability.provenance "
+                            "(expected object, got "
+                            f"{json_type_name(provenance)})",
+                        )
+                    else:
+                        comparable = require_field(
+                            artifact,
+                            (
+                                "cases",
+                                index,
+                                "comparability",
+                                "provenance",
+                                "comparable",
+                            ),
+                            failures,
+                            is_boolean,
+                            "boolean",
+                        )
+                        if (
+                            comparable is not MISSING
+                            and comparable is not True
+                        ):
+                            add_failure(
+                                failures,
+                                f"case {name} provenance comparability "
+                                "is not true",
+                            )
+
+        if isinstance(case_sources, dict):
+            source_path = case_sources.get(name, MISSING)
+            if source_path is MISSING:
+                add_failure(
+                    failures, f"missing field: case_sources.{name}"
+                )
+            elif not isinstance(source_path, str):
+                add_failure(
+                    failures,
+                    f"invalid field: case_sources.{name} "
+                    f"(expected string, got {json_type_name(source_path)})",
+                )
+            elif not canonical_source_path(name, source_path):
+                add_failure(
+                    failures,
+                    f"case_sources.{name} overrides canonical source: "
+                    f"{source_path}",
+                )
+
+    # Even a non-participating sentinel must not carry an override that could
+    # later be mistaken for canonical provenance.
+    if isinstance(case_sources, dict):
+        for name in P0_SENTINEL_NAMES:
+            source_path = case_sources.get(name, MISSING)
+            if source_path is MISSING:
+                continue
+            if not isinstance(source_path, str):
+                add_failure(
+                    failures,
+                    f"invalid field: case_sources.{name} "
+                    f"(expected string, got {json_type_name(source_path)})",
+                )
+            elif not canonical_source_path(name, source_path):
+                add_failure(
+                    failures,
+                    f"case_sources.{name} overrides canonical source: "
+                    f"{source_path}",
+                )
+
+    details.append(
+        f"aggregate participants checked: {len(participants)} via {source}"
+    )
+    details.append("forbidden case shapes: overridden, custom")
+    return result("require-canonical-provenance", failures, details)
+
+
+def check_output_match(artifact: dict[str, Any]) -> dict[str, Any]:
+    failures: list[str] = []
+    details: list[str] = []
+    named, _by_name = named_cases(artifact, failures)
+    if not named:
+        add_failure(
+            failures, "no cases available to prove output agreement"
+        )
+
+    exempt_cases: list[str] = []
+    for index, _case, name in named:
+        status = require_field(
+            artifact,
+            ("cases", index, "status"),
+            failures,
+            is_string,
+            "string",
+        )
+        if status is not MISSING and status != "ok":
+            add_failure(
+                failures,
+                f"case {name} status is {status!r}, expected 'ok'",
+            )
+
+        checksum_required = require_field(
+            artifact,
+            ("cases", index, "checksum_required"),
+            failures,
+            is_boolean,
+            "boolean",
+        )
+        declared = require_field(
+            artifact,
+            ("cases", index, "checksum_requirement_declared"),
+            failures,
+            is_boolean,
+            "boolean",
+        )
+        if checksum_required is MISSING:
+            continue
+        if checksum_required is False:
+            if declared is not True:
+                add_failure(
+                    failures,
+                    f"case {name} checksum_required=false is not "
+                    "explicitly declared",
+                )
+            else:
+                exempt_cases.append(name)
+            continue
+
+        checksum = require_field(
+            artifact,
+            ("cases", index, "comparability", "checksum"),
+            failures,
+            is_object,
+            "object",
+        )
+        if checksum is MISSING:
+            continue
+        comparable = require_field(
+            artifact,
+            (
+                "cases",
+                index,
+                "comparability",
+                "checksum",
+                "comparable",
+            ),
+            failures,
+            is_boolean,
+            "boolean",
+        )
+        if comparable is not MISSING and comparable is not True:
+            add_failure(
+                failures,
+                f"case {name} checksum comparability is not true",
+            )
+        all_match = require_field(
+            artifact,
+            (
+                "cases",
+                index,
+                "comparability",
+                "checksum",
+                "all_invocations_match",
+            ),
+            failures,
+            is_boolean,
+            "boolean",
+        )
+        if all_match is not MISSING and all_match is not True:
+            add_failure(
+                failures,
+                f"case {name} checksums do not match across all invocations",
+            )
+
+    for field in ("mismatch", "invalid"):
+        count = require_field(
+            artifact,
+            ("status_counts", field),
+            failures,
+            is_number,
+            "number",
+        )
+        if count is not MISSING and count != 0:
+            add_failure(
+                failures,
+                f"status_counts.{field} is {count}, expected 0",
+            )
+
+    details.append(f"cases checked: {len(named)}")
+    details.append(
+        "explicit checksum exemptions: "
+        + (", ".join(exempt_cases) if exempt_cases else "none")
+    )
+    return result("require-output-match", failures, details)
+
+
+def format_ratio(value: float) -> str:
+    return f"{value:.4f}"
+
+
+def format_limit(value: float) -> str:
+    return f"{value:.2f}"
+
+
+def check_exit_line(artifact: dict[str, Any]) -> dict[str, Any]:
+    failures: list[str] = []
+    details: list[str] = []
+
+    exit_line = require_field(
+        artifact,
+        ("aggregate", "exit_line"),
+        failures,
+        is_object,
+        "object",
+    )
+    if exit_line is MISSING:
+        return result("require-exit-line", failures, details)
+
+    geomean = require_field(
+        artifact,
+        ("aggregate", "p0_sentinel_geomean"),
+        failures,
+        is_positive_number,
+        "positive finite number",
+    )
+    geomean_limit = require_field(
+        artifact,
+        ("aggregate", "exit_line", "geomean_limit"),
+        failures,
+        is_positive_number,
+        "positive finite number",
+    )
+    geomean_pass = require_field(
+        artifact,
+        ("aggregate", "exit_line", "geomean_pass"),
+        failures,
+        is_boolean,
+        "boolean",
+    )
+
+    if (
+        geomean_limit is not MISSING
+        and geomean_limit != GEOMEAN_LIMIT
+    ):
+        add_failure(
+            failures,
+            "aggregate.exit_line.geomean_limit is "
+            f"{format_limit(geomean_limit)}, expected policy limit "
+            f"{format_limit(GEOMEAN_LIMIT)}",
+        )
+
+    if geomean is not MISSING:
+        details.append(
+            f"geomean {format_ratio(geomean)} "
+            f"(policy limit {format_limit(GEOMEAN_LIMIT)})"
+        )
+        if geomean > GEOMEAN_LIMIT:
+            add_failure(
+                failures,
+                f"geomean {format_ratio(geomean)} > "
+                f"limit {format_limit(GEOMEAN_LIMIT)}",
+            )
+        elif geomean_pass is not MISSING and geomean_pass is not True:
+            add_failure(
+                failures,
+                "aggregate.exit_line.geomean_pass is not true "
+                f"(geomean {format_ratio(geomean)} <= "
+                f"limit {format_limit(GEOMEAN_LIMIT)})",
+            )
+    elif geomean_pass is not MISSING and geomean_pass is not True:
+        add_failure(
+            failures, "aggregate.exit_line.geomean_pass is not true"
+        )
+
+    per_case_limit = require_field(
+        artifact,
+        ("aggregate", "exit_line", "per_case_limit"),
+        failures,
+        is_positive_number,
+        "positive finite number",
+    )
+    per_case_pass = require_field(
+        artifact,
+        ("aggregate", "exit_line", "per_case_pass"),
+        failures,
+        is_boolean,
+        "boolean",
+    )
+    over_limit = require_field(
+        artifact,
+        ("aggregate", "exit_line", "over_limit_cases"),
+        failures,
+        is_array,
+        "array",
+    )
+
+    rendered_over_limit: list[str] = []
+    if (
+        per_case_limit is not MISSING
+        and per_case_limit != PER_CASE_LIMIT
+    ):
+        add_failure(
+            failures,
+            "aggregate.exit_line.per_case_limit is "
+            f"{format_limit(per_case_limit)}, expected policy limit "
+            f"{format_limit(PER_CASE_LIMIT)}",
+        )
+    if isinstance(over_limit, list):
+        for index, item in enumerate(over_limit):
+            if not isinstance(item, dict):
+                add_failure(
+                    failures,
+                    f"invalid field: aggregate.exit_line."
+                    f"over_limit_cases[{index}] "
+                    f"(expected object, got {json_type_name(item)})",
+                )
+                continue
+            name = require_field(
+                artifact,
+                (
+                    "aggregate",
+                    "exit_line",
+                    "over_limit_cases",
+                    index,
+                    "name",
+                ),
+                failures,
+                is_string,
+                "string",
+            )
+            ratio = require_field(
+                artifact,
+                (
+                    "aggregate",
+                    "exit_line",
+                    "over_limit_cases",
+                    index,
+                    "ratio",
+                ),
+                failures,
+                is_positive_number,
+                "positive finite number",
+            )
+            if (
+                name is not MISSING
+                and ratio is not MISSING
+            ):
+                message = (
+                    f"{name} {format_ratio(ratio)} > "
+                    f"{format_limit(PER_CASE_LIMIT)}"
+                )
+                rendered_over_limit.append(message)
+                if ratio > PER_CASE_LIMIT:
+                    add_failure(failures, message)
+                else:
+                    add_failure(
+                        failures,
+                        "invalid over_limit_cases entry: "
+                        f"{name} ratio {format_ratio(ratio)} <= "
+                        f"limit {format_limit(PER_CASE_LIMIT)}",
+                    )
+
+    if per_case_pass is not MISSING and per_case_pass is not True:
+        if not rendered_over_limit:
+            add_failure(
+                failures,
+                "aggregate.exit_line.per_case_pass is not true",
+            )
+    elif per_case_pass is True and rendered_over_limit:
+        add_failure(
+            failures,
+            "aggregate.exit_line.per_case_pass is true but "
+            "over_limit_cases is not empty",
+        )
+
+    if per_case_limit is not MISSING:
+        details.append(
+            f"per-case policy limit {format_limit(PER_CASE_LIMIT)}; "
+            f"over-limit cases: "
+            f"{len(over_limit) if isinstance(over_limit, list) else 'unknown'}"
+        )
+    return result("require-exit-line", failures, details)
+
+
+def evaluate(
+    artifact: dict[str, Any], args: argparse.Namespace
+) -> dict[str, Any]:
+    checks = [
+        check_complete(artifact),
+        check_canonical_provenance(artifact),
+        check_output_match(artifact),
+        check_exit_line(artifact),
+    ]
+    requested_by_name = {
+        name: bool(getattr(args, destination))
+        for name, destination in CHECK_DEFINITIONS
+    }
+    for check in checks:
+        check["requested"] = requested_by_name[check["name"]]
+
+    passed = all(
+        check["passed"] for check in checks if check["requested"]
+    )
+    exit_code = 0 if passed else 1
+    return {
+        "artifact": args.artifact,
+        "checks": checks,
+        "passed": passed,
+        "exit_code": exit_code,
+    }
+
+
+def print_human(verdict: dict[str, Any]) -> None:
+    print(f"Artifact: {verdict['artifact']}")
+    requested_count = sum(
+        1 for check in verdict["checks"] if check["requested"]
+    )
+    if requested_count == 0:
+        print("Policy mode: advisory (no --require-* options requested)")
+
+    for check in verdict["checks"]:
+        status = "PASS" if check["passed"] else "FAIL"
+        qualifier = "required" if check["requested"] else "not requested"
+        print(f"{status} {check['name']} [{qualifier}]")
+        for detail in check["details"]:
+            print(f"  {detail}")
+        for failure in check["failures"]:
+            print(f"  - {failure}")
+
+    if requested_count == 0:
+        print("Overall: PASS (artifact parsed; policy checks not enforced)")
+    else:
+        status = "PASS" if verdict["passed"] else "FAIL"
+        print(f"Overall: {status} (exit {verdict['exit_code']})")
+
+
+def error_verdict(
+    artifact: str | None, message: str, exit_code: int = 2
+) -> dict[str, Any]:
+    return {
+        "artifact": artifact,
+        "checks": [],
+        "passed": False,
+        "exit_code": exit_code,
+        "error": message,
+    }
+
+
+def emit_error(
+    artifact: str | None, message: str, json_mode: bool
+) -> int:
+    verdict = error_verdict(artifact, message)
+    if json_mode:
+        print(json.dumps(verdict, separators=(",", ":")))
+    else:
+        print(f"error: {message}", file=sys.stderr)
+    return verdict["exit_code"]
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_args = sys.argv[1:] if argv is None else argv
+    json_mode = "--json" in raw_args
+    parser = build_parser()
+    try:
+        args = parser.parse_args(raw_args)
+    except CliError as error:
+        return emit_error(None, str(error), json_mode)
+
+    try:
+        artifact = load_artifact(Path(args.artifact))
+    except ArtifactError as error:
+        return emit_error(args.artifact, str(error), args.json)
+
+    verdict = evaluate(artifact, args)
+    if args.json:
+        print(json.dumps(verdict, separators=(",", ":")))
+    else:
+        print_human(verdict)
+    return int(verdict["exit_code"])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -10,3 +10,7 @@ quickjs/
 .claude/
 .migration/
 .scratch/
+
+# Python bytecode from tools/perf helpers
+__pycache__/
+*.pyc

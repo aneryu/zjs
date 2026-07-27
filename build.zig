@@ -734,4 +734,69 @@ pub fn build(b: *std.Build) void {
     engine_production_gate_step.dependOn(smoke_step);
     engine_production_gate_step.dependOn(architecture_check_step);
     engine_production_gate_step.dependOn(test262_gate_step);
+
+    // Same-runtime benchmark harness: reuse the production engine module so
+    // compile-once/execute-many measurements use the exact ReleaseFast engine
+    // configuration and build options as the zjs CLI.
+    const same_runtime_mod = b.createModule(.{
+        .root_source_file = b.path("tools/perf/same_runtime/zjs_same_runtime.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .omit_frame_pointer = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = internal_fast_mod },
+        },
+    });
+    const same_runtime_exe = b.addExecutable(.{
+        .name = "zjs-same-runtime",
+        .root_module = same_runtime_mod,
+    });
+    const install_same_runtime = b.addInstallArtifact(same_runtime_exe, .{});
+    const same_runtime_step = b.step("perf-same-runtime", "Build and install the ReleaseFast same-runtime benchmark harness");
+    same_runtime_step.dependOn(&install_same_runtime.step);
+    const build_qjs_same_runtime = b.addSystemCommand(&.{
+        "bash",
+        "tools/perf/same_runtime/build_qjs_harness.sh",
+    });
+    const same_runtime_all_step = b.step(
+        "perf-same-runtime-all",
+        "Build and install both zjs and QuickJS same-runtime benchmark harnesses",
+    );
+    same_runtime_all_step.dependOn(&install_same_runtime.step);
+    same_runtime_all_step.dependOn(&build_qjs_same_runtime.step);
+
+    // Direct/core performance scaffold. This is intentionally isolated from
+    // every validation gate: the build-only step installs the Zig harness,
+    // while perf-direct lets the driver compile the pinned QuickJS C harness
+    // and run ABBA-interleaved paired samples.
+    const perf_direct_zjs_mod = b.createModule(.{
+        .root_source_file = b.path("tools/perf/direct/zjs_direct_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = internal_fast_mod },
+        },
+    });
+    const perf_direct_zjs_exe = b.addExecutable(.{
+        .name = "zjs-direct-bench",
+        .root_module = perf_direct_zjs_mod,
+    });
+    const install_perf_direct_zjs = b.addInstallArtifact(perf_direct_zjs_exe, .{});
+    const perf_direct_build_step = b.step("perf-direct-build", "Build and install the zjs direct/core benchmark harness");
+    perf_direct_build_step.dependOn(&install_perf_direct_zjs.step);
+
+    const run_perf_direct = b.addSystemCommand(&.{
+        "bash",
+        "tools/perf/direct/run_direct.sh",
+        "--zig",
+        b.graph.zig_exe,
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-direct-bench"),
+    });
+    run_perf_direct.step.dependOn(&install_perf_direct_zjs.step);
+    if (b.args) |args| run_perf_direct.addArgs(args);
+    const perf_direct_step = b.step("perf-direct", "Run zjs versus pinned QuickJS direct/core benchmarks");
+    perf_direct_step.dependOn(&run_perf_direct.step);
 }
