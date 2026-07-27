@@ -7515,27 +7515,12 @@ pub const Object = extern struct {
     pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime_mod.ValueRootFrame) ObjectGraphError!usize {
         _ = roots;
         rt.gc.stats.collections += 1;
+        // This is the only fallible operation in the collection round, and it
+        // completes before trial refcounts, list membership, or round flags are
+        // changed. Everything below is therefore a committed, no-error path.
         try gcRemoveWeakObjects(rt);
 
         var garbage: gc.HeaderList = .{};
-        var garbage_committed = false;
-        defer {
-            // Every fallible operation happens before destruction begins. If
-            // one fails, refcounts have already been restored; splice the
-            // condemned partition back into the registry before returning.
-            if (!garbage_committed) {
-                while (garbage.popFront()) |h| {
-                    h.meta().flags.mark = false;
-                    h.meta().flags.cycle_visited = false;
-                    rt.gc.restoreCycleCandidate(h);
-                }
-            }
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                h.meta().flags.mark = false;
-                h.meta().flags.cycle_visited = false;
-            }
-        }
 
         // Phase 1: gc_decref
         {
@@ -7618,7 +7603,6 @@ pub const Object = extern struct {
         var garbage_shapes: gc.HeaderList = .{};
         var garbage_contexts: gc.HeaderList = .{};
         var garbage_modules: gc.HeaderList = .{};
-        garbage_committed = true;
         while (garbage.popFront()) |h| {
             switch (h.meta().flags.kind) {
                 .object => garbage_objects.append(h),
