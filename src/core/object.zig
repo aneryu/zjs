@@ -477,12 +477,21 @@ pub const BufferPayload = struct {
     detached: bool = false,
     immutable: bool = false,
     max_byte_length: ?usize = null,
+    first_view: ?*TypedArrayPayload = null,
 
     pub fn destroy(self: *BufferPayload, rt: *JSRuntime) void {
+        // QuickJS's ArrayBuffer finalizer can run before the TypedArray /
+        // DataView finalizers during cycle removal. Sever every weak view link
+        // first so a later view finalizer never dereferences this payload.
+        self.unlinkAllViews();
         self.releaseStorage(rt);
     }
 
     fn releaseStorage(self: *BufferPayload, rt: *JSRuntime) void {
+        // Any release may invalidate or move the data pointer. Clear cached
+        // view state before the old storage is returned to its owner; install
+        // paths republish the new state after committing the replacement.
+        self.invalidateViews();
         if (self.shared_store) |store| {
             store.release();
         } else if (self.external_deinit) |deinit| {
@@ -501,6 +510,58 @@ pub const BufferPayload = struct {
         self.external_deinit = null;
         self.external_context = null;
     }
+
+    fn attachView(self: *BufferPayload, view: *TypedArrayPayload) void {
+        std.debug.assert(view.backing_payload == null);
+        std.debug.assert(view.buffer_prev == null);
+        std.debug.assert(view.buffer_next == null);
+
+        view.backing_payload = self;
+        view.buffer_next = self.first_view;
+        if (self.first_view) |first| first.buffer_prev = view;
+        self.first_view = view;
+        view.updateLiveState(self);
+    }
+
+    fn detachView(self: *BufferPayload, view: *TypedArrayPayload) void {
+        if (view.backing_payload != self) {
+            std.debug.assert(view.backing_payload == null);
+            return;
+        }
+
+        const previous = view.buffer_prev;
+        const next = view.buffer_next;
+        if (previous) |prev| {
+            prev.buffer_next = next;
+        } else {
+            std.debug.assert(self.first_view == view);
+            self.first_view = next;
+        }
+        if (next) |following| following.buffer_prev = previous;
+
+        view.backing_payload = null;
+        view.buffer_prev = null;
+        view.buffer_next = null;
+        view.clearLiveState();
+    }
+
+    fn invalidateViews(self: *BufferPayload) void {
+        var current = self.first_view;
+        while (current) |view| : (current = view.buffer_next) {
+            view.clearLiveState();
+        }
+    }
+
+    fn updateViews(self: *BufferPayload) void {
+        var current = self.first_view;
+        while (current) |view| : (current = view.buffer_next) {
+            view.updateLiveState(self);
+        }
+    }
+
+    fn unlinkAllViews(self: *BufferPayload) void {
+        while (self.first_view) |view| self.detachView(view);
+    }
 };
 
 pub const TypedArrayPayload = struct {
@@ -509,9 +570,69 @@ pub const TypedArrayPayload = struct {
     element_size: u32 = 0,
     fixed_length: ?u32 = null,
     kind: u8 = 0,
+    live_length: u32 = 0,
+    data: ?[*]u8 = null,
+    backing_payload: ?*BufferPayload = null,
+    buffer_prev: ?*TypedArrayPayload = null,
+    buffer_next: ?*TypedArrayPayload = null,
 
     pub fn destroy(self: *TypedArrayPayload, rt: *JSRuntime) void {
+        // Mirrors js_typed_array_finalizer: unlink before releasing the strong
+        // buffer value because that release may immediately finalize the
+        // ArrayBuffer payload.
+        if (self.backing_payload) |backing| backing.detachView(self);
         destroyOptionalValue(rt, &self.buffer);
+    }
+
+    fn clearLiveState(self: *TypedArrayPayload) void {
+        self.live_length = 0;
+        self.data = null;
+    }
+
+    fn updateLiveState(self: *TypedArrayPayload, backing: *BufferPayload) void {
+        self.clearLiveState();
+        if (backing.detached) return;
+
+        const offset = self.byte_offset;
+        const storage = backing.bytes;
+        if (offset > storage.len) return;
+        const remaining = storage.len - offset;
+
+        // DataView is byte-addressed (`element_size == 0`). QuickJS updates a
+        // length-tracking DataView's byte length from the ArrayBuffer list; the
+        // fixed-length form stays live only while its complete range fits.
+        if (self.element_size == 0) {
+            const tracks_buffer = self.kind == 1 and backing.max_byte_length != null;
+            const live: usize = if (!tracks_buffer) blk: {
+                const fixed = self.fixed_length orelse return;
+                if (@as(usize, fixed) > remaining) return;
+                break :blk fixed;
+            } else blk: {
+                // qjs requires offset < byte_length for a tracking DataView to
+                // have a non-zero live range.
+                if (offset == storage.len) return;
+                break :blk remaining;
+            };
+            self.live_length = std.math.cast(u32, live) orelse return;
+            self.data = storage.ptr + offset;
+            return;
+        }
+
+        const width: usize = self.element_size;
+        if (self.fixed_length) |fixed| {
+            const byte_length = std.math.mul(usize, fixed, width) catch return;
+            if (byte_length > remaining) return;
+            self.live_length = fixed;
+            self.data = storage.ptr + offset;
+            return;
+        }
+
+        // QuickJS only publishes a pointer for a length-tracking TypedArray
+        // when at least one complete element remains. Partial trailing bytes
+        // are not addressable.
+        if (remaining < width) return;
+        self.live_length = std.math.cast(u32, @divTrunc(remaining, width)) orelse return;
+        self.data = storage.ptr + offset;
     }
 };
 
@@ -4256,6 +4377,47 @@ pub const Object = extern struct {
         self.flags.class_payload_kind = .typed_array;
     }
 
+    /// Initialize a TypedArray/DataView payload and link it into its backing
+    /// ArrayBuffer's weak view list. Takes ownership of `buffer_value`.
+    ///
+    /// This is the zjs counterpart of QuickJS `typed_array_init`: all view
+    /// constructors go through one operation so cached count/data state and
+    /// finalizer-safe list membership cannot diverge from the strong buffer
+    /// edge.
+    pub fn initTypedArrayView(
+        self: *Object,
+        rt: *JSRuntime,
+        buffer_value: JSValue,
+        byte_offset: usize,
+        element_size: u32,
+        fixed_length: ?u32,
+        kind: u8,
+    ) !void {
+        var owned_buffer = buffer_value;
+        errdefer owned_buffer.free(rt);
+
+        const backing_object = objectFromValue(owned_buffer) orelse return error.TypeError;
+        if (backing_object.class_id != class.ids.array_buffer and backing_object.class_id != class.ids.shared_array_buffer) {
+            return error.TypeError;
+        }
+        const backing_payload = backing_object.bufferPayload() orelse return error.TypeError;
+
+        try self.ensureTypedArrayPayload(rt);
+        const payload = self.typedArrayPayload() orelse unreachable;
+        if (payload.backing_payload) |old_backing| old_backing.detachView(payload);
+
+        // Publish the owned edge before the weak link. Replacing an old edge
+        // can immediately finalize its ArrayBuffer; it is already unlinked.
+        const next_buffer = owned_buffer;
+        owned_buffer = JSValue.undefinedValue();
+        try self.setOptionalValueSlot(rt, &payload.buffer, next_buffer);
+        payload.byte_offset = byte_offset;
+        payload.element_size = element_size;
+        payload.fixed_length = fixed_length;
+        payload.kind = kind;
+        backing_payload.attachView(payload);
+    }
+
     pub fn byteStorageSlot(self: *Object) *[]u8 {
         if (self.bufferPayload()) |payload| return &payload.bytes;
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4276,6 +4438,7 @@ pub const Object = extern struct {
             payload.inline_length = 0;
             payload.external_memory = external_memory;
             payload.detached = false;
+            payload.updateViews();
             return;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4294,6 +4457,7 @@ pub const Object = extern struct {
             payload.inline_length = @intCast(byte_length);
             payload.bytes = payload.inline_bytes[0..byte_length];
             payload.detached = false;
+            payload.updateViews();
             return true;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4316,6 +4480,7 @@ pub const Object = extern struct {
             payload.external_deinit = deinit_fn;
             payload.external_context = context;
             payload.detached = false;
+            payload.updateViews();
             return;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
@@ -4346,10 +4511,22 @@ pub const Object = extern struct {
             payload.inline_length = 0;
             payload.external_memory = .{};
             payload.detached = false;
+            payload.updateViews();
             return;
         }
         std.debug.assert(self.flags.class_payload_kind == .buffer);
         unreachable;
+    }
+
+    /// Change the visible prefix of an already-committed SharedArrayBuffer
+    /// store, then refresh all linked view state. This is QuickJS's shared
+    /// resize branch: the store identity and pointer stay stable.
+    pub fn setSharedByteStorageLength(self: *Object, new_length: usize) !void {
+        const payload = self.bufferPayload() orelse return error.TypeError;
+        const store = payload.shared_store orelse return error.TypeError;
+        if (new_length > store.bytes.len) return error.RangeError;
+        payload.bytes = store.bytes[0..new_length];
+        payload.updateViews();
     }
 
     pub fn arrayBufferDetachedSlot(self: *Object) *bool {
@@ -4431,6 +4608,15 @@ pub const Object = extern struct {
     pub fn typedArrayFixedLength(self: *const Object) ?u32 {
         if (self.typedArrayPayloadConst()) |payload| return payload.fixed_length;
         return null;
+    }
+
+    /// Single-lookup view of the typed-array payload for the hot element
+    /// read/write legs — qjs reads its cached `u.array` state once per access;
+    /// this returns the payload pointer so the interpreter fast legs read
+    /// kind/element_size/byte_offset/fixed_length/buffer without re-resolving
+    /// the payload through five separate accessors.
+    pub fn typedArrayPayloadFast(self: *const Object) ?*const TypedArrayPayload {
+        return self.typedArrayPayloadConst();
     }
 
     pub fn typedArrayKindSlot(self: *Object) *u8 {
@@ -4781,6 +4967,28 @@ pub const Object = extern struct {
         const old = slot.*;
         slot.* = new_value.dup();
         old.free(rt);
+        return true;
+    }
+
+    /// Owned-value counterpart of `setFastArrayElementDup`. The value is
+    /// consumed only when this returns true; false leaves ownership with the
+    /// caller. Mirrors QuickJS `set_value` for OP_put_array_el.
+    pub fn setFastArrayElementOwned(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        if (!self.isFastArrayIndexInBounds(index)) return false;
+        replaceOwnedValue(rt, &self.u.array.values[@intCast(index)], new_value);
+        return true;
+    }
+
+    /// Active-bytecode counterpart of `setFastArrayElementOwned`. The VM owns
+    /// `new_value` and has already established the runtime-teardown exclusion
+    /// carried by `freeDuringActiveBytecode`; false still leaves ownership with
+    /// the caller.
+    pub fn setFastArrayElementOwnedDuringActiveBytecode(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        if (!self.isFastArrayIndexInBounds(index)) return false;
+        const slot = &self.u.array.values[@intCast(index)];
+        const old_value = slot.*;
+        slot.* = new_value;
+        old_value.freeDuringActiveBytecode(rt);
         return true;
     }
 
@@ -7031,7 +7239,8 @@ pub const Object = extern struct {
     }
 
     const DecrefVisitor = struct {
-        rt: *JSRuntime,
+        registry: *gc.Registry,
+        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7073,9 +7282,14 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
-            _ = self;
             if (h.meta().rc == 0) return;
             h.meta().rc -= 1;
+            // QuickJS gc_decref_child immediately moves an already-scanned
+            // child whose trial refcount reaches zero to tmp_obj_list.
+            if (h.meta().rc == 0 and h.meta().flags.mark) {
+                self.registry.detachCycleCandidate(h);
+                self.garbage.append(h);
+            }
         }
     };
 
@@ -7307,50 +7521,29 @@ pub const Object = extern struct {
     pub fn destroyRuntimeCyclesWithValueRoots(rt: *JSRuntime, roots: ?*const runtime_mod.ValueRootFrame) ObjectGraphError!usize {
         _ = roots;
         rt.gc.stats.collections += 1;
+        // This is the only fallible operation in the collection round, and it
+        // completes before trial refcounts, list membership, or round flags are
+        // changed. Everything below is therefore a committed, no-error path.
         try gcRemoveWeakObjects(rt);
 
         var garbage: gc.HeaderList = .{};
-        var garbage_committed = false;
-        defer {
-            // Every fallible operation happens before destruction begins. If
-            // one fails, refcounts have already been restored; splice the
-            // condemned partition back into the registry before returning.
-            if (!garbage_committed) {
-                while (garbage.popFront()) |h| {
-                    h.meta().flags.mark = false;
-                    h.meta().flags.cycle_visited = false;
-                    rt.gc.restoreCycleCandidate(h);
-                }
-            }
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                h.meta().flags.mark = false;
-                h.meta().flags.cycle_visited = false;
-            }
-        }
 
         // Phase 1: gc_decref
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
+                traceChildren(rt, h, DecrefVisitor{
+                    .registry = &rt.gc,
+                    .garbage = &garbage,
+                });
+                // Match qjs gc_decref: mark the current node after visiting
+                // its children, then move it immediately if its trial count
+                // is zero. GcObjectIterator captured `next` before tracing.
                 h.meta().flags.mark = true;
-            }
-
-            gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                traceChildren(rt, h, DecrefVisitor{ .rt = rt });
-            }
-
-            // QJS moves trial-zero nodes to tmp_obj_list. Partitioning after
-            // the decref walk is equivalent and keeps the visitor itself tiny.
-            var cursor = rt.gc.gc_object_head;
-            while (cursor) |h| {
-                const next = h.next;
                 if (h.meta().rc == 0) {
                     rt.gc.detachCycleCandidate(h);
                     garbage.append(h);
                 }
-                cursor = next;
             }
         }
 
@@ -7409,7 +7602,6 @@ pub const Object = extern struct {
         var garbage_shapes: gc.HeaderList = .{};
         var garbage_contexts: gc.HeaderList = .{};
         var garbage_modules: gc.HeaderList = .{};
-        garbage_committed = true;
         while (garbage.popFront()) |h| {
             switch (h.meta().flags.kind) {
                 .object => garbage_objects.append(h),
@@ -9318,6 +9510,33 @@ pub const Object = extern struct {
         return null;
     }
 
+    /// Borrowed own `.prototype` object for a constructor's [[Construct]], with
+    /// the one difference from getOwnDataObjectBorrowed that matters here: a
+    /// function's `.prototype` is created LAZILY (an auto_init placeholder) in
+    /// zjs, whereas qjs creates it eagerly, so a bare data read misses on the
+    /// first construct and the constructor falls all the way to
+    /// reflectConstructPrototypeVm. Materialize the auto_init here (js_closure
+    /// would have done this eagerly) — the slot becomes a permanent .data
+    /// object, so this and every later `new` take the direct read. Accessor /
+    /// var_ref prototypes (or an exotic receiver) return null to keep the
+    /// general path. Returns a BORROWED pointer (Object.create dups it).
+    pub fn getOwnConstructorPrototypeObject(self: *Object, rt: *JSRuntime) !?*Object {
+        if (self.hasExoticMethods()) return null;
+        const index = self.findProperty(atom.ids.prototype) orelse return null;
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted) return null;
+        switch (flags.kind) {
+            .data => {},
+            .auto_init => {
+                const materialized = try self.materializeAutoInit(index);
+                materialized.free(rt);
+            },
+            else => return null,
+        }
+        const stored = self.asDataAt(index) orelse return null;
+        return objectFromValue(stored);
+    }
+
     pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
         if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
@@ -9929,6 +10148,17 @@ pub const Object = extern struct {
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
+        return self.appendDenseArrayIndexMode(rt, index, atom_id, new_value, false);
+    }
+
+    /// Owned-value counterpart of `appendDenseArrayIndex`. The value is
+    /// consumed only when this returns true; false/error leave ownership with
+    /// the caller. Mirrors QuickJS OP_put_array_el's direct stack-to-slot move.
+    pub fn appendDenseArrayIndexOwned(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
+        return self.appendDenseArrayIndexMode(rt, index, atom_id, new_value, true);
+    }
+
+    fn appendDenseArrayIndexMode(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue, comptime take_ownership: bool) !bool {
         // qjs add_fast_array_element (quickjs.c:9542-9570): the dense append
         // gate is `idx == count`, NOT `idx == length`. A holey array (length >
         // count) can append at `count`; `length` is bumped to `index+1` only
@@ -9939,7 +10169,7 @@ pub const Object = extern struct {
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = new_value.dup();
+        element_slot.* = if (take_ownership) new_value else new_value.dup();
         if (index + 1 > self.u.array.length) self.u.array.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
@@ -10504,7 +10734,26 @@ pub const Object = extern struct {
         while (prototype) |proto| {
             if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
             if (isTypedArrayObjectForSetFastPath(proto)) return false;
-            if (proto.findProperty(atom_id) != null) return false;
+            if (proto.findProperty(atom_id)) |proto_index| {
+                // qjs JS_SetPropertyInternal's prototype loop (quickjs.c:9840-
+                // 9853) stops at the FIRST prototype that owns the key and reads
+                // `prs->flags` straight off the shape. A GETSET accessor takes
+                // the setter path, an AUTOINIT/VARREF entry needs
+                // materialization, and a non-writable data entry is read-only --
+                // all of those must defer to the full resolver. A plain WRITABLE
+                // DATA property does NOT shadow the create: qjs `break`s and
+                // `add_property`s an own C_W_E data property on the receiver
+                // (quickjs.c:9852, 9884). Mirror that here so the ubiquitous
+                // "assign an instance field whose prototype declares a default"
+                // pattern (raytrace `this.x = ...`, `result.red = ...`) creates
+                // the own slot directly instead of falling through to
+                // `callAccessorSetter`, whose `findPropertyDescriptor` ->
+                // `getOwnProperty` rebuilds an allocating Descriptor up the same
+                // chain only to discover the entry is data, not an accessor.
+                const proto_flags = proto.propFlagsAt(proto_index);
+                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return false;
+                break;
+            }
             prototype = proto.getPrototype();
         }
 
@@ -11642,35 +11891,32 @@ fn typedArrayBackingBufferObject(object: *Object) !*Object {
 }
 
 pub fn isTypedArrayObject(object: *const Object) bool {
-    return object.typedArrayBuffer() != null and object.typedArrayElementSize() != 0;
+    const payload = object.typedArrayPayloadFast() orelse return false;
+    return payload.buffer != null and payload.element_size != 0;
 }
 
 pub fn typedArrayOutOfBounds(object: *Object) !bool {
-    const buffer = try typedArrayBackingBufferObject(object);
-    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return true;
-    if (object.typedArrayFixedLength()) |fixed| {
-        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
-        return bytes > buffer.byteStorage().len - object.typedArrayByteOffset();
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (payload.byte_offset > backing.bytes.len) return true;
+    if (payload.fixed_length) |fixed| {
+        const bytes = std.math.mul(usize, fixed, payload.element_size) catch return true;
+        return bytes > backing.bytes.len - payload.byte_offset;
     }
     return false;
 }
 
 pub fn typedArrayDetached(object: *Object) !bool {
-    const buffer = try typedArrayBackingBufferObject(object);
-    return buffer.arrayBufferDetached();
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    return backing.detached;
 }
 
 pub fn typedArrayLength(rt: *JSRuntime, object: *Object) !u32 {
     _ = rt;
-    const buffer = try typedArrayBackingBufferObject(object);
-    if (buffer.arrayBufferDetached()) return 0;
-    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return 0;
-    if (object.typedArrayFixedLength()) |fixed| {
-        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
-        if (bytes > buffer.byteStorage().len - object.typedArrayByteOffset()) return 0;
-        return fixed;
-    }
-    return @intCast(@divTrunc(buffer.byteStorage().len - object.typedArrayByteOffset(), object.typedArrayElementSize()));
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
+    return payload.live_length;
 }
 
 pub fn typedArrayByteLength(rt: *JSRuntime, object: *Object) !usize {
@@ -11685,8 +11931,10 @@ pub fn typedArrayEffectiveByteOffset(object: *Object) !usize {
 }
 
 pub fn typedArrayIndexValid(rt: *JSRuntime, object: *Object, index: u32) !bool {
-    const length = try typedArrayLength(rt, object);
-    return index < length;
+    _ = rt;
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
+    return index < payload.live_length;
 }
 
 pub const TypedArrayCanonicalIndex = union(enum) {
@@ -11727,8 +11975,9 @@ pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !Type
 
 pub fn typedArrayBackedByResizableBuffer(object: *Object) bool {
     if (!isTypedArrayObject(object)) return false;
-    const buffer = typedArrayBackingBufferObject(object) catch return false;
-    return buffer.arrayBufferMaxByteLength() != null;
+    const payload = object.typedArrayPayloadFast() orelse return false;
+    const backing = payload.backing_payload orelse return false;
+    return backing.max_byte_length != null;
 }
 
 pub fn arrayBufferIsImmutable(rt: *JSRuntime, object: *Object) bool {
@@ -11742,8 +11991,10 @@ pub fn markArrayBufferImmutable(rt: *JSRuntime, object: *Object) !void {
 }
 
 pub fn typedArrayImmutableBuffer(rt: *JSRuntime, object: *Object) !bool {
-    const buffer = try typedArrayBackingBufferObject(object);
-    return arrayBufferIsImmutable(rt, buffer);
+    _ = rt;
+    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    return backing.immutable;
 }
 
 pub fn typedArrayRejectImmutableBuffer(rt: *JSRuntime, object: *Object) !void {

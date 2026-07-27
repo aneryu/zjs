@@ -1,145 +1,136 @@
 # Stack Bytecode VM Status And Evolution Boundary
 
-本文只回答当前 ZJS 是否应该从 stack bytecode interpreter 迁移到 register /
-accumulator bytecode。它按当前源码状态描述，不把未来路线写成已完成能力。
+本文记录当前 stack bytecode VM 的真实边界，并回答是否应迁移到 register /
+accumulator bytecode。字段级 QuickJS 对照见
+[子系统差异基线](qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)。
 
 ## 1. Current Answer
 
-当前不需要把 VM “改成 bytecode interpreter”。
+zjs 已经是 bytecode interpreter：
 
-`src/exec/zjs_vm.zig` 已经是 bytecode interpreter：parser/emitter 产出
-QuickJS-format bytecode，VM loop 逐 opcode dispatch，并把具体 opcode family
-分发到 `src/exec/vm_*.zig`。
+- `parser.zig` 解析并发射 QuickJS-aligned stack bytecode；
+- `bytecode.zig` 完成 resolve、stack-size、pc2line 和 finalize；
+- `zjs_vm.zig` / `tailcall_dispatch.zig` 执行 opcode；
+- `vm_*.zig` 和 `vm_property_*` 承担具体 opcode family。
 
-当前也不建议重写为 register / accumulator bytecode。理由是：
+当前没有证据支持改写为 register/accumulator VM。语义、call frame、module、
+eval、ownership 和通用 dispatch 的已知差异更具体，也更适合逐项与 QuickJS
+对照。
 
-- 语义兼容、对象模型、GC roots、eval、module、promise 和 exception 行为仍是更高价值的稳定化区域。
-- 当前已有 stack-size validation、source location metadata、property IC 和 opcode profiling。
-- register / accumulator bytecode 会同时影响 emitter、debug/source metadata、exception unwinding、GC liveness 和未来 JIT lowering。
-- 在没有 profiler 证明 dispatch 或 operand-stack traffic 是主要瓶颈前，重写 bytecode 格式收益不清楚。
+## 2. Current Carriers
 
-## 2. Current Implementation
+编译期载体：
 
-当前 VM 相关入口：
+- `FunctionDef`：变量、scope、child function、source/debug 和 emitter 状态；
+- lowered `Bytecode`：pipeline 的可变 code/metadata。
 
-- `src/parser.zig`: QuickJS-aligned parser/emitter。
-- `src/bytecode.zig`: `Bytecode` runtime carrier。
-- `src/bytecode.zig` `pipeline` namespace: label/variable resolution、stack-size、pc2line 和 finalize passes。
-- `src/exec/zjs_vm.zig`: VM dispatcher。
-- `src/exec/frame.zig`: call frame、eval var-ref snapshot 和 root scope。
-- `src/exec/stack.zig`: operand stack。
-- `src/exec/vm_*.zig`: opcode family shards。
-- `src/exec/property_ic.zig`: property inline-cache fast paths。
+发布后的生产执行载体：
 
-当前 `Bytecode` 已经携带多类 metadata：
+- canonical GC-managed `FunctionBytecode`；
+- 96-byte QuickJS-aligned core header；
+- packed constant/var/closure/code data；
+- optional 32-byte debug tail；
+- zjs-only 8-byte call-facts/script-or-module tail。
 
-- bytecode bytes
-- constants
-- atom operands
-- argument/local/var-ref metadata
-- scopes and module metadata
-- `pc2line_buf`
-- `source_loc_slots`
-- property IC site/slot tables
+script、eval、nested function 和 module root 都执行 canonical
+`FunctionBytecode`。没有单独的 `CodeBlock`，也没有 property IC slots。
 
-当前没有单独命名为 `CodeBlock` 的抽象。历史设计文档里的 `CodeBlock` 可以看作
-未来可能的封装方向，但当前代码的真实载体是 `bytecode.Bytecode` 和
-`core.FunctionBytecode`。
+## 3. Frame And Dispatch
 
-## 3. Already Landed
+主要入口：
 
-已落地能力包括：
+- `src/exec/frame.zig`: `Frame`, `FrameSlab` 和 frame-owned windows；
+- `src/exec/stack.zig`: operand stack；
+- `src/core/runtime.zig`: per-runtime `VmStackArena`；
+- `src/exec/inline_calls.zig`: same-loop `Machine` frame push/pop；
+- `src/exec/tailcall_dispatch.zig`: threaded/tail-called opcode handlers；
+- `src/exec/call_runtime.zig`: call/eval/generator/Atomics shared runtime glue。
 
-- stack bytecode interpreter。
-- QuickJS-format opcode execution。
-- `compute_stack_size` style stack-depth validation in
-  `src/bytecode.zig `pipeline` namespacestack_size.zig`。
-- `pc2line_buf` and `source_loc_slots` for diagnostics/backtrace location。
-- `ValueRootFrame` for explicit host/boundary value-root tracing (VM running
-  frames no longer use a per-frame root scope; their operand stack/locals/args/
-  var_refs are `FrameSlab`-owned and kept live by refcount-on-push)。
-- frame-local ownership teardown through `Frame.deinit` and the `FrameSlab` carve。
-- property IC slots attached to `Bytecode`。
-- shape/version-guarded own/prototype data-property IC in `property_ic.zig`。
-- `core.OpcodeProfile` counters for opcode time/counts, slow paths and IC events。
-- VM opcode-family decomposition under `src/exec/vm_*.zig`。
-- contiguous VM stack arena (`VmStackArena`) for frame locals/args/operand windows。
-- same-loop inline bytecode calls (`src/exec/inline_calls.zig` `Machine`)。
-- proper tail calls via inline-frame reuse (`Machine.tailCallReuse`,
-  `tail-call-optimization` enabled in `test262.conf`)。
+普通同步 bytecode frame 优先从 runtime arena carve
+`[args | locals | operand | var-ref metadata]`。generator/async frame 必须在
+suspend 后继续存活，所以拥有可转移的 resident storage，而不是借用 arena。
 
-These are current facts. They can be referenced as implementation status.
+VM 中的运行值依靠 refcount-on-push 和 frame deterministic teardown 保活。
+`ValueRootFrame` 用于宿主/builtin 边界，不是每个 VM frame 的通用 root
+registration。
 
-## 4. Not Current Implementation
+## 4. Property Access
 
-The following items are future candidates or design notes only:
+当前没有 inline cache：
 
-- register bytecode VM
-- accumulator bytecode VM
-- baseline JIT
-- call inline cache
-- JIT-style formal GC stack maps
-- moving copying nursery as the default heap model
-- concurrent old-space GC
-- uWS/HTTP/WebSocket host runtime boundary
-- standalone `CodeBlock` API replacing current `Bytecode`
+- `src/core/ic.zig` 不存在；
+- `FunctionBytecode` 没有 site/slot table；
+- `zjs_enable_ic` 不存在。
 
-Documents may discuss these as possible evolution paths, but they should not be
-described as current ZJS behavior.
+`src/exec/property_ic.zig` 是历史文件名，当前保存的是非缓存 direct
+shape/property/global fast paths。每次访问都检查当前 object/shape/property
+状态；两个 retained `cached*` adapter 恒 miss。
 
-## 5. Stack VM Versus Register/Accumulator
+## 5. Tail Calls
 
-Stack bytecode remains the right current tradeoff:
+VM 能执行 `tail_call` / `tail_call_method`，并可用
+`Machine.tailCallReuse` 替换 inline frame。这是 bytecode ABI/内部能力。
 
-```text
-load local / constant
-push intermediate values
-execute opcode
-pop operands
-push result
-```
+默认 source compiler 与 pinned QuickJS 当前 parser 都产生普通 call+return，
+不把源码自动 lower 成 proper tail calls。`test262.conf` 跳过
+`tail-call-optimization`。因此文档和发布说明不得声称产品级 PTC 已启用。
 
-Advantages now:
+## 6. zjs-Specific Call Machinery
 
-- emitter stays simpler while QuickJS compatibility is still improving.
-- bytecode is compact and close to the existing parser/pipeline model.
-- exception and eval behavior can be debugged against current stack state.
-- existing stack-size validation remains useful.
+为缩小 Zig frame/dispatch 固定成本，当前 FunctionBytecode 和 Machine 还包含：
 
-Costs to watch:
+- simple-inline eligibility；
+- empty/exact/padded/capture leaf 分类；
+- forwarded `Function.prototype.call` leaf；
+- narrow leaf frame constructors and return epilogues；
+- simple-field constructor body bypass 及 runtime memo。
 
-- more push/pop traffic than a register or accumulator VM.
-- more dispatches for expression-heavy code.
-- future JIT lowering would need to reconstruct stack data flow.
-- precise liveness metadata is harder than with explicit registers.
+这些不是 property IC，但其中多项也没有 pinned QuickJS 对应机制。它们是当前
+QuickJS-faithful policy 的审计对象，不能继续以 microbenchmark 结果自动扩大。
+保留或删除必须依据：
 
-Accumulator/register bytecode may become worthwhile later if profiling shows the
-interpreter loop itself dominates after property IC, object shapes, calls,
-strings, arrays, promises and GC are stable.
+1. 对应 QuickJS 机制；
+2. observable/exception/OOM/interrupt/realm 边界；
+3. controlled instructions/allocations/time A/B；
+4. focused + checkpoint/production gates。
 
-## 6. Near-Term VM Work
+## 7. Current Capabilities
 
-Useful near-term work should stay compatible with the current stack bytecode:
+已经落地：
 
-- continue shrinking `src/exec/call_runtime.zig` (originally `shared.zig`) into focused VM/helper modules.
-- keep property opcode logic concentrated in `vm_property.zig` and
-  `property_ic.zig`.
-- improve bytecode validation where `stack_size.zig` is not enough.
-- expand source-location coverage for diagnostics.
-- use `OpcodeProfile` and perf reports before changing bytecode architecture.
-- strengthen root-safety tests around frame teardown, eval var refs, closures,
-  generators, async jobs and module evaluation.
+- QuickJS-aligned stack opcode execution；
+- stack-depth validation；
+- pc2line/source-location diagnostics；
+- canonical `FunctionBytecode`；
+- same-loop bytecode call frames；
+- explicit generator/async resident-frame ownership；
+- direct and indirect eval entry；
+- catch/finally and pending JS exception propagation；
+- optional opcode profiling；
+- four zjs-only explicit-resource-management opcodes。
 
-## 7. Migration Trigger
+未实现：
 
-Reconsider accumulator/register bytecode only when most of these are true:
+- register/accumulator bytecode；
+- baseline JIT；
+- call or property inline cache；
+- JIT GC stack maps；
+- moving nursery；
+- concurrent collector；
+- public standalone `CodeBlock`/bytecode serialization API。
 
-- semantic gates are stable enough that emitter-wide rewrites are acceptable.
-- property/object/call/array/string/promise hotspots have been addressed.
-- profiler data shows dispatch or operand-stack traffic is a top bottleneck.
-- bytecode metadata, source locations and exception tables have clear contracts.
-- GC liveness/rooting requirements at VM safepoints are explicitly specified.
-- there is a concrete JIT or baseline compiler plan that benefits from the new
-  bytecode form.
+## 8. Near-Term Work
 
-Until then, keep stack bytecode and improve the current interpreter.
+保持 stack bytecode，优先：
+
+- 用 current pinned qjs 拆解 call admission、frame publication、return 和 RC
+  fixed tax；
+- 审计 zjs-only leaf/body-bypass 机制；
+- 收敛 direct-eval binding mechanism；
+- 强化 generator/async/module exception 和 OOM ownership tests；
+- 改善 source-location coverage；
+- 继续按 ownership domain 收窄 `call_runtime.zig`，但不为行数指标强拆
+  shared state。
+
+只有当语义门禁稳定、call/property/array/string 等热点已用 qjs 机制收敛，且
+PMU 证明 operand traffic/dispatch 是主瓶颈时，才重新评估 bytecode 架构。

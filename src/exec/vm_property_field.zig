@@ -49,6 +49,8 @@ const decodeOptionalLocalCompletionTail = property_vm.decodeOptionalLocalComplet
 const decodeStringSliceConstLocalStore = property_vm.decodeStringSliceConstLocalStore;
 const fastArrayPrototypeMethodIsDefault = property_vm.fastArrayPrototypeMethodIsDefault;
 pub const fastDenseArrayElementValue = property_vm.fastDenseArrayElementValue;
+pub const fastArrayOwnIntElementValue = property_vm.fastArrayOwnIntElementValue;
+pub const fastArrayOwnIntElementSet = property_vm.fastArrayOwnIntElementSet;
 const fastRegExpPrototypeMethodIsDefault = property_vm.fastRegExpPrototypeMethodIsDefault;
 const finishUndefinedCallResult = property_vm.finishUndefinedCallResult;
 const frameHasVarRefBinding = property_vm.frameHasVarRefBinding;
@@ -398,15 +400,25 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
     } else {
         if (rt.atoms.mightBePrivate(atom_id)) return null;
     }
+    // The mapped-Arguments compensation only matters when the operand atom could
+    // name one of the out-of-shape numeric bindings. Those bindings cover indices
+    // [0, argc); argc is a u16 arg_count, so every binding atom interns as a
+    // tagged-int atom (<= max_int_atom == 2^31-1). A named/symbol atom can never
+    // alias a binding, so its shape slot is authoritative — exactly as in qjs,
+    // whose find_own_property leans solely on the per-property TMASK/kind check.
+    // Hoisting this loop-invariant decision keeps the common named-field walk (the
+    // get_field / get_field2 hot path) off the per-object class test entirely; the
+    // predicate comptime-folds to false for the get_length caller (trust=true).
+    const probe_mapped_arguments = !trust_mapped_arguments_probe and core.atom.isTaggedInt(atom_id);
     while (true) {
         // zjs-only divergence from qjs's probe-first order: mapped Arguments
         // numeric bindings live in out-of-shape var-ref cells, so a shape data
         // slot on a mapped Arguments object can be stale and its hit cannot be
         // trusted — bail before probing. (qjs stores those bindings as
         // JS_PROP_VARREF shape entries, which its own probe rejects via
-        // JS_PROP_TMASK.) The constant `length` atom never aliases a numeric
-        // binding, so the get_length caller skips this guard.
-        if (!trust_mapped_arguments_probe and object.class_id == core.class.ids.mapped_arguments) return null;
+        // JS_PROP_TMASK.) Only a tagged-int operand atom can alias one of those
+        // numeric bindings; named atoms and the constant `length` atom skip it.
+        if (probe_mapped_arguments and object.class_id == core.class.ids.mapped_arguments) return null;
         var slow_property = false;
         if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
         if (slow_property) return null;
@@ -573,7 +585,15 @@ noinline fn typedArrayPrototypeNamedPropertyForFastPath(
 ) ?PropertyFastValue {
     var holder = receiver.getPrototype() orelse return .{ .borrowed = core.JSValue.undefinedValue() };
     while (true) {
-        if (holder.findProperty(atom_id)) |index| {
+        // Trusted hash-chain probe: mirrors qjs's force-inlined find_own_property
+        // (quickjs.c:6135), which walks hash_next off the already-loaded property
+        // with no per-step cycle/bounds guards. The defensive findProperty's
+        // extra `steps < prop_count` / `index >= prop_count` / `index >= props.len`
+        // guards are dead on any well-formed shape (the trusted probe's debug
+        // asserts confirm the invariants), so this is the same lean probe the
+        // ordinary get_field data path already uses — a faithful alignment, not a
+        // behavior change — on this hot `.length`/`.byteLength`/`.byteOffset` walk.
+        if (holder.findPropertyIndexTrusted(atom_id)) |index| {
             return typedArrayShapePropertyForFastPath(rt, receiver, holder, index, atom_id, expected_id);
         }
         if (holder.proxyTarget() != null) return .{ .proxy = holder };
@@ -588,7 +608,10 @@ noinline fn typedArrayNamedPropertyForFastPath(
     atom_id: core.Atom,
 ) ?PropertyFastValue {
     const expected_id = typedArrayAccessorMethodId(atom_id) orelse return null;
-    if (object.findProperty(atom_id)) |index| {
+    // Trusted hash-chain probe (qjs find_own_property, quickjs.c:6135), matching
+    // the ordinary get_field data path rather than the defensive findProperty
+    // whose per-step guards are dead on a well-formed shape.
+    if (object.findPropertyIndexTrusted(atom_id)) |index| {
         return typedArrayShapePropertyForFastPath(rt, object, object, index, atom_id, expected_id);
     }
     return typedArrayPrototypeNamedPropertyForFastPath(rt, object, atom_id, expected_id);
@@ -719,7 +742,7 @@ pub inline fn cachedStringPropertyValueForFastPath(
             const index_value = core.JSValue.int32(@intCast(index));
             if (fastDenseArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
             if (fastStringIndexValue(rt, receiver, index_value)) |value| return .{ .owned = value };
-            if (fastTypedArrayElementValue(rt, receiver, index_value)) |value| return .{ .owned = value };
+            if (fastTypedArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
         }
     }
     return atomPropertyValueForFastPath(rt, global, receiver, atom_id);
@@ -843,7 +866,93 @@ fn stringFromCharCodeInt32Value(rt: *core.JSRuntime, code: i32) !core.JSValue {
     return (try core.string.String.createUtf16(rt, &.{unit})).value();
 }
 
-pub noinline fn arrayElement(
+/// OP_put_array_el continuation after the resident handler misses. The caller
+/// has already published pc/sp, so this is the direct counterpart of qjs's
+/// put_array_el_slow_path -> JS_SetPropertyValue call, without the shared
+/// get/put opcode switch.
+pub inline fn putArrayElementAfterFastMiss(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.FunctionBytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+) !Step {
+    const value = try stack.pop();
+    defer value.free(ctx.runtime);
+    const key = try stack.pop();
+    defer key.free(ctx.runtime);
+    const obj = try stack.pop();
+    defer obj.free(ctx.runtime);
+    // The resident OP_put_array_el handler already ran qjs
+    // JS_SetPropertyValue's object+int class switch (Array, slow Array, then
+    // TypedArray). On that exact miss, continue at qjs's JS_ValueToAtom ->
+    // JS_SetPropertyInternal slow-path boundary instead of repeating the same
+    // typed/dense probes here.
+    const int_object_fast_miss = key.isInt() and obj.isObject();
+    if (!int_object_fast_miss) {
+        switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        }) {
+            .handled => return .continue_loop,
+            .not_typed_array => {},
+        }
+        switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) {
+            .handled => return .continue_loop,
+            .out_of_memory => return error.OutOfMemory,
+            .miss => {},
+        }
+    }
+    if (int_object_fast_miss) {
+        const index = key.asInt32().?;
+        if (index >= 0) {
+            // qjs JS_ValueToAtom -> __JS_AtomFromUInt32: a non-negative int32
+            // key is already a tagged integer atom. No JSValue copy/string
+            // conversion or dynamic atom ownership is needed.
+            const atom_id = core.atom.atomFromUInt32(@intCast(index));
+            const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
+            result.free(ctx.runtime);
+            return .done;
+        }
+    }
+    const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    defer key_value.free(ctx.runtime);
+    // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
+    // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish base
+    // TypeError, so user key-coercion side effects fire first.
+    if (obj.isNull() or obj.isUndefined()) {
+        _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key_value) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
+        unreachable;
+    }
+    if (!int_object_fast_miss) {
+        switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key_value, value)) {
+            .handled => return .continue_loop,
+            .out_of_memory => return error.OutOfMemory,
+            .miss => {},
+        }
+    }
+    const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
+    defer ctx.runtime.atoms.free(atom_id);
+    const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    result.free(ctx.runtime);
+    return .done;
+}
+
+pub noinline fn getArrayElement(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -891,7 +1000,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
+            if (fastTypedArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -934,7 +1043,7 @@ pub noinline fn arrayElement(
                 old_value.free(ctx.runtime);
                 return .done;
             }
-            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
+            if (fastTypedArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 const old_value = stack.values[stack.len() - 1];
                 stack.values[stack.len() - 1] = value;
@@ -979,7 +1088,7 @@ pub noinline fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
-            if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
+            if (fastTypedArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
@@ -1003,45 +1112,6 @@ pub noinline fn arrayElement(
             old_key.free(ctx.runtime);
             try stack.pushOwned(value);
         },
-        op.put_array_el => {
-            const value = try stack.pop();
-            defer value.free(ctx.runtime);
-            const key = try stack.pop();
-            defer key.free(ctx.runtime);
-            const obj = try stack.pop();
-            defer obj.free(ctx.runtime);
-            switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            }) {
-                .handled => return .continue_loop,
-                .not_typed_array => {},
-            }
-            if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) return .continue_loop;
-            const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            };
-            defer key_value.free(ctx.runtime);
-            // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
-            // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish
-            // base TypeError, so user key-coercion side effects fire first.
-            if (obj.isNull() or obj.isUndefined()) {
-                _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key_value) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                    return err;
-                };
-                unreachable;
-            }
-            if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key_value, value)) return .continue_loop;
-            const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-            defer ctx.runtime.atoms.free(atom_id);
-            const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            };
-            result.free(ctx.runtime);
-        },
         else => unreachable,
     }
     return .done;
@@ -1054,34 +1124,26 @@ pub noinline fn arrayElement(
 // Uint8Clamped/Int16/Uint16/Int32/Uint32/Float16/Float32/Float64 — kinds 1..10),
 // which are all allocation-free; BigInt64/BigUint64 (kinds 11/12) return null so
 // the value flows through the (correct, allocating) generic path. The byte→value
-// mapping is delegated to the canonical `typedArrayGetIndex` (one source of truth
-// with the slow path / DataView), so no kind-specific decoder is duplicated here.
-pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue) ?core.JSValue {
+// mapping is delegated to the canonical `readNumericElement`, which is also used
+// by the generic core reader, so no kind-specific decoder is duplicated here.
+pub fn fastTypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JSValue {
     const object = objectFromValue(obj) orelse return null;
     const key_int = key.asInt32() orelse return null;
     if (key_int < 0) return null;
-    // Non-BigInt, fixed-length, real typed array only. element_size==0 means the
-    // object is not a typed array; kinds 11/12 are BigInt (skip — they allocate).
-    const kind = object.typedArrayKind();
+    // QuickJS keeps the live element count and base pointer on the TypedArray
+    // object and refreshes them from the ArrayBuffer's view list on every
+    // detach/resize. Read that state once: one bounds check, then one typed
+    // load. DataView (`element_size == 0`) and allocating BigInt kinds punt.
+    const payload = object.typedArrayPayloadFast() orelse return null;
+    const kind = payload.kind;
     if (kind < 1 or kind > 10) return null;
-    const fixed_len = object.typedArrayFixedLength() orelse return null;
-    const element_size = object.typedArrayElementSize();
-    const buffer_value = object.typedArrayBuffer() orelse return null;
-    const buffer = objectFromValue(buffer_value) orelse return null;
-    if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return null;
-    if (buffer.arrayBufferDetached()) return core.JSValue.undefinedValue();
-
-    const bytes = buffer.byteStorage();
-    const byte_offset = object.typedArrayByteOffset();
-    if (byte_offset > bytes.len) return core.JSValue.undefinedValue();
-    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, element_size)) catch return null;
-    if (byte_len > bytes.len - byte_offset) return core.JSValue.undefinedValue();
     const index: u32 = @intCast(key_int);
-    if (index >= fixed_len) return core.JSValue.undefinedValue();
-    // All bounds/detach/length conditions above match typedArrayGetIndex's own
-    // gating, so for kinds 1..10 it cannot error here (no allocation) — but route
-    // any unexpected error to the slow path rather than swallowing it.
-    return core.typed_array.typedArrayGetIndex(rt, object, index) catch null;
+    if (index >= payload.live_length) return core.JSValue.undefinedValue();
+    const data = payload.data orelse return core.JSValue.undefinedValue();
+    const width: usize = payload.element_size;
+    if (width == 0) return null;
+    const element_offset = @as(usize, index) * width;
+    return core.typed_array.readNumericElement(kind, data + element_offset);
 }
 
 pub const TypedArrayWriteFast = enum { not_typed_array, handled };
@@ -1120,17 +1182,44 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     // string / boolean / null / undefined have non-throwing conversions, so the
     // validity-check-first order is observably identical for them — they stay fast.)
     if (value.isBigInt() or value.isSymbol()) return .not_typed_array;
-    if (!core.object.isTypedArrayObject(object)) return .not_typed_array;
-    const kind = object.typedArrayKind();
-    // BigInt64/BigUint64 punt to the slow path (it converts via JS_ToBigInt64).
-    if (kind == 11 or kind == 12) return .not_typed_array;
+    // Resolve the payload once. Its live count/data pair is maintained from the
+    // backing ArrayBuffer's view list, exactly like qjs `u.array.count/u.ptr`.
+    // Keep the qjs operation order: immutable reject -> coerce -> RE-check the
+    // live pair -> store; detach/OOB after conversion is a silent no-op.
+    const payload = object.typedArrayPayloadFast() orelse return .not_typed_array;
+    const kind = payload.kind;
+    if (kind < 1 or kind > 10) return .not_typed_array; // BigInt / non-TA -> slow
+    const backing = payload.backing_payload orelse return .not_typed_array;
+    if (backing.immutable) return .handled; // silent no-op
+    const width = payload.element_size;
+    if (width == 0) return .not_typed_array;
+    var scratch: [8]u8 = undefined;
+    try core.typed_array.writeNumericElement(rt, kind, scratch[0..width], value); // coerce FIRST
     const index: u32 = @intCast(key_int);
-    // typedArraySetElement mirrors qjs exactly: immutable reject (silent no-op),
-    // convert into a scratch buffer FIRST (user code may detach/resize), then
-    // re-check the in-bounds/attached state and store. OOB after conversion is a
-    // silent no-op (qjs `ta_out_of_bound: return TRUE`), not a throw.
-    _ = try core.typed_array.typedArraySetElement(rt, object, index, value);
+    if (index >= payload.live_length) return .handled;
+    const data = payload.data orelse return .handled;
+    const byte_width: usize = width;
+    const off = @as(usize, index) * byte_width;
+    // Store the coerced element with a direct sized copy. `width` is a runtime
+    // value (payload.element_size), so a plain @memcpy lowers to a memcpyFast
+    // CALL even for a 1-byte Uint8 store — the top self-cost of typed-array-heavy
+    // code (gbemu VRAM/memory writes). Switch to comptime lengths so each arm is
+    // a single sized load+store. Widths are always one of {1,2,4,8}.
+    storeElementBytes(data[off .. off + byte_width], &scratch, width);
     return .handled;
+}
+
+/// Direct sized store of a coerced typed-array element from `scratch` into the
+/// destination buffer. Comptime lengths per width so LLVM emits a plain sized
+/// store instead of a runtime-length memcpyFast call.
+inline fn storeElementBytes(dst: []u8, scratch: *const [8]u8, width: u32) void {
+    switch (width) {
+        1 => dst[0] = scratch[0],
+        2 => dst[0..2].* = scratch[0..2].*,
+        4 => dst[0..4].* = scratch[0..4].*,
+        8 => dst[0..8].* = scratch[0..8].*,
+        else => @memcpy(dst[0..width], scratch[0..width]),
+    }
 }
 
 fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {

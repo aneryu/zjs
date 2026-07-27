@@ -11,6 +11,7 @@ const function_def = zjs.bytecode.function_def;
 const op = zjs.bytecode.opcode.op;
 const property_ops = zjs.exec.property_ops;
 const object_ops = zjs.exec.object_ops;
+const array_ops = zjs.exec.array_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
 
@@ -2702,6 +2703,153 @@ test "class entry and construction use bytecode gates without a class behavior f
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
+}
+
+test "ordinary constructor Machine completion preserves bindings eval recursion and abrupt teardown" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    const result = try js.eval(
+        \\let observed;
+        \\let evalThis;
+        \\let evalNewTarget;
+        \\function Ordinary(value, mode) {
+        \\  const arrow = () => [this, new.target, arguments[0]];
+        \\  observed = arrow();
+        \\  eval("evalThis = this; evalNewTarget = new.target");
+        \\  this.value = value;
+        \\  if (mode === "object") return { replacement: value + 1 };
+        \\  if (mode === "throw") throw value;
+        \\  return 17;
+        \\}
+        \\const primitive = new Ordinary(3, "primitive");
+        \\assert.sameValue(primitive.value, 3);
+        \\assert.sameValue(observed[0], primitive);
+        \\assert.sameValue(observed[1], Ordinary);
+        \\assert.sameValue(observed[2], 3);
+        \\assert.sameValue(evalThis, primitive);
+        \\assert.sameValue(evalNewTarget, Ordinary);
+        \\const replacement = new Ordinary(4, "object");
+        \\assert.sameValue(replacement.replacement, 5);
+        \\assert.sameValue(replacement.value, undefined);
+        \\let caught;
+        \\try { new Ordinary(6, "throw"); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 6);
+        \\
+        \\function Recursive(depth) {
+        \\  this.depth = depth;
+        \\  if (depth !== 0) this.child = new Recursive(depth - 1);
+        \\}
+        \\const recursive = new Recursive(32);
+        \\let count = 0;
+        \\for (let cursor = recursive; cursor; cursor = cursor.child) count++;
+        \\assert.sameValue(count, 33);
+        \\
+        \\function EvalTail(value) {
+        \\  eval("this.value = value");
+        \\}
+        \\const evalTail = new EvalTail(9);
+        \\assert.sameValue(evalTail.value, 9);
+        \\
+        \\function GcConstructor(value) {
+        \\  this.value = value;
+        \\  $262.gc();
+        \\  return null;
+        \\}
+        \\const gcValue = new GcConstructor(11);
+        \\assert.sameValue(gcValue.value, 11);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
+test "derived constructor Machine completion preserves inherited new target and teardown" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    const result = try js.eval(
+        \\let baseNewTarget;
+        \\function OrdinaryBase(value) { this.value = value; }
+        \\class Base {
+        \\  constructor(value, mode) {
+        \\    baseNewTarget = new.target;
+        \\    this.value = value;
+        \\    if (mode === "object") return { replacement: value + 1 };
+        \\    if (mode === "throw") throw value;
+        \\  }
+        \\}
+        \\class Derived extends Base {
+        \\  constructor(value, mode) {
+        \\    super(value, mode);
+        \\    this.derived = true;
+        \\  }
+        \\}
+        \\class FromOrdinary extends OrdinaryBase {
+        \\  constructor(value) { super(value); }
+        \\}
+        \\
+        \\const direct = new Derived(3);
+        \\assert.sameValue(direct.value, 3);
+        \\assert.sameValue(direct.derived, true);
+        \\assert.sameValue(baseNewTarget, Derived);
+        \\assert.sameValue(Object.getPrototypeOf(direct), Derived.prototype);
+        \\const fromOrdinary = new FromOrdinary(5);
+        \\assert.sameValue(fromOrdinary.value, 5);
+        \\assert.sameValue(Object.getPrototypeOf(fromOrdinary), FromOrdinary.prototype);
+        \\
+        \\function Replacement() {}
+        \\Replacement.prototype = { marker: 7 };
+        \\const reflected = Reflect.construct(Derived, [11], Replacement);
+        \\assert.sameValue(reflected.value, 11);
+        \\assert.sameValue(reflected.derived, true);
+        \\assert.sameValue(baseNewTarget, Replacement);
+        \\assert.sameValue(Object.getPrototypeOf(reflected), Replacement.prototype);
+        \\const reflectedOrdinary = Reflect.construct(FromOrdinary, [13], Replacement);
+        \\assert.sameValue(reflectedOrdinary.value, 13);
+        \\assert.sameValue(Object.getPrototypeOf(reflectedOrdinary), Replacement.prototype);
+        \\
+        \\const replacement = new Derived(17, "object");
+        \\assert.sameValue(replacement.replacement, 18);
+        \\assert.sameValue(replacement.derived, true);
+        \\let caught;
+        \\try { new Derived(19, "throw"); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 19);
+        \\
+        \\class ReturnsObject extends Base {
+        \\  constructor() { return { selected: 23 }; }
+        \\}
+        \\class ReturnsPrimitive extends Base {
+        \\  constructor() { return 29; }
+        \\}
+        \\assert.sameValue(new ReturnsObject().selected, 23);
+        \\assert.throws(TypeError, function () { new ReturnsPrimitive(); });
+        \\
+        \\class Recursive extends Base {
+        \\  constructor(depth) {
+        \\    super(depth);
+        \\    if (depth !== 0) this.child = new Recursive(depth - 1);
+        \\  }
+        \\}
+        \\const recursive = new Recursive(24);
+        \\let count = 0;
+        \\for (let cursor = recursive; cursor; cursor = cursor.child) count++;
+        \\assert.sameValue(count, 25);
+        \\$262.gc();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
 test "Reflect.construct keeps a fresh prototype getter result alive through instance allocation" {
@@ -12335,6 +12483,141 @@ test "computed named reads preserve prototype accessors proxies and operand owne
     try std.testing.expect(result.isUndefined());
 }
 
+test "computed integer write misses preserve generic set semantics" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const own = { 0: 1 };
+        \\own[0] = 2;
+        \\assert.sameValue(own[0], 2);
+        \\const negativeKey = -1;
+        \\own[negativeKey] = 3;
+        \\assert.sameValue(own["-1"], 3);
+        \\let setterReceiver;
+        \\let setterValue;
+        \\const prototype = {};
+        \\Object.defineProperty(prototype, "0", {
+        \\    set(value) {
+        \\        setterReceiver = this;
+        \\        setterValue = value;
+        \\    },
+        \\});
+        \\const inherited = Object.create(prototype);
+        \\inherited[0] = 4;
+        \\assert.sameValue(setterReceiver, inherited);
+        \\assert.sameValue(setterValue, 4);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(inherited, "0"), false);
+        \\let trapReceiver;
+        \\const target = { 0: 5 };
+        \\const proxy = new Proxy(target, {
+        \\    set(object, key, value, receiver) {
+        \\        trapReceiver = receiver;
+        \\        object[key] = value + 1;
+        \\        return true;
+        \\    },
+        \\});
+        \\proxy[0] = 6;
+        \\assert.sameValue(target[0], 7);
+        \\assert.sameValue(trapReceiver, proxy);
+        \\function mapped(value) {
+        \\    arguments[0] = 8;
+        \\    return [value, arguments[0]];
+        \\}
+        \\const mappedResult = mapped(1);
+        \\assert.sameValue(mappedResult[0], 8);
+        \\assert.sameValue(mappedResult[1], 8);
+        \\let coerced = 0;
+        \\const typed = new Int32Array(1);
+        \\typed[0] = { valueOf() { coerced++; return 9; } };
+        \\assert.sameValue(typed[0], 9);
+        \\assert.sameValue(coerced, 1);
+        \\const frozen = {};
+        \\Object.defineProperty(frozen, "0", { value: 10, writable: false });
+        \\frozen[0] = 11;
+        \\assert.sameValue(frozen[0], 10);
+        \\function strictWrite() {
+        \\    "use strict";
+        \\    frozen[0] = 12;
+        \\}
+        \\let rejected = false;
+        \\try {
+        \\    strictWrite();
+        \\} catch (error) {
+        \\    rejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(rejected, true);
+        \\assert.sameValue(frozen[0], 10);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "dense write leaf consumes reserved appends only inside the qjs capacity window" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array = try core.Object.createArray(rt, null);
+    defer array.value().free(rt);
+    try array.fastArrayEnsureCapacity(rt, 2);
+
+    const stored = try core.Object.create(rt, core.class.ids.object, null);
+    const stored_witness = stored.value().dup();
+    defer stored_witness.free(rt);
+    try std.testing.expectEqual(
+        array_ops.DenseArrayOverwriteFastResult.handled,
+        array_ops.putDenseArrayElementOverwriteOwnedFast(
+            rt,
+            array.value(),
+            core.JSValue.int32(0),
+            stored.value(),
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 1), array.fastArrayCount());
+    try std.testing.expectEqual(@as(u32, 1), array.arrayLength());
+    try std.testing.expectEqual(&stored.header, array.fastArrayElementAt(0).refHeader().?);
+    try std.testing.expectEqual(@as(i32, 2), stored.header.meta().rc);
+
+    const growth_array = try core.Object.createArray(rt, null);
+    defer growth_array.value().free(rt);
+    const retained = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expectEqual(
+        array_ops.DenseArrayOverwriteFastResult.append_candidate,
+        array_ops.putDenseArrayElementOverwriteOwnedFast(
+            rt,
+            growth_array.value(),
+            core.JSValue.int32(0),
+            retained.value(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i32, 1), retained.header.meta().rc);
+    retained.value().free(rt);
+
+    const shaped_array = try core.Object.createArray(rt, null);
+    defer shaped_array.value().free(rt);
+    try shaped_array.fastArrayEnsureCapacity(rt, 1);
+    const extra_atom = try rt.internAtom("extra");
+    defer rt.atoms.free(extra_atom);
+    try shaped_array.defineOwnProperty(
+        rt,
+        extra_atom,
+        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+    );
+    const shaped_retained = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expectEqual(
+        array_ops.DenseArrayOverwriteFastResult.append_candidate,
+        array_ops.putDenseArrayElementOverwriteOwnedFast(
+            rt,
+            shaped_array.value(),
+            core.JSValue.int32(0),
+            shaped_retained.value(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i32, 1), shaped_retained.header.meta().rc);
+    shaped_retained.value().free(rt);
+}
+
 test "static named getter and proxy fast paths preserve receivers throws and invariants" {
     engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
@@ -16860,6 +17143,35 @@ test "reflect construct roots argument list while resolving prototype" {
 // paths with a real return op and the verifier must reject reachable falloff.
 // Each test pins the observable completion value.
 // ===========================================================================
+
+test "short conditional branches preserve immediate and full ToBoolean semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function choose(value) { if (value) return 1; return 0; }
+        \\function orValue(value) { return value || 9; }
+        \\function andValue(value) { return value && 9; }
+        \\assert.sameValue(choose(-1), 1);
+        \\assert.sameValue(choose(0), 0);
+        \\assert.sameValue(choose(1), 1);
+        \\assert.sameValue(choose(false), 0);
+        \\assert.sameValue(choose(true), 1);
+        \\assert.sameValue(choose(null), 0);
+        \\assert.sameValue(choose(undefined), 0);
+        \\assert.sameValue(choose(-0), 0);
+        \\assert.sameValue(choose(0.5), 1);
+        \\assert.sameValue(choose(""), 0);
+        \\assert.sameValue(choose("x"), 1);
+        \\assert.sameValue(choose({}), 1);
+        \\assert.sameValue(orValue(0), 9);
+        \\assert.sameValue(orValue(4), 4);
+        \\assert.sameValue(andValue(0), 0);
+        \\assert.sameValue(andValue(4), 9);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
 
 test "if-throw fall-off form returns undefined (if_false8 branch-to-end)" {
     const js = helpers.sharedTestEngine();

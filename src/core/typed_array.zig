@@ -82,7 +82,7 @@ pub fn sharedArrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_
     // re-identifies the backing store.
     const store = try object.SharedBufferStore.create(rt, max_byte_length orelse byte_length);
     obj.installSharedByteStorage(rt, store);
-    obj.byteStorageSlot().* = store.bytes[0..byte_length];
+    try obj.setSharedByteStorageLength(byte_length);
     obj.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return obj.value();
 }
@@ -273,7 +273,7 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
     // Atomics waiter keys valid.
     if (buffer.sharedByteStorageStore()) |store| {
         if (store.bytes.len >= new_length) {
-            buffer.byteStorageSlot().* = store.bytes[0..new_length];
+            try buffer.setSharedByteStorageLength(new_length);
             return JSValue.undefinedValue();
         }
     }
@@ -390,11 +390,7 @@ pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u
     } else null;
     const obj = try createTypedArrayInstance(rt, kind, prototype);
     errdefer Object.destroyFromHeader(rt, &obj.header);
-    try obj.setOptionalValueSlot(rt, obj.typedArrayBufferSlot(), buffer.value().dup());
-    obj.typedArrayByteOffsetSlot().* = byte_offset;
-    obj.typedArrayElementSizeSlot().* = element_size;
-    obj.typedArrayFixedLengthSlot().* = fixed_length;
-    obj.typedArrayKindSlot().* = kind;
+    try obj.initTypedArrayView(rt, buffer.value().dup(), byte_offset, element_size, fixed_length, kind);
     return obj.value();
 }
 
@@ -415,12 +411,9 @@ pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kin
 
     const obj = try createTypedArrayInstance(rt, kind, prototype);
     errdefer Object.destroyFromHeader(rt, &obj.header);
-    try obj.setOptionalValueSlot(rt, obj.typedArrayBufferSlot(), owned_buffer_value);
+    const view_buffer = owned_buffer_value;
     owned_buffer_value = JSValue.undefinedValue();
-    obj.typedArrayByteOffsetSlot().* = 0;
-    obj.typedArrayElementSizeSlot().* = element_size;
-    obj.typedArrayFixedLengthSlot().* = @intCast(length);
-    obj.typedArrayKindSlot().* = kind;
+    try obj.initTypedArrayView(rt, view_buffer, 0, element_size, @intCast(length), kind);
     return obj.value();
 }
 
@@ -443,21 +436,27 @@ pub fn dataViewConstruct(rt: *JSRuntime, args: []const JSValue, prototype: ?*Obj
     const obj = try Object.create(rt, class.ids.dataview, prototype);
     errdefer Object.destroyFromHeader(rt, &obj.header);
     if (view_length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-    try obj.setOptionalValueSlot(rt, obj.typedArrayBufferSlot(), buffer.value().dup());
-    obj.typedArrayByteOffsetSlot().* = byte_offset;
-    obj.typedArrayFixedLengthSlot().* = @intCast(view_length);
-    obj.typedArrayKindSlot().* = if (auto_length) 1 else 0;
+    try obj.initTypedArrayView(
+        rt,
+        buffer.value().dup(),
+        byte_offset,
+        0,
+        @intCast(view_length),
+        if (auto_length) 1 else 0,
+    );
     return obj.value();
 }
 
 // --- TypedArray element read / write (engine core) --------------------------
 
 pub fn typedArrayGetIndex(rt: *JSRuntime, obj: *Object, index: u32) !JSValue {
-    const length = try object.typedArrayLength(rt, obj);
-    if (index >= length) return JSValue.undefinedValue();
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * obj.typedArrayElementSize();
-    return readElement(rt, obj.typedArrayKind(), buffer.byteStorage()[offset..][0..obj.typedArrayElementSize()]);
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0) return error.TypeError;
+    if (index >= payload.live_length) return JSValue.undefinedValue();
+    const data = payload.data orelse return JSValue.undefinedValue();
+    const width: usize = payload.element_size;
+    const offset = @as(usize, index) * width;
+    return readElement(rt, payload.kind, data[offset .. offset + width]);
 }
 
 pub fn typedArrayCoerceElementValue(rt: *JSRuntime, obj: *Object, value: JSValue) !void {
@@ -466,24 +465,30 @@ pub fn typedArrayCoerceElementValue(rt: *JSRuntime, obj: *Object, value: JSValue
 }
 
 pub fn typedArraySetElement(rt: *JSRuntime, obj: *Object, index: u32, value: JSValue) !bool {
-    if (try object.typedArrayImmutableBuffer(rt, obj)) return false;
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (backing.immutable) return false;
     var scratch: [8]u8 = undefined;
-    const width = obj.typedArrayElementSize();
-    try writeElement(rt, obj.typedArrayKind(), scratch[0..width], value);
-    if (!try object.typedArrayIndexValid(rt, obj, index)) return false;
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * width;
-    @memcpy(buffer.byteStorage()[offset..][0..width], scratch[0..width]);
+    const width: usize = payload.element_size;
+    if (width == 0) return error.TypeError;
+    try writeElement(rt, payload.kind, scratch[0..width], value);
+    if (index >= payload.live_length) return false;
+    const data = payload.data orelse return false;
+    const offset = @as(usize, index) * width;
+    @memcpy(data[offset .. offset + width], scratch[0..width]);
     return true;
 }
 
 pub fn typedArraySetIndex(rt: *JSRuntime, obj: *Object, index: u32, value: JSValue) !bool {
-    if (try object.typedArrayImmutableBuffer(rt, obj)) return false;
-    const length = try object.typedArrayLength(rt, obj);
-    if (index >= length) return true;
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * obj.typedArrayElementSize();
-    try writeElement(rt, obj.typedArrayKind(), buffer.byteStorage()[offset..][0..obj.typedArrayElementSize()], value);
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (backing.immutable) return false;
+    const width: usize = payload.element_size;
+    if (width == 0) return error.TypeError;
+    if (index >= payload.live_length) return true;
+    const data = payload.data orelse return true;
+    const offset = @as(usize, index) * width;
+    try writeElement(rt, payload.kind, data[offset .. offset + width], value);
     return true;
 }
 
@@ -495,35 +500,37 @@ pub fn typedArraySetIndex(rt: *JSRuntime, obj: *Object, index: u32, value: JSVal
 /// re-validated detach/out-of-bounds and clamped `final` to the live length.
 pub fn typedArrayFillRange(rt: *JSRuntime, obj: *Object, start: u32, final: u32, value: JSValue) !void {
     if (start >= final) return;
-    const kind = obj.typedArrayKind();
-    const width = obj.typedArrayElementSize();
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const kind = payload.kind;
+    const width: usize = payload.element_size;
+    if (width == 0) return error.TypeError;
     var scratch: [8]u8 = undefined;
     try writeElement(rt, kind, scratch[0..width], value);
 
-    const buffer = try typedArrayBufferObject(obj);
-    const storage = buffer.byteStorage();
-    const base = obj.typedArrayByteOffset();
-    var offset = base + @as(usize, start) * width;
-    const end = base + @as(usize, final) * width;
+    const data = payload.data orelse return error.TypeError;
+    var offset = @as(usize, start) * width;
+    const end = @as(usize, final) * width;
     switch (width) {
-        1 => @memset(storage[offset..end], scratch[0]),
+        1 => @memset(data[offset..end], scratch[0]),
         else => {
             const cell = scratch[0..width];
             while (offset < end) : (offset += width) {
-                @memcpy(storage[offset..][0..width], cell);
+                @memcpy(data[offset .. offset + width], cell);
             }
         },
     }
 }
 
 pub fn typedArraySetInt32IndexFast(rt: *JSRuntime, obj: *Object, index: u32, value: i32) !bool {
-    if (obj.typedArrayKind() != 6) return false;
-    if (try object.typedArrayImmutableBuffer(rt, obj)) return false;
-    const length = try object.typedArrayLength(rt, obj);
-    if (index >= length) return true;
-    const buffer = try typedArrayBufferObject(obj);
-    const offset = obj.typedArrayByteOffset() + @as(usize, index) * 4;
-    std.mem.writeInt(i32, buffer.byteStorage()[offset..][0..4], value, .little);
+    _ = rt;
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.kind != 6) return false;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (backing.immutable) return false;
+    if (index >= payload.live_length) return true;
+    const data = payload.data orelse return true;
+    const offset = @as(usize, index) * 4;
+    std.mem.writeInt(i32, data[offset .. offset + 4], value, .little);
     return true;
 }
 
@@ -835,7 +842,19 @@ fn f64ToFloat16(value: f64) u16 {
     return @bitCast(@as(f16, @floatCast(value)));
 }
 
-fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
+/// Decode one non-BigInt TypedArray element without entering the allocating
+/// BigInt/error-union path. QuickJS's JS_GetPropertyValue typed-array arm
+/// switches on the concrete numeric class and returns the value directly; keep
+/// the same split here so the VM's already-validated numeric fast path does not
+/// acquire the stack frame needed by kinds 11/12. Use the platform C ABI for
+/// this leaf just as QuickJS's C helper does: a 16-byte JSValue is returned in
+/// the ABI result registers on 64-bit targets instead of through Zig's internal
+/// sret pointer. The raw byte pointer is safe because every caller has already
+/// validated the concrete typed-array kind and its fixed element width.
+///
+/// This is also the single source of truth for numeric decoding: readElement
+/// delegates kinds 1..10 here before handling the allocating BigInt kinds.
+pub noinline fn readNumericElement(kind: u8, bytes: [*]const u8) callconv(.c) JSValue {
     return switch (kind) {
         1 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
         2 => JSValue.int32(bytes[0]),
@@ -847,42 +866,81 @@ fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
         8 => numberResult(float16ToF64(std.mem.readInt(u16, bytes[0..2], .little))),
         9 => numberResult(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))))),
         10 => numberResult(@bitCast(std.mem.readInt(u64, bytes[0..8], .little))),
+        else => unreachable,
+    };
+}
+
+pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
+    if (kind >= 1 and kind <= 10) return readNumericElement(kind, bytes.ptr);
+    return switch (kind) {
         11 => bigIntResult(rt, std.mem.readInt(i64, bytes[0..8], .little)),
         12 => bigIntResult(rt, @intCast(std.mem.readInt(u64, bytes[0..8], .little))),
         else => error.TypeError,
     };
 }
 
-fn writeElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+/// Coerce and encode one non-BigInt TypedArray element. QuickJS groups the
+/// JS_SetPropertyValue class-id arms by conversion mechanism: truncating
+/// integer arrays use JS_ToInt32Free, Uint8Clamped uses JS_ToUint8ClampFree,
+/// and floating arrays use JS_ToFloat64Free. Preserve those three groups here.
+/// In particular, an existing int32 value reaches integer storage as raw bits
+/// instead of making a round trip through f64 and the generic 2^32 modulo.
+///
+/// The VM's numeric element fast path calls this directly; writeElement also
+/// delegates kinds 1..10 here so the encoding remains canonical.
+pub inline fn writeNumericElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+    if (value.isBigInt()) return error.TypeError;
     switch (kind) {
-        1, 2 => {
-            if (value.isBigInt()) return error.TypeError;
-            bytes[0] = @truncate(numberToUint32(try coerceNumber(rt, value)));
-        },
-        3 => {
-            if (value.isBigInt()) return error.TypeError;
-            bytes[0] = numberToUint8Clamp(try coerceNumber(rt, value));
-        },
-        4, 5 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u16, bytes[0..2], @truncate(numberToUint32(try coerceNumber(rt, value))), .little);
-        },
-        6, 7 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u32, bytes[0..4], numberToUint32(try coerceNumber(rt, value)), .little);
-        },
-        8 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(try coerceNumber(rt, value)), .little);
-        },
-        9 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(try coerceNumber(rt, value)))), .little);
-        },
-        10 => {
-            if (value.isBigInt()) return error.TypeError;
-            std.mem.writeInt(u64, bytes[0..8], @bitCast(try coerceNumber(rt, value)), .little);
-        },
+        1, 2, 4, 5, 6, 7 => return writeTruncatingIntegerElement(rt, kind, bytes, value),
+        3 => return writeClampedElement(rt, bytes, value),
+        8 => return writeFloatingElement(8, rt, bytes, value),
+        9 => return writeFloatingElement(9, rt, bytes, value),
+        10 => return writeFloatingElement(10, rt, bytes, value),
+        else => unreachable,
+    }
+}
+
+noinline fn writeTruncatingIntegerElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+    const bits: u32 = if (value.asInt32()) |integer|
+        @bitCast(integer)
+    else
+        numberToUint32(try coerceNumber(rt, value));
+    switch (kind) {
+        1, 2 => bytes[0] = @truncate(bits),
+        4, 5 => std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little),
+        6, 7 => std.mem.writeInt(u32, bytes[0..4], bits, .little),
+        else => unreachable,
+    }
+}
+
+noinline fn writeClampedElement(rt: *JSRuntime, bytes: []u8, value: JSValue) !void {
+    bytes[0] = if (value.asInt32()) |integer|
+        if (integer <= 0)
+            0
+        else if (integer >= 255)
+            255
+        else
+            @intCast(integer)
+    else
+        numberToUint8Clamp(try coerceNumber(rt, value));
+}
+
+noinline fn writeFloatingElement(comptime kind: u8, rt: *JSRuntime, bytes: []u8, value: JSValue) !void {
+    const number = try coerceNumber(rt, value);
+    if (kind == 8) {
+        std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(number), .little);
+    } else if (kind == 9) {
+        std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(number))), .little);
+    } else if (kind == 10) {
+        std.mem.writeInt(u64, bytes[0..8], @bitCast(number), .little);
+    } else {
+        unreachable;
+    }
+}
+
+pub fn writeElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+    if (kind >= 1 and kind <= 10) return writeNumericElement(rt, kind, bytes, value);
+    switch (kind) {
         11, 12 => std.mem.writeInt(u64, bytes[0..8], try valueToBigInt64Bits(rt, value), .little),
         else => return error.TypeError,
     }

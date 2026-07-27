@@ -5,6 +5,7 @@ const engine = zjs;
 const bytecode = zjs.bytecode;
 const core = zjs.core;
 const frame_mod = zjs.exec.frame;
+const parser = zjs.parser;
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -2372,7 +2373,10 @@ test "resolve_variables empty finalizer removal is transactional across every al
     while (try runEmptyFinalizerPhase2AllocationFailure(cleanup_rt, fail_offset)) {
         fail_offset += 1;
     }
-    try std.testing.expect(fail_offset >= 8);
+    // No scope_make_ref appears in this topology, so the five tail ledgers are
+    // deliberately absent. Keep the remaining transactional allocation
+    // surface exact: every one was failed, checked unchanged, and retried.
+    try std.testing.expectEqual(@as(usize, 7), fail_offset);
 }
 
 test "resolve_variables: scope_put_var → put_var" {
@@ -2741,6 +2745,42 @@ test "resolve_variables: scope_get_var_undef → get_var_undef" {
     try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
     try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
     try std.testing.expectEqual(z_atom, fd.closure_var[0].var_name);
+}
+
+test "resolve_labels converges for a large branch topology" {
+    const branch_count = 2048;
+    const branch_source = "if (input) { value += 1; } else { value -= 1; }";
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.ensureTotalCapacity(
+        std.testing.allocator,
+        "function targetTopologyProbe(input) { let value = 0; ".len +
+            branch_count * branch_source.len +
+            "return value; }".len,
+    );
+    try source.appendSlice(
+        std.testing.allocator,
+        "function targetTopologyProbe(input) { let value = 0; ",
+    );
+    for (0..branch_count) |_| {
+        try source.appendSlice(std.testing.allocator, branch_source);
+    }
+    try source.appendSlice(std.testing.allocator, "return value; }");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.updateNativeStackTop();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    var parsed = try parser.compile(
+        .{ .realm = realm },
+        source.items,
+        .{ .mode = .script, .filename = "large-branch-topology.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
 }
 
 test "resolve_labels: drops label opcodes" {
@@ -6652,7 +6692,9 @@ test "resolve_variables logical fold is transactional across every post-bind all
     while (try runLogicalPhaseOwnerAllocationFailure(cleanup_rt, fail_offset)) {
         fail_offset += 1;
     }
-    try std.testing.expect(fail_offset >= 8);
+    // The no-make-ref topology has six transactional allocations after
+    // folding jump-target state into the CFG.
+    try std.testing.expectEqual(@as(usize, 6), fail_offset);
 }
 
 fn runTaggedLogicalPhaseOwnerAllocationFailure(
@@ -6756,7 +6798,9 @@ test "resolve_variables tagged logical labels are leak-free and retryable across
     while (try runTaggedLogicalPhaseOwnerAllocationFailure(cleanup_rt, fail_offset)) {
         fail_offset += 1;
     }
-    try std.testing.expect(fail_offset >= 9);
+    // Tagged-label binding contributes one allocation before the same six
+    // no-make-ref phase-owner allocations.
+    try std.testing.expectEqual(@as(usize, 7), fail_offset);
 }
 
 test "resolve_labels null comparison strict_eq folds both constants with QuickJS source mapping" {

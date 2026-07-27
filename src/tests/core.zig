@@ -124,6 +124,30 @@ test "every JSValue constructor recovers its QuickJS semantic tag" {
     for (cases) |case| try std.testing.expectEqual(case.tag, case.value.tagOf());
 }
 
+test "QuickJS branch immediate range admits int bool null and undefined only" {
+    var object_header: core.gc.Header = undefined;
+    const cases = [_]struct {
+        value: core.JSValue,
+        expected: ?bool,
+    }{
+        .{ .value = core.JSValue.int32(-1), .expected = true },
+        .{ .value = core.JSValue.int32(0), .expected = false },
+        .{ .value = core.JSValue.int32(1), .expected = true },
+        .{ .value = core.JSValue.boolean(false), .expected = false },
+        .{ .value = core.JSValue.boolean(true), .expected = true },
+        .{ .value = core.JSValue.nullValue(), .expected = false },
+        .{ .value = core.JSValue.undefinedValue(), .expected = false },
+        .{ .value = core.JSValue.object(&object_header), .expected = null },
+        .{ .value = core.JSValue.float64(1), .expected = null },
+        .{ .value = core.JSValue.uninitialized(), .expected = null },
+        .{ .value = core.JSValue.shortBigInt(1), .expected = null },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, case.value.asBranchImmediateBool());
+    }
+}
+
 test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
     const RawWideValue = extern struct {
         payload: u64,
@@ -190,6 +214,26 @@ test "proven object release preserves generic JSValue ownership semantics" {
     try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
     value.freeObjectAssumeObject(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
+test "active bytecode release preserves generic ownership" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline_objects = rt.gc.liveCount();
+    rt.hot.call_depth = 1;
+    defer rt.hot.call_depth = 0;
+
+    const generic_object = try core.Object.create(rt, core.class.ids.object, null);
+    const generic_value = generic_object.value();
+    const generic_retained = generic_value.dup();
+    generic_retained.freeDuringActiveBytecode(rt);
+    try std.testing.expectEqual(@as(i32, 1), generic_object.header.meta().rc);
+    generic_value.freeDuringActiveBytecode(rt);
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+
+    core.JSValue.int32(1).freeDuringActiveBytecode(rt);
+    core.JSValue.undefinedValue().freeDuringActiveBytecode(rt);
 }
 
 test "primitive value predicates match QuickJS helpers" {
@@ -3220,7 +3264,7 @@ test "buffer and typed array state use payload storage" {
     try std.testing.expectEqual(core.class.PayloadKind.buffer, buffer.flags.class_payload_kind);
     const bytes = try rt.memory.alloc(u8, 3);
     @memset(bytes, 9);
-    buffer.byteStorageSlot().* = bytes;
+    try buffer.installByteStorage(rt, bytes);
     buffer.arrayBufferMaxByteLengthSlot().* = 8;
     try std.testing.expectEqual(@as(usize, 3), buffer.byteStorage().len);
     try std.testing.expectEqual(@as(u8, 9), buffer.byteStorage()[0]);
@@ -3228,19 +3272,83 @@ test "buffer and typed array state use payload storage" {
 
     const view = try core.Object.create(rt, core.class.ids.object, null);
     defer view.value().free(rt);
-    try view.ensureTypedArrayPayload(rt);
+    try view.initTypedArrayView(rt, buffer.value().dup(), 1, 2, 1, 4);
     try std.testing.expect(view.u.payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.typed_array, view.flags.class_payload_kind);
-    view.typedArrayBufferSlot().* = buffer.value().dup();
-    view.typedArrayByteOffsetSlot().* = 1;
-    view.typedArrayElementSizeSlot().* = 2;
-    view.typedArrayFixedLengthSlot().* = 1;
-    view.typedArrayKindSlot().* = 4;
     try std.testing.expect(view.typedArrayBuffer() != null);
     try std.testing.expectEqual(@as(usize, 1), view.typedArrayByteOffset());
     try std.testing.expectEqual(@as(u32, 2), view.typedArrayElementSize());
     try std.testing.expectEqual(@as(?u32, 1), view.typedArrayFixedLength());
     try std.testing.expectEqual(@as(u8, 4), view.typedArrayKind());
+}
+
+test "array buffer view list republishes cached typed array count and data" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const buffer = try core.Object.create(rt, core.class.ids.array_buffer, null);
+    const buffer_value = buffer.value();
+    defer buffer_value.free(rt);
+    const initial = try rt.memory.alloc(u8, 12);
+    @memset(initial, 0);
+    try buffer.installByteStorage(rt, initial);
+    buffer.arrayBufferMaxByteLengthSlot().* = 32;
+
+    const fixed = try core.Object.create(rt, core.class.ids.object, null);
+    const fixed_value = fixed.value();
+    defer fixed_value.free(rt);
+    try fixed.initTypedArrayView(rt, buffer_value.dup(), 4, 4, 2, 6);
+
+    const tracking = try core.Object.create(rt, core.class.ids.object, null);
+    const tracking_value = tracking.value();
+    defer tracking_value.free(rt);
+    try tracking.initTypedArrayView(rt, buffer_value.dup(), 2, 2, null, 5);
+
+    const fixed_payload = fixed.typedArrayPayloadFast().?;
+    const tracking_payload = tracking.typedArrayPayloadFast().?;
+    try std.testing.expectEqual(@as(u32, 2), fixed_payload.live_length);
+    try std.testing.expect(fixed_payload.data.? == buffer.byteStorage().ptr + 4);
+    try std.testing.expectEqual(@as(u32, 5), tracking_payload.live_length);
+    try std.testing.expect(tracking_payload.data.? == buffer.byteStorage().ptr + 2);
+
+    var result = try engine.exec.buffer_ops.arrayBufferResizeLength(rt, buffer_value, 7);
+    result.free(rt);
+    try std.testing.expectEqual(@as(u32, 0), fixed_payload.live_length);
+    try std.testing.expect(fixed_payload.data == null);
+    try std.testing.expectEqual(@as(u32, 2), tracking_payload.live_length);
+    try std.testing.expect(tracking_payload.data.? == buffer.byteStorage().ptr + 2);
+
+    result = try engine.exec.buffer_ops.arrayBufferResizeLength(rt, buffer_value, 12);
+    result.free(rt);
+    try std.testing.expectEqual(@as(u32, 2), fixed_payload.live_length);
+    try std.testing.expect(fixed_payload.data.? == buffer.byteStorage().ptr + 4);
+    try std.testing.expectEqual(@as(u32, 5), tracking_payload.live_length);
+    try std.testing.expect(tracking_payload.data.? == buffer.byteStorage().ptr + 2);
+
+    result = try engine.exec.buffer_ops.detachArrayBuffer(rt, buffer_value);
+    result.free(rt);
+    try std.testing.expectEqual(@as(u32, 0), fixed_payload.live_length);
+    try std.testing.expect(fixed_payload.data == null);
+    try std.testing.expectEqual(@as(u32, 0), tracking_payload.live_length);
+    try std.testing.expect(tracking_payload.data == null);
+}
+
+test "shared array buffer grow refreshes length-tracking typed array state" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const buffer_value = try engine.exec.buffer_ops.sharedArrayBufferConstructLength(rt, 2, 8, null);
+    defer buffer_value.free(rt);
+    const view = try core.Object.create(rt, core.class.ids.object, null);
+    defer view.value().free(rt);
+    try view.initTypedArrayView(rt, buffer_value.dup(), 0, 1, null, 2);
+
+    const payload = view.typedArrayPayloadFast().?;
+    try std.testing.expectEqual(@as(u32, 2), payload.live_length);
+    const result = try engine.exec.buffer_ops.sharedArrayBufferGrowLength(rt, buffer_value, 5);
+    result.free(rt);
+    try std.testing.expectEqual(@as(u32, 5), payload.live_length);
+    try std.testing.expect(payload.data != null);
 }
 
 test "shared buffer store can back wrappers in separate runtimes" {
@@ -4562,6 +4670,35 @@ test "dense array element self-assignment keeps stored object alive" {
 
     try std.testing.expectEqual(@as(i32, 1), stored.header.meta().rc);
     try std.testing.expectEqual(&stored.header, array.arrayElements()[0].refHeader().?);
+}
+
+test "owned dense array writes consume values only on success" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array = try core.Object.createArray(rt, null);
+    defer array.value().free(rt);
+    const initial = try core.Object.create(rt, core.class.ids.object, null);
+    const initial_witness = initial.value().dup();
+    defer initial_witness.free(rt);
+    const index_0 = core.atom.atomFromUInt32(0);
+
+    try std.testing.expect(try array.appendDenseArrayIndexOwned(rt, 0, index_0, initial.value()));
+    try std.testing.expectEqual(@as(i32, 2), initial.header.meta().rc);
+
+    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+    const replacement_witness = replacement.value().dup();
+    defer replacement_witness.free(rt);
+    try std.testing.expect(array.setFastArrayElementOwned(rt, 0, replacement.value()));
+    try std.testing.expectEqual(@as(i32, 1), initial.header.meta().rc);
+    try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
+    try std.testing.expectEqual(&replacement.header, array.arrayElements()[0].refHeader().?);
+
+    const rejected = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expect(!array.setFastArrayElementOwned(rt, 2, rejected.value()));
+    try std.testing.expect(!try array.appendDenseArrayIndexOwned(rt, 3, core.atom.atomFromUInt32(3), rejected.value()));
+    try std.testing.expectEqual(@as(i32, 1), rejected.header.meta().rc);
+    rejected.value().free(rt);
 }
 
 test "prototype replacement clones shared transition shape" {
@@ -8051,6 +8188,31 @@ test "typed-array buffer self-cycle is released by runtime cycle removal" {
 
     view.value().free(rt);
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
+}
+
+test "array buffer and linked typed array cycle survives arbitrary finalizer order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const buffer = try core.Object.create(rt, core.class.ids.array_buffer, null);
+    const buffer_value = buffer.value();
+    const bytes = try rt.memory.alloc(u8, 8);
+    @memset(bytes, 0);
+    try buffer.installByteStorage(rt, bytes);
+
+    const view = try core.Object.create(rt, core.class.ids.object, null);
+    try view.initTypedArrayView(rt, buffer_value.dup(), 0, 4, 2, 6);
+    const view_key = try rt.internAtom("linked-view");
+    defer rt.atoms.free(view_key);
+    try buffer.defineOwnProperty(rt, view_key, core.Descriptor.data(view.value(), true, true, true));
+
+    // buffer -> view through the property, view -> buffer through the owned
+    // TypedArray slot. The raw buffer-view list is weak and must be safely
+    // severed whether cycle removal finalizes the buffer or the view first.
+    view.value().free(rt);
+    buffer_value.free(rt);
+    _ = rt.runObjectCycleRemoval();
+    try expectNoLiveGc(rt);
 }
 
 test "regexp lastIndex self-cycle is released by runtime cycle removal" {

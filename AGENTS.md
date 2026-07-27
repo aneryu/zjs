@@ -73,7 +73,7 @@ This is a single-context repository. See `docs/agents/domain.md`.
   properties, arrays, GC, and core ownership.
 - `src/parser.zig`: lexer, parser, source positions, and compile entry.
 - `src/bytecode.zig`: bytecode, constants, scopes, module metadata,
-  inline-cache slots, and pipeline passes.
+  `FunctionBytecode` packing, and pipeline passes.
 - `src/exec/`: bytecode execution, standard-global bootstrap and built-in
   behavior, calls, eval, exceptions, modules, promises, VM opcode shards, and
   job queue.
@@ -186,11 +186,11 @@ Missing or invalid arguments should print usage and exit non-zero.
 ## Where To Look
 
 - Core values, runtime/context, atoms, strings, objects, properties, arrays,
-  shapes, IC storage, and GC:
+  shapes, and GC:
   `src/core/`.
 - Lexer, parser, source positions, and TypeScript erasure: `src/parser.zig`.
-- Bytecode emission, scopes, module metadata, inline-cache slots, and pipeline
-  passes: `src/bytecode.zig`.
+- Bytecode emission, scopes, module metadata, `FunctionBytecode` packing, and
+  pipeline passes: `src/bytecode.zig`.
 - Execution semantics, calls, exceptions, eval, modules, promises, job queue,
   and opcode handlers:
   `src/exec/`.

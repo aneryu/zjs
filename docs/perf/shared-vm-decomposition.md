@@ -24,8 +24,9 @@ helpers use the `vm_*.zig` prefix; broader domain helpers generally use the
 - `vm_literal.zig`: literal construction helpers.
 - `vm_property.zig`: property, reference, global read/write/delete, and related
   property fast-path opcode handlers.
-- `property_ic.zig`: shape-keyed property inline-cache adapter plus fast
-  ordinary data-property lookup/write helpers.
+- `property_ic.zig`: non-cached direct own/prototype/global data-property
+  lookup/write helpers. The historical filename remains, but the shape-keyed
+  inline cache has been removed.
 - `vm_regexp.zig`: RegExp VM helpers.
 - `vm_value.zig`: value conversion and primitive helper operations.
 

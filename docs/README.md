@@ -15,6 +15,9 @@ the active tree; recover them from git history when needed.
 ## Architecture And API
 
 - [Architecture](architecture.md): current source architecture snapshot.
+- [zjs / QuickJS Subsystem Difference Baseline](qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md):
+  dated source, behavior, test262, and performance comparison used to plan
+  alignment work.
 - [API Boundary](api-boundary.md): layering rules between public API, core,
   runtime, bindings, CLI, and test262 harness code.
 - [Public API Contract](public-api-contract.md): current Zig API surface and
@@ -35,10 +38,10 @@ the active tree; recover them from git history when needed.
 
 - [Performance Workflow](perf/README.md): self-baseline performance gate,
   runtime profiling, checked artifacts, and functional gates.
-- [Object And Shape Implementation](perf/object-shape-design.md): object,
-  shape, property, and inline-cache invariants.
-- [Inline Cache Implementation](perf/inline-cache-design.md): cacheable
-  opcodes, slot states, lookup rules, profiling, and validation.
+- [Object And Shape Implementation](perf/object-shape-design.md): current
+  object, shape, property, and non-cached fast-path invariants.
+- [Retired Inline Cache Note](perf/inline-cache-design.md): records that the
+  former property IC is no longer part of the engine.
 - [Shared VM Decomposition](perf/shared-vm-decomposition.md): current
   `exec/call_runtime.zig` decomposition map.
 - [Release Checklist](release-checklist.md): Production v1 release checklist.
@@ -47,7 +50,9 @@ the active tree; recover them from git history when needed.
 
 - `reports/api/public-symbols.txt`: checked public API symbol snapshot.
 - `reports/test262-latest/`: latest local test262 bucket and failure reports.
-- `reports/perf/baseline/`: checked performance baseline artifacts.
+- `reports/perf/baseline/`: active zjs self-baseline plus historical
+  cross-engine artifacts; the 2026-06-13 QuickJS-ng comparison is not a current
+  pinned-QuickJS baseline.
 - `reports/perf/current/`: checked runtime-profile artifacts.
 
 ## Documentation Rules

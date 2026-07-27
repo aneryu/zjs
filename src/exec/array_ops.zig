@@ -5936,22 +5936,88 @@ pub fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
     if (values.len != 0) rt.memory.free(core.JSValue, values);
 }
 
-pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
-    const object = property_ops.expectObject(object_value) catch return false;
-    if (!object.isArray()) return false;
+pub const DenseArrayElementFastResult = enum(u8) {
+    miss,
+    handled,
+    out_of_memory,
+};
+
+/// QuickJS performs OP_put_array_el's dense overwrite/append window directly
+/// in its C interpreter. Keep the same semantic window here, but use the C ABI
+/// for this cross-module helper so the compact three-state result is returned in
+/// a register instead of Zig's error-union sret storage. The only throwing
+/// operation in this window is dense-buffer growth.
+pub noinline fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) callconv(.c) DenseArrayElementFastResult {
+    const object = property_ops.expectObject(object_value) catch return .miss;
+    if (!object.isArray()) return .miss;
     if (key.asInt32()) |index_i32| {
-        if (index_i32 < 0 or index_i32 > core.array.max_array_index) return false;
+        if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
         const index: u32 = @intCast(index_i32);
-        if (object.setFastArrayElementDup(rt, index, value)) return true;
-        if (index > core.atom.max_int_atom) return false;
-        return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
+        if (object.setFastArrayElementDup(rt, index, value)) return .handled;
+        if (index > core.atom.max_int_atom) return .miss;
+        const appended = object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value) catch |err| switch (err) {
+            error.OutOfMemory => return .out_of_memory,
+        };
+        return if (appended) .handled else .miss;
     }
-    const number = value_ops.numberValue(key) orelse return false;
-    if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > core.array.max_array_index or @trunc(number) != number) return false;
+    const number = value_ops.numberValue(key) orelse return .miss;
+    if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > core.array.max_array_index or @trunc(number) != number) return .miss;
     const index: u32 = @intFromFloat(number);
-    if (object.setFastArrayElementDup(rt, index, value)) return true;
-    if (index > core.atom.max_int_atom) return false;
-    return try object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value);
+    if (object.setFastArrayElementDup(rt, index, value)) return .handled;
+    if (index > core.atom.max_int_atom) return .miss;
+    const appended = object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value) catch |err| switch (err) {
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return if (appended) .handled else .miss;
+}
+
+pub const DenseArrayOverwriteFastResult = enum(u8) {
+    miss,
+    handled,
+    append_candidate,
+};
+
+/// Consuming overwrite/reserved-append form for the resident OP_put_array_el
+/// handler. QuickJS keeps one exact Array/int-tag/count classification across
+/// both arms and moves sp[-1] directly into the selected dense slot.
+pub noinline fn putDenseArrayElementOverwriteOwnedFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) callconv(.c) DenseArrayOverwriteFastResult {
+    const object = property_ops.expectObject(object_value) catch return .miss;
+    if (!object.isArray()) return .miss;
+    const index_i32 = key.asInt32() orelse return .miss;
+    if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
+    const index: u32 = @intCast(index_i32);
+    if (object.setFastArrayElementOwnedDuringActiveBytecode(rt, index, value)) return .handled;
+    if (!object.isFastArray()) return .miss;
+
+    // qjs OP_put_array_el keeps the exact Array/int classification live across
+    // its overwrite and reserved-capacity append arms. Preserve the overwrite
+    // leaf above, then complete the allocation-free append here without
+    // re-reading the JSValue tags through a second helper.
+    if (index != object.fastArrayCount() or !object.flags.length_writable) return .miss;
+    if (object.hasExoticMethods() or !object.canExtendFastArray()) return .miss;
+    if (object.shape_ref.prop_count != 0) return .append_candidate;
+    const new_count = index + 1;
+    if (new_count > object.fastArrayCapacity()) return .append_candidate;
+    object.fastArraySlotAssumeCapacity(index).* = value;
+    object.setFastArrayCountAssumeCapacity(new_count);
+    if (new_count > object.arrayLength()) object.setArrayLength(new_count);
+    object.markIndexedProperties(rt);
+    return .handled;
+}
+
+/// Append remainder for a proven Array/int candidate. Revalidate the operands
+/// at this public boundary; false/OOM leave the owned stack value untouched.
+pub noinline fn putDenseArrayElementAppendOwnedFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) callconv(.c) DenseArrayElementFastResult {
+    const object = property_ops.expectObject(object_value) catch return .miss;
+    if (!object.isArray()) return .miss;
+    const index_i32 = key.asInt32() orelse return .miss;
+    if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
+    const index: u32 = @intCast(index_i32);
+    if (index > core.atom.max_int_atom) return .miss;
+    const appended = object.appendDenseArrayIndexOwned(rt, index, core.atom.atomFromUInt32(index), value) catch |err| switch (err) {
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return if (appended) .handled else .miss;
 }
 
 /// qjs `JS_MAX_LOCAL_VARS` (quickjs.c:210): the build_arg_list argument cap.

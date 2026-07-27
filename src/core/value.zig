@@ -443,6 +443,17 @@ pub const JSValue = extern struct {
         return numberValue(self);
     }
 
+    /// QuickJS OP_if_{true,false} classifies the contiguous immediate tag
+    /// range [int, undefined] with one unsigned comparison, then reads the
+    /// payload as its truth value. Null and undefined have a zero payload;
+    /// references and floats return null so the caller can use full ToBoolean.
+    pub inline fn asBranchImmediateBool(self: JSValue) ?bool {
+        const tag: u32 = @bitCast(self.tagOf());
+        const last_immediate: u32 = @intCast(Tag.undefined_value);
+        if (tag > last_immediate) return null;
+        return self.payloadOf() != 0;
+    }
+
     pub fn asBool(self: JSValue) ?bool {
         if (self.hasTag(Tag.boolean)) return self.payloadOf() != 0;
         return null;
@@ -627,6 +638,39 @@ pub const JSValue = extern struct {
         if (!self.requiresRefCount()) return;
         const tag = self.tagOf();
         if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return;
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
+        self.releaseCommonRefCount(rt);
+    }
+
+    /// QuickJS-shaped release for an owner held by an active bytecode frame.
+    ///
+    /// Runtime teardown hard-fails before entering `gc.deinit` while any
+    /// bytecode call-depth owner is live (`JSRuntime.assertIdleForTeardown`).
+    /// A VM handler may therefore prove the deinit exclusion once at bytecode
+    /// entry instead of re-reading `gc.phase` for every `JS_FreeValue`-shaped
+    /// release. Keep the proof explicit here: Debug/ReleaseSafe catch a caller
+    /// outside that window, while ReleaseFast retains only QuickJS's tag-range
+    /// check, refcount decrement, profile hook, and zero-ref tail.
+    ///
+    /// Generic/runtime teardown code must continue to use `free`.
+    pub inline fn freeDuringActiveBytecode(self: JSValue, rt: anytype) void {
+        comptime {
+            @setEvalBranchQuota(10_000);
+        }
+        std.debug.assert(rt.hot.call_depth != 0);
+        std.debug.assert(rt.gc.phase != .deinit);
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
+            if (comptime build_options.zjs_enable_opcode_profile) {
+                if (rt.opcode_profile) |prof| prof.recordValueFree();
+            }
+            self.releaseCommonRefCount(rt);
+            return;
+        }
+        if (!self.requiresRefCount()) return;
         if (comptime build_options.zjs_enable_opcode_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }

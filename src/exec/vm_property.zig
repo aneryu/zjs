@@ -1174,6 +1174,47 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     return object.fastArrayElementDup(index);
 }
 
+/// Own integer-element read for a NON-fast (sparse/slow) Array — the leg after
+/// fastDenseArrayElementValue misses. qjs JS_GetPropertyValue's JS_CLASS_ARRAY
+/// arm, when `idx >= u.array.count`, routes to JS_GetPropertyInternal with the
+/// int atom (quickjs.c:12005 / __JS_AtomFromUInt32); a slow array holds its
+/// elements as ordinary int-atom shape properties, so the overwhelmingly common
+/// case (sparse-array element, crypto BigInteger digit) is an own plain-data
+/// property that find_own_property resolves without a prototype walk. Read it
+/// inline so the hot handler skips the cold_table -> arrayElement chain, which
+/// otherwise re-tries the dense/string/typed fast paths and re-derives this same
+/// int atom through toPropertyKeyAtom (two non-inlined calls + a defer-free).
+/// A hole / accessor / prototype-only element returns null and falls through to
+/// the full slow path; gating on isArray keeps mapped-arguments (live-cell
+/// overlay) and other exotics on the exact getValueProperty ordering.
+pub fn fastArrayOwnIntElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue {
+    const index_i32 = key.asInt32() orelse return null;
+    if (index_i32 < 0) return null;
+    const object = objectFromValue(value) orelse return null;
+    if (!object.isArray()) return null;
+    return object.getOwnDataPropertyValue(core.atom.atomFromUInt32(@intCast(index_i32)));
+}
+
+/// Own integer-element OVERWRITE for a NON-fast (sparse/slow) Array — the write
+/// twin of fastArrayOwnIntElementValue. qjs JS_SetPropertyValue's JS_CLASS_ARRAY
+/// arm, when `idx >= u.array.count`, routes to JS_SetPropertyInternal with the
+/// int atom; for an existing own writable data element (the slow array holds its
+/// elements as int-atom shape properties) that resolves to one find_own_property
+/// + set_value on the slot. setOwnWritableDataProperty is exactly that primitive
+/// — it returns false for a missing (new) element, a non-writable/accessor slot,
+/// or module_ns, all of which need the full JS_SetPropertyInternal semantics
+/// (length growth, strict-mode throw, setter call) and so fall through to cold.
+/// The value is borrowed: the helper dups into the slot when refcounted, and the
+/// hot caller frees its own operand ref exactly as the dense leg does. Gating on
+/// isArray keeps mapped-arguments and other exotics on the exact set path.
+pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: core.JSValue, new_value: core.JSValue) !bool {
+    const index_i32 = key.asInt32() orelse return false;
+    if (index_i32 < 0) return false;
+    const object = objectFromValue(value) orelse return false;
+    if (!object.isArray()) return false;
+    return object.setOwnWritableDataProperty(rt, core.atom.atomFromUInt32(@intCast(index_i32)), new_value);
+}
+
 pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);

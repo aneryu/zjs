@@ -386,6 +386,39 @@ noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
     return true;
 }
 
+/// Constructor setup recovery matching vm_call.constructor: the caller's
+/// constructor operand region has already been consumed, so only deliver the
+/// pending exception to the intact caller frame. Unlike ordinary OP_call,
+/// OP_call_constructor has no implicit IteratorClose step here.
+noinline fn constructorSetupRecover(vm: *Vm, err: HostError) bool {
+    const caught = call_runtime.handleCatchableRuntimeError(
+        vm.ctx,
+        vm.output,
+        vm.stack,
+        vm.frame,
+        vm.catch_target,
+        vm.global,
+        err,
+    ) catch |e2| {
+        vm.pending_error = e2;
+        return false;
+    };
+    if (!caught) {
+        vm.pending_error = err;
+        return false;
+    }
+    return true;
+}
+
+/// Error before same-Machine constructor setup still owns the complete
+/// `[func, new_target, args...]` caller region. Release it exactly as the
+/// legacy vm_call.constructor pop/defer sequence did, then use the common
+/// constructor catch delivery above.
+noinline fn constructorRegionRecover(vm: *Vm, region_base: usize, err: HostError) bool {
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+    return constructorSetupRecover(vm, err);
+}
+
 /// `IteratorNext` itself is outside the IteratorClose-on-abrupt region (qjs
 /// `JS_IteratorNext2` propagates a failing `next()` directly). A same-Machine
 /// setup failure for that method therefore tries the caller catch without
@@ -963,6 +996,7 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
             }
             completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err);
         },
+        .constructor => unreachable,
         .next => unreachable,
     }
     return coldNext(var_buf, vm);
@@ -1170,6 +1204,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
+    if (machine.topEntry().completesConstructor()) {
+        const completed = machine.popConstructorReturn(value);
+        reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+        vm.stack.pushOwnedAssumeCapacity(completed);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    }
     var continuation = machine.popReturnedFrame();
     // popFrame just installed qjs's `sf->prev_frame` in Machine.top. Its null
     // state already distinguishes L0, so do not reload and test depth as well.
@@ -1202,15 +1243,13 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64)
     // done: epilogue. Derived-ctor return legality is a SEPARATE opcode there
     // (OP_check_ctor_return, quickjs.c:18273, emitted at parse time 28459) and
     // the depth-0/generator hand-off lives at the JS_CallInternal boundary —
-    // neither is ever inline in OP_return's value dataflow. zjs's compiler does
-    // not yet emit the qjs check-ctor sequence for every derived return, so the
-    // depth-0 cold helper retains that legality check. InlineTarget rejects
-    // class and derived constructors before a Machine frame is pushed, leaving
-    // the hot leg to carry the value as a plain JSValue (no `!JSValue` error
-    // union, no memory phi) into popAndResume.
+    // neither is ever inline in OP_return's value dataflow. zjs likewise emits
+    // OP_check_ctor_return before a derived constructor reaches OP_return, so
+    // the cold helper only handles the depth-0/generator boundary; resident
+    // ordinary and derived frames keep the hot leg's plain JSValue flow into
+    // popAndResume.
     if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_cold, .{ pc, sp, vb, vm });
-    std.debug.assert(!vm.frame.function.isDerivedClassConstructor());
     // qjs moves the result out of the operand region before the done: cleanup
     // with the check-free `ret_val = *--sp` (quickjs.c:18266). Valid `return`
     // bytecode always has one result; valueless returns use `return_undef`.
@@ -1247,7 +1286,6 @@ fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) ali
     // `ret_val = JS_UNDEFINED; goto done;`, check-free and infallible.
     if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_undef_cold, .{ pc, sp, vb, vm });
-    std.debug.assert(!vm.frame.function.isDerivedClassConstructor());
     vm.syncSp(sp);
     return popAndResume(vm, JSValue.undefinedValue());
 }
@@ -1581,6 +1619,155 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             return .tail;
         },
     }
+}
+
+/// Same-Realm direct ordinary and derived bytecode construction stays in the
+/// active Machine. General [[Construct]] policy remains authoritative: base
+/// classes, proxy, bound, native, cross-Realm, and differing-new-target cases
+/// (including super()) fall through unchanged.
+const DerivedConstructorEntryResult = union(enum) {
+    entry: *inline_calls.Entry,
+    handled,
+    threw,
+};
+
+/// Outline the derived-only frame setup so the established ordinary
+/// constructor handler retains its measured register and branch shape.
+/// Direct derived construction has no instance-creation phase, but preserves
+/// the same two qjs interrupt polls: JS_CallConstructorInternal entry, then
+/// JS_CallInternal bytecode entry before stack preflight.
+noinline fn pushDerivedConstructorEntry(
+    vm: *Vm,
+    region_base: usize,
+    region_start: [*]JSValue,
+    func: JSValue,
+    candidate: *const call_runtime.SameMachineConstructorTarget,
+    argc: u16,
+) DerivedConstructorEntryResult {
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    const interrupt_global = vm.ctx.global orelse vm.global;
+    exception_ops.pollInterrupt(vm.ctx, interrupt_global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+
+    vm.frame.pc += 2;
+    const displaced_func = region_start[0];
+    const constructor_this = JSValue.uninitialized();
+    region_start[0] = constructor_this;
+    displaced_func.free(vm.rt);
+    const target = candidate.resolved.bind(constructor_this, func);
+    vm.stack.setTopPtr(region_start);
+    const entry = vm.machine.pushDerivedConstructorCall(
+        vm.global,
+        vm.stack,
+        &target,
+        region_start,
+        argc,
+    ) catch |err| {
+        if (!constructorSetupRecover(vm, err)) return .threw;
+        return .handled;
+    };
+    return .{ .entry = entry };
+}
+
+fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    vm.publish(pc, sp); // frame.pc points at the u16 argc operand
+    const argc = readInt(u16, pc + 1);
+    const total = @as(usize, argc) + 2;
+    if (vm.stack.len() >= total) {
+        const region_base = vm.stack.len() - total;
+        const region_start = vm.stack.values + region_base;
+        const func = region_start[0];
+        const new_target = region_start[1];
+        if (call_runtime.resolveSameMachineConstructor(vm.global, func, new_target)) |candidate| {
+            if (candidate.resolved.fb.isDerivedClassConstructor()) {
+                return switch (pushDerivedConstructorEntry(
+                    vm,
+                    region_base,
+                    region_start,
+                    func,
+                    &candidate,
+                    argc,
+                )) {
+                    .entry => |entry| enterEntry(
+                        vm,
+                        entry,
+                        candidate.resolved.fb.byteCodeAssumeMaterialized().ptr,
+                    ),
+                    .handled => coldNext(vb, vm),
+                    .threw => .threw,
+                };
+            }
+            // First JS_CallConstructorInternal poll: before instance creation,
+            // constructibility effects, and the inner bytecode-call poll.
+            exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+                if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                return coldNext(vb, vm);
+            };
+            const args = (region_start + 2)[0..argc];
+            const prepared = call_runtime.prepareSameMachineConstructorAfterFirstPoll(
+                vm.ctx,
+                vm.output,
+                vm.global,
+                func,
+                &candidate,
+                args,
+                vm.function,
+                vm.frame,
+            ) catch |err| {
+                if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                return coldNext(vb, vm);
+            };
+            vm.frame.pc += 2;
+            switch (prepared) {
+                .completed => |result| {
+                    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+                    vm.stack.pushOwnedAssumeCapacity(result);
+                    return coldNext(vb, vm);
+                },
+                .instance => |instance| {
+                    // Parser-emitted direct construction owns two references
+                    // to the same callable (`get_var; dup`). Recast that
+                    // region as method-shaped setup: move the eager instance
+                    // into receiver slot 0, retain slot 1 as the callable,
+                    // and release the displaced duplicate.
+                    const displaced_func = region_start[0];
+                    region_start[0] = instance;
+                    displaced_func.free(vm.rt);
+                    const target = candidate.resolved.bind(instance, func);
+                    vm.stack.setTopPtr(region_start);
+                    const entry = vm.machine.pushConstructorCall(
+                        vm.global,
+                        vm.stack,
+                        &target,
+                        region_start,
+                        argc,
+                    ) catch |err| {
+                        if (!constructorSetupRecover(vm, err)) return .threw;
+                        return coldNext(vb, vm);
+                    };
+                    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+                },
+            }
+        }
+    }
+
+    // Authoritative slow path expects frame.pc at the argc operand and owns
+    // its existing pop/catch protocol.
+    _ = call_vm.constructor(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        vm.stack,
+        vm.function,
+        vm.frame,
+        vm.catch_target,
+    ) catch |e| return vm.fail(e);
+    return coldNext(vb, vm);
 }
 
 /// Generic for-of calls a bytecode iterator's zero-argument `next` method in
@@ -2633,21 +2820,66 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 }
 
 // Hot inline put_array_el — qjs OP_put_array_el's dense fast path: a[i] = v on a
-// fast array with a non-negative int32 index writes the (dup'd) value into the
-// dense slot (or appends), then pops the [obj, key, value] triple. The value is
-// dup'd into the array (setFastArrayElementDup), so all three operands are freed
-// here exactly as the cold path's defers do. Typed arrays (not is_array), string
-// keys, out-of-range / holey, and exotic receivers fall to the cold h_array_element.
+// fast array with a non-negative int32 index moves the owned stack value into
+// the dense slot (or appends), frees the receiver, then drops the
+// [obj, key, value] triple. This is qjs set_value / direct append ownership:
+// value is consumed by the slot and the proven-int key needs no release.
+// Typed arrays (not is_array), string keys, out-of-range / holey, and exotic
+// receivers fall to the cold h_put_array_element with all operands still owned.
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     const key = (sp - 2)[0];
     const obj = (sp - 3)[0];
     const rt = vm.ctx.runtime;
-    if (array_ops.putDenseArrayElementFast(rt, obj, key, value) catch |e| return vm.fail(e)) {
-        value.free(rt);
-        key.free(rt);
-        obj.free(rt);
+    const overwrite_result = array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value);
+    if (overwrite_result == .handled) {
+        // QuickJS still uses generic JS_FreeValue for sp[-3] here: preserve
+        // its refcount-tag check and omit only zjs's active-impossible deinit
+        // phase gate.
+        obj.freeDuringActiveBytecode(rt);
         return cont(pc + 1, sp - 3, var_buf, vm);
+    }
+    if (overwrite_result == .append_candidate) {
+        switch (array_ops.putDenseArrayElementAppendOwnedFast(rt, obj, key, value)) {
+            .handled => {
+                obj.freeDuringActiveBytecode(rt);
+                return cont(pc + 1, sp - 3, var_buf, vm);
+            },
+            .out_of_memory => return vm.fail(error.OutOfMemory),
+            .miss => {},
+        }
+    }
+    if (key.isInt() and obj.isObject()) {
+        // Slow/sparse Array existing own integer element overwrite (crypto
+        // BigInteger digit stores): once the dense append gate misses on a
+        // non-fast array, qjs JS_SetPropertyValue's JS_CLASS_ARRAY arm hands the
+        // int atom to JS_SetPropertyInternal, which for an existing writable
+        // data element is one find_own_property + set_value. Reach it inline,
+        // before the typed-array probe (an Array is never typed) and the cold
+        // write chain. A new element / non-writable / accessor slot returns
+        // false and falls through to setValuePropertyWithThrow unchanged.
+        if (vm_property_field.fastArrayOwnIntElementSet(rt, obj, key, value) catch |e| return vm.fail(e)) {
+            value.free(rt);
+            key.free(rt);
+            obj.free(rt);
+            return cont(pc + 1, sp - 3, var_buf, vm);
+        }
+        // Typed-array integer write: qjs JS_SetPropertyValue's typed arm
+        // (quickjs.c:9947) converts the numeric value, bounds-rechecks, and
+        // stores. Object/BigInt/Symbol values (user-code or throwing
+        // conversions) return .not_typed_array and fall through; a numeric/
+        // string/bool/null/undefined value writes (or is a silent OOB/detached
+        // no-op) here. The store copies the coerced bytes and does not consume
+        // the operand, so value/key/obj refs are released as the dense leg does.
+        switch (vm_property_field.putTypedArrayElementFast(rt, obj, key, value) catch |e| return vm.fail(e)) {
+            .handled => {
+                value.free(rt);
+                key.free(rt);
+                obj.free(rt);
+                return cont(pc + 1, sp - 3, var_buf, vm);
+            },
+            .not_typed_array => {},
+        }
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
@@ -2913,11 +3145,40 @@ fn op_get_array_el_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
 pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const key = (sp - 1)[0];
     const obj = (sp - 2)[0];
+    const rt = vm.ctx.runtime;
     if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
-        obj.free(vm.ctx.runtime);
-        key.free(vm.ctx.runtime);
+        obj.free(rt);
+        key.free(rt);
         (sp - 2)[0] = value; // owned (fastArrayElementDup dups)
         return cont(pc + 1, sp - 1, var_buf, vm);
+    }
+    // Typed-array integer read: qjs JS_GetPropertyValue's per-class typed arm
+    // (quickjs.c:9048-9083) is the slow path for OP_get_array_el but is itself a
+    // compact bounds-check + typed load. Reach it directly from the hot handler
+    // (int key returns an owned/undefined JSValue) instead of the
+    // cold_table -> arrayElement -> fastTypedArrayElementValue detour. Non-typed
+    // /BigInt/negative/length-tracking cases return null and fall through.
+    if (key.isInt() and obj.isObject()) {
+        // Slow/sparse Array own integer element (e.g. crypto BigInteger digit
+        // arrays, filled high-index-first so they convert to shape storage):
+        // read the int-atom own data property directly. Placed before the
+        // typed-array probe (an Array is never a typed array, so this also
+        // spares slow arrays that probe) and before the cold arrayElement chain
+        // (which re-tries the dense/typed fast paths and re-derives this int
+        // atom through toPropertyKeyAtom). A hole / accessor / prototype element
+        // returns null and falls through unchanged.
+        if (vm_property_field.fastArrayOwnIntElementValue(obj, key)) |value| {
+            obj.free(rt);
+            // key is an int (no refcount); nothing to free.
+            (sp - 2)[0] = value;
+            return cont(pc + 1, sp - 1, var_buf, vm);
+        }
+        if (vm_property_field.fastTypedArrayElementValue(obj, key)) |value| {
+            obj.free(rt);
+            // key is an int (no refcount); nothing to free.
+            (sp - 2)[0] = value;
+            return cont(pc + 1, sp - 1, var_buf, vm);
+        }
     }
     if (key.isString()) return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_string), .{ pc, sp, var_buf, vm });
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -3142,6 +3403,29 @@ pub fn op_mod_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     return coldNext(var_buf, vm);
 }
 
+/// Dedicated cold-table handler for OP_div after its both-int32 CASE misses.
+/// QJS OP_div routes every non-(both-int) case to js_binary_arith_slow, which
+/// handles both-float and mixed int/float operands through `handle_float64`:
+/// `dr = d1 / d2; sp[-2] = __JS_NewFloat64(ctx, dr)` — a BARE float64 with no
+/// int canonicalization (the canonicalizing JS_NewFloat64 only runs on the
+/// both-int leg, which opBinary already caught before reaching here, so the
+/// cold path always has ≥1 float operand). Mirror that so a plain float divide
+/// stays register-resident instead of falling all the way to binaryVm.
+/// numberValue rejects BigInt/string/object, so those retain the generic path.
+pub fn op_div_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (!vm.local_fast_blocked) {
+        if (value_ops.numberValue((sp - 2)[0])) |lhs| {
+            if (value_ops.numberValue((sp - 1)[0])) |rhs| {
+                (sp - 2)[0] = JSValue.float64(lhs / rhs);
+                return cont(pc + 1, sp - 1, var_buf, vm);
+            }
+        }
+    }
+    vm.publish(pc, sp);
+    _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+    return coldNext(var_buf, vm);
+}
+
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
 /// float-vs-int / float / object / loose-eq cases (qjs js_relational_slow /
 /// js_eq_slow). Installed as the cold_table entry for the compare ops, so the
@@ -3246,12 +3530,12 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
-// The boolean fast path (a comparison result — the hot loop condition) inlines; a
-// non-boolean condition routes to cold_table[pc[0]] (the generic branch8 handler).
+// The QuickJS immediate-scalar fast path (int/bool/null/undefined) inlines; values
+// needing full ToBoolean route to cold_table[pc[0]] (the generic branch8 handler).
 // That routing is INDIRECT, which LLVM cannot inline back — so the hot handler stays
 // prologue-free (a direct tail-call to a local slow shell got re-inlined, dragging in
 // its 64B frame + callee-saved spills, which pressured the store buffer and stalled
-// the boolean's store→load forward from opCompare). Booleans need no free / no call.
+// the immediate value's store→load forward). Immediate values need no free / no call.
 // Plain objects take qjs JS_ToBoolFree's object leg inline (quickjs.c:11205-11211,
 // called by OP_if_{true,false}8 at 18881-18919); HTMLDDA objects stay cold because
 // `core.value_semantics.toBoolean` makes their is_html_dda flag falsy.
@@ -3259,7 +3543,7 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
 // invariant under unrelated text-size changes elsewhere in the dispatch unit.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     const value = (sp - 1)[0];
-    if (value.asBool()) |b| {
+    if (value.asBranchImmediateBool()) |b| {
         // Cadence tick only (qjs js_poll_interrupts inline leg); a hit routes
         // to the cold branch8, which re-executes the untouched operand with
         // the publishing poll (see op_goto8).
@@ -3284,7 +3568,7 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 }
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
-    if (value.asBool()) |b| {
+    if (value.asBranchImmediateBool()) |b| {
         if (vm.ctx.pollInterruptTick())
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
@@ -3533,6 +3817,7 @@ const specials: colds.SpecialHandlers = .{
     .op_call2 = op_call2,
     .op_call3 = op_call3,
     .op_call_method = op_call_method,
+    .op_call_constructor = op_call_constructor,
     .op_for_of_next = op_for_of_next,
     .op_tail_call = op_tail_call,
     .op_tail_call_method = op_tail_call_method,
@@ -3755,6 +4040,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 switch (continuation.action) {
                     .proxy_get => try completeProxyGetContinuation(vm, result, continuation.takeAtom()),
                     .for_of_next => try completeForOfNextContinuation(vm, result, continuation.takeForOfDepth()),
+                    .constructor => unreachable,
                     .next => unreachable,
                 }
                 reloadTop(vm, &pc, &sp, &var_buf);
@@ -3766,7 +4052,9 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 // qjs polls at JS_CallInternal entry before the planned-frame
                 // stack guard and before any caller-frame mutation.
                 try exception_ops.pollInterrupt(vm.ctx, vm.global);
-                if (vm.tail_is_reuse) {
+                if (vm.tail_is_reuse and
+                    !(vm.machine.depth > 0 and vm.machine.topEntry().completesConstructor()))
+                {
                     _ = vm.machine.tailCallReuse(
                         vm.global,
                         vm.stack,

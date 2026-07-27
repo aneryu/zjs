@@ -885,12 +885,7 @@ test "public Buffer borrowBytes carries TypedArray byte offset and length" {
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
     defer view_value.free(rt);
-    try view.ensureTypedArrayPayload(rt);
-    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
-    view.typedArrayByteOffsetSlot().* = 2;
-    view.typedArrayElementSizeSlot().* = 2;
-    view.typedArrayFixedLengthSlot().* = 2;
-    view.typedArrayKindSlot().* = 2;
+    try view.initTypedArrayView(rt, buffer_value.dup(), 2, 2, 2, 2);
 
     const borrow = try object.Buffer.borrowBytes(rt, object.fromCore(view));
     try std.testing.expectEqual(object.Buffer.BorrowKind.typed_array, borrow.kind);

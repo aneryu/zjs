@@ -90,6 +90,7 @@ test "dense array writer readers retain their semantic guard class" {
     const vm_literal_source = @embedFile("../exec/vm_literal.zig");
     const readers = [_]Reader{
         .{ .class = .own_overwrite, .source = array_ops_source, .needle = ".setFastArrayElementDup(rt, index, value)", .count = 2 },
+        .{ .class = .own_overwrite, .source = array_ops_source, .needle = ".setFastArrayElementOwnedDuringActiveBytecode(rt, index, value)", .count = 1 },
         .{ .class = .create_data_property, .source = core_array_source, .needle = ".initDenseArrayLiteralValuesAssumingEmpty(rt, values)", .count = 1 },
         .{ .class = .create_data_property, .source = core_array_source, .needle = ".appendDenseArrayLiteralIndex(rt,", .count = 1 },
         .{ .class = .create_data_property, .source = array_builtin_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 1 },
@@ -102,6 +103,8 @@ test "dense array writer readers retain their semantic guard class" {
         .{ .class = .create_data_property, .source = string_ops_source, .needle = ".initDenseArrayIndexZeroAssumingEmpty(rt,", .count = 1 },
         .{ .class = .create_data_property, .source = vm_literal_source, .needle = ".defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
         .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".appendDenseArrayIndex(rt,", .count = 2 },
+        .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".appendDenseArrayIndexOwned(rt,", .count = 1 },
+        .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".fastArraySlotAssumeCapacity(index).* = value", .count = 1 },
         .{ .class = .prewalk_set, .source = object_ops_source, .needle = ".appendDenseArrayIndex(ctx.runtime,", .count = 1 },
         .{ .class = .already_walked_set, .source = object_source, .needle = "try self.defineOwnDataPropertyForSetKnownNoOwn(rt, atom_id, new_value);", .count = 1 },
         .{ .class = .qjs_bulk_set, .source = array_ops_source, .needle = ".appendDenseArrayValues(ctx.runtime,", .count = 1 },

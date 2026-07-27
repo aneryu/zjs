@@ -1,113 +1,124 @@
-# Object and Shape Implementation
+# Object And Shape Implementation
 
-This note describes the active object/shape contract. It is not a roadmap or
-completion ledger.
-
-Primary owners:
+This note describes the current object/shape contract. The source of truth is:
 
 - `src/core/object.zig`
 - `src/core/shape.zig`
 - `src/core/property.zig`
-- property opcode handlers in `src/exec/vm_property.zig`
+- `src/exec/property_ic.zig`
+- `src/exec/vm_property*.zig`
+
+The dated
+[zjs / QuickJS subsystem baseline](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
+contains the field-level comparison and current behavior probes.
+
+## Fixed Layout
+
+On the current 64-bit target:
+
+- `Object` is 64 bytes.
+- `Shape` has a 56-byte fixed header.
+- `shape.Property` is an 8-byte packed QuickJS-style shape-property record.
+- `property.Entry` is one value-sized property union: 16 bytes in the default
+  representation.
+- `ObjectStorage` is the 24-byte class-data union.
+
+Bytecode-function and RegExp state fit directly in `ObjectStorage`. Many other
+classes use the union's payload pointer and an out-of-line typed payload.
 
 ## Shape Model
 
-`Shape` is GC-managed (an embedded GC header; shapes live in the cycle
-collector's `gc_obj_list`) and shared by objects with the same structural
-property sequence and prototype identity. Important fields:
+`Shape` is GC-managed and shared by objects with the same structural property
+sequence and prototype identity. Its fixed header contains:
 
-- `header` (GC object header — shapes are collected, not hand-ref-counted)
-- `parent`, `transition_atom`, `transition_flags` (back-link recording how this shape was reached)
-- `proto` (the prototype identity is owned by the shape, not the object)
-- `version`
-- `hash`
-- `registry_index`, `registry_hash_next`, `registry_hash_prev`
-- `prop_hash_mask`, `hash_buckets`
-- `props`
+- the intrusive GC header;
+- hashed-shape state and hash;
+- property hash mask;
+- property capacity/count/deleted count;
+- registry hash link;
+- prototype.
 
-`Shape.version` is the structural invalidation token used by inline caches. It
-is bumped when property layout or prototype identity changes, including property
-addition, deletion, flag updates, hash rebuilds, and prototype replacement.
+One allocation contains the fixed Shape followed by:
 
-## Property Lookup
+```text
+[shape.Property array][u32 hash buckets]
+```
 
-Shapes always carry a property hash (`prop_hash_mask` + `hash_buckets`) — there
-is no small-shape linear-scan threshold (the former `small_shape_linear_limit`
-path was removed to align with qjs always-build-hash). The hash maps property
-name to slot.
+This order differs from QuickJS, which places the buckets first and the
+properties second. Do not change the order without size-bucketed cache and
+relocation measurements.
 
-Property storage remains insertion-ordered in `Object.properties`; the shape
-hash only accelerates name-to-slot lookup. Property entries are not moved just
-because the hash table is rebuilt.
+The shape property array owns property atoms and descriptor flags. The Object's
+property-value array owns only values/getter-setter/VarRef/AutoInit state. The
+two arrays must remain index-compatible.
 
-Deletion marks the property as deleted and bumps `Shape.version`. Deleted
-entries are skipped by enumeration and can contribute to later hash rebuilds.
+## Lookup And Mutation
 
-## Shape Registry
+Shapes carry a property hash; ordinary named lookup resolves an atom to a shape
+slot and then reads the matching Object value slot. Property addition can reuse
+a hashed structural transition. Prototype identity is part of the shape.
 
-`shape.Registry` owns all live shapes. It keeps:
+Deletion clears/unlinks the live property metadata and increments the deleted
+count, but does not move every following slot immediately. Enumeration and
+lookup skip deleted entries; later rebuild/relocation may compact storage.
 
-- a dense `shapes` array for ownership and destruction.
-- `shape_hash_buckets` for hash-based lookup by shape identity, with shapes
-  chained through `registry_hash_next`/`registry_hash_prev`.
+Mutation must preserve:
 
-`createObjectRoot` reuses a cacheable empty root shape for the same prototype
-identity. `transitionProperty` reuses a cached child when the same
-`(parent, atom, flags)` transition is found in the hashed-shape registry
-(this replaced the former per-parent transition arrays, aligning with qjs
-`find_hashed_shape_prop`).
+- shape/value-slot index compatibility;
+- atom retain/release balance;
+- prototype ownership through the shape;
+- descriptor and AutoInit operation order;
+- rollback safety if value storage or a relocated Shape cannot be allocated;
+- Proxy/exotic/typed-array/array special semantics before using an ordinary
+  fast path.
 
-The registry is also responsible for retaining and releasing atoms held by
-shape properties and transition metadata.
+## Arrays And Class Data
 
-## Object Layout
+The `ObjectStorage.array` arm stores dense values, count, capacity, and visible
+length. QuickJS keeps visible array length in an ordinary shape property; zjs
+keeps a scalar mirror in the array arm. Every array mutation must preserve
+`length >= count`, hole semantics, sparse fallback, and non-writable length.
 
-`Object` keeps common fields inline:
+Typed arrays do not use an inline Object ptr/count cache in zjs. The Object
+points to `TypedArrayPayload`, which contains live length/data and participates
+in the backing buffer's view list. Element fast paths must not bypass
+detach/resize/immutable checks.
 
-- GC header, class id, class payload tag/pointer.
-- the shape reference (`shape_ref`); the prototype identity is owned by the
-  shape (`shape_ref.proto`), not a separate object→prototype edge.
-- object flags such as extensibility, array/proxy/global markers, HTMLDDA,
-  with-environment, and indexed-property markers.
-- shared caches such as lazy native functions, cached iterator next, and
-  global lexical environment.
-- array length metadata, property storage, and exotic methods.
+## Property Fast Paths: No Inline Cache
 
-Class-specific state is held in external payload structs where possible:
+The former shape-keyed per-bytecode-site inline cache has been removed:
 
-- iterator, collection, buffer, typed array, regexp.
-- bound function, proxy, arguments, object-data wrappers, var-ref.
-- array, promise, generator, function, module namespace.
-- finalization registry, std file, disposable stack, realm payload.
+- no `src/core/ic.zig`;
+- no FunctionBytecode IC slots;
+- no `zjs_enable_ic` build option.
 
-Payload accessors should be used instead of reaching through `class_payload`
-directly. New class-specific state should default to a payload unless it is
-needed by ordinary objects on the hot path.
+The historical filename `src/exec/property_ic.zig` now owns non-cached helpers:
 
-## Invariants
+- direct ordinary own-data lookup;
+- immediate prototype-data lookup;
+- global data-slot lookup/store;
+- simple ordinary put;
+- computed-property action resolution.
 
-- `Object.shape_ref` must remain retained for the object's lifetime.
-- Prototype changes must update shape identity or bump the existing shape
-  version through the registry.
-- Shape-owned atom references must be duplicated on insertion and freed on
-  shape release.
-- `Object.properties` and `Shape.props` must stay index-compatible for live
-  property slots.
-- Inline-cache entries must retain guard shapes and release them on function
-  teardown or cache promotion to megamorphic.
-- Any change that can invalidate a cached slot must bump `Shape.version`.
+The retained `cachedDataPropertyValueForFastPath` and
+`cachedSetObjectDataPropertyForPutFastPath` signatures always miss and route to
+the authoritative current-state lookup. They do not retain shapes or versions.
+
+Performance work must therefore describe a property result as a direct
+shape/hash fast-path hit or a slow/exotic path, never as an IC hit.
 
 ## Validation
 
-For object/shape changes, run at least:
+Start with the narrowest changed-area target:
 
 ```sh
-zig build test --seed 0 --summary all
-zig build smoke --seed 0 --summary all
+zig build test-core --seed 0 --summary all
+zig build test-exec --seed 0 --summary all
+mise run quick-check
 git diff --check
 ```
 
-Add targeted test262 slices according to the touched behavior, for example:
+Add focused test262 slices for the touched behavior:
 
 ```sh
 ./zig-out/bin/run-test262 -t 8 -c test262.conf \
@@ -116,7 +127,10 @@ Add targeted test262 slices according to the touched behavior, for example:
   -d test262/test/built-ins/Object
 ./zig-out/bin/run-test262 -t 8 -c test262.conf \
   -d test262/test/built-ins/Reflect
+./zig-out/bin/run-test262 -t 8 -c test262.conf \
+  -d test262/test/built-ins/Proxy
 ```
 
-Performance-sensitive object/property work should record a fresh measurement
-command and environment with the owning change.
+For layout/GC/ownership changes, also run the checkpoint and phase-close OOM
+gate at the appropriate handoff tier. Performance-sensitive changes require a
+pinned QuickJS mechanism reference plus controlled before/after measurement.

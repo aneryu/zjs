@@ -730,6 +730,18 @@ const RuntimeCompactState = packed struct(u8) {
     _padding: u5 = 0,
 };
 
+/// Cached result of the simple-field-constructor bytecode scan for one FB.
+/// `fb == 0` means empty; a computed entry sets `fb` to the FB pointer and
+/// `is_simple` to whether it matched (with `len`/`atoms`/`args` the pattern when
+/// it did). Max fields mirrors exec's `max_simple_constructor_fields` (8).
+pub const SimpleCtorMemo = struct {
+    fb: usize = 0,
+    is_simple: bool = false,
+    len: u8 = 0,
+    atoms: [8]u32 = [_]u32{0} ** 8,
+    args: [8]u16 = [_]u16{0} ** 8,
+};
+
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
@@ -797,6 +809,15 @@ pub const JSRuntime = struct {
     /// Own-property count to reserve on a global object before running
     /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
     standard_global_own_property_capacity: usize = 0,
+
+    /// Single-entry memo for constructSimpleFieldConstructor's bytecode pattern
+    /// (the `this.f = arg` shape a base constructor's fast path matches). The
+    /// match is a pure, immutable property of the FunctionBytecode, but was
+    /// re-scanned on every `new F()` (top self-cost of the fast-path construct).
+    /// Keyed by FB pointer as a usize (0 = empty) so no exec-layer type leaks
+    /// into core; invalidated in the FunctionBytecode destructor, which makes
+    /// pointer reuse safe. One runtime per thread, so no synchronization.
+    simple_ctor_memo: SimpleCtorMemo = .{},
 
     /// QuickJS `context_list`: intrusive membership only.  Realm ownership is
     /// carried by `RealmRef` and the GC header, never by these links.

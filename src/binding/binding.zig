@@ -1524,12 +1524,7 @@ test "JSObject typed method borrows utf8 string and byte slices" {
     const shared_view_object = try core.Object.create(rt, core.class.ids.object, null);
     const shared_view_value = shared_view_object.value();
     defer shared_view_value.free(rt);
-    try shared_view_object.ensureTypedArrayPayload(rt);
-    try shared_view_object.setOptionalValueSlot(rt, shared_view_object.typedArrayBufferSlot(), shared_output_value.dup());
-    shared_view_object.typedArrayByteOffsetSlot().* = 0;
-    shared_view_object.typedArrayElementSizeSlot().* = 1;
-    shared_view_object.typedArrayFixedLengthSlot().* = 2;
-    shared_view_object.typedArrayKindSlot().* = 2;
+    try shared_view_object.initTypedArrayView(rt, shared_output_value.dup(), 0, 1, 2, 2);
 
     try std.testing.expectError(error.JSException, ctx.callFunction(mix_value, &.{
         label,
