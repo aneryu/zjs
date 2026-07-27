@@ -7291,23 +7291,26 @@ pub const pipeline_resolve_variables = struct {
         var atom_index: usize = 0;
         while (pc < code.len) {
             const op_id = code[pc];
-            const instr = topologyInstruction(code, atoms, pc, atom_index);
-            const size: usize = instr.size;
+            // computePhase1Topology already validated every instruction and
+            // recorded its phase-1 width/kind. Reuse that LabelSlot-like
+            // metadata instead of decoding the opcode and atom format again.
+            const node = reachability[pc];
+            const size: usize = node.size;
             if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
             if (!isPhase1Reachable(reachability, pc)) {
-                if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+                if (topologyInstructionHasAtom(op_id, node.is_temp)) atom_index += 1;
                 pc += size;
                 continue;
             }
-            if (instr.is_temp and (isScopeVarOp(op_id) or isScopeRefOp(op_id))) {
+            if (node.is_temp and (isScopeVarOp(op_id) or isScopeRefOp(op_id))) {
                 const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
                 const scope = decodeScopeOperand(code[pc + 5 ..][0..2]).level;
                 try resolveBindingTopology(ctx, atom_id, scope);
-            } else if (instr.is_temp and isScopePrivateFieldOp(op_id)) {
+            } else if (node.is_temp and isScopePrivateFieldOp(op_id)) {
                 const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
                 const scope = decodeScopeOperand(code[pc + 5 ..][0..2]).level;
                 try resolvePrivateBindingTopology(ctx, op_id, atom_id, scope);
-            } else if (instr.is_temp and op_id == opcode.op.scope_make_ref) {
+            } else if (node.is_temp and op_id == opcode.op.scope_make_ref) {
                 const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
                 const scope: i16 = std.mem.readInt(i16, code[pc + 9 ..][0..2], .little);
                 // Capture events are part of the binding topology that decides
@@ -7355,7 +7358,7 @@ pub const pipeline_resolve_variables = struct {
                 const scope = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
                 try markEvalCapturedVariables(ctx.function_def.?, scope);
             }
-            if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            if (topologyInstructionHasAtom(op_id, node.is_temp)) atom_index += 1;
             pc += size;
         }
         if (atom_index != atoms.len) return error.InvalidBytecode;
@@ -7431,11 +7434,11 @@ pub const pipeline_resolve_variables = struct {
         var planned_scope_var_count: usize = 0;
         while (i < func.code.len) {
             const op = func.code[i];
-            const instr = topologyInstruction(func.code, func.atom_operands, i, scan_atom_idx);
-            const input_size: usize = instr.size;
+            const node = phase1_reachability[i];
+            const input_size: usize = node.size;
             if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
             if (!isPhase1Reachable(phase1_reachability, i)) {
-                if (topologyInstructionHasAtom(op, instr.is_temp)) scan_atom_idx += 1;
+                if (topologyInstructionHasAtom(op, node.is_temp)) scan_atom_idx += 1;
                 i += input_size;
                 continue;
             }
@@ -7694,12 +7697,12 @@ pub const pipeline_resolve_variables = struct {
             // the lowered body resolve correctly.
             pc_map[i] = out_idx;
             const op = func.code[i];
-            const instr = topologyInstruction(func.code, func.atom_operands, i, in_atom_idx);
-            const input_size: usize = instr.size;
+            const node = phase1_reachability[i];
+            const input_size: usize = node.size;
             if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
             if (!isPhase1Reachable(phase1_reachability, i)) {
                 for (i + 1..i + input_size) |dead_pc| pc_map[dead_pc] = out_idx;
-                if (topologyInstructionHasAtom(op, instr.is_temp)) in_atom_idx += 1;
+                if (topologyInstructionHasAtom(op, node.is_temp)) in_atom_idx += 1;
                 i += input_size;
                 continue;
             }
