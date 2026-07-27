@@ -28,48 +28,28 @@
 - 宿主持有跨调用生命周期的值时，必须使用 public API 中的 handle /
   persistent-root 机制，而不是裸保存 `JSValue`。
 
-Z-GE 分代脚手架（nursery / remembered-set / dirty-card / minor 调度，默认
-关闭、从未投产）已按 Phase 4 计划整体移除（git 历史可找回）；`gc.zig` 保留
-RC + 循环回收主路径、old/large 空间记账与 GC scheduler。
+当前没有 nursery、moving、generational 或 concurrent collector。GC 是
+QuickJS 风格的非原子 RC + intrusive-list cycle removal；`gc.Policy` 中的
+concurrent/selective 字段均为关闭状态，不能当作已实现能力。
 
-Object 头瘦身第一步已完成：13 个散装 bool 收敛为 `flags: ObjectFlags`
-（packed u16），`sizeOf(Object)` 192 → 184 字节。shape.props 与
-object.properties 的 `atom_id`/`flags` 双份元数据去重亦已完成（commit
-d352733）：`property.Entry` 只持 `slot: Slot`（QuickJS `JSProperty` 模型），
-key atom 与 writable/enumerable/configurable/accessor/deleted flags 全在
-`shape.Property`，与 Entry 数组 1:1 索引（`Object.propAtomAt`/`propFlagsAt`
-读元数据）。
+关键 64-bit 固定布局为：
 
-Phase 4 余项（均已完成）：
-- ~~循环回收的 `visited`/`preserved`/`free_set` 三个 AutoHashMap（每轮全堆
-  hash put）可改为 header 2-bit 状态机~~：已实施（commit e2d0b4e）。
-  `GCObjectHeader.BlockFlags` 增 `cycle_visited`/`cycle_preserved` bits
-  （header 仍 8 字节），free 成员派生为 `visited and !preserved`；~20 个
-  contains/put/getOrPut 点改为 bit 读写，`Registry.visited`/`preserved`/
-  `free_set` 及 init/deinit 删除，消除每轮 O(对象数) 的 hash 开销。唯一残留
-  AutoHashMap 是非-Object 的 `preserved_bytecodes`（FunctionBytecode 无
-  object header，需侧表）。
-- ~~weak identity 裸 header 地址 + O(n) 全堆扫描兜底~~：已实施 weak_id
-  （单调递增）双表注册表（`weak_object_ids`/`weak_id_objects`，
-  `Object.has_weak_id` flag 门控销毁清理）。weak 槽（WeakRef/WeakMap/
-  WeakSet/FinalizationRegistry/WeakRootSlot）统一存 `weak_id << 1` 编码
-  （symbol 仍为 `(atom<<1)|1`），`liveObjectFromWeakIdentity` 改为 O(1)
-  查表，地址复用 ABA 误命中随 id 永不复用而根治；matcher 偶数分支由
-  「解引用 header flag」改为批量 identity 哈希集合查询，消除了对已释放
-  对象内存的读取。
+- `gc.Metadata` 8-byte allocation prefix；
+- `GCObjectHeader` 16-byte intrusive links；
+- `Object` 64 bytes，含 24-byte class union；
+- `Shape` 56-byte header + inline FAM；
+- `shape.Property` 8 bytes；
+- `FunctionBytecode` 96-byte QuickJS core header，debug 与 zjs-only state
+  置于可选 inline tails。
 
-JSValue 表示（Phase 5）：访问器封装 pass 已完成——`core/value.zig` 之外的
-直接 `tag`/`payload` 字段访问为零（仅 `binding/ffi.zig` 的 comptime 布局
-反射保留，用于 NaN-boxing 切换时自动失配 ABI 指纹）；NaN-boxing 的 8 字节
-表示已作为 build option（`-Dzjs_nan_boxing`）双模式落地。默认策略与
-QuickJS 一致：64 位目标使用 16 字节 `payload + int64 tag`，较窄目标使用
-8 字节 NaN-boxing；显式 build option 可覆盖目标默认。
+Weak object identity 使用单调递增 id 和双向 runtime maps，避免地址复用 ABA；
+这是相对 QuickJS weakref list/count 的安全实现差异，也是需要单独测量的
+side-table 成本。
 
-双表示是永久双模式，不是迁移过渡期：QuickJS 以 `#ifdef JS_NAN_BOXING`
-永久维护双布局，双模式即参照设计本身。zjs 的 16 字节布局是 64 位规范
-表示，并保留完整 i64 short-BigInt payload；8 字节布局是显式可选的紧凑
-adapter，在值密集堆上降低 RSS，但只有 48 位 payload。两种模式都不许 rot，
-由 `test-altrepr` step 以目标默认的相反表示运行统一测试来守护。
+`JSValue` 永久支持两种表示。64-bit 默认是 16-byte payload + signed tag；
+`-Dzjs_nan_boxing=true` 选择 8-byte、48-bit payload 的 zjs encoding。alternate
+模式守护语义和所有权，但不是 QuickJS narrow representation 的 bit-level ABI。
+`test-altrepr` 必须持续守护相反表示。
 
 ## 2. Parser And TypeScript Erasure
 
@@ -93,8 +73,9 @@ TypeScript 语义、类型检查、source-map 等价物或固定性能提升百�
 
 ## 3. Bytecode Carrier
 
-当前执行载体是 `src/bytecode.zig` 中的 `Bytecode`，不是单独的
-`CodeBlock` 抽象。`Bytecode` 持有：
+编译期载体是 `src/bytecode.zig` 的 `FunctionDef` 与 lowered `Bytecode`；
+发布后的唯一生产执行载体是 GC-managed canonical `FunctionBytecode`。没有
+单独的 `CodeBlock` 抽象。编译期数据包括：
 
 - opcode bytes: `code`
 - constants: `constant.Pool`
@@ -102,7 +83,7 @@ TypeScript 语义、类型检查、source-map 等价物或固定性能提升百�
 - args、vars、var refs、global vars、private names
 - module metadata
 - `pc2line_buf`、`source_loc_slots`、`debug_table`
-- property inline-cache slots: `ic_slots`、`ic_site_ids`、`ic_sites`
+- module/debug/source-position metadata
 
 pipeline 入口在 `src/bytecode.zig` 的 `pipeline` namespace：
 
@@ -116,26 +97,19 @@ pipeline 入口在 `src/bytecode.zig` 的 `pipeline` namespace：
 overflow、stack mismatch 和无效 opcode 等错误。它不是完整 JIT-style GC
 stack-map 系统。
 
-### 3.1 编译管线与 QuickJS 的对应关系
+### 3.1 与 QuickJS 的当前边界
 
-p3-pipeline / p4-fb-compact 的对照结论（语义已由 test262 门禁 0 失败 +
-行为探针验证；下表记录结构差异及其成本评估，消除「未知偏差」）：
+- QuickJS real opcode 顺序保持稳定；zjs 仅在尾部增加 4 个 explicit-resource
+  management opcode。
+- script、eval、nested function 和 module root 都发布 canonical
+  `FunctionBytecode`。
+- zjs core header 对齐 QuickJS 的 96-byte offset，但另有 optional 32-byte
+  debug tail 和 8-byte `call_facts/script_or_module` extension。
+- direct eval 的 caller-binding overlay、FunctionBytecode call/leaf facts 和
+  explicit-resource opcode 是需要单独验证的实现差异。
 
-> **2026-07-20 复审更正：** 下表这八项仍可用于识别历史 transport，但其中“按构造等价”“无实质成本”与
-> “不实施/既定设计”的裁决已被新的 QuickJS bytecode、parser-topology、cell-identity 和 OOM 证据推翻，不能再作为优化前置。
-> 当前裁决与执行顺序以 [`qjs-align/OPT-ROADMAP-2026-07-19.md`](qjs-align/OPT-ROADMAP-2026-07-19.md) 的
-> W1b2.5（parser/finalizer/body）及后续 canonical root/direct-FB 阶段为准；实现完成后再逐行重写本表的终态描述。
-
-| QuickJS pass / 机制 | zjs 等价机制 | 差异点 | 实质成本 |
-| --- | --- | --- | --- |
-| `js_create_function` scope 重链（quickjs.c:36120-36144：重算 `scope_next`/`scopes[].first`，空 scope 继承父链） | `FunctionDef.addScopeVar` 在解析时增量维护 `scope_next`/`scopes[].first`；`resolveScopeVar`（resolve_variables.zig）显式沿 `scopes[].parent` 上溯 | zjs 链接关系自构造起即正确且只含本 scope 变量，无需收尾重链 pass；QuickJS 的「空 scope 继承父链」由查找方上溯替代 | 无。按构造等价 |
-| `add_eval_variables`（quickjs.c:33694：编译期把调用方全部绑定闭包化，`capture_var` 标记所有 locals） | 运行时 eval overlay：`eval_ops.zig` 把 caller frame 的 `eval_local_names`/slots/`var_ref_names`/refs 传入嵌套执行，`getVar`/`putVar` 按名查 overlay | 编译期闭包转换 vs 运行时按名叠加视图；zjs 无需预捕获 caller 全部 locals（overlay 直读 frame 槽位） | eval 路径按名扫描慢于索引访问，但 direct eval 是冷路径；语义等价 |
-| `add_module_variables`（quickjs.c:36073：模块 global vars 入 closure，`export_entries[i].var_idx` 编译末期定索引） | 解析期 `ensureTopLevelModuleDeclClosureVar`（parser.zig）为顶层模块绑定建 `module_decl` closure_var；实例化期 `buildModuleVarRefs`（exec/module.zig）按 `var_ref_names` 名字解析到模块 cell（import → 他模块 cell = live binding） | export → 索引的绑定从编译末期推迟到模块实例化期，按名而非按 `var_idx` | 实例化期 O(绑定数) 名字解析，一次性；稳态访问同为 `get_var_ref` 索引访问。live binding 探针通过 |
-| `capture_var`（quickjs.c:33022：置 `is_captured` + 分配 `var_ref_idx`，`b->var_ref_count` = 被捕获自有局部数；运行时 `sf->var_refs[]` 存开放 JSVarRef） | `ensureClosureChain`（parser.zig）置 `VarDef.is_captured`；无 `var_ref_idx`——cell 由 `ensureLocalVarRefCell`（slot_ops.zig）就地装箱在局部槽内 | QuickJS 是「旁路 var_ref 表 + 栈槽开放引用」模型；zjs 是「槽内 boxed cell」模型，捕获状态即槽位内容，无需帧侧 var_refs 表寻自有局部 | 无正确性差异。字段语义差异：zjs `var_ref_count` = closure_var 数（父引用数，供 frame.var_refs 定容），不是 QuickJS 的被捕获自有局部数 |
-| `OP_enter_scope` 降级（quickjs.c:34476：对 scope 内 lexical 发 `set_loc_uninitialized`，函数声明发 `fclosure` 重实例化） | `resolve_variables` 的 `enterScopeRefreshSize`/`writeEnterScopeRefresh`：对 scope 内被捕获槽发 `close_loc`（detach cell），对 `.normal` lexical 发 `set_loc_uninitialized`（TDZ 重 arm） | zjs 把 close 也放在 scope **入口**（QuickJS 在 `leave_scope` 出口 + break/continue 跳转点 `close_scopes`，quickjs.c:27948）。入口位置支配一切重入路径（正常回边/continue/内层 break），单点发射即可；因局部槽不复用、cell 仅经闭包可达，观察等价 | 无。函数/箭头体块（每帧仅进入一次，且提升函数初始化先于体码捕获槽位）显式抑制发射（`suppress_block_enter_scope`） |
-| `OP_leave_scope` 降级（quickjs.c:34510：对 `is_captured` 变量发 `close_loc`） | 解析器在 for 头作用域回边处 `emitCloseCurrentScopeLexicals`；块作用域由上行 enter_scope 入口刷新覆盖；`removeUncapturedCloseLoc`（finalize.zig）以 `localIsCaptured`（resolve_variables.zig，共享谓词）剔除未捕获槽的 close_loc | 出口 close 改为入口 close + for 头回边 close 的组合 | 无（语义探针覆盖 per-iteration 捕获、TDZ 重入、capture-before-decl、catch/switch/嵌套循环） |
-| 编译期载体：`JSFunctionDef`（含 `byte_code` DynBuf）→ pass 原地改写 → 一次 memcpy 进单块 `JSFunctionBytecode`（quickjs.c:36219-36294） | `FunctionDef`（变量/scope 元数据 + `byte_code`）→ finalize **move**（非拷贝）code/atom_operands 进 lowered `Bytecode` → pass 改写 → 一次拷贝进单块 `core.FunctionBytecode.block`；VM/frame/call 直接持有最终 `FunctionBytecode *` | zjs 仍多一个仅编译期 lowered 载体，但不再建立 heap/cached execution view；普通 script/eval/child 的 attach 只消费并发布 owned FB 引用，不扫描、不分配 | move 后的拷贝次数与 QuickJS 相同（仅终态打包一次）。只剩 legacy module root 通过 caller-stack、非逃逸 adapter 执行，待 W1e 收口 |
-| 顶层脚本执行载体 | script、direct/indirect eval 与嵌套函数都物化 canonical `FunctionBytecode` 并由 VM 直接执行；仅 module root 暂保留显式 `legacy_module: Bytecode` variant | QuickJS 的 module root 也物化 `JSFunctionBytecode` | 普通顶层已对齐；module linking/debug 表仍留在 legacy `Bytecode`，其边界 adapter 是 W1e 的显式迁移债 |
+完整字段级对照见
+[`qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md`](qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)。
 
 ## 4. VM Execution
 
@@ -264,26 +238,22 @@ embedder/runtime host helpers (`print` output, destructuring runtime helpers,
 the external-host-function registry, disposable-stack throw glue), not standard
 ECMAScript native functions.
 
-## 5. Object Shapes And Property IC
+## 5. Object Shapes And Property Fast Paths
 
-Object-shape state lives in `src/core/shape.zig`; IC slot storage lives in
-`src/core/ic.zig`. There is no separate bytecode IC module: `src/bytecode.zig`
-re-exports the core module (`pub const ic = @import("core/ic.zig")`), so
-existing `bytecode.ic` call sites resolve through that re-export.
+Object/shape state lives in `src/core/object.zig`, `shape.zig`, and
+`property.zig`. `Object` is 64 bytes; `Shape` is a 56-byte header followed by
+an inline property-array/hash-bucket FAM. Property values and shape metadata
+remain index-compatible.
 
-Property opcode fast paths are implemented in `src/exec/property_ic.zig` and used
-from `src/exec/vm_property.zig`. Current IC behavior is shape/version guarded and
-tracks the states:
+There is no property inline cache:
 
-- `empty`
-- `mono`
-- `poly`
-- `mega`
-- `invalid`
+- `src/core/ic.zig` and `zjs_enable_ic` do not exist;
+- FunctionBytecode has no IC slots;
+- the retained `cached*` adapters in `src/exec/property_ic.zig` always miss.
 
-The active IC covers own/prototype data-property fast paths and records feedback
-through `core.OpcodeProfile`. It is not a call inline cache and it is not JIT
-metadata. Builds can disable property IC with `-Dzjs_enable_ic=false`.
+`property_ic.zig` now contains non-cached direct own/prototype/global lookup and
+simple-put helpers used by `vm_property*`. Every access validates the current
+object/shape/property state; no receiver shape is retained per bytecode site.
 
 ## 6. Modules, Promises, And Jobs
 

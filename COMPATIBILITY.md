@@ -27,10 +27,16 @@ zig build run-test262 --seed 0 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-As currently tracked, the gate has no unexpected failures and no checked-in
-known failures. The checked report under `reports/test262-latest/` records the
-latest local bucket, per-directory, feature-skip, and failure details;
-`test262_errors.txt` is currently empty.
+The checked 2026-07-27 report has 44,541 passes, 25 checked-in known failures,
+0 unexpected failures, and 5,209 feature skips. The checked report under
+`reports/test262-latest/` records the bucket, per-directory, feature-skip, and
+failure details.
+
+Running the same 25 files through this runner with the pinned QuickJS binary
+also produces 25 errors. They remain test262 compatibility debt, but none is a
+currently demonstrated zjs-to-pinned-QuickJS regression. See the
+[subsystem difference baseline](docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
+for the command and classification.
 
 ## Configured Skips and Excludes
 
@@ -43,8 +49,6 @@ changed with a concrete implementation plan:
   `decorators`, `host-gc-required`, `import-defer`, source-phase imports,
   canonical time zone data, and the Intl feature groups listed in
   `test262.conf`.
-- Generated RegExp string-property and UnicodeSets cases that still exceed the
-  current parity boundary are excluded individually.
 - Most `test262/test/staging/` tests are excluded by default, with selected
   locally useful staging slices re-included. Known SpiderMonkey staging
   divergences remain explicitly excluded or tracked in `test262_errors.txt`
@@ -85,10 +89,19 @@ While `zjs` targets semantic parity with QuickJS, its local validation profile
 enables and validates several features that are skipped or unsupported in
 upstream QuickJS:
 
-- **Atomics.waitAsync**: Fully supported and validated in `zjs` (including engine-deinit cleanup validation), whereas upstream QuickJS lists this as unsupported and skips it.
-- **Other Enabled Features**: Features like `await-dictionary`, `legacy-regexp`, `nonextensible-applies-to-private`, and `regexp-modifiers` are enabled and validated in `zjs` but skipped in upstream QuickJS.
+- **Atomics.waitAsync**: enabled and validated in `zjs` (including engine-deinit
+  cleanup validation), while the pinned QuickJS config skips it.
+- **Other Enabled Features**: the pinned QuickJS config skips
+  `arbitrary-module-namespace-names`, `Array.fromAsync`, `await-dictionary`,
+  `explicit-resource-management`, `immutable-arraybuffer`, `import-text`,
+  `joint-iteration`, `legacy-regexp`, and
+  `nonextensible-applies-to-private`, while the zjs profile enables them.
 - **Import Bytes**: The local profile enables and validates binary module
-  imports (`import-bytes`) within the repository validation boundary.
+  imports (`import-bytes`), while the pinned QuickJS config skips them.
+
+Conversely, the pinned QuickJS profile enables `host-gc-required`, while zjs
+skips it. The two profiles also select different staging tests, so raw pass
+counts are not a direct completeness comparison.
 
 ## Validation Commands
 

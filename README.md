@@ -11,9 +11,11 @@ QuickJS C API outside its specified API surface.
 
 ## Status
 
-The active local test262 gate is expected to pass with no unexpected errors and
-no checked-in known failures. The current `test262_errors.txt` boundary is
-empty.
+The active local test262 gate is expected to pass with no unexpected errors.
+The 2026-07-27 checked report has 44,541 passes, 25 checked-in known failures,
+and 5,209 feature skips. All 25 known files also fail when the same runner and
+harness use the pinned QuickJS binary, so they are test262 compatibility debt,
+not demonstrated zjs-to-QuickJS regressions.
 
 ```sh
 zig build test262-gate --seed 0 --summary all
@@ -87,7 +89,9 @@ traversal stays reproducible and cacheable. Zig test runners also use seed `0`
 by default; pass `-Dzjs_test_seed=<u32>` for an explicit randomized validation
 run.
 
-`-Dzjs_enable_ic=false` disables shape-keyed inline caches for diagnosis.
+Property opcodes use direct shape/property fast paths. The former shape-keyed
+inline cache and its `zjs_enable_ic` build option have been removed to stay
+aligned with QuickJS.
 
 ## CLI
 
@@ -112,6 +116,9 @@ Key authorities:
 - [COMPATIBILITY.md](COMPATIBILITY.md): current validation boundary.
 - [LIMITATIONS.md](LIMITATIONS.md): runtime and product-scope limitations.
 - [docs/architecture.md](docs/architecture.md): current architecture snapshot.
+- [docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md](docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md):
+  source-, behavior-, test-, and measurement-backed subsystem comparison with
+  the pinned QuickJS checkout.
 - [docs/public-api-contract.md](docs/public-api-contract.md): public Zig API
   contract.
 - [docs/embedding-cookbook.md](docs/embedding-cookbook.md): Zig-native
@@ -176,7 +183,7 @@ zig build perf-benchmark --seed 0 --summary all
   properties, arrays, GC, and core ownership.
 - `src/parser.zig`: lexer, parser, source positions, and compile entry.
 - `src/bytecode.zig`: bytecode, constants, scopes, module metadata,
-  inline-cache slots, and pipeline passes.
+  `FunctionBytecode` packing, and pipeline passes.
 - `src/exec/`: bytecode execution, standard-global bootstrap and built-in
   behavior, calls, eval, exceptions, modules, promises, VM opcode shards, and
   job queue.

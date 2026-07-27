@@ -7,8 +7,9 @@ it does not require a local C QuickJS binary.
 Current design notes:
 
 - [Object and shape implementation](object-shape-design.md)
-- [Inline cache implementation](inline-cache-design.md)
+- [Retired inline-cache note](inline-cache-design.md)
 - [`exec/call_runtime.zig` decomposition map](shared-vm-decomposition.md)
+- [Current zjs / pinned QuickJS subsystem baseline](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
 
 ## Current Benchmark Entries
 
@@ -47,6 +48,14 @@ release gate.
 
 The active checked-in self baseline is
 `reports/perf/baseline/microbench-zjs-releasefast.json`.
+
+The checked `microbench-vs-quickjs.json`, `hotpath-vs-quickjs.json`, and
+`env-vs-quickjs.md` are historical: they were captured on 2026-06-13 against
+QuickJS-ng 0.15 with a then-default 8-byte zjs value representation and
+mechanisms that have since been removed. Do not use them as the current
+Bellard-QuickJS comparison. Regenerate a pinned comparison with binary hashes,
+CPU affinity, output validation, and the current 16-byte default before making
+cross-engine claims.
 
 Its environment note is `reports/perf/baseline/env-zjs-self.md`. Refresh it
 with:
