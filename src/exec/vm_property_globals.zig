@@ -556,40 +556,6 @@ fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
     };
 }
 
-/// Inline cell direct-write fast path for `OP_put_var`.
-///
-/// `putVar` handles cell writes, lexical TDZ, const violations, global-object
-/// sets and eval bindings in one `noinline` body. That body is ~13 KB and costs
-/// a 272-byte frame plus 14 callee-saved registers on entry, yet a steady-state
-/// global write takes only its shortest arm. QuickJS keeps the equivalent work
-/// inside `JS_CallInternal`, so it pays no per-write call frame at all.
-///
-/// This mirrors the first cell arm of `putVar` mechanically -- same guards, same
-/// order, same ownership -- and commits nothing on a miss: the guards run before
-/// the stack pop, and `frame.pc` is only advanced on a hit, so the outlined
-/// `putVar` still sees exactly the state it would have seen.
-pub inline fn tryPutVarCellFast(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-) bool {
-    const ref_idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    if (ref_idx >= frame.var_refs.len) return false;
-    const cell = slot_ops.varRefSlotCell(frame, ref_idx);
-    const current = cell.pvalue.*;
-    // Same predicate as putVar's write-through arm: not uninitialized, not
-    // const, not an indirect var-ref, not a function-name slot.
-    if (current.isUninitialized() or cell.varRefIsConstSlot().*) return false;
-    if (core.VarRef.fromValue(current) != null) return false;
-    if (cell.varRefIsFunctionNameSlot().*) return false;
-
-    const value = stack.pop() catch return false;
-    frame.pc += 2;
-    cell.setVarRefValue(ctx.runtime, value);
-    return true;
-}
-
 pub noinline fn putVar(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

@@ -97,12 +97,13 @@ pub const h_get_var = coldStd(struct {
         _ = try vm_property_globals.getVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
     }
 }.b);
+/// Miss continuation for `td.op_put_var`, and the whole of OP_put_var in the
+/// all-cold table. The cell direct-write arm no longer runs here: it moved into
+/// the resident handler, which reaches this shell only after that arm declined,
+/// so re-testing it would be a guaranteed second miss.
 pub const h_put_var = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
         _ = pc;
-        // Steady-state global writes take only the cell direct-write arm; try it
-        // inline so the common case does not build putVar's 272-byte frame.
-        if (vm_property_globals.tryPutVarCellFast(vm.ctx, vm.stack, vm.function, vm.frame)) return;
         _ = try vm_property_globals.putVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.strictUnresolvedGetVar(vm), td.evalGlobalVarBindings(vm), td.isEvalCode(vm));
     }
 }.b);
@@ -919,6 +920,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.add_loc] = td.op_add_loc;
     t[op.get_var] = td.op_get_var;
     t[op.get_var_undef] = td.op_get_var;
+    t[op.put_var] = td.op_put_var; // resident cell write-through; every other arm → cold h_put_var
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.get_var_ref0, .h = td.opGetVarRef(.c0) },
         .{ .o = op.get_var_ref1, .h = td.opGetVarRef(.c1) },
