@@ -3319,14 +3319,49 @@ pub const Machine = struct {
     /// transferred to a tail-call replacement, or explicitly deinitialized.
     inline fn popFrameMode(self: *Machine, comptime returned: bool) ReturnContinuation {
         const dying = self.topEntry();
-        // Read the overlay before teardown. The final replacement releases
-        // its own unit and every retired tail caller it represents.
-        const chain_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
-            dying.tailChainBudgetSlot().*
-        else
-            .{ .extra_depth = 0, .planned_stack_bytes = 0 };
+        // A frame that carries retired tail callers releases their accumulated
+        // budget too, which means reading an overlay before teardown and a
+        // second pass over the runtime's depth and byte counters. An ordinary
+        // frame's budget is statically {0, 0}, so it used to build that struct,
+        // hold it live across teardown, and subtract zero from two hot runtime
+        // fields on every single return. The whole shape now lives in the
+        // outlined twin below and this path never mentions it again; the bit
+        // tested here is in the same `teardown` byte deinitReturned already
+        // loads for its own flags.
+        if (dying.teardown.tail_chain) return self.popTailChainFrameMode(returned);
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        ));
+        const continuation = dying.takeContinuation();
+        if (returned)
+            dying.deinitReturned(self.ctx)
+        else
+            dying.deinit(self.ctx);
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        self.depth -= 1;
+        // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
+        // done: epilogue (quickjs.c:20709).
+        self.top = dying.prev;
+        return continuation;
+    }
+
+    /// `popFrameMode` for a frame that inherited the logical depth and planned
+    /// bytecode-stack cost of tail callers whose Entry storage was reused. Same
+    /// sequence as the ordinary twin plus the inherited-budget release, kept out
+    /// of line so an ordinary return neither materializes the overlay nor pays
+    /// the second counter pass. `returned` is runtime here rather than comptime:
+    /// this path is entered once per tail chain, not once per call.
+    noinline fn popTailChainFrameMode(self: *Machine, returned: bool) ReturnContinuation {
+        const dying = self.topEntry();
+        std.debug.assert(dying.teardown.tail_chain);
+        // Read the overlay before teardown. The final replacement releases
+        // its own unit and every retired tail caller it represents.
+        const chain_budget: Entry.TailChainBudget = dying.tailChainBudgetSlot().*;
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
         std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
             dying.frame.function,
@@ -3344,8 +3379,6 @@ pub const Machine = struct {
         self.ctx.runtime.hot.call_depth -= chain_budget.extra_depth;
         self.ctx.runtime.hot.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
-        // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
-        // done: epilogue (quickjs.c:20709).
         self.top = dying.prev;
         return continuation;
     }
