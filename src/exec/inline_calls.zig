@@ -436,6 +436,74 @@ pub const Entry = struct {
         continuation.payload = 0;
     }
 
+    /// Teardown bits whose presence means this frame's completion is not the
+    /// plain one. Listed by name rather than as a literal mask so that adding a
+    /// completion kind forces a decision here instead of silently classifying
+    /// as ordinary; the comptime check below fails if any bit goes unclassified.
+    ///
+    /// Two bits are deliberately absent. `simple` is a teardown-shape fact an
+    /// ordinary return requires rather than one it excludes, and `copy_argv`
+    /// only prices the frame's bytecode-stack charge and has no completion
+    /// effect at all.
+    const extended_completion_flags: TeardownFlags = .{
+        .has_native_caller = true,
+        .empty_leaf = true,
+        .exact_args_leaf = true,
+        .forwarded_leaf = true,
+        .tail_chain = true,
+        .constructor_completion = true,
+    };
+
+    comptime {
+        const ordinary_compatible: TeardownFlags = .{ .simple = true, .copy_argv = true };
+        const covered = @as(u8, @bitCast(extended_completion_flags)) |
+            @as(u8, @bitCast(ordinary_compatible));
+        if (covered != std.math.maxInt(u8))
+            @compileError("a TeardownFlags bit is unclassified for return-mode purposes");
+    }
+
+    /// Whether this frame retires through the plain completion: push the
+    /// result, resume the caller, nothing else.
+    ///
+    /// The generic return path establishes this today by interrogating the same
+    /// state one bit at a time -- three leaf arms, the constructor arm, the
+    /// tail-chain arm, the native-caller release, the continuation tag -- on
+    /// every return, although the answer is fixed the moment the frame is
+    /// published. This derives it from the already-loaded `teardown` byte with
+    /// one masked compare, so nothing is stored and Entry does not grow.
+    ///
+    /// Reads ONLY completion-type facts. `frame.cold`, storage ownership, and
+    /// whether the operand stack still owns its arena window are all decided
+    /// while the body runs -- a callee can materialize `arguments`, fall back to
+    /// heap storage, or grow its stack -- so they stay out of the
+    /// classification and the ordinary epilogue keeps testing them dynamically.
+    /// `frame.cold` in particular is NOT a proxy for extended completion: a
+    /// forwarded leaf, a native-caller frame, a Proxy or for-of continuation
+    /// and a tail-chain frame all leave it null, while `arguments` sets it on
+    /// frames that complete plainly.
+    pub inline fn isOrdinaryReturn(self: *const Entry) bool {
+        const bits: u8 = @bitCast(self.teardown);
+        if (bits & @as(u8, @bitCast(extended_completion_flags)) != 0) return false;
+        if (!self.teardown.simple) return false;
+        return self.return_action == .next;
+    }
+
+    /// Link the static classification to the runtime continuation the generic
+    /// return actually receives. The bit tests above are derived from the same
+    /// fields the special arms read, so checking those against each other would
+    /// be circular; this is the one edge that is not, and it is what would
+    /// break first if a producer ever installed a non-plain continuation on a
+    /// frame this predicate calls ordinary.
+    pub inline fn assertOrdinaryImpliesPlainContinuation(
+        was_ordinary: bool,
+        continuation: ReturnContinuation,
+    ) void {
+        if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
+        if (!was_ordinary) return;
+        std.debug.assert(continuation.action == .next);
+        std.debug.assert(continuation.payload == 0);
+    }
+
     inline fn canUseSimpleTeardown(self: *const Entry) bool {
         return self.teardown.simple and self.frame.cold == null and
             self.frame.ownership.storage == .borrowed and self.stack.isArenaWindow();

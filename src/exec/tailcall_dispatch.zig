@@ -1211,7 +1211,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
+    // Classify before teardown: the fields it reads are consumed below.
+    // Nothing dispatches on this yet -- the discrimination that follows is
+    // unchanged, and the assert after `popReturnedFrame` is what proves the
+    // classification agrees with the continuation the frame actually carries.
+    const was_ordinary = machine.topEntry().isOrdinaryReturn();
     var continuation = machine.popReturnedFrame();
+    inline_calls.Entry.assertOrdinaryImpliesPlainContinuation(was_ordinary, continuation);
     // popFrame just installed qjs's `sf->prev_frame` in Machine.top. Its null
     // state already distinguishes L0, so do not reload and test depth as well.
     reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
