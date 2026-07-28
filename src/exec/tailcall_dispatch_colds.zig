@@ -100,6 +100,9 @@ pub const h_get_var = coldStd(struct {
 pub const h_put_var = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
         _ = pc;
+        // Steady-state global writes take only the cell direct-write arm; try it
+        // inline so the common case does not build putVar's 272-byte frame.
+        if (vm_property_globals.tryPutVarCellFast(vm.ctx, vm.stack, vm.function, vm.frame)) return;
         _ = try vm_property_globals.putVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.strictUnresolvedGetVar(vm), td.evalGlobalVarBindings(vm), td.isEvalCode(vm));
     }
 }.b);
