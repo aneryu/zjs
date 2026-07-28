@@ -1,3 +1,7 @@
+comptime {
+    _ = @import("dossier_pad.zig");
+}
+
 const public_root = @import("root.zig");
 
 pub const public_api = public_root;

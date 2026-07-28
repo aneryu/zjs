@@ -40,14 +40,17 @@ pub fn build(b: *std.Build) void {
     // Separate options object for the dossier harnesses. Reusing engine_options
     // here would register the same generated file under two module names
     // (the harnesses already receive it transitively via internal_fast_mod).
+    const zjs_dossier_layout_pad = b.option(usize, "zjs_dossier_layout_pad", "Dossier-only layout-lineage pad slot count (0 = no effect)") orelse 0;
     const dossier_options = b.addOptions();
     dossier_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    dossier_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     engine_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    engine_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/root.zig"),
@@ -63,6 +66,7 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     plugin_fixture_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     plugin_fixture_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    plugin_fixture_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     const plugin_fixture_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -557,6 +561,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     test_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    test_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
     test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
     unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
