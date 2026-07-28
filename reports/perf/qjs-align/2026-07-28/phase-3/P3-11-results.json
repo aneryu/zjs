@@ -1,0 +1,281 @@
+{
+ "note": "P3-11 return control-field touch audit. Profiling and disassembly only, no source changes.",
+ "head": "39a4ba79",
+ "absolute": {
+  "fib_rec": 1.3157,
+  "call_body_loop": 1.1398,
+  "method_call_loop": 1.1471
+ },
+ "table_A_epilogue_family": {
+  "note": "200 inner calls per probe (fib 465, countdown 201); the generic=1 in most rows is the top-level run()",
+  "rows": {
+   "empty": {
+    "op_return": 202,
+    "op_return_undef": 0,
+    "leaf_empty": 200,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 1,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "identity": {
+    "op_return": 202,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 200,
+    "leaf_forwarded": 0,
+    "generic": 1,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "countdown": {
+    "op_return": 203,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 201,
+    "leaf_forwarded": 0,
+    "generic": 1,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "fib": {
+    "op_return": 467,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 466,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "closure": {
+    "op_return": 202,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 201,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "method": {
+    "op_return": 202,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 201,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "arguments": {
+    "op_return": 202,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 201,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "native": {
+    "op_return": 202,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 201,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "throw": {
+    "op_return": 2,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 1,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 200,
+    "continuationDispatcher": 0
+   },
+   "ctor": {
+    "op_return": 152,
+    "op_return_undef": 50,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 1,
+    "constructor": 150,
+    "tail_chain": 0,
+    "generalTeardown": 150,
+    "continuationDispatcher": 0
+   },
+   "proxy": {
+    "op_return": 402,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 200,
+    "leaf_forwarded": 0,
+    "generic": 1,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "forof": {
+    "op_return": 2,
+    "op_return_undef": 0,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 1,
+    "constructor": 0,
+    "tail_chain": 0,
+    "generalTeardown": 0,
+    "continuationDispatcher": 0
+   },
+   "special": {
+    "op_return": 392,
+    "op_return_undef": 50,
+    "leaf_empty": 0,
+    "leaf_exact": 0,
+    "leaf_forwarded": 0,
+    "generic": 241,
+    "constructor": 50,
+    "tail_chain": 0,
+    "generalTeardown": 50,
+    "continuationDispatcher": 240
+   }
+  }
+ },
+ "table_B_field_touch": {
+  "entry_size": 256,
+  "continuation_payload": {
+   "offset": 248,
+   "setup_writes_per_call": 1,
+   "ordinary_return_loads_per_call": 1,
+   "used_on_next_path": false,
+   "ordinary_value": 0,
+   "evidence": "loaded into w24 at 125e0c4; the .next branch at 125eaf4 never reads it; only 125eb04 (non-.next) stores it to vm.return_payload"
+  },
+  "return_action": {
+   "offset": 253,
+   "setup_writes_per_call": 1,
+   "ordinary_return_loads_per_call": 1,
+   "tested_every_return": true,
+   "ordinary_value": ".next"
+  },
+  "teardown": {
+   "offset": 252,
+   "setup_writes_per_call": 1,
+   "ordinary_return_loads_per_call": 1,
+   "bit_tests_per_ordinary_return": 5
+  },
+  "frame_cold": {
+   "offset": 128,
+   "ordinary_value": "null",
+   "read_by": "canUseSimpleTeardown"
+  },
+  "native_caller": {
+   "offset": 224,
+   "setup_writes_on_ordinary_path": 0,
+   "note": "left unspecified by ordinary setup; reused as leaf resume record and tail-chain budget overlay"
+  },
+  "profile_guard": {
+   "offset": 252,
+   "size": 0,
+   "note": "zero-sized, no cost"
+  },
+  "discrimination_chain_tests_before_any_release": 12,
+  "constructor_completion_tested_twice": true
+ },
+ "table_C_generic_return_attribution": {
+  "fib_rec": {
+   "op_return_percent_of_workload": 21.87,
+   "stages_percent_of_workload": {
+    "no line info": 6.24,
+    "RC decref": 3.45,
+    "live-value release": 2.55,
+    "special-state discrimination": 2.39,
+    "frame/top restore": 2.21,
+    "other <0.8% lines": 1.57,
+    "depth/byte accounting": 1.33,
+    "handler prologue/epilogue": 0.93,
+    "arena restore": 0.6,
+    "result push": 0.32,
+    "continuation decode": 0.29
+   }
+  },
+  "call_body_loop": {
+   "op_return_percent_of_workload": 13.57,
+   "stages_percent_of_workload": {
+    "no line info": 3.06,
+    "other <0.8% lines": 2.34,
+    "live-value release": 1.74,
+    "RC decref": 1.65,
+    "frame/top restore": 1.21,
+    "special-state discrimination": 1.05,
+    "depth/byte accounting": 0.66,
+    "handler prologue/epilogue": 0.66,
+    "result push": 0.47,
+    "arena restore": 0.47,
+    "continuation decode": 0.25
+   }
+  },
+  "largest_single_line_in_discrimination": {
+   "line": "inline_calls.zig:624 (teardown.has_native_caller)",
+   "percent_of_op_return": 6.22,
+   "percent_of_fib_rec": 1.36
+  }
+ },
+ "verdict": {
+  "case": "B",
+  "case_A_rejected_because": "continuation decode is 0.29% of fib_rec, far below the 2% gate, even though return_action and continuation_payload are written every setup and loaded every ordinary return",
+  "next_cut": "collapse the layered special-state discrimination into one ordinary-mode test, with .next continuation and zero payload implied by that mode",
+  "removable_ceiling_percent_of_fib_rec": 2.68,
+  "projected_fib_rec_after": 1.281,
+  "exit_line": 1.2,
+  "conclusion": "even a fully successful P3-12 leaves fib_rec around 1.28x; recommend a structural hold point afterwards rather than continuing with 0.3-0.6% items"
+ },
+ "positive_probes": {
+  "proxy_get and for_of_next": {
+   "probe": "Proxy with a JS getter trap plus a user-defined iterator next()",
+   "hits": 240
+  },
+  "constructor_completion": {
+   "popConstructorReturn": 150,
+   "op_return_undef": 50
+  },
+  "tail_chain": {
+   "probe": "synthetic bytecode test",
+   "hits": 10,
+   "note": "established in P3-10"
+  },
+  "throw_unwind": {
+   "deinitGeneralResources": 200
+  },
+  "forwarded_leaf_and_has_native_caller": {
+   "hits": 0,
+   "note": "NO production consumer found across 13 probes; f.call takes the generic arm. Locating one is a precondition for P3-12"
+  }
+ }
+}
