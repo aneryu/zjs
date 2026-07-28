@@ -1063,6 +1063,26 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
+    // One masked test on the teardown byte decides the whole completion shape.
+    // A frame that clears it retires straight through the linear epilogue: no
+    // leaf arm, no constructor arm, no tail-chain budget, no native-caller or
+    // constructor-fallback release, no continuation tag or payload. Every one
+    // of those was asked on this path before, on every ordinary return, about
+    // state fixed when the frame was published.
+    //
+    // Placed ahead of the special arms rather than after them, so the plain
+    // case pays one test instead of four. A leaf or constructor frame fails it
+    // and reaches the arms below completely unchanged, one predicted test
+    // later.
+    if (machine.topEntry().isOrdinaryReturn()) {
+        machine.popOrdinaryFrame();
+        reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+        // AssumeCapacity never reallocs, so the sp reloadAfterPop captured
+        // stays valid; it just advances past the pushed slot.
+        vm.stack.pushOwnedAssumeCapacity(value);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    }
     if (machine.topEntry().isEmptyLeaf()) {
         // No operand-window guard on this arm: zero-arg empty-leaf
         // publication requires the static return-balance proof
@@ -1211,13 +1231,9 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    // Classify before teardown: the fields it reads are consumed below.
-    // Nothing dispatches on this yet -- the discrimination that follows is
-    // unchanged, and the assert after `popReturnedFrame` is what proves the
-    // classification agrees with the continuation the frame actually carries.
-    const was_ordinary = machine.topEntry().isOrdinaryReturn();
+    // Reaching here means the frame is not a plain completion, so the
+    // continuation genuinely has to be read.
     var continuation = machine.popReturnedFrame();
-    inline_calls.Entry.assertOrdinaryImpliesPlainContinuation(was_ordinary, continuation);
     // popFrame just installed qjs's `sf->prev_frame` in Machine.top. Its null
     // state already distinguishes L0, so do not reload and test depth as well.
     reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);

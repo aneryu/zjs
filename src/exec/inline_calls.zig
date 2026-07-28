@@ -488,22 +488,6 @@ pub const Entry = struct {
         return self.return_action == .next;
     }
 
-    /// Link the static classification to the runtime continuation the generic
-    /// return actually receives. The bit tests above are derived from the same
-    /// fields the special arms read, so checking those against each other would
-    /// be circular; this is the one edge that is not, and it is what would
-    /// break first if a producer ever installed a non-plain continuation on a
-    /// frame this predicate calls ordinary.
-    pub inline fn assertOrdinaryImpliesPlainContinuation(
-        was_ordinary: bool,
-        continuation: ReturnContinuation,
-    ) void {
-        if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-        if (!was_ordinary) return;
-        std.debug.assert(continuation.action == .next);
-        std.debug.assert(continuation.payload == 0);
-    }
-
     inline fn canUseSimpleTeardown(self: *const Entry) bool {
         return self.teardown.simple and self.frame.cold == null and
             self.frame.ownership.storage == .borrowed and self.stack.isArenaWindow();
@@ -696,6 +680,43 @@ pub const Entry = struct {
         for (live_values) |v| v.free(rt);
         for (frame.args) |v| v.free(rt);
         if (self.teardown.constructor_completion) self.releaseConstructorFallback(rt);
+    }
+
+    /// `deinitSimpleResources` for a frame `isOrdinaryReturn` already cleared.
+    /// Same sequence and same order; the native-caller release and the
+    /// constructor-fallback release are gone because the classification proved
+    /// both bits clear. The first of those two tests alone was 6.22% of
+    /// op_return in fib_rec.
+    inline fn deinitOrdinarySimpleResources(self: *Entry, ctx: *core.JSContext) void {
+        const rt = ctx.runtime;
+        const frame = &self.frame;
+        std.debug.assert(self.isOrdinaryReturn());
+        std.debug.assert(self.canUseSimpleTeardown());
+        std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
+        std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+        if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
+        if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+        // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
+        const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
+        for (live_values) |v| v.free(rt);
+        for (frame.args) |v| v.free(rt);
+    }
+
+    /// `deinitReturned` for a plain completion. The leaf routing is gone -- the
+    /// classification proved all three leaf bits clear -- so the only decision
+    /// left is the one that genuinely cannot be made before the body runs:
+    /// whether the frame still has the arena-backed shape simple teardown
+    /// needs. A frame that grew its stack or materialized `arguments` keeps the
+    /// unchanged general body.
+    inline fn deinitOrdinaryReturned(self: *Entry, ctx: *core.JSContext) void {
+        if (self.canUseSimpleTeardown()) {
+            self.deinitOrdinarySimpleResources(ctx);
+            ctx.runtime.vm_stack.restore(self.arena_mark);
+            self.profile_guard.deinit();
+            return;
+        }
+        self.deinitGeneral(ctx);
     }
 
     /// General teardown for frames whose stack, cold state, or storage escaped
@@ -3449,6 +3470,34 @@ pub const Machine = struct {
         self.depth -= 1;
         self.top = dying.prev;
         return continuation;
+    }
+
+    /// `popFrameMode` for a frame `isOrdinaryReturn` already cleared. No
+    /// tail-chain budget to release, no continuation to move out, no special
+    /// completion to discriminate -- so none of that is re-asked. Returns
+    /// nothing because a plain completion carries no payload for the caller.
+    pub inline fn popOrdinaryFrame(self: *Machine) void {
+        const dying = self.topEntry();
+        std.debug.assert(dying.isOrdinaryReturn());
+        // The classification never reads the payload, so this is the one check
+        // on this path that is not circular: it catches a producer that
+        // installed a continuation payload without the tag that goes with it,
+        // which is exactly the frame this path would drop on the floor.
+        std.debug.assert(dying.continuation_payload == 0);
+        // Committed charge persisted at construction; the recompute is the
+        // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        ));
+        dying.deinitOrdinaryReturned(self.ctx);
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        self.depth -= 1;
+        // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
+        // done: epilogue (quickjs.c:20709).
+        self.top = dying.prev;
     }
 
     /// Retire an abruptly-completed or tail-replaced frame.
