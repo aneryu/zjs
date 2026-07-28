@@ -31,6 +31,13 @@ same source shape as the process-level comparison tools.
   write and prints it. This case performs 250,000 indexed writes and then a
   1,024-element checksum pass.
 
+- `local_arith_loop`: not adapted from anything, and deliberately absent from
+  `policy.json`. It is an attribution sentinel for opcode hot/cold
+  reclassification work: purely local arithmetic and loop dispatch, so a change
+  that perturbs dispatch as a whole shows up here while a change confined to one
+  opcode does not. Listing it as a policy sentinel would change the P0 exit-line
+  geomean, which is why it is only ever selected explicitly.
+
 The callable shapes are necessary because each harness evaluates the source
 once, retains global `run`, and invokes that function for warmup and timed
 samples without recompiling the source.
