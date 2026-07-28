@@ -38,6 +38,17 @@ same source shape as the process-level comparison tools.
   opcode does not. Listing it as a policy sentinel would change the P0 exit-line
   geomean, which is why it is only ever selected explicitly.
 
+- `call_empty_0`, `call_identity_1`, `call_identity_4`, `call_8_locals`,
+  `call_arguments`, `call_throw`: Phase 3 ordinary-call probes, none of them
+  policy sentinels for the same reason as `local_arith_loop`. They are designed
+  to be read as differences rather than in isolation: identity_1 minus empty_0
+  is the first argument, identity_4 minus identity_1 is argument passing with
+  the callee body held constant, 8_locals minus identity_1 is frame geometry,
+  and `call_arguments` / `call_throw` are the semantic shapes that must not
+  regress when the plain path gets cheaper. The three remaining shapes the plan
+  calls for already exist: `fib_rec` is recursion, `method_call_loop` is
+  call-method, and `call_body_loop` is call-closure.
+
 The callable shapes are necessary because each harness evaluates the source
 once, retains global `run`, and invokes that function for warmup and timed
 samples without recompiling the source.
