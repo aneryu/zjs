@@ -29,61 +29,85 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import re
 import sys
 from itertools import permutations
 from pathlib import Path
 from typing import Any
 
-CLASSIFIER_VERSION = 1
+CLASSIFIER_VERSION = 2
 
-# Symbols whose difference between two binaries is explained by the experiment
-# itself rather than by the compiler state, and which must not vote.
-EXCLUDED_PATTERNS = (
-    # layout-lineage pad
-    re.compile(r"^zjs_dossier_pad_\d+$"),
-    # variant attestation / harness-only surface
-    re.compile(r"dossier_variant"),
-    re.compile(r"dossier_options"),
-    # functions the simple-constructor switch directly rewrites or removes
-    re.compile(r"constructSimpleFieldConstructor"),
-    re.compile(r"ensureSimpleCtorMemo"),
-    re.compile(r"simpleFieldConstructorPattern"),
-    re.compile(r"simpleLocalThisFieldConstructorPattern"),
-    re.compile(r"simpleStackThisFieldConstructorPattern"),
-    re.compile(r"tryAppendSimpleConstructorField"),
-    re.compile(r"decodeSimpleConstructor"),
-    re.compile(r"prototypeChainBlocksSimpleFieldStore"),
-    re.compile(r"constructOrdinaryBytecodeFunctionObject"),
-    re.compile(r"prepareSameMachineConstructorAfterFirstPoll"),
-)
+POLICY_PATH = Path(__file__).resolve().parent / "state_exclusions.json"
 
 # A missing or extra symbol is stronger evidence than one changed body.
 PRESENCE_PENALTY = 10
-MARGIN_RATIO = 4.0
-MARGIN_ABSOLUTE = 1000
 
-# A candidate that genuinely shares a reference's compiler state matches it
-# exactly once switch-owned and pad symbols are excluded -- measured distance is
-# 0 on real two-state binaries. Without this bound a margin rule alone can be
-# satisfied by a build belonging to neither reference: a third state sitting
-# nearer Y than X passes at ratio 40 while its true same-state distance is not
-# zero. Such a build must be reported as unmatched, not filed under the closer
-# label. If a future toolchain makes honest same-state distance nonzero, this
-# has to be re-calibrated deliberately rather than relaxed.
+# Membership is exact. A candidate that genuinely shares a reference's compiler
+# state matches it with distance 0 once switch-owned and pad symbols are
+# excluded -- measured on real two-state binaries. Separation alone is not
+# enough: a third state sitting nearer Y than X satisfied a 4x ratio rule at
+# ratio 40 while its true same-state distance was 10, and would have been filed
+# under Y. If a future toolchain makes honest same-state distance nonzero, the
+# references must be rebuilt and the comparator re-calibrated, not this widened.
 SAME_STATE_TOLERANCE = 0
 
-
-def excluded(name: str) -> bool:
-    return any(pattern.search(name) for pattern in EXCLUDED_PATTERNS)
-
-
-def votable(identity: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {n: e for n, e in identity["symbols"].items() if not excluded(n)}
+# Separation is now a health gate on the reference pair itself, not an
+# admission route for candidates: it asks whether X and Y are far enough apart
+# to be distinguishable at all.
+ABSOLUTE_STATE_SEPARATION_MIN = 1000
 
 
-def distance(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    a, b = votable(left), votable(right)
+class PolicyError(RuntimeError):
+    """Raised when the checked-in exclusion policy cannot be honoured."""
+
+
+def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
+    """Load the checked-in exclusion policy.
+
+    The exclusion set decides which symbols get to vote on state membership, so
+    it carries the same authority as a performance policy: it lives in git,
+    changing it requires review, and an artifact under test may not extend it.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise PolicyError(f"cannot read exclusion policy: {error}") from error
+    try:
+        policy = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PolicyError(f"invalid exclusion policy JSON: {error}") from error
+    for field in ("policy_id", "policy_version", "exact_symbols", "audited_patterns"):
+        if field not in policy:
+            raise PolicyError(f"exclusion policy is missing {field}")
+    policy["_sha256"] = hashlib.sha256(raw).hexdigest()
+    policy["_exact"] = frozenset(policy["exact_symbols"])
+    policy["_patterns"] = tuple(
+        re.compile(entry["pattern"]) for entry in policy["audited_patterns"]
+    )
+    policy["_minimum_votable"] = int(policy.get("minimum_votable_symbols", 0))
+    return policy
+
+
+def excluded(name: str, policy: dict[str, Any]) -> bool:
+    if name in policy["_exact"]:
+        return True
+    return any(pattern.search(name) for pattern in policy["_patterns"])
+
+
+def votable(
+    identity: dict[str, Any], policy: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    return {n: e for n, e in identity["symbols"].items() if not excluded(n, policy)}
+
+
+def distance(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = policy or load_policy()
+    a, b = votable(left, policy), votable(right, policy)
     shared = set(a) & set(b)
     size_changed = sum(1 for n in shared if a[n]["size"] != b[n]["size"])
     body_changed = sum(
@@ -106,62 +130,98 @@ def distance(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
 def match(
     reference: dict[str, dict[str, Any]],
     candidates: dict[str, dict[str, Any]],
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assign two candidate builds to the two reference states.
 
-    `reference` and `candidates` are both {label: identity}; reference labels
-    are the state names (conventionally "X" and "Y").
+    Three layers, evaluated in order:
+
+      1. reference health -- X and Y must differ, and by at least
+         ABSOLUTE_STATE_SEPARATION_MIN, or they are not distinguishable states;
+      2. membership -- each candidate must match its assigned reference
+         *exactly* (distance 0). Separation is not an admission route: a third
+         state nearer Y than X clears any ratio bar while belonging to neither;
+      3. bijection -- the two candidates must occupy the two distinct states.
+
+    Ratio and gap are reported for diagnosis only and never decide a verdict.
     """
+    policy = policy or load_policy()
     ref_labels = sorted(reference)
     cand_labels = sorted(candidates)
     if len(ref_labels) != 2 or len(cand_labels) != 2:
         raise ValueError("matcher requires exactly two references and two candidates")
 
-    matrix = {
-        f"{c}->{r}": distance(candidates[c], reference[r])["distance"]
+    reference_gap = distance(reference[ref_labels[0]], reference[ref_labels[1]], policy)
+    votable_count = reference_gap["votable_symbols"]
+
+    matrix: dict[str, int] = {}
+    detail: dict[str, dict[str, Any]] = {}
+    for c in cand_labels:
+        for r in ref_labels:
+            measured = distance(candidates[c], reference[r], policy)
+            matrix[f"{c}->{r}"] = measured["distance"]
+            detail[f"{c}->{r}"] = measured
+
+    exact_matches = {
+        c: [r for r in ref_labels if matrix[f"{c}->{r}"] <= SAME_STATE_TOLERANCE]
         for c in cand_labels
-        for r in ref_labels
     }
 
-    scored = []
-    for order in permutations(ref_labels):
-        assignment = dict(zip(cand_labels, order))
-        total = sum(matrix[f"{c}->{r}"] for c, r in assignment.items())
-        scored.append((total, assignment))
-    scored.sort(key=lambda item: item[0])
-
-    same_total, best = scored[0]
-    cross_total, _ = scored[1]
-
-    ratio_ok = same_total == 0 or cross_total >= MARGIN_RATIO * same_total
-    absolute_ok = (cross_total - same_total) >= MARGIN_ABSOLUTE
-    separated = ratio_ok or absolute_ok
-    belongs = same_total <= SAME_STATE_TOLERANCE
-
-    if not separated:
-        verdict = "ambiguous"
-    elif not belongs:
-        # Well separated, but the winning pairing still is not an exact match:
-        # at least one candidate belongs to neither reference state.
+    assignment: dict[str, str] | None = None
+    if votable_count < policy["_minimum_votable"]:
+        verdict = "insufficient_votable_symbols"
+    elif reference_gap["distance"] == 0:
+        verdict = "invalid_references"
+    elif reference_gap["distance"] < ABSOLUTE_STATE_SEPARATION_MIN:
+        verdict = "insufficient_state_separation"
+    elif any(len(m) == 0 for m in exact_matches.values()):
         verdict = "no_matching_state"
+    elif any(len(m) > 1 for m in exact_matches.values()):
+        # Only reachable if the references are not actually distinct, which the
+        # earlier gate should already have caught; kept as a belt-and-braces
+        # guard rather than silently picking one.
+        verdict = "ambiguous"
+    elif len({m[0] for m in exact_matches.values()}) != 2:
+        verdict = "non_bijective_assignment"
     else:
         verdict = "matched"
+        assignment = {c: exact_matches[c][0] for c in cand_labels}
+
+    same_total = (
+        sum(matrix[f"{c}->{assignment[c]}"] for c in cand_labels)
+        if assignment
+        else min(
+            sum(matrix[f"{c}->{r}"] for c, r in zip(cand_labels, order))
+            for order in permutations(ref_labels)
+        )
+    )
+    cross_total = max(
+        sum(matrix[f"{c}->{r}"] for c, r in zip(cand_labels, order))
+        for order in permutations(ref_labels)
+    )
 
     return {
         "state_classifier_version": CLASSIFIER_VERSION,
-        "assignment": best if verdict == "matched" else None,
         "verdict": verdict,
+        "assignment": assignment,
         "same_state_tolerance": SAME_STATE_TOLERANCE,
-        "candidate_belongs_to_reference_states": belongs,
+        "absolute_state_separation_min": ABSOLUTE_STATE_SEPARATION_MIN,
+        "excluded_symbols_policy": policy["policy_id"],
+        "excluded_symbols_policy_version": policy["policy_version"],
+        "excluded_symbols_sha256": policy["_sha256"],
+        "votable_symbols": votable_count,
+        "reference_separation": reference_gap["distance"],
         "same_state_distance": same_total,
         "cross_state_distance": cross_total,
-        "margin_ratio": (
-            float("inf") if same_total == 0 else cross_total / same_total
+        # Diagnostics only. Written as null rather than a JSON-illegal Infinity
+        # when the denominator is zero, which is the healthy case.
+        "separation_ratio": (
+            None if same_total == 0 else cross_total / same_total
         ),
-        "margin_absolute": cross_total - same_total,
-        "rule_ratio_satisfied": ratio_ok,
-        "rule_absolute_satisfied": absolute_ok,
+        "separation_gap": cross_total - same_total,
+        "exact_matches": exact_matches,
         "distance_matrix": matrix,
+        "distance_detail": detail,
         "reference_signatures": {
             r: reference[r].get("global_normalized_signature") for r in ref_labels
         },

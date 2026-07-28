@@ -1,0 +1,34 @@
+{
+  "policy_id": "simple-constructor-v1",
+  "policy_version": 1,
+  "rationale": "Symbols whose difference between two builds is explained by the experiment itself (variant switch or layout pad) rather than by the compiler state. They must not vote when deciding whether two builds share a state. This list is checked in and may not be extended by an artifact under test.",
+  "exact_symbols": [
+    "exec.call_runtime.constructSimpleFieldConstructor",
+    "exec.call_runtime.ensureSimpleCtorMemo",
+    "exec.call_runtime.simpleFieldConstructorPattern",
+    "exec.call_runtime.simpleLocalThisFieldConstructorPattern",
+    "exec.call_runtime.simpleStackThisFieldConstructorPattern",
+    "exec.call_runtime.tryAppendSimpleConstructorField",
+    "exec.call_runtime.decodeSimpleConstructorPutLoc",
+    "exec.call_runtime.decodeSimpleConstructorGetLoc",
+    "exec.call_runtime.decodeSimpleConstructorArgGet",
+    "exec.call_runtime.prototypeChainBlocksSimpleFieldStore",
+    "exec.call_runtime.constructOrdinaryBytecodeFunctionObject",
+    "exec.call_runtime.prepareSameMachineConstructorAfterFirstPoll"
+  ],
+  "audited_patterns": [
+    {
+      "pattern": "^zjs_dossier_pad_[0-9]+$",
+      "reason": "layout-lineage pad exports; present only when -Dzjs_dossier_layout_pad > 0"
+    },
+    {
+      "pattern": "dossier_variant",
+      "reason": "variant attestation surface emitted by the measurement harnesses"
+    },
+    {
+      "pattern": "dossier_options",
+      "reason": "build-options module carrying the variant identity"
+    }
+  ],
+  "minimum_votable_symbols": 500
+}
