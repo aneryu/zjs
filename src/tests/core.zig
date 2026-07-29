@@ -10292,7 +10292,9 @@ test "multi-limb division survives a failure at every allocation point" {
     const bigint = engine.libs.bigint;
     // 6 limbs by 3, chosen so the numerator is strictly larger and the division
     // is a real multi-limb one rather than the early return or the single-limb
-    // path.
+    // path. The multi-limb path allocates a normalized numerator scratch, a
+    // normalized divisor scratch, the quotient and, when non-zero, the
+    // remainder; the sweep fails each in turn.
     const lhs_limbs = [_]bigint.Limb{
         0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210, 0xAAAA_AAAA_AAAA_AAAB,
         0x0000_0000_0000_0007, 0xFFFF_FFFF_FFFF_FFFF, 0x8000_0000_0000_0001,
@@ -10359,3 +10361,173 @@ test "multi-limb division survives a failure at every allocation point" {
     try std.testing.expectEqual(std.math.Order.eq, again.compare(expected_quotient));
 }
 
+
+/// Checks `q * b + r == a`, `abs(r) < abs(b)`, the remainder's sign, and that
+/// neither result carries a leading zero limb.
+fn expectDivisionIdentity(
+    lhs_limbs: []const engine.libs.bigint.Limb,
+    lhs_negative: bool,
+    rhs_limbs: []const engine.libs.bigint.Limb,
+    rhs_negative: bool,
+) !void {
+    const bigint = engine.libs.bigint;
+    const alloc = std.testing.allocator;
+    const lhs = bigint.BigInt{ .negative = lhs_negative, .limbs = @constCast(lhs_limbs), .allocator = alloc };
+    const rhs = bigint.BigInt{ .negative = rhs_negative, .limbs = @constCast(rhs_limbs), .allocator = alloc };
+
+    var quotient = try lhs.div(rhs);
+    defer quotient.deinit();
+    var remainder = try lhs.rem(rhs);
+    defer remainder.deinit();
+
+    var product = try bigint.mulAlloc(alloc, quotient, rhs);
+    defer product.deinit();
+    var recovered = try bigint.addAlloc(alloc, product, remainder);
+    defer recovered.deinit();
+    try std.testing.expectEqual(std.math.Order.eq, recovered.compare(lhs));
+
+    const abs_remainder = bigint.BigInt{ .limbs = remainder.limbs, .allocator = alloc };
+    const abs_rhs = bigint.BigInt{ .limbs = @constCast(rhs_limbs), .allocator = alloc };
+    try std.testing.expectEqual(std.math.Order.lt, abs_remainder.compare(abs_rhs));
+    try std.testing.expect(remainder.isZero() or remainder.negative == lhs_negative);
+    try std.testing.expect(quotient.isZero() or
+        quotient.negative == (lhs_negative != rhs_negative));
+    if (quotient.limbs.len != 0)
+        try std.testing.expect(quotient.limbs[quotient.limbs.len - 1] != 0);
+    if (remainder.limbs.len != 0)
+        try std.testing.expect(remainder.limbs[remainder.limbs.len - 1] != 0);
+}
+
+test "normalized long division handles every quotient-estimate correction" {
+    const Limb = engine.libs.bigint.Limb;
+    // Frozen vectors. Each was found by instrumenting the estimate loop with
+    // event counters, searching for inputs that trip it, and then freezing the
+    // input; the counters are not in the shipped code. Random differentials
+    // will not reach the last two on their own -- an add-back happens for
+    // roughly two in 2^64 random digits, and the clamp needs the running
+    // window's top limb to equal the divisor's -- so they have to be pinned.
+    const Vector = struct { a: []const Limb, b: []const Limb, event: []const u8 };
+    const vectors = [_]Vector{
+        // qhat overshoots by one; the two-limb correction walks it down once.
+        .{ .event = "one correction", .a = &.{
+            18446744071130631000, 18446744070582471246, 18446744073293857249,
+            18446744072649403833, 18446744073376993945,
+        }, .b = &.{ 18292791604476754667, 1966659979700317977 } },
+        .{ .event = "one correction", .a = &.{
+            12082522041592792640, 15748636029607535374, 15181851967732580813,
+        }, .b = &.{ 7374570672812560177, 9114781625496212255 } },
+        // Two and three consecutive corrections in a single digit.
+        .{ .event = "two corrections", .a = &.{ 6760, 15609, 46248, 25141, 4658, 56091 }, .b = &.{
+            13111450017376601947, 15741773727843677049,
+        } },
+        .{ .event = "three corrections", .a = &.{
+            2922364011524419948, 15199577267042544661, 8869955383828204815,
+            6086884528135068723, 17470225258706509392, 5989704710919718645,
+        }, .b = &.{ 7737569840773542854, 10212381028821443357 } },
+        // Multiply-subtract underflow followed by an add-back. Reachable only
+        // with three or more divisor limbs, where the two-limb correction can
+        // still leave qhat one too large.
+        .{ .event = "add-back", .a = &.{
+            13465684955894917774, 8558819152265836238, 6820847440565444368,
+            18276390249259064961, 7278821098085739655, 6374605922739522640,
+            7032115460613293848,
+        }, .b = &.{
+            12263064420428875817, 15085240911834220974, 12499075520100409598,
+            1862140883670459562, 9223372036854776206,
+        } },
+        .{ .event = "add-back", .a = &.{
+            10902867065322963979, 8154025842177743286, 892225491405445580,
+            6852634366156024265, 6260784258398759999,
+        }, .b = &.{
+            15187370619739732000, 16811601731636216368, 9924715777611263663,
+            9223372036854775836,
+        } },
+        .{ .event = "add-back", .a = &.{
+            7261502557649319965, 9419382559357885929, 17598245110249695978,
+            15137239819430460520, 3808798334777379262, 8297164559207748804,
+        }, .b = &.{
+            1751729836318627440, 17751592689439995320, 7534591674257631123,
+            9223372036863636856,
+        } },
+        // Window top limb equal to the divisor's, where the estimate would be
+        // the base itself and has to be clamped to maxInt before correction.
+        // Constructed: the numerator's top two limbs are below the divisor but
+        // share its top limb, so the first digit is zero and leaves them in
+        // place for the next step to see.
+        .{ .event = "clamped estimate", .a = &.{ 0xDEAD_BEEF, 0x1234, 0x8000_0000_0000_0001 }, .b = &.{
+            0xFFFF_FFFF_FFFF_FFFF, 0x8000_0000_0000_0001,
+        } },
+    };
+
+    for (vectors) |vector| {
+        inline for (.{ false, true }) |lhs_negative| {
+            inline for (.{ false, true }) |rhs_negative| {
+                expectDivisionIdentity(vector.a, lhs_negative, vector.b, rhs_negative) catch |err| {
+                    std.debug.print("vector failed: {s}\n", .{vector.event});
+                    return err;
+                };
+            }
+        }
+    }
+}
+
+test "normalized long division covers every normalization shift" {
+    const bigint = engine.libs.bigint;
+    var prng = std.Random.DefaultPrng.init(0x604C3);
+    const random = prng.random();
+
+    // The divisor's top limb decides the shift, so place its most significant
+    // bit at 63 - shift for all 64 values rather than sampling a few.
+    for (0..64) |shift| {
+        const top_bit: u6 = @intCast(63 - shift);
+        for (2..6) |nb| {
+            for (nb..nb + 4) |na| {
+                var b = try std.testing.allocator.alloc(bigint.Limb, nb);
+                defer std.testing.allocator.free(b);
+                var a = try std.testing.allocator.alloc(bigint.Limb, na);
+                defer std.testing.allocator.free(a);
+                for (b) |*l| l.* = random.int(bigint.Limb);
+                b[nb - 1] = (random.int(bigint.Limb) >> @as(u6, @intCast(63 - @as(u7, top_bit)))) |
+                    (@as(bigint.Limb, 1) << top_bit);
+                for (a) |*l| l.* = random.int(bigint.Limb);
+                a[na - 1] |= 1;
+                // Guarantee a real division rather than the early return.
+                if (na == nb) a[na - 1] = std.math.maxInt(bigint.Limb);
+                try expectDivisionIdentity(a, false, b, false);
+                try expectDivisionIdentity(a, true, b, false);
+            }
+        }
+    }
+}
+
+test "normalized long division covers the operand relations" {
+    const bigint = engine.libs.bigint;
+    const alloc = std.testing.allocator;
+    const divisor = [_]bigint.Limb{
+        0xDEAD_BEEF_CAFE_BABE, 0x0000_0000_0000_0001, 0x4000_0000_0000_0000,
+    };
+    const v = bigint.BigInt{ .limbs = @constCast(divisor[0..]), .allocator = alloc };
+
+    // lhs < rhs, lhs == rhs, quotient exactly 1, exact division, and the
+    // largest possible non-zero remainder.
+    try expectDivisionIdentity(&.{ 1, 2 }, false, &divisor, false);
+    try expectDivisionIdentity(&divisor, false, &divisor, false);
+    var plus_one = try v.cloneWithAllocator(alloc);
+    defer plus_one.deinit();
+    try plus_one.addPositiveSmallInPlace(1);
+    try expectDivisionIdentity(plus_one.limbs, false, &divisor, false);
+
+    const multiplier = [_]bigint.Limb{ 0x1234_5678_9ABC_DEF0, 0xFFFF_FFFF_FFFF_FFFF };
+    const mv = bigint.BigInt{ .limbs = @constCast(multiplier[0..]), .allocator = alloc };
+    var exact = try bigint.mulAlloc(alloc, v, mv);
+    defer exact.deinit();
+    try expectDivisionIdentity(exact.limbs, false, &divisor, false);
+
+    // exact product minus one: the largest remainder for that quotient.
+    const one_limbs = [_]bigint.Limb{1};
+    const one = bigint.BigInt{ .limbs = @constCast(one_limbs[0..]), .allocator = alloc };
+    var largest = try bigint.subAlloc(alloc, exact, one);
+    defer largest.deinit();
+    try expectDivisionIdentity(largest.limbs, false, &divisor, false);
+    try expectDivisionIdentity(largest.limbs, true, &divisor, true);
+}

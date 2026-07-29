@@ -604,45 +604,201 @@ fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
     return @intCast(remainder);
 }
 
+/// Multi-limb divisor: normalized schoolbook long division, one quotient limb
+/// per step. This is qjs's mechanism (`js_bigint_divrem` normalizes and then
+/// runs `mp_divnorm`, quickjs.c:11893-11976): normalize so the divisor's top
+/// limb has its high bit set, estimate one quotient digit from the leading
+/// numerator limbs, multiply-subtract, and add back on the rare overshoot.
+///
+/// Not a line-for-line port. qjs's `JSBigInt` is two's complement with sign
+/// extension, so its top quotient limb can only be 0 or 1 and it special-cases
+/// that; zjs is normalized sign-magnitude, where the top quotient limb is any
+/// `u64`. What is mirrored is the normalized limb-division mechanism, not the
+/// consequences of a different representation.
+///
+/// Everything is sized exactly up front, so there is no normalization pass and
+/// no shrinking realloc anywhere: at most four allocations, three of which are
+/// unconditional.
+///
+/// `noinline` for the reason P6-04b measured: a wide algorithm sharing a
+/// function with another branch pollutes it.
+noinline fn divRemAbsNormalizedLong(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    rhs: BigInt,
+) !struct { BigInt, BigInt } {
+    const na = lhs.limbs.len;
+    const nb = rhs.limbs.len;
+    std.debug.assert(nb >= 2);
+    std.debug.assert(na >= nb);
+    std.debug.assert(rhs.limbs[nb - 1] != 0);
+    const m = na - nb;
+    const shift: u6 = @intCast(@clz(rhs.limbs[nb - 1]));
+
+    // The quotient's exact length, decided before allocating: the top digit is
+    // non-zero exactly when the numerator's top `nb` limbs are at least the
+    // divisor. `lhs < rhs` was handled by the caller, so this is at least 1.
+    const quotient_len = if (compareAbsParts(lhs.limbs[m..na], rhs.limbs) != .lt) m + 1 else m;
+    std.debug.assert(quotient_len >= 1);
+
+    // `u` and `v` are pure scratch and are always released. Keeping them as two
+    // allocations rather than one shared block is deliberate for this cut: it
+    // keeps the allocation topology readable and the OOM sweep able to fail
+    // each one separately.
+    const u = try allocator.alloc(Limb, na + 1);
+    defer allocator.free(u);
+    const v = try allocator.alloc(Limb, nb);
+    defer allocator.free(v);
+    const q = try allocator.alloc(Limb, quotient_len);
+    errdefer allocator.free(q);
+
+    if (shift == 0) {
+        @memcpy(v, rhs.limbs);
+        @memcpy(u[0..na], lhs.limbs);
+        u[na] = 0;
+    } else {
+        const divisor_carry = shiftLeftInto(v, rhs.limbs, shift);
+        // `shift` is the divisor top limb's leading-zero count, so shifting it
+        // left by that much cannot carry out.
+        std.debug.assert(divisor_carry == 0);
+        u[na] = shiftLeftInto(u[0..na], lhs.limbs, shift);
+    }
+    std.debug.assert(v[nb - 1] >> (limb_bits - 1) == 1);
+
+    const v1 = v[nb - 1];
+    const v0 = v[nb - 2];
+    var j = m + 1;
+    while (j > 0) {
+        j -= 1;
+        const window = u[j .. j + nb + 1];
+        const top = window[nb];
+        const high = window[nb - 1];
+        const next = window[nb - 2];
+        // Normalization keeps the running window below `v * b`, so its top limb
+        // never exceeds the divisor's.
+        std.debug.assert(top <= v1);
+
+        var qhat: Limb = undefined;
+        var rhat: DoubleLimb = undefined;
+        if (top == v1) {
+            // The true digit would be the base itself; clamp and let the
+            // correction below walk it down.
+            qhat = std.math.maxInt(Limb);
+            rhat = @as(DoubleLimb, high) + v1;
+        } else {
+            const numerator = (@as(DoubleLimb, top) << limb_bits) | high;
+            qhat = @intCast(numerator / v1);
+            rhat = numerator % v1;
+        }
+        // Second-divisor-limb correction. `rhat` reaching the base means the
+        // estimate is already exact, and shifting it would overflow the u128.
+        while (rhat < (@as(DoubleLimb, 1) << limb_bits) and
+            @as(DoubleLimb, qhat) * v0 > ((rhat << limb_bits) | next))
+        {
+            qhat -= 1;
+            rhat += v1;
+        }
+
+        if (subMulAt(window, v, qhat)) {
+            // With the two-limb correction above this happens with probability
+            // about 2/b, and never twice: one add-back restores the window.
+            qhat -= 1;
+            addBackAt(window, v);
+        }
+
+        if (j < quotient_len) {
+            q[j] = qhat;
+        } else {
+            std.debug.assert(qhat == 0);
+        }
+    }
+    std.debug.assert(q[quotient_len - 1] != 0);
+    // The remainder is below the divisor, so it fits in `nb` limbs.
+    std.debug.assert(u[nb] == 0);
+
+    // The remainder still carries the normalization shift. Measure its
+    // unshifted length first so it can be allocated at exactly that size --
+    // building `nb` limbs and normalizing afterwards would mean a shrinking
+    // realloc, which is the one thing this function avoids everywhere.
+    var remainder_len = nb;
+    while (remainder_len > 0 and unshiftedLimbAt(u, remainder_len - 1, shift) == 0) : (remainder_len -= 1) {}
+
+    var remainder = BigInt{ .allocator = allocator };
+    if (remainder_len != 0) {
+        const r = try allocator.alloc(Limb, remainder_len);
+        for (r, 0..) |*limb, i| limb.* = unshiftedLimbAt(u, i, shift);
+        remainder = .{ .limbs = r, .allocator = allocator };
+    }
+    return .{ BigInt{ .limbs = q, .allocator = allocator }, remainder };
+}
+
+/// `dst = src << shift`, returning the bits carried out of the top limb.
+/// `shift` must be 1..63; the zero case is a plain copy at the call sites so
+/// that `limb_bits - shift` is never an out-of-range shift.
+fn shiftLeftInto(dst: []Limb, src: []const Limb, shift: u6) Limb {
+    std.debug.assert(shift != 0);
+    std.debug.assert(dst.len == src.len);
+    const back: u6 = @intCast(@as(u7, limb_bits) - @as(u7, shift));
+    var carry: Limb = 0;
+    for (src, 0..) |limb, i| {
+        dst[i] = (limb << shift) | carry;
+        carry = limb >> back;
+    }
+    return carry;
+}
+
+/// One limb of the remainder with the normalization shift removed. Reads
+/// `normalized[index + 1]`, so the slice must extend one limb past `index`.
+fn unshiftedLimbAt(normalized: []const Limb, index: usize, shift: u6) Limb {
+    if (shift == 0) return normalized[index];
+    const back: u6 = @intCast(@as(u7, limb_bits) - @as(u7, shift));
+    return (normalized[index] >> shift) | (normalized[index + 1] << back);
+}
+
+/// `numerator -= divisor * qhat` across `divisor.len + 1` limbs. Returns true
+/// when the result went negative, meaning `qhat` was one too large.
+fn subMulAt(numerator: []Limb, divisor: []const Limb, qhat: Limb) bool {
+    std.debug.assert(numerator.len == divisor.len + 1);
+    var carry: Limb = 0;
+    var borrow: Limb = 0;
+    for (divisor, 0..) |limb, i| {
+        const product = @as(DoubleLimb, limb) * qhat + carry;
+        carry = @intCast(product >> limb_bits);
+        const low: Limb = @truncate(product);
+        const first = @subWithOverflow(numerator[i], low);
+        const second = @subWithOverflow(first[0], borrow);
+        numerator[i] = second[0];
+        // At most one of the two can wrap: the first only wraps when it leaves
+        // a non-zero value, which the second cannot then underflow.
+        borrow = @as(Limb, first[1]) + @as(Limb, second[1]);
+    }
+    const top_first = @subWithOverflow(numerator[divisor.len], carry);
+    const top_second = @subWithOverflow(top_first[0], borrow);
+    numerator[divisor.len] = top_second[0];
+    return (top_first[1] | top_second[1]) != 0;
+}
+
+/// `numerator += divisor` across `divisor.len + 1` limbs. The final carry is
+/// dropped on purpose: it cancels the borrow left by the failed subtraction.
+fn addBackAt(numerator: []Limb, divisor: []const Limb) void {
+    std.debug.assert(numerator.len == divisor.len + 1);
+    var carry: Limb = 0;
+    for (divisor, 0..) |limb, i| {
+        const first = @addWithOverflow(numerator[i], limb);
+        const second = @addWithOverflow(first[0], carry);
+        numerator[i] = second[0];
+        carry = @as(Limb, first[1]) + @as(Limb, second[1]);
+    }
+    numerator[divisor.len] +%= carry;
+}
+
 fn divRemAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
     if (rhs.isZero()) return error.DivisionByZero;
     if (compareAbs(lhs, rhs) == .lt) {
         return .{ .{ .allocator = allocator }, try lhs.cloneWithAllocator(allocator) };
     }
     if (rhs.limbs.len == 1) return divRemAbsByLimbAlloc(allocator, lhs, rhs.limbs[0]);
-    var quotient = BigInt{ .allocator = allocator };
-    errdefer quotient.deinit();
-    var remainder = BigInt{ .allocator = allocator };
-    errdefer remainder.deinit();
-    var bit = lhs.bitLengthAbs();
-    while (bit > 0) {
-        bit -= 1;
-        const shifted = try remainder.shl(allocator, 1);
-        remainder.deinit();
-        remainder = shifted;
-        if (lhs.testBit(bit)) try addSmallInPlace(&remainder, 1);
-        if (compareAbs(remainder, rhs) != .lt) {
-            const next_remainder = try subAbsAlloc(allocator, remainder, rhs);
-            remainder.deinit();
-            remainder = next_remainder;
-            try setBit(&quotient, bit);
-        }
-    }
-    // Transfer each value out of the local before normalizing it. `normalize`
-    // frees what it is given when its shrinking realloc fails, so leaving the
-    // `errdefer` above aliasing the same limbs would free them twice; and if
-    // the second normalize fails, the errdefer must not act on a `quotient`
-    // whose limbs normalize has already moved.
-    const quotient_owned = quotient;
-    quotient = .{ .allocator = allocator };
-    const normalized_quotient = try normalize(quotient_owned);
-    errdefer {
-        var owned = normalized_quotient;
-        owned.deinit();
-    }
-    const remainder_owned = remainder;
-    remainder = .{ .allocator = allocator };
-    return .{ normalized_quotient, try normalize(remainder_owned) };
+    return divRemAbsNormalizedLong(allocator, lhs, rhs);
 }
 
 pub fn addAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
