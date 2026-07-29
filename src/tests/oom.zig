@@ -120,6 +120,33 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "native-reentry-oom-ok" },
     },
     .{
+        .name = "native-callback-map-set",
+        .source =
+        \\function oomCollectionHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\let checksum = 0;
+        \\new Map([["key", 2]]).forEach(function oomMapCallback(value) {
+        \\  new Set([value]).forEach(function oomSetCallback(inner) {
+        \\    trace = new Error("collection-callback-trace").stack;
+        \\    checksum = oomCollectionHelper(inner);
+        \\  });
+        \\});
+        \\const setCallbackAt = trace.indexOf("    at oomSetCallback");
+        \\const setNativeAt = trace.indexOf("forEach (native)", setCallbackAt);
+        \\const mapCallbackAt = trace.indexOf("    at oomMapCallback", setNativeAt);
+        \\const mapNativeAt = trace.indexOf("forEach (native)", mapCallbackAt);
+        \\checksum === 3 &&
+        \\setCallbackAt === 0 &&
+        \\setNativeAt > setCallbackAt &&
+        \\mapCallbackAt > setNativeAt &&
+        \\mapNativeAt > mapCallbackAt
+        \\  ? "collection-reentry-oom-ok" : "collection-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "collection-reentry-oom-ok" },
+    },
+    .{
         .name = "tail-moved-args",
         .source =
         \\function target(a,b,c,d,e,f,g,h,i,j) {
@@ -1046,6 +1073,10 @@ test "oom recovery canary: root and nested closure construction" {
 
 test "oom recovery canary: native callback map through Reflect.apply" {
     try recoveryCanarySweep(corpusSnippetNamed("native-callback-map-reflect-apply"));
+}
+
+test "oom recovery canary: nested Map and Set callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-map-set"));
 }
 
 test "oom recovery canary: repeated private class identity" {

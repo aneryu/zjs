@@ -905,6 +905,15 @@ pub fn qjsObjectGroupByCall(
 
     const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
+    var callback_call = call_runtime.SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        args[1],
+        caller_function,
+        caller_frame,
+    );
 
     var index: usize = 0;
     while (true) {
@@ -918,7 +927,7 @@ pub fn qjsObjectGroupByCall(
         if (step.done) return out_value;
 
         const index_value = value_ops.numberToValue(@floatFromInt(index));
-        const raw_key = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), args[1], &.{ step.value, index_value }, caller_function, caller_frame) catch |err| {
+        const raw_key = callback_call.call(&.{ step.value, index_value }) catch |err| {
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };

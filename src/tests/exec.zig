@@ -1010,6 +1010,213 @@ test "Array and TypedArray synchronous callback cohort stays on one Machine" {
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
 
+test "Map and Set synchronous callback cohort stays on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function collectionCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function collectionCohortCallback(value) {
+        \\    "use strict";
+        \\    if (value === 2) {
+        \\        try {
+        \\            throw new Error("local");
+        \\        } catch (error) {
+        \\            assert.sameValue(error.message, "local");
+        \\        }
+        \\    }
+        \\    return collectionCohortHelper(value);
+        \\}
+        \\var collectionCohortTraceValue;
+        \\var collectionCohortOrder = [];
+        \\globalThis.__collectionCallbackCohortOuter = function __collectionCallbackCohortOuter() {
+        \\    var mapSum = 0;
+        \\    var map = new Map([["one", 1], ["two", 2]]);
+        \\    map.forEach(function (value, key, owner, missing) {
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(owner, map);
+        \\        assert.sameValue(missing, undefined);
+        \\        assert.sameValue(owner.get(key), value);
+        \\        mapSum += collectionCohortCallback(value);
+        \\    });
+        \\    assert.sameValue(mapSum, 5);
+        \\
+        \\    var setSum = 0;
+        \\    var set = new Set([1, 2]);
+        \\    set.forEach(function (value, key, owner) {
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(value, key);
+        \\        assert.sameValue(owner, set);
+        \\        setSum += collectionCohortCallback(value);
+        \\    });
+        \\    assert.sameValue(setSum, 5);
+        \\
+        \\    var objectGroups = Object.groupBy([1, 2, 3], function (value, index) {
+        \\        assert.sameValue(index, value - 1);
+        \\        return collectionCohortHelper(value) % 2 ? "odd" : "even";
+        \\    });
+        \\    assert.sameValue(objectGroups.even.join(","), "1,3");
+        \\    assert.sameValue(objectGroups.odd.join(","), "2");
+        \\
+        \\    var mapGroups = Map.groupBy([1, 2, 3], function (value, index) {
+        \\        assert.sameValue(index, value - 1);
+        \\        return collectionCohortHelper(value) % 2;
+        \\    });
+        \\    assert.sameValue(mapGroups.get(0).join(","), "1,3");
+        \\    assert.sameValue(mapGroups.get(1).join(","), "2");
+        \\
+        \\    var inserted = new Map();
+        \\    assert.sameValue(inserted.getOrInsertComputed("key", function (key) {
+        \\        return key + ":" + collectionCohortHelper(6);
+        \\    }), "key:7");
+        \\    assert.sameValue(inserted.get("key"), "key:7");
+        \\
+        \\    var setLike = {
+        \\        size: 2,
+        \\        has: function (key) {
+        \\            return collectionCohortHelper(key) > 0;
+        \\        },
+        \\        keys: function () {
+        \\            collectionCohortHelper(0);
+        \\            return [3, 4][Symbol.iterator]();
+        \\        }
+        \\    };
+        \\    assert.sameValue(new Set([1, 2]).isSubsetOf(setLike), true);
+        \\    assert.sameValue(
+        \\        [...new Set([1, 2]).union(setLike)].join(","),
+        \\        "1,2,3,4"
+        \\    );
+        \\
+        \\    var nested = 0;
+        \\    new Map([["outer", 1]]).forEach(function (value) {
+        \\        new Map([["inner", value]]).forEach(function (inner) {
+        \\            nested = collectionCohortHelper(inner);
+        \\        });
+        \\    });
+        \\    assert.sameValue(nested, 2);
+        \\
+        \\    collectionCohortTraceValue = undefined;
+        \\    new Map([["trace", 1]]).forEach(function collectionCohortTrace(value) {
+        \\        collectionCohortTraceValue = new Error("collection cohort").stack;
+        \\        return value;
+        \\    });
+        \\    var callbackIndex = collectionCohortTraceValue.indexOf("    at collectionCohortTrace");
+        \\    var nativeIndex = collectionCohortTraceValue.indexOf("forEach (native)");
+        \\    var outerIndex = collectionCohortTraceValue.indexOf("    at __collectionCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    collectionCohortOrder = [];
+        \\    try {
+        \\        new Map([["throw", 1]]).forEach(function collectionCohortThrow() {
+        \\            collectionCohortOrder.push("callback");
+        \\            throw new RangeError("collection cohort throw");
+        \\        });
+        \\    } catch (error) {
+        \\        collectionCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(collectionCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+        \\var collectionInterruptMap = new Map([["interrupt", 1]]);
+        \\function collectionInterruptHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\globalThis.__collectionCallbackInterrupt = function __collectionCallbackInterrupt() {
+        \\    collectionInterruptMap.forEach(function collectionInterruptCallback(value) {
+        \\        return collectionInterruptHelper(value);
+        \\    });
+        \\    return 42;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__collectionCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 18), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__collectionCallbackInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
