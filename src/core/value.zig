@@ -918,7 +918,7 @@ fn bigIntParts(value: JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *@import("bigint.zig").BigInt = @alignCast(@fieldParentPtr("header", header));
-        return .{ .negative = big.value.negative, .limbs = big.value.limbs };
+        return .{ .negative = big.negative(), .limbs = big.limbs() };
     }
     return null;
 }

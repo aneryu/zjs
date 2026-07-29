@@ -598,9 +598,7 @@ pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        var val = big.value;
-        val.allocator = rt.memory.allocator;
-        return val;
+        return big.borrowedValue(rt.memory.allocator);
     }
     return error.TypeError;
 }
@@ -610,7 +608,7 @@ pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.value.cloneWithAllocator(rt.memory.allocator);
+        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
     }
     return error.TypeError;
 }
@@ -797,7 +795,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
             var owned = rhs;
             owned.deinit();
         };
-        try big.value.addInPlace(rhs);
+        try big.addInPlaceExternal(rhs);
         return a.dup();
     }
 
@@ -848,9 +846,9 @@ fn addPositiveShortToBigInt(rt: *core.JSRuntime, value: core.JSValue, addend: bi
     if (!value.isBigInt()) return null;
     const header = value.refHeader() orelse return null;
     const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-    if (big.value.negative) return null;
+    if (big.negative()) return null;
 
-    var out = try big.value.cloneWithAllocator(rt.memory.allocator);
+    var out = try big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
     errdefer out.deinit();
     try out.addPositiveSmallInPlace(addend);
     return try createBigIntOwned(rt, out);
@@ -1410,7 +1408,7 @@ fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return .{ .negative = big.value.negative, .limbs = big.value.limbs };
+        return .{ .negative = big.negative(), .limbs = big.limbs() };
     }
     return null;
 }

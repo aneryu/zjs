@@ -17,7 +17,7 @@ pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u
     if (!value.isBigInt()) return error.TypeError;
     const header = value.refHeader() orelse return error.TypeError;
     const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
-    const printed = try big.value.formatBase10Alloc(allocator);
+    const printed = try big.borrowedValue(allocator).formatBase10Alloc(allocator);
     defer allocator.free(printed);
     try buffer.appendSlice(allocator, printed);
 }

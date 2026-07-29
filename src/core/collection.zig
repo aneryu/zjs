@@ -161,7 +161,7 @@ fn bigIntHashParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntHashPar
     }
     const header = value.refHeader() orelse return null;
     const bigint: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-    return .{ .negative = bigint.value.negative, .limbs = bigint.value.limbs };
+    return .{ .negative = bigint.negative(), .limbs = bigint.limbs() };
 }
 
 fn hashBigIntValue(value: core.JSValue) u64 {

@@ -1,3 +1,4 @@
+const std = @import("std");
 const gc = @import("gc.zig");
 const libs = @import("../libs/root.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
@@ -10,6 +11,58 @@ pub const BigInt = struct {
     }
     header: gc.Header,
     value: libs.bigint.BigInt,
+
+    // ---- storage accessors -------------------------------------------------
+    //
+    // Every consumer goes through these instead of reaching into `value`, so
+    // the limb storage can later be held either in its own allocation or in a
+    // flexible array member without any of them having to know which.
+
+    pub inline fn negative(self: *const BigInt) bool {
+        return self.value.negative;
+    }
+
+    pub inline fn limbs(self: *const BigInt) []const libs.bigint.Limb {
+        return self.value.limbs;
+    }
+
+    pub inline fn limbsMut(self: *BigInt) []libs.bigint.Limb {
+        return self.value.limbs;
+    }
+
+    /// Borrowed view for the read-only library operations.
+    ///
+    /// The caller must not `deinit`, `realloc`, or otherwise change this
+    /// value's allocation. That is already required of the callers that used to
+    /// copy `value` and stamp a fresh allocator onto it, and it is what lets a
+    /// future inline storage mode hand out the same view safely.
+    pub inline fn borrowedValue(self: *const BigInt, allocator: std.mem.Allocator) libs.bigint.BigInt {
+        return .{
+            .negative = self.value.negative,
+            .limbs = @constCast(self.value.limbs),
+            .allocator = allocator,
+        };
+    }
+
+    /// Adopt an owned library value as this object's storage.
+    ///
+    /// Public because the parser allocates its BigInt literal wrapper itself,
+    /// out of the function's persistent allocator rather than the runtime's, so
+    /// it cannot go through `createFromOwned`.
+    pub fn initExternalFromOwned(self: *BigInt, owned: libs.bigint.BigInt) void {
+        self.* = .{
+            .header = .{},
+            .value = owned,
+        };
+    }
+
+    /// In-place add for a uniquely-referenced BigInt. `addInPlace` may
+    /// reallocate, move the limb pointer, change the length or the sign, and may
+    /// leave the value empty, so it is the one mutation that has to know how the
+    /// limbs are owned -- hence the explicit `External` in the name.
+    pub fn addInPlaceExternal(self: *BigInt, other: libs.bigint.BigInt) !void {
+        try self.value.addInPlace(other);
+    }
 
     pub fn create(rt: *JSRuntime, value: i128) !*BigInt {
         var big = try libs.bigint.BigInt.fromIntAlloc(rt.memory.accountedAllocator(), value);
@@ -38,10 +91,7 @@ pub const BigInt = struct {
             owned.deinit();
             owned = migrated;
         }
-        self.* = .{
-            .header = .{},
-            .value = owned,
-        };
+        self.initExternalFromOwned(owned);
         return self;
     }
 
