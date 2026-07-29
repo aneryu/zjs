@@ -597,35 +597,45 @@ pub fn mulAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt 
     // the first row overwrites, later rows accumulate.
     //
     // Every result limb is written before it is read. Row 0 overwrites
-    // `limbs[0..rhs.len]` and then its carry slot at `rhs.len`, so the
-    // initialized prefix is `limbs[0..rhs.len + 1]`. Row `i` reads
-    // `limbs[i..i + rhs.len]`, whose highest index is `i + rhs.len - 1`, and
-    // rows `0..i-1` have already initialized through exactly that index; it then
-    // overwrites one new slot at `i + rhs.len`. After the final row the prefix
-    // covers the whole buffer, and the top limb is written even when its carry
-    // is zero, which `normalize` then strips.
+    // `limbs[0..inner.len]` and then its carry slot at `inner.len`, so the
+    // initialized prefix is `limbs[0..inner.len + 1]`. Row `i` reads
+    // `limbs[i..i + inner.len]`, whose highest index is `i + inner.len - 1`,
+    // and rows `0..i-1` have already initialized through exactly that index; it
+    // then overwrites one new slot at `i + inner.len`. After the final row the
+    // prefix covers the whole buffer (`outer.len + inner.len` limbs), and the
+    // top limb is written even when its carry is zero, which `normalize` then
+    // strips.
     //
-    // The loop nesting is deliberately unchanged. Swapping it to qjs's
-    // outer-over-rhs order was measured separately and is worth nothing on
-    // square shapes but 5.9% at 2x4 and 13.3% at 1x8, so it is a second
-    // mechanism and belongs in its own cut rather than riding along in this one.
-    for (lhs.limbs, 0..) |a, i| {
+    // Row count follows the OUTER operand, and only row 0 is a pure write, so
+    // the number of accumulating rows is `outer.len - 1`. That makes the loop
+    // asymmetric in operand order: measured on the ordered matrix, the same
+    // multiply costs 21.8ns as 1x8 and 26.9ns as 8x1. A fixed flip to qjs's
+    // outer-over-rhs nesting does not fix this, it only moves the win -- it was
+    // measured at -19.0% on 8x1 and +23.6% on 1x8, a clean trade.
+    //
+    // Take the shorter operand as the outer one instead. Multiplication is
+    // commutative, the result length `lhs.len + rhs.len` is order-independent,
+    // and the sign below is computed from both operands, so the swap is
+    // invisible to the caller.
+    const outer = if (lhs.limbs.len <= rhs.limbs.len) lhs.limbs else rhs.limbs;
+    const inner = if (lhs.limbs.len <= rhs.limbs.len) rhs.limbs else lhs.limbs;
+    for (outer, 0..) |a, i| {
         var carry: DoubleLimb = 0;
         if (i == 0) {
-            for (rhs.limbs, 0..) |b, j| {
+            for (inner, 0..) |b, j| {
                 const current: DoubleLimb = @as(DoubleLimb, a) * b + carry;
                 limbs[j] = @truncate(current);
                 carry = current >> limb_bits;
             }
         } else {
-            for (rhs.limbs, 0..) |b, j| {
+            for (inner, 0..) |b, j| {
                 const index = i + j;
                 const current: DoubleLimb = @as(DoubleLimb, a) * b + limbs[index] + carry;
                 limbs[index] = @truncate(current);
                 carry = current >> limb_bits;
             }
         }
-        limbs[i + rhs.limbs.len] = @intCast(carry);
+        limbs[i + inner.len] = @intCast(carry);
     }
     return normalize(.{ .negative = lhs.negative != rhs.negative, .limbs = limbs, .allocator = allocator });
 }
