@@ -10108,3 +10108,80 @@ test "repeated heap multiplication retains nothing as the count grows" {
         if (n != 0) previous_peak = rt.memory.peak_allocation_count;
     }
 }
+
+test "single-limb division is exact and allocation-bounded" {
+    const bigint = engine.libs.bigint;
+    const allocator = std.testing.allocator;
+
+    // P6-04b: the single-limb divisor path allocates the quotient at its exact
+    // final length instead of walking the numerator bit by bit, so the sizing
+    // rule -- the quotient has one fewer limb exactly when the numerator's top
+    // limb is below the divisor -- has to hold for every shape.
+    const divisors = [_]bigint.Limb{
+        1, 2, 3, 7, 255, 65537,
+        (@as(bigint.Limb, 1) << 63) - 1,
+        @as(bigint.Limb, 1) << 63,
+        std.math.maxInt(bigint.Limb),
+        std.math.maxInt(bigint.Limb) - 1,
+    };
+    var prng = std.Random.DefaultPrng.init(0x604B);
+    const random = prng.random();
+
+    for (1..17) |numerator_len| {
+        for (divisors) |divisor| {
+            for (0..6) |pattern| {
+                const limbs = try allocator.alloc(bigint.Limb, numerator_len);
+                defer allocator.free(limbs);
+                for (limbs, 0..) |*l, i| l.* = switch (pattern) {
+                    0 => std.math.maxInt(bigint.Limb),
+                    1 => if (i == numerator_len - 1) @as(bigint.Limb, 1) else 0,
+                    2 => if (i % 2 == 0) 0xAAAA_AAAA_AAAA_AAAA else 0x5555_5555_5555_5555,
+                    3 => if (i == numerator_len - 1) divisor else 0,
+                    4 => if (i == numerator_len - 1) divisor -| 1 else std.math.maxInt(bigint.Limb),
+                    else => random.int(bigint.Limb),
+                };
+                if (limbs[numerator_len - 1] == 0) limbs[numerator_len - 1] = 1;
+
+                const divisor_limbs = try allocator.alloc(bigint.Limb, 1);
+                defer allocator.free(divisor_limbs);
+                divisor_limbs[0] = divisor;
+
+                inline for (.{ false, true }) |numerator_negative| {
+                    inline for (.{ false, true }) |divisor_negative| {
+                        const numerator = bigint.BigInt{
+                            .negative = numerator_negative,
+                            .limbs = limbs,
+                            .allocator = allocator,
+                        };
+                        const denominator = bigint.BigInt{
+                            .negative = divisor_negative,
+                            .limbs = divisor_limbs,
+                            .allocator = allocator,
+                        };
+                        var quotient = try numerator.div(denominator);
+                        defer quotient.deinit();
+                        var remainder = try numerator.rem(denominator);
+                        defer remainder.deinit();
+
+                        // q * b + r == a, and the remainder takes the
+                        // dividend's sign with a magnitude below the divisor's.
+                        var product = try bigint.mulAlloc(allocator, quotient, denominator);
+                        defer product.deinit();
+                        var recovered = try bigint.addAlloc(allocator, product, remainder);
+                        defer recovered.deinit();
+                        try std.testing.expectEqual(std.math.Order.eq, recovered.compare(numerator));
+                        try std.testing.expect(remainder.isZero() or remainder.negative == numerator_negative);
+                        const abs_remainder = bigint.BigInt{ .limbs = remainder.limbs, .allocator = allocator };
+                        const abs_divisor = bigint.BigInt{ .limbs = divisor_limbs, .allocator = allocator };
+                        try std.testing.expectEqual(std.math.Order.lt, abs_remainder.compare(abs_divisor));
+                        // Every result stays normalized: no leading zero limb.
+                        if (quotient.limbs.len != 0)
+                            try std.testing.expect(quotient.limbs[quotient.limbs.len - 1] != 0);
+                        if (remainder.limbs.len != 0)
+                            try std.testing.expect(remainder.limbs[remainder.limbs.len - 1] != 0);
+                    }
+                }
+            }
+        }
+    }
+}

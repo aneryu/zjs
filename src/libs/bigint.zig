@@ -530,11 +530,79 @@ pub fn compareParts(lhs_negative: bool, lhs_limbs: []const Limb, rhs_negative: b
     return if (lhs_negative) invertOrder(abs_order) else abs_order;
 }
 
+/// Single-limb divisor: one high-to-low pass over the numerator instead of the
+/// bit loop. This is qjs's shape for the same case -- `mp_div1norm`
+/// (quickjs.c:11332) walks limbs, not bits -- and it is the same kernel
+/// `divRemSmallInPlace` already uses for base conversion, lifted to an
+/// allocating caller.
+///
+/// The caller has already returned for `lhs < rhs`, so the quotient has at
+/// least one limb. Its exact length is known up front -- the top quotient digit
+/// is `lhs_top / divisor`, which is non-zero exactly when `lhs_top >= divisor`
+/// -- so the buffer is allocated at its final size and no normalization pass,
+/// and therefore no shrinking realloc, is needed. Cost is two allocations at
+/// most: the quotient, and the remainder when it is non-zero.
+///
+/// `noinline` because inlining it into `divRemAbsAlloc` costs the multi-limb
+/// bit loop, which shares that function, about 2% at the JS level -- measured,
+/// all sixteen build combinations above 1.0. The single-limb path is already a
+/// hundred times cheaper than what it replaces, so a call boundary on it is
+/// free by comparison, while the loop it sits next to is untouched.
+noinline fn divRemAbsByLimbAlloc(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    divisor: Limb,
+) !struct { BigInt, BigInt } {
+    std.debug.assert(divisor != 0);
+    std.debug.assert(lhs.limbs.len != 0);
+    const lhs_top = lhs.limbs[lhs.limbs.len - 1];
+    const quotient_len = if (lhs_top >= divisor) lhs.limbs.len else lhs.limbs.len - 1;
+    std.debug.assert(quotient_len >= 1);
+
+    const quotient_limbs = try allocator.alloc(Limb, quotient_len);
+    errdefer allocator.free(quotient_limbs);
+    const remainder_limb = divRemAbsByLimb(lhs.limbs, divisor, quotient_limbs);
+
+    var remainder = BigInt{ .allocator = allocator };
+    if (remainder_limb != 0) {
+        const remainder_limbs = try allocator.alloc(Limb, 1);
+        remainder_limbs[0] = remainder_limb;
+        remainder = .{ .limbs = remainder_limbs, .allocator = allocator };
+    }
+    return .{ BigInt{ .limbs = quotient_limbs, .allocator = allocator }, remainder };
+}
+
+/// `quotient.len` must be `lhs.len` or `lhs.len - 1`, matching whether the top
+/// quotient digit is non-zero. Returns the remainder.
+fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
+    std.debug.assert(divisor != 0);
+    std.debug.assert(lhs.len != 0);
+    std.debug.assert(quotient.len == lhs.len or quotient.len + 1 == lhs.len);
+    var remainder: DoubleLimb = 0;
+    var index = lhs.len;
+    if (quotient.len + 1 == lhs.len) {
+        // The top quotient digit is zero by construction, so fold the top limb
+        // into the running remainder and leave the loop writing exactly one
+        // digit per slot.
+        index -= 1;
+        std.debug.assert(lhs[index] < divisor);
+        remainder = lhs[index];
+    }
+    while (index > 0) {
+        index -= 1;
+        const current = (remainder << limb_bits) | lhs[index];
+        quotient[index] = @intCast(current / divisor);
+        remainder = current % divisor;
+    }
+    return @intCast(remainder);
+}
+
 fn divRemAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
     if (rhs.isZero()) return error.DivisionByZero;
     if (compareAbs(lhs, rhs) == .lt) {
         return .{ .{ .allocator = allocator }, try lhs.cloneWithAllocator(allocator) };
     }
+    if (rhs.limbs.len == 1) return divRemAbsByLimbAlloc(allocator, lhs, rhs.limbs[0]);
     var quotient = BigInt{ .allocator = allocator };
     errdefer quotient.deinit();
     var remainder = BigInt{ .allocator = allocator };
