@@ -6107,17 +6107,11 @@ pub fn argsFromArrayLike(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) ![]core.JSValue {
-    const object = objectFromValue(array_value) orelse return error.TypeError;
-    if (object.isArray()) {
-        return argsFromArray(ctx.runtime, array_value) catch |err| switch (err) {
-            error.RangeError => {
-                _ = try exception_ops.throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
-                return error.RangeError;
-            },
-            else => err,
-        };
-    }
-
+    _ = objectFromValue(array_value) orelse return error.TypeError;
+    // CreateListFromArrayLike performs observable [[Get]] operations even
+    // when the source is an Array. A dense bulk copy is only valid after
+    // proving that every indexed property is an own dense data property;
+    // keep the generic path authoritative until that proof is made here.
     const length_value = try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);

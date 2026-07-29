@@ -4341,6 +4341,73 @@ test "standard constructors publish final prototype graphs and eager metadata" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "Function apply CreateListFromArrayLike observes array indexed gets" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function capture() {
+        \\    return Array.prototype.join.call(arguments, ",");
+        \\}
+        \\
+        \\var ownCalls = 0;
+        \\var ownAccessor = [];
+        \\Object.defineProperty(ownAccessor, "0", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\        ownCalls++;
+        \\        return 42;
+        \\    }
+        \\});
+        \\ownAccessor.length = 1;
+        \\assert.sameValue(capture.apply(null, ownAccessor), "42");
+        \\assert.sameValue(ownCalls, 1);
+        \\
+        \\var inherited = [];
+        \\Object.setPrototypeOf(inherited, { 0: 17 });
+        \\inherited.length = 1;
+        \\assert.sameValue(capture.apply(null, inherited), "17");
+        \\
+        \\var snapshot = [];
+        \\Object.defineProperty(snapshot, "0", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\        snapshot[2] = "third";
+        \\        return "first";
+        \\    }
+        \\});
+        \\Object.defineProperty(snapshot, "1", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\        return "second";
+        \\    }
+        \\});
+        \\snapshot.length = 2;
+        \\assert.sameValue(capture.apply(null, snapshot), "first,second");
+        \\
+        \\var order = [];
+        \\var proxy = new Proxy([3, 4], {
+        \\    get: function(target, key, receiver) {
+        \\        order.push(String(key));
+        \\        if (key === "1") throw new RangeError("index-one");
+        \\        return Reflect.get(target, key, receiver);
+        \\    }
+        \\});
+        \\var abrupt;
+        \\try {
+        \\    capture.apply(null, proxy);
+        \\} catch (error) {
+        \\    abrupt = error;
+        \\}
+        \\assert.sameValue(abrupt instanceof RangeError, true);
+        \\assert.sameValue(abrupt.message, "index-one");
+        \\assert.sameValue(order.join(","), "length,0,1");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Promise constructor resolve and reject functions inherit Function.prototype" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
