@@ -68,6 +68,12 @@ pub fn main(init: std.process.Init) !void {
         try runTypedArray(init.gpa, iterations, warmup)
     else if (std.mem.startsWith(u8, case_name, "bigint/mul-size-"))
         try runBigIntSize(init.gpa, case_name, iterations, warmup)
+    else if (std.mem.startsWith(u8, case_name, "bigint/div-size-") or
+        std.mem.startsWith(u8, case_name, "bigint/mod-size-"))
+        try runBigIntDivSize(init.gpa, case_name, iterations, warmup)
+    else if (std.mem.startsWith(u8, case_name, "bigint/div-rel-") or
+        std.mem.startsWith(u8, case_name, "bigint/mod-rel-"))
+        try runBigIntDivRelation(init.gpa, case_name, iterations, warmup)
     else if (std.mem.eql(u8, case_name, "bigint/mul-multilimb"))
         try runBigInt(init.gpa, iterations, warmup)
     else
@@ -578,6 +584,182 @@ fn bigIntSizeLoop(
         product.deinit();
     }
     return checksum;
+}
+
+/// Division/remainder size matrix, the P6-04a baseline. Shapes are ORDERED:
+/// `AxB` means the numerator has A limbs and the divisor B. An optional `sN`
+/// suffix places the divisor's most significant bit so that a normalizing
+/// implementation would shift by N (`s0` is the default: top bit already set).
+///
+/// The shift axis exists because the current implementation does not normalize
+/// at all -- it walks the numerator one bit at a time -- while qjs normalizes
+/// the divisor and then works limb by limb. Recording the shift axis now means
+/// the replacement can be judged on the same axes rather than on a matrix
+/// invented to fit it.
+///
+/// Operands are built before timing. The timed loop does only the division, a
+/// checksum consume of length plus low and top limb, and the frees.
+fn runBigIntDivSize(
+    allocator: std.mem.Allocator,
+    case_name: []const u8,
+    iterations: usize,
+    warmup: usize,
+) !BenchResult {
+    const want_remainder = std.mem.startsWith(u8, case_name, "bigint/mod-size-");
+    const prefix_len = "bigint/div-size-".len;
+    const dims = parseDivShape(case_name[prefix_len..]) orelse return error.UnknownCase;
+
+    var lhs = try limbPattern(allocator, dims.lhs_limbs, 0x9e3779b97f4a7c15);
+    defer lhs.deinit();
+    var rhs = try limbPatternShifted(allocator, dims.rhs_limbs, 0xc2b2ae3d27d4eb4f, dims.shift);
+    defer rhs.deinit();
+    // The size matrix must measure the division loop, not the `lhs < rhs` early
+    // return. With equal limb counts that relation would otherwise fall out of
+    // the pseudorandom pattern -- it did, and 16x16 came back at 31 ns against
+    // 8x8's 10 us. Saturate the numerator's top limb so the numerator is
+    // strictly larger whenever it has at least as many limbs. The `rel-` cases
+    // below cover the relations on purpose.
+    lhs.limbs[dims.lhs_limbs - 1] = std.math.maxInt(bigint.Limb);
+
+    const warmup_checksum = try bigIntDivLoop(allocator, lhs, rhs, want_remainder, warmup, hash_offset);
+    const start = monotonicNanos();
+    const checksum = try bigIntDivLoop(allocator, lhs, rhs, want_remainder, iterations, warmup_checksum);
+    const elapsed = elapsedNanosSince(start);
+    return .{
+        .category = "bigint",
+        .case_name = case_name["bigint/".len..],
+        .iterations = iterations,
+        .warmup = warmup,
+        .ns_total = elapsed,
+        .checksum = checksum,
+        .fidelity = "true-direct",
+        .entry = if (want_remainder) "libs/bigint.BigInt.rem" else "libs/bigint.BigInt.div",
+        // zjs-only size matrix, same status as the multiply matrix: there is no
+        // QuickJS counterpart harness for these shapes, so this is within-zjs
+        // attribution and must not be read as a cross-engine comparison. The
+        // cross-engine division number comes from the JS level.
+        .comparable = false,
+        .checksum_comparable = false,
+        .caliber_note = "zjs-only division size matrix; operands built before timing; division, checksum consume and deinit are timed",
+        .memory = null,
+        .allocations_reason = "BigInt kernel uses the caller allocator without a JSRuntime memoryUsage counter",
+    };
+}
+
+fn bigIntDivLoop(
+    allocator: std.mem.Allocator,
+    lhs: bigint.BigInt,
+    rhs: bigint.BigInt,
+    want_remainder: bool,
+    iterations: usize,
+    initial_checksum: u64,
+) !u64 {
+    _ = allocator;
+    var checksum = initial_checksum;
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        var out = if (want_remainder) try lhs.rem(rhs) else try lhs.div(rhs);
+        const len = out.limbs.len;
+        checksum = mixU64(checksum, @as(u64, len));
+        if (len != 0) {
+            checksum = mixU64(checksum, out.limbs[0]);
+            checksum = mixU64(checksum, out.limbs[len - 1]);
+        }
+        out.deinit();
+    }
+    return checksum;
+}
+
+/// Division relation cases. The size matrix holds the shape fixed and varies
+/// the operand widths; these hold an 8-limb-by-4-limb shape and vary the
+/// relation between the operands, because the bit loop's iteration count and
+/// its per-iteration branches both depend on it.
+///
+/// * `lt`    numerator below divisor -- the early return, no loop at all
+/// * `eq`    equal operands -- quotient 1, remainder 0
+/// * `q1`    quotient exactly 1 with a non-zero remainder
+/// * `exact` remainder 0 with a multi-limb quotient
+fn runBigIntDivRelation(
+    allocator: std.mem.Allocator,
+    case_name: []const u8,
+    iterations: usize,
+    warmup: usize,
+) !BenchResult {
+    const want_remainder = std.mem.startsWith(u8, case_name, "bigint/mod-rel-");
+    const relation = case_name["bigint/div-rel-".len..];
+
+    var divisor = try limbPattern(allocator, 4, 0xc2b2ae3d27d4eb4f);
+    defer divisor.deinit();
+
+    var numerator = if (std.mem.eql(u8, relation, "lt"))
+        try limbPattern(allocator, 3, 0x9e3779b97f4a7c15)
+    else if (std.mem.eql(u8, relation, "eq"))
+        try divisor.cloneWithAllocator(allocator)
+    else if (std.mem.eql(u8, relation, "q1")) blk: {
+        // divisor + 1: the quotient is 1 and the remainder is 1, but the loop
+        // still walks every numerator bit.
+        var out = try divisor.cloneWithAllocator(allocator);
+        errdefer out.deinit();
+        try out.addPositiveSmallInPlace(1);
+        break :blk out;
+    } else if (std.mem.eql(u8, relation, "exact")) blk: {
+        var multiplier = try limbPattern(allocator, 4, 0x14057b7ef767814f);
+        defer multiplier.deinit();
+        break :blk try bigint.mulAlloc(allocator, divisor, multiplier);
+    } else return error.UnknownCase;
+    defer numerator.deinit();
+
+    const warmup_checksum = try bigIntDivLoop(allocator, numerator, divisor, want_remainder, warmup, hash_offset);
+    const start = monotonicNanos();
+    const checksum = try bigIntDivLoop(allocator, numerator, divisor, want_remainder, iterations, warmup_checksum);
+    const elapsed = elapsedNanosSince(start);
+    return .{
+        .category = "bigint",
+        .case_name = case_name["bigint/".len..],
+        .iterations = iterations,
+        .warmup = warmup,
+        .ns_total = elapsed,
+        .checksum = checksum,
+        .fidelity = "true-direct",
+        .entry = if (want_remainder) "libs/bigint.BigInt.rem" else "libs/bigint.BigInt.div",
+        .comparable = false,
+        .checksum_comparable = false,
+        .caliber_note = "zjs-only division relation cases; operands built before timing; division, checksum consume and deinit are timed",
+        .memory = null,
+        .allocations_reason = "BigInt kernel uses the caller allocator without a JSRuntime memoryUsage counter",
+    };
+}
+
+const DivShape = struct { lhs_limbs: usize, rhs_limbs: usize, shift: u6 };
+
+fn parseDivShape(shape: []const u8) ?DivShape {
+    var body = shape;
+    var shift: u6 = 0;
+    if (std.mem.lastIndexOfScalar(u8, shape, 's')) |s_index| {
+        const parsed = std.fmt.parseInt(u8, shape[s_index + 1 ..], 10) catch return null;
+        if (parsed > 63) return null;
+        shift = @intCast(parsed);
+        body = shape[0..s_index];
+    }
+    const dims = parseSizeShape(body) orelse return null;
+    return .{ .lhs_limbs = dims.lhs_limbs, .rhs_limbs = dims.rhs_limbs, .shift = shift };
+}
+
+/// Like `limbPattern`, but the top limb's most significant set bit sits at
+/// `63 - shift`, so a normalizing divisor would need exactly `shift` bits of
+/// left shift. The limbs below stay dense.
+fn limbPatternShifted(
+    allocator: std.mem.Allocator,
+    limb_count: usize,
+    seed: u64,
+    shift: u6,
+) !bigint.BigInt {
+    var value = try limbPattern(allocator, limb_count, seed);
+    const top = &value.limbs[limb_count - 1];
+    const top_bit: u6 = @intCast(63 - @as(u7, shift));
+    top.* = (top.* >> shift) | (@as(bigint.Limb, 1) << top_bit);
+    if (shift == 63 and limb_count == 1) top.* |= 1;
+    return value;
 }
 
 const SizeShape = struct { lhs_limbs: usize, rhs_limbs: usize };

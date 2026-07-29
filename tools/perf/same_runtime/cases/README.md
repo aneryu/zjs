@@ -68,6 +68,17 @@ same source shape as the process-level comparison tools.
   2,000 multiplications per `run()` rather than 20,000 because the operands are
   an order of magnitude wider than the shapes above.
 
+- `bigint_div_8x1`, `bigint_div_8x4`, `bigint_div_16x8`, `bigint_mod_8x4`:
+  P6-04a division baselines, not policy sentinels. Shapes are ordered: the
+  numerator has A limbs and the divisor B, and the numerator's top limb is
+  saturated so these measure the division rather than the
+  `numerator < divisor` early return. The iteration counts are 100-200 rather
+  than the multiplication cases' 20,000 because the current implementation
+  walks the numerator one bit at a time and a single division costs
+  microseconds. They exist to give P6-04b and P6-04c a fixed JS-level baseline
+  to be judged against; at the time they were added the ratios against pinned
+  QuickJS were 255x, 243x, 209x and 152x.
+
 The callable shapes are necessary because each harness evaluates the source
 once, retains global `run`, and invokes that function for warmup and timed
 samples without recompiling the source.
