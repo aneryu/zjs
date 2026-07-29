@@ -10071,3 +10071,40 @@ test "heap multiplication rejects an oversize product before allocating" {
     try std.testing.expectError(error.BigIntTooLarge, core.bigint.BigInt.createMulInline(rt, lhs, rhs));
     try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
 }
+
+test "repeated heap multiplication retains nothing as the count grows" {
+    const bigint = engine.libs.bigint;
+    const operand_limbs = [_]bigint.Limb{ 3, @as(bigint.Limb, 1) << 63 };
+
+    // P6-03e: the single-allocation topology has to be flat in the iteration
+    // count. Both the live account and the peak live-allocation count are
+    // checked, because a leak would show in the first and a retained temporary
+    // in the second.
+    var previous_peak: ?usize = null;
+    for ([_]usize{ 0, 1, 10, 1000 }) |n| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const lhs = try makeLockstepOperand(rt, &operand_limbs, false, false);
+        defer lhs.valueRef().free(rt);
+        const rhs = try makeLockstepOperand(rt, &operand_limbs, true, false);
+        defer rhs.valueRef().free(rt);
+
+        const bytes_before = rt.memory.allocated_bytes;
+        const count_before = rt.memory.allocation_count;
+        const peak_before = rt.memory.peak_allocation_count;
+
+        for (0..n) |_| {
+            const product = try core.bigint.BigInt.createMulInline(rt, lhs, rhs);
+            product.valueRef().free(rt);
+        }
+
+        try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(count_before, rt.memory.allocation_count);
+        // One live product at a time regardless of n: the peak rises by exactly
+        // one over the pre-loop state on the first iteration and never again.
+        const expected_peak = if (n == 0) peak_before else @max(peak_before, count_before + 1);
+        try std.testing.expectEqual(expected_peak, rt.memory.peak_allocation_count);
+        if (previous_peak) |p| if (n != 0) try std.testing.expectEqual(p, rt.memory.peak_allocation_count);
+        if (n != 0) previous_peak = rt.memory.peak_allocation_count;
+    }
+}

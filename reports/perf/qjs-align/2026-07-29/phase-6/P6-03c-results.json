@@ -704,47 +704,11 @@
  },
  "negative_observations": {
   "peak_rss": {
-   "measurements_kb": {
-    "local_arith_loop_control": {
-     "p0": 4612,
-     "p1": 4612
-    },
-    "2x2": {
-     "p0": 4676,
-     "p1": 4804
-    },
-    "8x8": {
-     "p0": [
-      4672,
-      4672
-     ],
-     "p1": [
-      4804,
-      4868
-     ]
-    },
-    "16x16": {
-     "p0": [
-      4676,
-      4672
-     ],
-     "p1": [
-      4868,
-      4804
-     ]
-    },
-    "28x28": {
-     "p0": 4740,
-     "p1": 4868
-    },
-    "28x29": {
-     "p0": 4676,
-     "p1": 4804
-    }
-   },
-   "delta": "+128 to +196 KB (+2.7% to +4.2%) on every BigInt shape, exactly zero on the non-BigInt control",
-   "candidate_cause": "consistent with the GC trigger moving ahead of the whole block (JSRuntime.triggerGCOnAllocation is 2.10% of the P1 profile), but possibly the new block size class pulling in extra arenas. Causality unconfirmed; not investigated further in this cut.",
-   "scale_note": "the workload holds one live product at a time, so the per-op allocation saving is invisible at RSS scale"
+   "status": "RETRACTED by P6-03e",
+   "original_claim": "+128 to +196 KB on every BigInt shape with zero difference on the non-BigInt control",
+   "why_it_was_wrong": "one maxRSS sample per instance per shape, against a repeat-measurement spread of about 200 KB on this host; the zero-difference control was a coincidence of a single sample",
+   "correct_result": "same-process A/B (the old topology is still reachable in this binary) shows the FAM topology is RSS-neutral for slab-backed products and strictly better for standalone ones (+0 KB versus +116 KB), flat in the iteration count, with the logical account returning to zero and major_gc_count zero throughout",
+   "see": "P6-03e-fam-rss-classification.md"
   },
   "bigint_div_mod": {
    "measurement": "8-limb / 8-limb: zjs 18.0 us per division, qjs about 58.6 ns, ratio 306.8x for div and 283.4x for mod",
