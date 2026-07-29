@@ -1508,7 +1508,7 @@ pub fn qjsFunctionApplyCall(
     if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const arg_array = if (args.len >= 2 and !args[1].isNull() and !args[1].isUndefined()) args[1] else {
-        return callValueOrBytecode(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
+        return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
     };
     if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
     if (object_ops.callableObjectFromValue(this_value)) |target_object| {
@@ -1521,7 +1521,7 @@ pub fn qjsFunctionApplyCall(
     var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
-    return callValueOrBytecode(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
+    return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
 }
 
 pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, _: *core.Object, message: []const u8) !core.JSValue {
@@ -6948,7 +6948,7 @@ pub fn qjsReflectApplyCall(
     var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
-    return callValueOrBytecode(ctx, output, global, args[1], args[0], apply_args, caller_function, caller_frame);
+    return callValueOrBytecodeSyncInternal(ctx, output, global, args[1], args[0], apply_args, caller_function, caller_frame);
 }
 
 pub fn closeIteratorForFromEntriesAbrupt(

@@ -598,6 +598,103 @@ test "synchronous native fence restores every budget after interrupt" {
     try std.testing.expect(!js.context.exceptionIsUncatchable());
 }
 
+test "Function and Reflect apply opt into the active Machine explicitly" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function nativeApplyHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function nativeApplyCallback(value) {
+        \\    return nativeApplyHelper(value);
+        \\}
+        \\function nativeApplyRecursive(depth) {
+        \\    if (depth === 0) return 10;
+        \\    return nativeApplyRecursive.apply(null, [depth - 1]) + 1;
+        \\}
+        \\globalThis.__nativeApplyOuter = function () {
+        \\    return nativeApplyCallback.apply(null, [1])
+        \\        + Reflect.apply(nativeApplyCallback, null, [2])
+        \\        + nativeApplyRecursive(3);
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__nativeApplyOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 18), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 5), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+}
+
+test "synchronous apply fallbacks restore the outer active invocation" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\var nativeApplyOther = $262.createRealm().global;
+        \\var nativeApplyForeign = nativeApplyOther.eval(
+        \\    "(function nativeApplyForeign(value) { return value + 1; })"
+        \\);
+        \\function nativeApplyLocal(value) {
+        \\    return value;
+        \\}
+        \\globalThis.__nativeApplyFallbackOuter = function () {
+        \\    return nativeApplyForeign.apply(null, [20])
+        \\        + nativeApplyLocal.apply(null, [21]);
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__nativeApplyFallbackOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -7661,6 +7758,24 @@ test "native builtin errors capture a native callsite" {
         \\assert.sameValue(crossMachineSites[1][1], true);
         \\assert.sameValue(crossMachineSites[2][0], "outerMapBacktrace");
         \\assert.sameValue(crossMachineSites[2][1], false);
+        \\function nativeFenceHelper() {
+        \\    return new Error("same-machine").stack;
+        \\}
+        \\function nativeFenceCallback() {
+        \\    return nativeFenceHelper();
+        \\}
+        \\function nativeFenceOuter() {
+        \\    return nativeFenceCallback.apply(null, []);
+        \\}
+        \\var sameMachineSites = nativeFenceOuter();
+        \\assert.sameValue(sameMachineSites[0][0], "nativeFenceHelper");
+        \\assert.sameValue(sameMachineSites[0][1], false);
+        \\assert.sameValue(sameMachineSites[1][0], "nativeFenceCallback");
+        \\assert.sameValue(sameMachineSites[1][1], false);
+        \\assert.sameValue(sameMachineSites[2][0], "apply");
+        \\assert.sameValue(sameMachineSites[2][1], true);
+        \\assert.sameValue(sameMachineSites[3][0], "nativeFenceOuter");
+        \\assert.sameValue(sameMachineSites[3][1], false);
         \\Error.prepareStackTrace = undefined;
         \\Error.prepareStackTrace = function(error, sites) {
         \\    assert.sameValue(sites[0].getFunctionName(), "map");

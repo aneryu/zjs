@@ -4408,6 +4408,129 @@ test "Function apply CreateListFromArrayLike observes array indexed gets" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "Function and Reflect apply preserve target classes and argument shapes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function signature() {
+        \\    return arguments.length + ":" + arguments[0] + ":"
+        \\        + arguments[arguments.length - 1];
+        \\}
+        \\var counts = [0, 1, 8, 9, 16, 64];
+        \\for (var countIndex = 0; countIndex < counts.length; countIndex++) {
+        \\    var count = counts[countIndex];
+        \\    var dense = Array(count);
+        \\    for (var index = 0; index < count; index++) dense[index] = index + 1;
+        \\    var expected = count === 0
+        \\        ? "0:undefined:undefined"
+        \\        : count + ":1:" + count;
+        \\    assert.sameValue(signature.apply(null, dense), expected);
+        \\    assert.sameValue(Reflect.apply(signature, null, dense), expected);
+        \\}
+        \\assert.sameValue(signature.apply(null), "0:undefined:undefined");
+        \\assert.sameValue(signature.apply(null, null), "0:undefined:undefined");
+        \\assert.sameValue(signature.apply(null, undefined), "0:undefined:undefined");
+        \\assert.sameValue(Reflect.apply(signature, null, []), "0:undefined:undefined");
+        \\
+        \\function sloppyThis() { return this === globalThis; }
+        \\function strictThis() { "use strict"; return this; }
+        \\assert.sameValue(sloppyThis.apply(null, []), true);
+        \\assert.sameValue(strictThis.apply(null, []), null);
+        \\var arrowOwner = {
+        \\    make: function() { return () => this; }
+        \\};
+        \\var lexicalArrow = arrowOwner.make();
+        \\assert.sameValue(lexicalArrow.apply({ ignored: true }, []), arrowOwner);
+        \\function closureFactory(offset) {
+        \\    return function(value) { return offset + value; };
+        \\}
+        \\assert.sameValue(closureFactory(40).apply(null, [2]), 42);
+        \\
+        \\assert.sameValue(Math.max.apply(null, [3, 9, 4]), 9);
+        \\function boundTarget(left, right) {
+        \\    return this.base + left + right;
+        \\}
+        \\var bound = boundTarget.bind({ base: 10 }, 20);
+        \\assert.sameValue(bound.apply({ base: 1000 }, [12]), 42);
+        \\var trapOrder = [];
+        \\var proxied = new Proxy(boundTarget, {
+        \\    apply: function(target, receiver, list) {
+        \\        trapOrder.push(receiver.base, list.length, list[0], list[1]);
+        \\        return Reflect.apply(target, receiver, list);
+        \\    }
+        \\});
+        \\assert.sameValue(proxied.apply({ base: 30 }, [5, 7]), 42);
+        \\assert.sameValue(trapOrder.join(","), "30,2,5,7");
+        \\class ApplyClass {}
+        \\assert.throws(TypeError, function() { ApplyClass.apply(null, []); });
+        \\
+        \\var other = $262.createRealm().global;
+        \\var foreign = other.eval(
+        \\    "(function foreign(value) { return this.base + value; })"
+        \\);
+        \\assert.sameValue(foreign.apply({ base: 40 }, [2]), 42);
+        \\async function asyncTarget(value) { return value + 1; }
+        \\var asyncResult = asyncTarget.apply(null, [41]);
+        \\assert.sameValue(asyncResult instanceof Promise, true);
+        \\function* generatorTarget(value) { yield value + 1; }
+        \\var generatorResult = generatorTarget.apply(null, [41]);
+        \\assert.sameValue(generatorResult.next().value, 42);
+        \\
+        \\function helper(value) { return value + 1; }
+        \\function callbackToHelper(value) { return helper(value); }
+        \\assert.sameValue(callbackToHelper.apply(null, [41]), 42);
+        \\function reentrantApply(value) {
+        \\    if (value === 0) return 40;
+        \\    return reentrantApply.apply(null, [value - 1]) + 1;
+        \\}
+        \\assert.sameValue(reentrantApply.apply(null, [2]), 42);
+        \\assert.sameValue(
+        \\    (function() { return signature.apply(null, arguments); })(1, 2, 3),
+        \\    "3:1:3"
+        \\);
+        \\
+        \\var genericOrder = [];
+        \\var generic = {
+        \\    get length() {
+        \\        genericOrder.push("length");
+        \\        return 2;
+        \\    },
+        \\    get 0() {
+        \\        genericOrder.push("0");
+        \\        this.extra = 99;
+        \\        return 20;
+        \\    },
+        \\    get 1() {
+        \\        genericOrder.push("1");
+        \\        return 22;
+        \\    },
+        \\    get 2() {
+        \\        genericOrder.push("2");
+        \\        return this.extra;
+        \\    }
+        \\};
+        \\assert.sameValue(
+        \\    Reflect.apply(function(a, b) { return a + b; }, null, generic),
+        \\    42
+        \\);
+        \\assert.sameValue(genericOrder.join(","), "length,0,1");
+        \\
+        \\globalThis.__nativeApplyIndirect = 0;
+        \\function indirectApplyProbe() {
+        \\    var hiddenFromIndirectEval = 1;
+        \\    return (0, eval).apply(null, [
+        \\        "globalThis.__nativeApplyIndirect = 42; typeof hiddenFromIndirectEval;"
+        \\    ]);
+        \\}
+        \\assert.sameValue(indirectApplyProbe(), "undefined");
+        \\assert.sameValue(globalThis.__nativeApplyIndirect, 42);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Promise constructor resolve and reject functions inherit Function.prototype" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
