@@ -147,6 +147,41 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "collection-reentry-oom-ok" },
     },
     .{
+        .name = "native-callback-property-proxy-coercion",
+        .source =
+        \\function oomPropertyHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\const accessor = Object.defineProperty({}, "value", {
+        \\  get: function oomPropertyGetter() {
+        \\    trace = new Error("property-callback-trace").stack;
+        \\    return oomPropertyHelper(1);
+        \\  }
+        \\});
+        \\const proxy = new Proxy(accessor, {
+        \\  get: function oomPropertyGetTrap(target, key, receiver) {
+        \\    return Reflect.get(target, key, receiver);
+        \\  }
+        \\});
+        \\const primitive = {
+        \\  [Symbol.toPrimitive]: function oomPropertyPrimitive() {
+        \\    return oomPropertyHelper(39);
+        \\  }
+        \\};
+        \\const checksum = proxy.value + primitive;
+        \\const getterAt = trace.indexOf("    at oomPropertyGetter");
+        \\const reflectAt = trace.indexOf("get (native)", getterAt);
+        \\const trapAt = trace.indexOf("    at oomPropertyGetTrap", reflectAt);
+        \\checksum === 42 &&
+        \\getterAt === 0 &&
+        \\reflectAt > getterAt &&
+        \\trapAt > reflectAt
+        \\  ? "property-reentry-oom-ok" : "property-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "property-reentry-oom-ok" },
+    },
+    .{
         .name = "tail-moved-args",
         .source =
         \\function target(a,b,c,d,e,f,g,h,i,j) {
@@ -1077,6 +1112,10 @@ test "oom recovery canary: native callback map through Reflect.apply" {
 
 test "oom recovery canary: nested Map and Set callbacks" {
     try recoveryCanarySweep(corpusSnippetNamed("native-callback-map-set"));
+}
+
+test "oom recovery canary: accessor Proxy and primitive coercion callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-property-proxy-coercion"));
 }
 
 test "oom recovery canary: repeated private class identity" {

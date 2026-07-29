@@ -941,7 +941,7 @@ pub fn getValueProperty(
                 core.JSValue.undefinedValue()
             else blk: {
                 if (try activeGlobalObject(ctx.runtime, global, globals)) |active_global| {
-                    break :blk try call_runtime.callValueOrBytecode(ctx, output, active_global, receiver_value, desc.getter, &.{}, null, null);
+                    break :blk try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, active_global, receiver_value, desc.getter, &.{}, null, null);
                 }
                 break :blk try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver_value, desc.getter, &.{});
             },

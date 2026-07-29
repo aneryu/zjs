@@ -62,7 +62,7 @@ const asyncGeneratorPrototypeFromGlobal = promise_ops.asyncGeneratorPrototypeFro
 const atomListContains = core.atom.atomListContains;
 const callAccessorSetter = call_runtime.callAccessorSetter;
 const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const captureErrorStack = error_stack_ops.captureErrorStack;
 const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
 const createArrayFromArgs = array_ops.createArrayFromArgs;
@@ -2012,7 +2012,7 @@ pub fn qjsObjectGetPrototypeOfStep(
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return qjsObjectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     const result_proto = if (result.isNull()) null else objectFromValue(result) orelse return error.TypeError;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
@@ -2048,7 +2048,7 @@ pub fn qjsObjectGetPrototypeOfValue(
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return qjsObjectGetPrototypeOfValue(ctx, output, global, target, caller_function, caller_frame);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
     if (!result.isNull() and objectFromValue(result) == null) return error.TypeError;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
@@ -2177,7 +2177,7 @@ pub fn objectRestOwnKeys(
         const target = try property_ops.expectObject(target_value);
         return objectRestOwnKeys(ctx, output, global, target);
     }
-    const trap_result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
+    const trap_result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
     defer trap_result.free(ctx.runtime);
     _ = try property_ops.expectObject(trap_result);
     var out: []core.Atom = &.{};
@@ -2726,7 +2726,7 @@ pub fn callObjectToPrimitiveMethod(
     defer method.free(ctx.runtime);
     if (method.isUndefined() or method.isNull()) return null;
     if (!isCallableValue(method)) return null;
-    const result = try callValueOrBytecode(ctx, output, global, receiver, method, &.{}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, method, &.{}, caller_function, caller_frame);
     if (result.isObject()) {
         result.free(ctx.runtime);
         return null;
@@ -2751,7 +2751,7 @@ pub fn getMethodPropertyForOrdinaryToPrimitive(
             .data => return desc.value.dup(),
             .accessor => {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                return callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
+                return callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
             },
             .generic => return core.JSValue.undefinedValue(),
         }
@@ -2926,7 +2926,7 @@ noinline fn functionCallerArgumentsProperty(
             .generic => return core.JSValue.undefinedValue(),
             .accessor => {
                 if (own_desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                return try callValueOrBytecode(ctx, output, global, receiver, own_desc.getter, &.{}, caller_function, caller_frame);
+                return try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, own_desc.getter, &.{}, caller_function, caller_frame);
             },
         }
     }
@@ -2965,7 +2965,7 @@ noinline fn getPrivateValueProperty(
             .generic => return error.TypeError,
             .accessor => {
                 if (desc.getter.isUndefined()) return error.TypeError;
-                return callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
+                return callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
             },
         }
     }
@@ -2994,7 +2994,7 @@ pub fn setPrivateValueProperty(
             .generic => return error.TypeError,
             .accessor => {
                 if (desc.setter.isUndefined()) return error.TypeError;
-                const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
+                const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
                 result.free(ctx.runtime);
                 return;
             },
@@ -3057,7 +3057,7 @@ pub fn getValuePropertyWithReceiver(
                 .generic => return core.JSValue.undefinedValue(),
                 .accessor => {
                     if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                    return callValueOrBytecode(ctx, output, global, receiver_value, desc.getter, &.{}, caller_function, caller_frame);
+                    return callValueOrBytecodeSyncInternal(ctx, output, global, receiver_value, desc.getter, &.{}, caller_function, caller_frame);
                 },
             }
         }
@@ -3302,7 +3302,7 @@ pub fn setWithOwnDescriptor(
     switch (own_desc.kind) {
         .accessor => {
             if (own_desc.setter.isUndefined()) return false;
-            const result = try callValueOrBytecode(ctx, output, global, receiver_value, own_desc.setter, &.{value}, caller_function, caller_frame);
+            const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver_value, own_desc.setter, &.{value}, caller_function, caller_frame);
             result.free(ctx.runtime);
             return true;
         },
@@ -3521,7 +3521,7 @@ pub fn qjsObjectIsExtensibleCall(
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return core.JSValue.boolean(try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame));
     if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{proxy_target_value}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{proxy_target_value}, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     const extensible = valueTruthy(result);
     if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
@@ -3870,7 +3870,7 @@ pub fn getAccessorDescriptorValue(
         defer desc.destroy(ctx.runtime);
         if (desc.kind != .accessor) return null;
         if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-        return try callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
+        return try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
     }
     return null;
 }
@@ -3914,7 +3914,7 @@ inline fn getPropertyValueFromObjectChain(
                     const getter = lookup.entry.slot.accessor.getterValue().dup();
                     defer getter.free(ctx.runtime);
                     if (getter.isUndefined()) return core.JSValue.undefinedValue();
-                    return try callValueOrBytecode(ctx, output, global, receiver, getter, &.{}, caller_function, caller_frame);
+                    return try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, getter, &.{}, caller_function, caller_frame);
                 },
                 // Auto-init materialization and var-ref/TDZ handling remain
                 // centralized in getOwnProperty, exactly like qjs's retry and
@@ -3951,7 +3951,7 @@ noinline fn getSlowPropertyValueFromObject(
             .generic => return core.JSValue.undefinedValue(),
             .accessor => {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                return try callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
+                return try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
             },
         }
     }
@@ -3975,7 +3975,7 @@ pub fn getSuperPropertyValue(
             switch (desc.kind) {
                 .accessor => {
                     if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                    return callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
+                    return callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
                 },
                 .data => return desc.value.dup(),
                 .generic => {},
@@ -4008,7 +4008,7 @@ pub fn setSuperPropertyValue(
                     if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.AccessorWithoutSetter);
                     return;
                 }
-                const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
+                const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
                 result.free(ctx.runtime);
                 return;
             },
@@ -4086,7 +4086,7 @@ pub fn hasPropertyForWith(
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
 }
@@ -4114,7 +4114,7 @@ pub fn hasValueProperty(
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
 }
@@ -4202,7 +4202,7 @@ pub fn deleteValueProperty(
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     // js_proxy_delete_property (quickjs.c:51157): the target desc is read via
@@ -4878,7 +4878,7 @@ pub fn proxySetTrapForErrorStackSetter(
 
     const key_value = try proxyTrapKeyValue(ctx.runtime, stack_key);
     defer key_value.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return error.TypeError;
     const target = try property_ops.expectObject(target_value);
@@ -4926,7 +4926,7 @@ pub fn proxyCreateDataPropertyOrThrow(
     try defineValueProperty(ctx.runtime, desc_object, "writable", core.JSValue.boolean(true));
     try defineValueProperty(ctx.runtime, desc_object, "enumerable", core.JSValue.boolean(true));
     try defineValueProperty(ctx.runtime, desc_object, "configurable", core.JSValue.boolean(true));
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!value_ops.isTruthy(result)) return error.TypeError;
     _ = receiver_value;
@@ -5005,7 +5005,7 @@ pub fn proxyAwareOwnPropertyDescriptor(
     if (!isCallableValue(trap)) return error.TypeError;
     const key_value = try proxyTrapKeyValue(ctx.runtime, key);
     defer key_value.free(ctx.runtime);
-    const desc_value = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
+    const desc_value = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     defer desc_value.free(ctx.runtime);
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, key, caller_function, caller_frame);
     defer if (target_desc) |item| item.destroy(ctx.runtime);
@@ -5081,7 +5081,7 @@ pub fn proxyAwareIsExtensible(
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
     if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     const extensible = valueTruthy(result);
     if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
@@ -5108,7 +5108,7 @@ pub fn proxyAwarePreventExtensions(
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return proxyAwarePreventExtensions(ctx, output, global, target, caller_function, caller_frame);
     if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     if (try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
@@ -5140,7 +5140,7 @@ pub fn proxyAwareSetPrototypeOf(
     const proto_value = if (prototype) |proto| proto.value() else core.JSValue.nullValue();
     if (trap.isUndefined() or trap.isNull()) return proxyAwareSetPrototypeOf(ctx, output, global, target, prototype, caller_function, caller_frame);
     if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, proto_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, proto_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
@@ -5224,12 +5224,12 @@ pub fn callProxyApply(
     const trap = try getValueProperty(ctx, output, global, handler_value, apply_atom, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
-        return callValueOrBytecode(ctx, output, global, this_value, target_value, args, caller_function, caller_frame);
+        return callValueOrBytecodeSyncInternal(ctx, output, global, this_value, target_value, args, caller_function, caller_frame);
     }
     if (!isCallableValue(trap)) return error.TypeError;
     const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
     defer arg_array.free(ctx.runtime);
-    return callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, this_value, arg_array }, caller_function, caller_frame);
+    return callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, this_value, arg_array }, caller_function, caller_frame);
 }
 
 pub fn constructProxy(
@@ -5261,7 +5261,7 @@ pub fn constructProxy(
     if (!isCallableValue(trap)) return error.TypeError;
     const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
     defer arg_array.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, arg_array, new_target_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, arg_array, new_target_value }, caller_function, caller_frame);
     if (!result.isObject()) {
         result.free(ctx.runtime);
         return error.TypeError;
@@ -5297,7 +5297,7 @@ pub fn getProxyProperty(
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, receiver_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, receiver_value }, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
     try validateProxyGetResult(ctx, output, global, target, atom_id, result, caller_function, caller_frame);
     return result;
@@ -5396,7 +5396,7 @@ pub fn proxySetValueProperty(
     if (!isCallableValue(trap)) return error.TypeError;
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     const target = try property_ops.expectObject(target_value);
@@ -5465,7 +5465,7 @@ pub fn proxyDefineValueForReflectSet(
     defer get_desc.free(ctx.runtime);
     if (!get_desc.isUndefined() and !get_desc.isNull()) {
         if (!isCallableValue(get_desc)) return error.TypeError;
-        const result = try callValueOrBytecode(ctx, output, global, handler_value, get_desc, &.{ target_value, key_value }, caller_function, caller_frame);
+        const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, get_desc, &.{ target_value, key_value }, caller_function, caller_frame);
         result.free(ctx.runtime);
     }
 
@@ -5487,7 +5487,7 @@ pub fn proxyDefineValueForReflectSet(
     desc_value = desc_object.value();
     defer desc_value.free(ctx.runtime);
     try defineValueProperty(ctx.runtime, desc_object, "value", rooted_value);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, define, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, define, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return error.TypeError;
     _ = receiver_value;
@@ -5531,7 +5531,7 @@ pub fn proxyDefineOwnProperty(
     defer key_value.free(ctx.runtime);
     const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
     defer desc_value.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
     defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame);

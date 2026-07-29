@@ -1735,7 +1735,7 @@ pub fn qjsErrorStackSetter(
     switch (own_desc.kind) {
         .accessor => {
             if (own_desc.setter.isUndefined()) return error.TypeError;
-            const result = try callValueOrBytecode(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
+            const result = try callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
             result.free(ctx.runtime);
             return core.JSValue.undefinedValue();
         },
@@ -7545,7 +7545,7 @@ pub fn callAccessorSetter(
         defer desc.destroy(ctx.runtime);
         if (desc.kind != .accessor) return false;
         if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
-        const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
+        const result = try callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
         result.free(ctx.runtime);
         return true;
     }

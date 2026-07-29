@@ -1076,7 +1076,7 @@ pub fn objectIsExtensibleForIntegrity(
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return target.isExtensible();
     if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
+    const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
     defer result.free(ctx.runtime);
     const extensible = valueTruthy(result);
     if (extensible != target.isExtensible()) return error.TypeError;

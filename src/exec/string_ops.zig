@@ -403,7 +403,7 @@ pub fn toPrimitiveForString(
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "string");
         defer hint.free(ctx.runtime);
-        const primitive = try callValueOrBytecode(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
+        const primitive = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
         if (primitive.isObject()) {
             primitive.free(ctx.runtime);
             return throwTypeErrorMessage(ctx, global, "toPrimitive");

@@ -1217,6 +1217,359 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
 }
 
+test "accessors Proxy traps and primitive coercion stay on the active Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function propertyCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\var propertyCohortStorage = 0;
+        \\var propertyCohortTrace;
+        \\var propertyCohortOrder = [];
+        \\var propertyCohortAccessor = {};
+        \\Object.defineProperty(propertyCohortAccessor, "value", {
+        \\    get: function propertyCohortGetter() {
+        \\        try {
+        \\            throw new Error("local");
+        \\        } catch (error) {
+        \\            assert.sameValue(error.message, "local");
+        \\        }
+        \\        return propertyCohortHelper(propertyCohortStorage);
+        \\    },
+        \\    set: function propertyCohortSetter(value) {
+        \\        propertyCohortStorage = propertyCohortHelper(value);
+        \\    }
+        \\});
+        \\var propertyCohortInherited = Object.create({
+        \\    get value() {
+        \\        return propertyCohortHelper(6);
+        \\    }
+        \\});
+        \\var propertyCohortDefaultPrimitive = {
+        \\    [Symbol.toPrimitive]: function propertyDefaultPrimitive(hint) {
+        \\        assert.sameValue(hint, "default");
+        \\        return propertyCohortHelper(40);
+        \\    }
+        \\};
+        \\var propertyCohortOrdinaryPrimitive = {
+        \\    valueOf: function propertyValueOf() {
+        \\        return propertyCohortHelper(8);
+        \\    }
+        \\};
+        \\var propertyCohortKey = {
+        \\    [Symbol.toPrimitive]: function propertyKeyPrimitive(hint) {
+        \\        assert.sameValue(hint, "string");
+        \\        return "cohort";
+        \\    }
+        \\};
+        \\globalThis.__propertyCallbackCohortOuter = function __propertyCallbackCohortOuter() {
+        \\    propertyCohortAccessor.value = 4;
+        \\    assert.sameValue(propertyCohortAccessor.value, 6);
+        \\    assert.sameValue(propertyCohortInherited.value, 7);
+        \\    assert.sameValue(propertyCohortDefaultPrimitive + 1, 42);
+        \\    assert.sameValue(+propertyCohortOrdinaryPrimitive, 9);
+        \\    var keyed = {};
+        \\    keyed[propertyCohortKey] = 10;
+        \\    assert.sameValue(keyed.cohort, 10);
+        \\
+        \\    var getProxy = new Proxy({ value: 1 }, {
+        \\        get: function propertyGetTrap(target, key, receiver) {
+        \\            assert.sameValue(receiver, getProxy);
+        \\            return propertyCohortHelper(target[key]);
+        \\        }
+        \\    });
+        \\    assert.sameValue(getProxy.value, 2);
+        \\
+        \\    var setTarget = { value: 1 };
+        \\    var setProxy = new Proxy(setTarget, {
+        \\        set: function propertySetTrap(target, key, value, receiver) {
+        \\            assert.sameValue(receiver, setProxy);
+        \\            target[key] = value;
+        \\            return true;
+        \\        }
+        \\    });
+        \\    setProxy.value = 2;
+        \\    assert.sameValue(setTarget.value, 2);
+        \\
+        \\    var hasProxy = new Proxy({ value: 1 }, {
+        \\        has: function propertyHasTrap(target, key) {
+        \\            return key in target;
+        \\        }
+        \\    });
+        \\    assert.sameValue("value" in hasProxy, true);
+        \\
+        \\    var deleteTarget = { value: 1 };
+        \\    var deleteProxy = new Proxy(deleteTarget, {
+        \\        deleteProperty: function propertyDeleteTrap(target, key) {
+        \\            return delete target[key];
+        \\        }
+        \\    });
+        \\    assert.sameValue(delete deleteProxy.value, true);
+        \\    assert.sameValue("value" in deleteTarget, false);
+        \\
+        \\    var proto = {};
+        \\    var protoTarget = Object.create(proto);
+        \\    var getPrototypeProxy = new Proxy(protoTarget, {
+        \\        getPrototypeOf: function propertyGetPrototypeTrap(target) {
+        \\            return Object.getPrototypeOf(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.getPrototypeOf(getPrototypeProxy), proto);
+        \\
+        \\    var newProto = {};
+        \\    var setPrototypeTarget = {};
+        \\    var setPrototypeProxy = new Proxy(setPrototypeTarget, {
+        \\        setPrototypeOf: function propertySetPrototypeTrap(target, value) {
+        \\            Object.setPrototypeOf(target, value);
+        \\            return true;
+        \\        }
+        \\    });
+        \\    Object.setPrototypeOf(setPrototypeProxy, newProto);
+        \\    assert.sameValue(Object.getPrototypeOf(setPrototypeTarget), newProto);
+        \\
+        \\    var extensibleProxy = new Proxy({}, {
+        \\        isExtensible: function propertyIsExtensibleTrap(target) {
+        \\            return Object.isExtensible(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.isExtensible(extensibleProxy), true);
+        \\
+        \\    var preventTarget = {};
+        \\    var preventProxy = new Proxy(preventTarget, {
+        \\        preventExtensions: function propertyPreventExtensionsTrap(target) {
+        \\            Object.preventExtensions(target);
+        \\            return true;
+        \\        }
+        \\    });
+        \\    Object.preventExtensions(preventProxy);
+        \\    assert.sameValue(Object.isExtensible(preventTarget), false);
+        \\
+        \\    var ownKeysProxy = new Proxy({ value: 1 }, {
+        \\        ownKeys: function propertyOwnKeysTrap(target) {
+        \\            return Reflect.ownKeys(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Reflect.ownKeys(ownKeysProxy).join(","), "value");
+        \\
+        \\    var descriptorProxy = new Proxy({ value: 1 }, {
+        \\        getOwnPropertyDescriptor: function propertyDescriptorTrap(target, key) {
+        \\            return Object.getOwnPropertyDescriptor(target, key);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.getOwnPropertyDescriptor(descriptorProxy, "value").value, 1);
+        \\
+        \\    var defineTarget = {};
+        \\    var defineProxy = new Proxy(defineTarget, {
+        \\        defineProperty: function propertyDefineTrap(target, key, descriptor) {
+        \\            Object.defineProperty(target, key, descriptor);
+        \\            return true;
+        \\        }
+        \\    });
+        \\    Object.defineProperty(defineProxy, "value", {
+        \\        value: 2,
+        \\        configurable: true
+        \\    });
+        \\    assert.sameValue(defineTarget.value, 2);
+        \\
+        \\    function propertyApplyTarget() {}
+        \\    var applyProxy = new Proxy(propertyApplyTarget, {
+        \\        apply: function propertyApplyTrap(target, receiver, args) {
+        \\            assert.sameValue(target, propertyApplyTarget);
+        \\            return propertyCohortHelper(args[0]);
+        \\        }
+        \\    });
+        \\    assert.sameValue(applyProxy(2), 3);
+        \\
+        \\    function propertyConstructTarget() {}
+        \\    var constructProxy = new Proxy(propertyConstructTarget, {
+        \\        construct: function propertyConstructTrap(target, args, newTarget) {
+        \\            assert.sameValue(target, propertyConstructTarget);
+        \\            assert.sameValue(newTarget, constructProxy);
+        \\            return { value: propertyCohortHelper(args[0]) };
+        \\        }
+        \\    });
+        \\    assert.sameValue(new constructProxy(3).value, 4);
+        \\
+        \\    function propertyForwardTarget(value) {
+        \\        return propertyCohortHelper(value);
+        \\    }
+        \\    assert.sameValue(new Proxy(propertyForwardTarget, {})(4), 5);
+        \\
+        \\    var nestedAccessor = {
+        \\        get value() {
+        \\            return new Proxy({ value: 5 }, {
+        \\                get: function propertyNestedGetTrap(target, key) {
+        \\                    return propertyCohortHelper(target[key]);
+        \\                }
+        \\            }).value;
+        \\        }
+        \\    };
+        \\    assert.sameValue(nestedAccessor.value, 6);
+        \\
+        \\    propertyCohortTrace = undefined;
+        \\    var traceProxy = new Proxy({ value: 1 }, {
+        \\        ownKeys: function propertyTraceOwnKeysTrap(target) {
+        \\            propertyCohortTrace = new Error("property cohort").stack;
+        \\            return Reflect.ownKeys(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.keys(traceProxy).join(","), "value");
+        \\    var callbackIndex = propertyCohortTrace.indexOf("    at propertyTraceOwnKeysTrap");
+        \\    var nativeIndex = propertyCohortTrace.indexOf("keys (native)");
+        \\    var outerIndex = propertyCohortTrace.indexOf("    at __propertyCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    propertyCohortOrder = [];
+        \\    try {
+        \\        new Proxy({}, {
+        \\            get: function propertyThrowingGetTrap() {
+        \\                propertyCohortOrder.push("callback");
+        \\                throw new RangeError("property cohort throw");
+        \\            }
+        \\        }).value;
+        \\    } catch (error) {
+        \\        propertyCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(propertyCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+        \\
+        \\var propertyOther = $262.createRealm().global;
+        \\var propertyForeignObject = propertyOther.eval(
+        \\    "Object.defineProperty({}, 'value', {" +
+        \\    "get: function propertyForeignGetter() { return 20; }})"
+        \\);
+        \\var propertyLocalObject = Object.defineProperty({}, "value", {
+        \\    get: function propertyLocalGetter() {
+        \\        return 22;
+        \\    }
+        \\});
+        \\globalThis.__propertyCallbackForeignOuter = function () {
+        \\    return propertyForeignObject.value + propertyLocalObject.value;
+        \\};
+        \\var propertyInterruptObject = Object.defineProperty({}, "value", {
+        \\    get: function propertyInterruptGetter() {
+        \\        return propertyCohortHelper(41);
+        \\    }
+        \\});
+        \\globalThis.__propertyCallbackInterrupt = function () {
+        \\    return propertyInterruptObject.value;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__propertyCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 21), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_key = try js.runtime.internAtom("__propertyCallbackForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    // The local plain accessor is already emitted as a direct VM
+    // InlineCallRequest; only the foreign accessor needs a fresh root.
+    try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__propertyCallbackInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 3;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

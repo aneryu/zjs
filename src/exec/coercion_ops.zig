@@ -14,7 +14,7 @@ const exception_ops = @import("vm_exception_ops.zig");
 // Helpers that remain in call_runtime.zig (generic utilities outside the coercion
 // cluster).
 const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -62,7 +62,7 @@ fn toPrimitiveForAdditionObject(
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "default");
         defer hint.free(ctx.runtime);
-        const primitive = try callValueOrBytecode(ctx, output, global, value, method, &.{hint}, null, null);
+        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
         if (primitive.isObject()) {
             primitive.free(ctx.runtime);
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
@@ -90,7 +90,7 @@ pub fn toPrimitiveForNumber(
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "number");
         defer hint.free(ctx.runtime);
-        const primitive = try callValueOrBytecode(ctx, output, global, value, method, &.{hint}, null, null);
+        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
         if (primitive.isObject()) {
             primitive.free(ctx.runtime);
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
