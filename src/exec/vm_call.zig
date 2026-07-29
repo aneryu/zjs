@@ -827,40 +827,97 @@ pub noinline fn apply(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-) !Step {
+    req_out: *call_runtime.InlineCallRequest,
+) !CallStep {
     const is_new = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
-    const array_value = try stack.pop();
-    defer array_value.free(ctx.runtime);
-    const this_value = try stack.pop();
-    defer this_value.free(ctx.runtime);
-    const func = try stack.pop();
-    defer func.free(ctx.runtime);
-    const apply_args = try collection_vm.argsFromArray(ctx.runtime, array_value);
-    defer call_runtime.freeArgs(ctx.runtime, apply_args);
-    const result = if (is_new != 0) blk: {
+    if (is_new != 0) {
+        const array_value = try stack.pop();
+        defer array_value.free(ctx.runtime);
+        const this_value = try stack.pop();
+        defer this_value.free(ctx.runtime);
+        const func = try stack.pop();
+        defer func.free(ctx.runtime);
+        const apply_args = try collection_vm.argsFromArray(ctx.runtime, array_value);
+        defer call_runtime.freeArgs(ctx.runtime, apply_args);
         // Parser-emitted apply(1) is already a constructor operation. Its
         // explicit stack operand is the new.target: ordinary `new F(...xs)`
         // pushes F, while `super(...xs)` pushes the outer constructor's
         // new.target. Callee identity must not grant construction permission
         // to an ordinary spread call.
-        break :blk call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, this_value) catch |err| {
+        const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, this_value) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-    } else call_runtime.callValueOrBytecodePreRooted(ctx, output, global, this_value, func, apply_args, function, frame) catch |err| {
+        errdefer result.free(ctx.runtime);
+        try stack.pushOwned(result);
+        return .done;
+    }
+
+    // Parser-emitted ordinary spread has one rooted operand region:
+    // `[callable, receiver, materialized-array]`. Build the argument snapshot
+    // first. On an eligible target, recast that same region to
+    // `[receiver, callable, args...]` and let the current Machine's ordinary
+    // `.next` call driver consume it. This is an opcode call, not a native
+    // Function.apply bridge, so no native fence or synthetic apply frame is
+    // involved.
+    if (stack.len() < 3) return error.StackUnderflow;
+    const region_base = stack.len() - 3;
+    const func = stack.values[region_base];
+    const this_value = stack.values[region_base + 1];
+    const array_value = stack.values[region_base + 2];
+    var apply_args = collection_vm.argsFromArray(ctx.runtime, array_value) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    if (is_new != 0) {
-        stack.pushOwned(result) catch |err| {
-            result.free(ctx.runtime);
-            return err;
+    defer call_runtime.freeArgs(ctx.runtime, apply_args);
+    var apply_args_root = collection_vm.ValueSliceRoot{};
+    apply_args_root.init(ctx.runtime, &apply_args);
+    defer apply_args_root.deinit();
+
+    if (inline_calls.resolveInlineTarget(ctx, global, this_value, func)) |target| {
+        const final_len = try std.math.add(usize, region_base + 2, apply_args.len);
+        const current_len = stack.len();
+        if (final_len > current_len) {
+            stack.reserveAdditional(final_len - current_len) catch |err| {
+                call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
+        }
+
+        // reserveAdditional may relocate the backing, so reload every slot.
+        const rooted_func = stack.values[region_base];
+        const rooted_this = stack.values[region_base + 1];
+        const rooted_array = stack.values[region_base + 2];
+        stack.values[region_base] = rooted_this;
+        stack.values[region_base + 1] = rooted_func;
+        stack.values[region_base + 2] = core.JSValue.undefinedValue();
+        stack.setLen(region_base + 2);
+        rooted_array.free(ctx.runtime);
+
+        for (apply_args, 0..) |*arg, index| {
+            stack.values[region_base + 2 + index] = arg.*;
+            arg.* = core.JSValue.undefinedValue();
+        }
+        stack.setLen(final_len);
+        req_out.* = .{
+            .target = target,
+            .region_base = region_base,
+            .argc = @intCast(apply_args.len),
+            .layout = .method,
         };
-        return .done;
+        return .inline_call;
     }
-    defer result.free(ctx.runtime);
-    try stack.push(result);
+
+    const result = call_runtime.callValueOrBytecodePreRooted(ctx, output, global, this_value, func, apply_args, function, frame) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+    stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
 

@@ -695,6 +695,66 @@ test "synchronous apply fallbacks restore the outer active invocation" {
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
 
+test "ordinary spread calls enter eligible bytecode targets on the current Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\var spreadOther = $262.createRealm().global;
+        \\var spreadForeign = spreadOther.eval(
+        \\    "(function spreadForeign(value) { return value + 18; })"
+        \\);
+        \\function spreadPlain(value) {
+        \\    return value + 1;
+        \\}
+        \\var spreadReceiver = {
+        \\    base: 20,
+        \\    add(value) {
+        \\        return this.base + value;
+        \\    }
+        \\};
+        \\function spreadTrace() {
+        \\    return new Error("spread").stack;
+        \\}
+        \\globalThis.__spreadCallOuter = function () {
+        \\    var trace = spreadTrace(...[]);
+        \\    assert.sameValue(trace.indexOf("    at spreadTrace"), 0);
+        \\    assert.sameValue(trace.indexOf("apply (native)"), -1);
+        \\    return spreadPlain(...[1])
+        \\        + spreadReceiver.add(...[1])
+        \\        + spreadForeign(...[1]);
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__spreadCallOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

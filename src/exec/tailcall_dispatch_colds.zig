@@ -143,6 +143,7 @@ pub const SpecialHandlers = struct {
     op_call2: Handler,
     op_call3: Handler,
     op_call_method: Handler,
+    op_apply: Handler,
     op_call_constructor: Handler,
     op_for_of_next: Handler,
     op_tail_call: Handler,
@@ -725,11 +726,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             _ = try vm_property_ref.deletePropertyVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    t[op.apply] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try call_vm.apply(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
+    t[op.apply] = s.op_apply;
     t[op.call_constructor] = s.op_call_constructor;
     t[op.apply_eval] = h(struct {
         fn b(vm: *Vm) HostError!void {

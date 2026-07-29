@@ -1500,6 +1500,26 @@ const op_call1 = opCall(.one);
 const op_call2 = opCall(.two);
 const op_call3 = opCall(.three);
 
+fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    switch (call_vm.apply(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        vm.stack,
+        vm.function,
+        vm.frame,
+        vm.catch_target,
+        &vm.tail_request,
+    ) catch |e| return vm.fail(e)) {
+        .done, .continue_loop => return coldNext(vb, vm),
+        .inline_call => {
+            vm.tail_is_reuse = false;
+            return .tail;
+        },
+    }
+}
+
 // Keep this high-frequency tail-dispatch target on an I-cache boundary so
 // unrelated source/layout changes cannot move its prologue across a cache line.
 fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
@@ -3833,6 +3853,7 @@ const specials: colds.SpecialHandlers = .{
     .op_call2 = op_call2,
     .op_call3 = op_call3,
     .op_call_method = op_call_method,
+    .op_apply = op_apply,
     .op_call_constructor = op_call_constructor,
     .op_for_of_next = op_for_of_next,
     .op_tail_call = op_tail_call,
