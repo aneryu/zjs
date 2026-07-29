@@ -9780,3 +9780,156 @@ test "basecase multiplication never reads an uninitialized result limb" {
         }
     }
 }
+
+/// Deterministic limb patterns for the lockstep test. Index selects a shape
+/// family; the offset keeps the two operands from being identical.
+fn lockstepLimb(pattern: usize, index: usize, offset: usize) engine.libs.bigint.Limb {
+    const Limb = engine.libs.bigint.Limb;
+    const i = index + offset;
+    return switch (pattern) {
+        // Saturated: maximal carry propagation, top carry non-zero.
+        0 => std.math.maxInt(Limb),
+        // Single high bit: top carry zero, so the product normalizes one limb
+        // below capacity.
+        1 => if (index == 0) @as(Limb, 1) << 63 else 0,
+        // Sparse.
+        2 => if (i % 3 == 0) 1 else 0,
+        // Alternating bit stripes.
+        3 => if (i % 2 == 0) 0xAAAA_AAAA_AAAA_AAAA else 0x5555_5555_5555_5555,
+        // Low-entropy ramp.
+        4 => @as(Limb, @intCast(i)) *% 0x9E37_79B9_7F4A_7C15 +% 1,
+        else => unreachable,
+    };
+}
+
+test "inline FAM multiplication matches the external kernel limb for limb" {
+    const bigint = engine.libs.bigint;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const baseline = rt.memory.allocated_bytes;
+
+    // Ordered shapes: the basecase loop takes the shorter operand as its outer
+    // row, so AxB and BxA exercise different nestings.
+    const shapes = [_][2]usize{
+        .{ 1, 2 }, .{ 2, 1 }, .{ 2, 2 }, .{ 1, 8 }, .{ 8, 1 },
+        .{ 3, 5 }, .{ 5, 3 }, .{ 4, 4 }, .{ 8, 8 }, .{ 16, 16 },
+        // The allocator boundary P6-03b pinned: capacity 56 is the last
+        // slab-eligible FAM, 57 the first standalone one.
+        .{ 28, 28 }, .{ 28, 29 }, .{ 29, 29 },
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x6D03C);
+    const random = prng.random();
+
+    for (shapes) |shape| {
+        for (0..5) |pattern| {
+            inline for (.{ false, true }) |lhs_negative| {
+                inline for (.{ false, true }) |rhs_negative| {
+                    const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, shape[0]);
+                    defer std.testing.allocator.free(lhs_limbs);
+                    const rhs_limbs = try std.testing.allocator.alloc(bigint.Limb, shape[1]);
+                    defer std.testing.allocator.free(rhs_limbs);
+                    for (lhs_limbs, 0..) |*l, i| l.* = lockstepLimb(pattern, i, 0);
+                    for (rhs_limbs, 0..) |*l, i| l.* = lockstepLimb(pattern, i, 1);
+                    // Both operands must stay normalized and non-zero, which is
+                    // what the heap x heap route guarantees its callee.
+                    lhs_limbs[shape[0] - 1] |= 1;
+                    rhs_limbs[shape[1] - 1] |= 1;
+
+                    try expectLockstepMul(rt, lhs_limbs, lhs_negative, rhs_limbs, rhs_negative);
+                    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+                }
+            }
+        }
+    }
+
+    // Random widths, both signs, so the fixed patterns above are not the only
+    // carry chains covered.
+    for (0..400) |_| {
+        const lhs_len = random.intRangeAtMost(usize, 1, 16);
+        const rhs_len = random.intRangeAtMost(usize, 1, 16);
+        if (lhs_len + rhs_len < 3) continue;
+        const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, lhs_len);
+        defer std.testing.allocator.free(lhs_limbs);
+        const rhs_limbs = try std.testing.allocator.alloc(bigint.Limb, rhs_len);
+        defer std.testing.allocator.free(rhs_limbs);
+        for (lhs_limbs) |*l| l.* = random.int(bigint.Limb);
+        for (rhs_limbs) |*l| l.* = random.int(bigint.Limb);
+        lhs_limbs[lhs_len - 1] |= 1;
+        rhs_limbs[rhs_len - 1] |= 1;
+        try expectLockstepMul(rt, lhs_limbs, random.boolean(), rhs_limbs, random.boolean());
+        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    }
+}
+
+/// Runs one multiply through both kernels and asserts the results agree in
+/// sign, length and every limb. Each operand is built once as external storage
+/// and once as inline storage, so all four storage combinations are covered.
+fn expectLockstepMul(
+    rt: *core.JSRuntime,
+    lhs_limbs: []const engine.libs.bigint.Limb,
+    lhs_negative: bool,
+    rhs_limbs: []const engine.libs.bigint.Limb,
+    rhs_negative: bool,
+) !void {
+    const bigint = engine.libs.bigint;
+    const allocator = rt.memory.allocator;
+
+    const lhs_value = bigint.BigInt{
+        .negative = lhs_negative,
+        .limbs = @constCast(lhs_limbs),
+        .allocator = allocator,
+    };
+    const rhs_value = bigint.BigInt{
+        .negative = rhs_negative,
+        .limbs = @constCast(rhs_limbs),
+        .allocator = allocator,
+    };
+    var expected = try bigint.mulAlloc(allocator, lhs_value, rhs_value);
+    defer expected.deinit();
+
+    inline for (.{ false, true }) |lhs_inline| {
+        inline for (.{ false, true }) |rhs_inline| {
+            const lhs = try makeLockstepOperand(rt, lhs_limbs, lhs_negative, lhs_inline);
+            defer lhs.valueRef().free(rt);
+            const rhs = try makeLockstepOperand(rt, rhs_limbs, rhs_negative, rhs_inline);
+            defer rhs.valueRef().free(rt);
+            try std.testing.expectEqual(lhs_inline, lhs.isInline());
+            try std.testing.expectEqual(rhs_inline, rhs.isInline());
+            try std.testing.expect(core.bigint.BigInt.mulInlineEligible(lhs, rhs));
+
+            const product = try core.bigint.BigInt.createMulInline(rt, lhs, rhs);
+            defer product.valueRef().free(rt);
+
+            try std.testing.expect(product.isInline());
+            try std.testing.expectEqual(expected.negative, product.negative());
+            try std.testing.expectEqualSlices(bigint.Limb, expected.limbs, product.limbs());
+            // The allocation is never shrunk, so destruction still has to use
+            // the full capacity even when normalization dropped the top limb.
+            try std.testing.expectEqual(lhs_limbs.len + rhs_limbs.len, product.capacitySliceMut().len);
+            try std.testing.expect(product.limbs().len == product.capacitySliceMut().len or
+                product.limbs().len + 1 == product.capacitySliceMut().len);
+        }
+    }
+}
+
+fn makeLockstepOperand(
+    rt: *core.JSRuntime,
+    limbs: []const engine.libs.bigint.Limb,
+    negative: bool,
+    comptime want_inline: bool,
+) !*core.bigint.BigInt {
+    const bigint = engine.libs.bigint;
+    if (want_inline) {
+        const big = try core.bigint.BigInt.createInlineUninitialized(rt, limbs.len);
+        @memcpy(big.capacitySliceMut(), limbs);
+        big.publishInline(limbs.len, negative);
+        return big;
+    }
+    const owned = bigint.BigInt{
+        .negative = negative,
+        .limbs = @constCast(limbs),
+        .allocator = rt.memory.allocator,
+    };
+    return core.bigint.BigInt.createFromBigInt(rt, owned);
+}

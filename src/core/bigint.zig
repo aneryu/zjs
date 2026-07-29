@@ -5,6 +5,15 @@ const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
 const Limb = libs.bigint.Limb;
+const DoubleLimb = u128;
+const limb_bits = 64;
+
+comptime {
+    // The duplicated multiplication kernel below relies on these matching the
+    // library's own limb geometry.
+    std.debug.assert(@bitSizeOf(Limb) == limb_bits);
+    std.debug.assert(@bitSizeOf(DoubleLimb) == 2 * limb_bits);
+}
 
 /// Heap BigInt carrier.
 ///
@@ -165,9 +174,8 @@ pub const BigInt = struct {
     /// caller to write. `len` starts at zero so a caller that fails before
     /// publishing still destroys a well-formed object.
     ///
-    /// Not reachable from production yet -- every JS-visible constructor above
-    /// still produces external storage. Exercised by the carrier tests so the
-    /// inline half is not dead on arrival when multiplication starts using it.
+    /// `createMulInline` is the one production caller; the carrier tests drive
+    /// the remaining shapes directly.
     pub fn createInlineUninitialized(rt: *JSRuntime, capacity: usize) !*BigInt {
         if (capacity > libs.bigint.max_limbs) return error.BigIntTooLarge;
         const fam_bytes = capacity * @sizeOf(Limb);
@@ -199,6 +207,108 @@ pub const BigInt = struct {
 
     pub fn valueRef(self: *BigInt) JSValue {
         return JSValue.bigInt(&self.header);
+    }
+
+    // ---- single-allocation multiplication -----------------------------------
+
+    /// True when `heap x heap` multiplication may be routed to
+    /// `createMulInline`.
+    ///
+    /// Two conditions, both required:
+    ///
+    /// * both operands own limbs, so the product is not zero. A zero heap
+    ///   BigInt should not exist -- every collapsing constructor turns zero
+    ///   into a short BigInt -- but the route must be total on its own terms
+    ///   rather than on that invariant;
+    /// * the product needs at least two limbs. A normalized `p`-limb value is
+    ///   at least `2^(64*(p-1))`, so the product of a `p`- and a `q`-limb value
+    ///   is at least `2^(64*(p+q-2))` and therefore occupies `p+q-1` or `p+q`
+    ///   limbs. Requiring `p+q >= 3` makes the result at least two limbs, i.e.
+    ///   at least `2^64`, which never fits a short BigInt.
+    ///
+    /// That second condition is what lets the FAM path skip the short-result
+    /// collapse that `createBigIntOwned` performs, and it has to be a gate
+    /// rather than an assumption: qjs compacts every multiplication result
+    /// (`JS_CompactBigInt` at quickjs.c:15054, collapsing at `len == 1`), and
+    /// zjs must match. A one-limb heap BigInt is reachable here -- the parser
+    /// emits a heap literal for anything outside the i32 range while short
+    /// BigInts hold the full i64 range -- so `3000000000n * 3000000000n` has
+    /// two heap operands and a product that does fit a short. That shape keeps
+    /// the collapsing path.
+    pub inline fn mulInlineEligible(lhs: *const BigInt, rhs: *const BigInt) bool {
+        if (lhs.len == 0 or rhs.len == 0) return false;
+        return lhs.len + rhs.len >= 3;
+    }
+
+    /// Multiply two heap BigInts into a single allocation: the wrapper and the
+    /// product's limbs come from one `createWithFam`, and the basecase loop
+    /// writes straight into the trailing limbs. This is the topology qjs has
+    /// (`js_bigint_new` is `js_malloc(sizeof(JSBigInt) + len * sizeof(limb))`,
+    /// quickjs.c:11860), replacing zjs's separate `mulAlloc` limb block plus
+    /// `createFromOwned` wrapper.
+    ///
+    /// Everything after the allocation is infallible, so OOM has exactly one
+    /// boundary. The object is fully initialized before the caller can publish
+    /// it as a JSValue.
+    pub fn createMulInline(rt: *JSRuntime, lhs: *const BigInt, rhs: *const BigInt) !*BigInt {
+        std.debug.assert(mulInlineEligible(lhs, rhs));
+
+        // Mirrors the js_bigint_new cap that bounds mulAlloc
+        // (quickjs.c:11592-11596). `capacity` cannot overflow before the check:
+        // both lengths are already <= max_limbs, which is 16384.
+        const capacity = @as(usize, lhs.len) + @as(usize, rhs.len);
+        const self = try createInlineUninitialized(rt, capacity);
+
+        const product = self.capacitySliceMut();
+        const lhs_limbs = lhs.limbs();
+        const rhs_limbs = rhs.limbs();
+
+        // Algorithmically synchronized with libs.bigint.mulAlloc.
+        // Deliberately duplicated to isolate hot-path code generation.
+        //
+        // P6-03a measured four ways of sharing one kernel between the two
+        // callers (a shared `mulInto`, a comptime-parameterized body, a
+        // destination-slice wrapper, an inline-forced helper); every one of
+        // them missed the direct-core neutrality gate by +2.4% to +4.4%, with
+        // the regressing shapes drifting between variants. The duplication is
+        // the measured-cheaper option, and the lockstep test is what keeps the
+        // two bodies equal.
+        //
+        // Shorter operand as the outer row (P6-01c), first row overwrites so no
+        // pre-zeroing pass exists (P6-01, mirroring qjs mp_mul_basecase at
+        // quickjs.c:11401-11413), and each row's top carry slot is a pure write.
+        const outer = if (lhs_limbs.len <= rhs_limbs.len) lhs_limbs else rhs_limbs;
+        const inner = if (lhs_limbs.len <= rhs_limbs.len) rhs_limbs else lhs_limbs;
+        for (outer, 0..) |a, i| {
+            var carry: DoubleLimb = 0;
+            if (i == 0) {
+                for (inner, 0..) |b, j| {
+                    const current: DoubleLimb = @as(DoubleLimb, a) * b + carry;
+                    product[j] = @truncate(current);
+                    carry = current >> limb_bits;
+                }
+            } else {
+                for (inner, 0..) |b, j| {
+                    const index = i + j;
+                    const current: DoubleLimb = @as(DoubleLimb, a) * b + product[index] + carry;
+                    product[index] = @truncate(current);
+                    carry = current >> limb_bits;
+                }
+            }
+            product[i + inner.len] = @intCast(carry);
+        }
+
+        // Not `libs.bigint.normalize`: that shrinks through the allocator, and
+        // the FAM tail cannot be reallocated on its own. Compute the live
+        // length and leave `capacity` -- and therefore the destroy size --
+        // alone. For two normalized non-zero operands only the top limb can be
+        // zero, but the general downward scan costs nothing here.
+        var len = product.len;
+        while (len != 0 and product[len - 1] == 0) : (len -= 1) {}
+        std.debug.assert(len >= 2);
+
+        self.publishInline(len, lhs.negative() != rhs.negative());
+        return self;
     }
 
     // ---- mutation ----------------------------------------------------------
