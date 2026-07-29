@@ -180,7 +180,7 @@ export const cases = [
     supported('target_native', 'Reflect.apply native target', 'target-control', 'Native target remains on the authoritative native call route.', [
         'var values = [1, 2];',
         'var checksum = 0;',
-        'for (var index = 0; index < 2000000; index += 1) {',
+        'for (var index = 0; index < 4000000; index += 1) {',
         '    checksum += Reflect.apply(Math.max, null, values);',
         '}',
         'print(checksum);',
