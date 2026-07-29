@@ -531,7 +531,7 @@ noinline fn runSyncInlineRouteMoved(
     return result;
 }
 
-noinline fn runSyncInlineRouteCopiedArgs(
+inline fn runSyncInlineRouteCopiedArgs(
     route: *SyncInlineRoute,
     global: *core.Object,
     args: []const core.JSValue,
@@ -664,6 +664,117 @@ pub inline fn callValueOrBytecodeSyncInternal(
         args,
     );
 }
+
+/// Loop-callback adapter for the same explicit synchronous contract. Keeping
+/// target resolution and the fallback union out of the surrounding native
+/// algorithm prevents one callback call site from extending its spill set
+/// across the algorithm's whole iteration body. Apply's single terminal call
+/// retains the inline adapter above; callback cohorts deliberately use this
+/// outlined seam.
+pub noinline fn callValueOrBytecodeSyncInternalOutlined(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    return callValueOrBytecodeSyncInternal(
+        ctx,
+        output,
+        global,
+        this_value,
+        func,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+/// A stack-local adapter for native algorithms that invoke one immutable
+/// callback repeatedly. QuickJS resolves the JSFunction record once from the
+/// callback value held by the native algorithm; mirror that lifetime here
+/// instead of rebuilding the wider InlineTarget on every iteration.
+///
+/// Call entry remains fully observable: every `call` polls interrupts and
+/// verifies that the invocation which prepared the route is still active.
+/// A site prepared outside bytecode execution, or used after an execution-root
+/// change, takes the authoritative root-call fallback unconditionally.
+pub const SyncInternalCallSite = struct {
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    route: ?SyncInlineRoute,
+
+    pub inline fn init(
+        ctx: *core.JSContext,
+        output: ?*std.Io.Writer,
+        global: *core.Object,
+        this_value: core.JSValue,
+        func: core.JSValue,
+        caller_function: ?*const bytecode.FunctionBytecode,
+        caller_frame: ?*frame_mod.Frame,
+    ) SyncInternalCallSite {
+        var route: SyncInlineRoute = undefined;
+        return .{
+            .ctx = ctx,
+            .output = output,
+            .global = global,
+            .this_value = this_value,
+            .func = func,
+            .caller_function = caller_function,
+            .caller_frame = caller_frame,
+            .route = if (resolveSyncInlineRoute(
+                &route,
+                ctx,
+                output,
+                global,
+                this_value,
+                func,
+            )) route else null,
+        };
+    }
+
+    pub noinline fn call(
+        self: *SyncInternalCallSite,
+        args: []const core.JSValue,
+    ) HostError!core.JSValue {
+        try exception_ops.pollInterrupt(self.ctx, self.global);
+
+        if (self.route) |*route| {
+            if (inline_calls.activeInvocation(self.ctx.runtime) == route.invocation) {
+                if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+                    return runSyncInlineRouteCopiedArgs(route, self.global, args);
+                }
+                return runSyncInlineRouteOwnedCopy(
+                    route,
+                    self.ctx,
+                    self.global,
+                    self.this_value,
+                    self.func,
+                    args,
+                );
+            }
+        }
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            self.ctx,
+            self.output,
+            self.global,
+            self.this_value,
+            self.func,
+            args,
+            self.caller_function,
+            self.caller_frame,
+            true,
+        );
+    }
+};
 
 /// Same synchronous routing contract as `callValueOrBytecodeSyncInternal`,
 /// but the caller supplies a rooted, owned argument list. Simple eligible

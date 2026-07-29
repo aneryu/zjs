@@ -889,6 +889,127 @@ test "constructor spread preserves new target on the current Machine" {
     try std.testing.expectEqual(@as(usize, 2), inline_calls.machineTestMetrics().machine_inits);
 }
 
+test "Array and TypedArray synchronous callback cohort stays on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function arrayCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function arrayCohortCallback(value) {
+        \\    if (value === 2) {
+        \\        try {
+        \\            throw new Error("local");
+        \\        } catch (error) {
+        \\            assert.sameValue(error.message, "local");
+        \\        }
+        \\    }
+        \\    return arrayCohortHelper(value);
+        \\}
+        \\var arrayCohortSeen = 0;
+        \\var arrayCohortTraceValue;
+        \\var arrayCohortOrder = [];
+        \\globalThis.__arrayCallbackCohortOuter = function __arrayCallbackCohortOuter() {
+        \\    assert.sameValue([1, 2, 3].map(arrayCohortCallback).join(","), "2,3,4");
+        \\    assert.sameValue([1].map(function (value, index, array, missing) {
+        \\        assert.sameValue(index, 0);
+        \\        assert.sameValue(array.length, 1);
+        \\        assert.sameValue(missing, undefined);
+        \\        return value;
+        \\    })[0], 1);
+        \\    assert.sameValue([7].map(function (value) {
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(arguments[0], 7);
+        \\        assert.sameValue(arguments[1], 0);
+        \\        assert.sameValue(arguments[2][0], 7);
+        \\        return value;
+        \\    })[0], 7);
+        \\    arrayCohortSeen = 0;
+        \\    [1, 2, 3].forEach(function (value) { arrayCohortSeen += arrayCohortCallback(value); });
+        \\    assert.sameValue(arrayCohortSeen, 9);
+        \\    assert.sameValue([1, 2, 3].filter(function (value) { return value > 1; }).join(","), "2,3");
+        \\    assert.sameValue([1, 2, 3].every(function (value) { return value < 4; }), true);
+        \\    assert.sameValue([1, 2, 3].some(function (value) { return value === 2; }), true);
+        \\    assert.sameValue([1, 2, 3].find(function (value) { return value === 2; }), 2);
+        \\    assert.sameValue([1, 2, 3].findIndex(function (value) { return value === 2; }), 1);
+        \\    assert.sameValue([1, 2, 3].reduce(function (sum, value) { return sum + value; }, 0), 6);
+        \\    assert.sameValue([1, 2, 3].reduceRight(function (sum, value) { return sum + value; }, 0), 6);
+        \\    assert.sameValue([1, 2].flatMap(function (value) { return [value, value + 1]; }).join(","), "1,2,2,3");
+        \\    assert.sameValue([3, 1, 2].sort(function (left, right) { return left - right; }).join(","), "1,2,3");
+        \\    assert.sameValue(Array.from([1, 2], arrayCohortCallback).join(","), "2,3");
+        \\
+        \\    assert.sameValue(
+        \\        new Uint8Array([1, 2]).map(arrayCohortCallback).join(","),
+        \\        "2,3"
+        \\    );
+        \\    assert.sameValue(
+        \\        new Uint8Array([1, 2, 3]).filter(function (value) { return value > 1; }).join(","),
+        \\        "2,3"
+        \\    );
+        \\
+        \\    var nested = [1].map(function (value) {
+        \\        return [value].map(arrayCohortCallback)[0];
+        \\    });
+        \\    assert.sameValue(nested[0], 2);
+        \\
+        \\    arrayCohortTraceValue = undefined;
+        \\    [1].map(function arrayCohortTrace(value) {
+        \\        arrayCohortTraceValue = new Error("array cohort").stack;
+        \\        return value;
+        \\    });
+        \\    var callbackIndex = arrayCohortTraceValue.indexOf("    at arrayCohortTrace");
+        \\    var nativeIndex = arrayCohortTraceValue.indexOf("map (native)");
+        \\    var outerIndex = arrayCohortTraceValue.indexOf("    at __arrayCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    arrayCohortOrder = [];
+        \\    try {
+        \\        [1].map(function arrayCohortThrow() {
+        \\            arrayCohortOrder.push("callback");
+        \\            throw new RangeError("array cohort throw");
+        \\        });
+        \\    } catch (error) {
+        \\        arrayCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(arrayCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__arrayCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 42), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

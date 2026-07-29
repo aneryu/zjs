@@ -85,6 +85,41 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "calls-ok:5:7" },
     },
     .{
+        .name = "native-callback-map-reflect-apply",
+        .source =
+        \\function oomNativeHelper(value, index) {
+        \\  "use strict";
+        \\  return arguments[0] + arguments[1];
+        \\}
+        \\function oomNativeThrow() {
+        \\  throw new RangeError("native-callback");
+        \\}
+        \\const order = [];
+        \\try {
+        \\  [1].map(function oomThrowingMapCallback() {
+        \\    order.push("callback");
+        \\    return Reflect.apply(oomNativeThrow, null, []);
+        \\  });
+        \\} catch (error) {
+        \\  if (!(error instanceof RangeError)) throw error;
+        \\  order.push("outer");
+        \\}
+        \\let trace;
+        \\const mapped = [2].map(function oomMapCallback(value, index) {
+        \\  trace = new Error("native-callback-trace").stack;
+        \\  return Reflect.apply(oomNativeHelper, null, [value, index]);
+        \\});
+        \\const callbackAt = trace.indexOf("    at oomMapCallback");
+        \\const nativeAt = trace.indexOf("map (native)");
+        \\order.join(",") === "callback,outer" &&
+        \\mapped[0] === 2 &&
+        \\callbackAt === 0 &&
+        \\nativeAt > callbackAt
+        \\  ? "native-reentry-oom-ok" : "native-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "native-reentry-oom-ok" },
+    },
+    .{
         .name = "tail-moved-args",
         .source =
         \\function target(a,b,c,d,e,f,g,h,i,j) {
@@ -1007,6 +1042,10 @@ test "oom recovery canary: arithmetic snippet" {
 
 test "oom recovery canary: root and nested closure construction" {
     try recoveryCanarySweep(corpusSnippetNamed("calls-closures"));
+}
+
+test "oom recovery canary: native callback map through Reflect.apply" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-map-reflect-apply"));
 }
 
 test "oom recovery canary: repeated private class identity" {

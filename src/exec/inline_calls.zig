@@ -3229,16 +3229,13 @@ pub const Machine = struct {
         std.debug.assert(rt == self.ctx.runtime);
         if (!nativeBoundarySimpleEligible(target)) return null;
         const execution = target.call_facts.execution;
-        if (args.len == 0 and
-            (execution.simple_inline_empty_leaf or
-                execution.raw_this_inline_empty_leaf))
+        if (execution.simple_inline_empty_leaf or
+            execution.raw_this_inline_empty_leaf)
         {
-            return self.tryPushNativeBoundaryEmptyFast(rt, target);
+            return self.tryPushNativeBoundaryEmptyFast(rt, target, args.len);
         }
-        if (args.len == target.fb.arg_count and
-            execution.exact_args_leaf_kind != .none)
-        {
-            return self.tryPushNativeBoundaryExactArgsFast(
+        if (execution.exact_args_leaf_kind != .none) {
+            return self.tryPushNativeBoundaryLeafArgsFast(
                 move_args,
                 rt,
                 target,
@@ -3253,6 +3250,7 @@ pub const Machine = struct {
         self: *Machine,
         rt: *core.JSRuntime,
         target: *const InlineTarget,
+        actual_arg_count: usize,
     ) ?*Entry {
         const function = target.fb;
         const execution = target.call_facts.execution;
@@ -3260,7 +3258,7 @@ pub const Machine = struct {
             execution.raw_this_inline_empty_leaf);
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
             function,
-            0,
+            actual_arg_count,
             true,
         );
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
@@ -3287,6 +3285,7 @@ pub const Machine = struct {
             .function = function,
             .this_value = target.this_value,
             .current_function = target.callable,
+            .actual_arg_count = @intCast(actual_arg_count),
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .locals = carve.window[0..0],
             .storage_values = &.{},
@@ -3315,7 +3314,11 @@ pub const Machine = struct {
         return entry;
     }
 
-    inline fn tryPushNativeBoundaryExactArgsFast(
+    /// Warm form of `pushNativeBoundaryLeafArgs`: exact-leaf publication
+    /// proves the frame has no arguments/rest/eval consumer, so extra actual
+    /// arguments need not be copied into writable parameter slots. The full
+    /// actual argc and qjs stack-budget charge remain authoritative.
+    inline fn tryPushNativeBoundaryLeafArgsFast(
         self: *Machine,
         comptime move_args: bool,
         rt: *core.JSRuntime,
@@ -3324,8 +3327,6 @@ pub const Machine = struct {
         moved_args: []core.JSValue,
     ) ?*Entry {
         const function = target.fb;
-        std.debug.assert(args.len != 0);
-        std.debug.assert(args.len == function.arg_count);
         std.debug.assert(target.call_facts.execution.exact_args_leaf_kind != .none);
         if (move_args) std.debug.assert(args.ptr == moved_args.ptr and args.len == moved_args.len) else std.debug.assert(moved_args.len == 0);
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
@@ -3342,21 +3343,24 @@ pub const Machine = struct {
             return null;
         }
         const entry = self.entryAt(index);
+        const frame_arg_count: usize = @intCast(function.arg_count);
+        const copied_arg_count = @min(args.len, frame_arg_count);
         const stack_count = @as(usize, function.stack_size) + 1;
-        const total = args.len + stack_count;
+        const total = frame_arg_count + stack_count;
         const carve = rt.vm_stack.carveActiveMarked(total) orelse {
             vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
             return null;
         };
 
-        const frame_args = carve.window[0..args.len];
-        const stack_window = carve.window[args.len..];
+        const frame_args = carve.window[0..frame_arg_count];
+        const stack_window = carve.window[frame_arg_count..];
         if (move_args) {
-            @memcpy(frame_args, moved_args);
-            @memset(moved_args, core.JSValue.undefinedValue());
+            @memcpy(frame_args[0..copied_arg_count], moved_args[0..copied_arg_count]);
+            @memset(moved_args[0..copied_arg_count], core.JSValue.undefinedValue());
         } else {
-            for (args, 0..) |arg, arg_index| frame_args[arg_index] = arg.dup();
+            for (args[0..copied_arg_count], 0..) |arg, arg_index| frame_args[arg_index] = arg.dup();
         }
+        @memset(frame_args[copied_arg_count..], core.JSValue.undefinedValue());
         const captures = target.captureSlice();
         entry.return_action = .native_boundary;
         entry.continuation_payload = 0;
@@ -3409,16 +3413,13 @@ pub const Machine = struct {
     ) HostError!?*Entry {
         if (!nativeBoundarySimpleEligible(target)) return null;
         if (move_args) std.debug.assert(args.ptr == moved_args.ptr and args.len == moved_args.len) else std.debug.assert(moved_args.len == 0);
-        if (args.len == 0 and
-            (target.call_facts.execution.simple_inline_empty_leaf or
-                target.call_facts.execution.raw_this_inline_empty_leaf))
+        if (target.call_facts.execution.simple_inline_empty_leaf or
+            target.call_facts.execution.raw_this_inline_empty_leaf)
         {
-            return try self.pushNativeBoundaryEmpty(global, target);
+            return try self.pushNativeBoundaryEmpty(global, target, args.len);
         }
-        if (args.len == target.fb.arg_count and
-            target.call_facts.execution.exact_args_leaf_kind != .none)
-        {
-            return try self.pushNativeBoundaryExactArgs(
+        if (target.call_facts.execution.exact_args_leaf_kind != .none) {
+            return try self.pushNativeBoundaryLeafArgs(
                 move_args,
                 global,
                 target,
@@ -3456,11 +3457,14 @@ pub const Machine = struct {
         return entry;
     }
 
-    /// Exact-arity native-fence twin of `pushNativeBoundaryEmpty`. Published
-    /// exact-leaf facts prove there are no locals, open refs, captures,
-    /// arguments snapshot, or direct eval; arguments still live in an owned,
-    /// writable frame window and return uses the native special continuation.
-    fn pushNativeBoundaryExactArgs(
+    /// Leaf-geometry native-fence twin of `pushNativeBoundaryEmpty`. Published
+    /// exact-leaf facts prove there are no locals, open refs, arguments/rest
+    /// consumer, or direct eval. Unlike the ordinary exact-arity leaf
+    /// epilogue, a native callback may supply fewer or extra arguments; this
+    /// path materializes the writable declared-parameter window and still
+    /// records the full actual argc before returning through the native
+    /// special continuation.
+    fn pushNativeBoundaryLeafArgs(
         self: *Machine,
         comptime move_args: bool,
         global: *core.Object,
@@ -3469,8 +3473,6 @@ pub const Machine = struct {
         moved_args: []core.JSValue,
     ) HostError!*Entry {
         const function = target.fb;
-        std.debug.assert(args.len != 0);
-        std.debug.assert(args.len == function.arg_count);
         std.debug.assert(target.call_facts.execution.exact_args_leaf_kind != .none);
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
             function,
@@ -3488,8 +3490,10 @@ pub const Machine = struct {
         errdefer entry.profile_guard.deinit();
 
         const rt = self.ctx.runtime;
+        const frame_arg_count: usize = @intCast(function.arg_count);
+        const copied_arg_count = @min(args.len, frame_arg_count);
         const stack_count = @as(usize, function.stack_size) + 1;
-        const total = try std.math.add(usize, args.len, stack_count);
+        const total = try std.math.add(usize, frame_arg_count, stack_count);
         var storage_on_heap = false;
         const slab_values = if (rt.vm_stack.carveActiveMarked(total)) |active_carve| blk: {
             entry.arena_mark = active_carve.mark;
@@ -3504,14 +3508,15 @@ pub const Machine = struct {
         errdefer rt.vm_stack.restore(entry.arena_mark);
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
 
-        const frame_args = slab_values[0..args.len];
-        const stack_window = slab_values[args.len..];
+        const frame_args = slab_values[0..frame_arg_count];
+        const stack_window = slab_values[frame_arg_count..];
         if (move_args) {
-            @memcpy(frame_args, moved_args);
-            @memset(moved_args, core.JSValue.undefinedValue());
+            @memcpy(frame_args[0..copied_arg_count], moved_args[0..copied_arg_count]);
+            @memset(moved_args[0..copied_arg_count], core.JSValue.undefinedValue());
         } else {
-            for (args, 0..) |arg, index| frame_args[index] = arg.dup();
+            for (args[0..copied_arg_count], 0..) |arg, index| frame_args[index] = arg.dup();
         }
+        @memset(frame_args[copied_arg_count..], core.JSValue.undefinedValue());
         const captures = target.captureSlice();
         entry.frame = .{
             .function = function,
@@ -3549,15 +3554,18 @@ pub const Machine = struct {
         return entry;
     }
 
-    /// Native-fence prologue for a published zero-argument empty geometry.
+    /// Native-fence prologue for a published zero-parameter empty geometry.
     /// It deliberately does not set the ordinary empty-leaf bit: return still
     /// uses the native special-return arm, while publication skips the generic
     /// args/locals/open-ref/snapshot partitioning that the call facts prove is
-    /// empty. Receiver and callable remain borrowed from the native algorithm.
+    /// empty. Extra actual arguments are unobservable without arguments/rest/
+    /// eval, but their full count and qjs stack-budget charge remain recorded.
+    /// Receiver and callable remain borrowed from the native algorithm.
     fn pushNativeBoundaryEmpty(
         self: *Machine,
         global: *core.Object,
         target: *const InlineTarget,
+        actual_arg_count: usize,
     ) HostError!*Entry {
         const function = target.fb;
         const execution = target.call_facts.execution;
@@ -3565,7 +3573,7 @@ pub const Machine = struct {
             execution.raw_this_inline_empty_leaf);
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
             function,
-            0,
+            actual_arg_count,
             true,
         );
         try vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes);
@@ -3598,6 +3606,7 @@ pub const Machine = struct {
             .function = function,
             .this_value = target.this_value,
             .current_function = target.callable,
+            .actual_arg_count = @intCast(actual_arg_count),
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .locals = stack_window[0..0],
             .storage_values = if (storage_on_heap) stack_window else &.{},
