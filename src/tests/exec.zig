@@ -2046,6 +2046,270 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     try helpers.expectStringValueBytes(recovered, "42");
 }
 
+test "Promise executor reuses the active Machine while reactions remain roots" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function promiseExecutorHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function promiseExecutorResolveHelper(resolve, value) {
+        \\    return resolve(promiseExecutorHelper(value));
+        \\}
+        \\var promiseExecutorTrace;
+        \\var promiseExecutorSubclassTrace;
+        \\var promiseExecutorOrder = [];
+        \\var promiseExecutorJobCount = 0;
+        \\globalThis.__promiseExecutorReactionValue = 0;
+        \\globalThis.__promiseExecutorJobOrder = "";
+        \\function promiseExecutorRecordJob(label) {
+        \\    promiseExecutorOrder.push(label);
+        \\    promiseExecutorJobCount++;
+        \\    if (promiseExecutorJobCount === 2) {
+        \\        globalThis.__promiseExecutorJobOrder = promiseExecutorOrder.join(",");
+        \\    }
+        \\}
+        \\function promiseExecutorPrimary(resolve) {
+        \\    promiseExecutorTrace = new Error("promise executor").stack;
+        \\    return promiseExecutorResolveHelper(resolve, 41);
+        \\}
+        \\class PromiseExecutorSubclass extends Promise {}
+        \\globalThis.__promiseExecutorOuter = function __promiseExecutorOuter() {
+        \\    var caught = false;
+        \\    try {
+        \\        var fulfilled = new Promise(promiseExecutorPrimary);
+        \\        fulfilled.then(function promiseExecutorSuccessReaction(value) {
+        \\            globalThis.__promiseExecutorReactionValue = value;
+        \\            promiseExecutorRecordJob("success-job");
+        \\        });
+        \\
+        \\        new Promise(function promiseExecutorReentrant(resolve) {
+        \\            new Promise(function promiseExecutorNested(nestedResolve) {
+        \\                nestedResolve(1);
+        \\            });
+        \\            resolve(2);
+        \\        });
+        \\
+        \\        new Promise(function promiseExecutorThrowing() {
+        \\            promiseExecutorOrder.push("throw");
+        \\            throw new RangeError("executor");
+        \\        }).catch(function promiseExecutorRejectReaction(error) {
+        \\            assert.sameValue(error instanceof RangeError, true);
+        \\            promiseExecutorRecordJob("reject-job");
+        \\        });
+        \\
+        \\        new PromiseExecutorSubclass(function promiseExecutorSubclass(resolve) {
+        \\            promiseExecutorSubclassTrace = new Error("subclass executor").stack;
+        \\            resolve(3);
+        \\        });
+        \\
+        \\        var prototypeOrder = [];
+        \\        var customNewTarget = (function () {}).bind();
+        \\        Object.defineProperty(customNewTarget, "prototype", {
+        \\            get: function promisePrototypeGetter() {
+        \\                prototypeOrder.push("prototype");
+        \\                throw new RangeError("prototype");
+        \\            }
+        \\        });
+        \\        try {
+        \\            Reflect.construct(Promise, [function promiseExecutorMustNotRun() {
+        \\                prototypeOrder.push("executor");
+        \\            }], customNewTarget);
+        \\        } catch (error) {
+        \\            assert.sameValue(error instanceof RangeError, true);
+        \\            var getterAt = error.stack.indexOf("    at promisePrototypeGetter");
+        \\            var getterPromiseAt = error.stack.indexOf("Promise (native)", getterAt);
+        \\            var getterOuterAt = error.stack.indexOf("    at __promiseExecutorOuter");
+        \\            assert.sameValue(getterAt, 0);
+        \\            assert.sameValue(getterPromiseAt > getterAt, true);
+        \\            assert.sameValue(getterOuterAt > getterPromiseAt, true);
+        \\            prototypeOrder.push("outer");
+        \\        }
+        \\        assert.sameValue(prototypeOrder.join(","), "prototype,outer");
+        \\    } catch (error) {
+        \\        caught = true;
+        \\    }
+        \\    promiseExecutorOrder.push("outer");
+        \\    assert.sameValue(caught, false);
+        \\    assert.sameValue(promiseExecutorOrder.join(","), "throw,outer");
+        \\
+        \\    var callbackIndex = promiseExecutorTrace.indexOf("    at promiseExecutorPrimary");
+        \\    var nativeIndex = promiseExecutorTrace.indexOf("Promise (native)");
+        \\    var outerIndex = promiseExecutorTrace.indexOf("    at __promiseExecutorOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    var subclassCallbackIndex = promiseExecutorSubclassTrace.indexOf(
+        \\        "    at promiseExecutorSubclass"
+        \\    );
+        \\    var subclassNativeIndex = promiseExecutorSubclassTrace.indexOf("Promise (native)");
+        \\    var subclassOuterIndex = promiseExecutorSubclassTrace.indexOf(
+        \\        "    at __promiseExecutorOuter"
+        \\    );
+        \\    assert.sameValue(subclassCallbackIndex, 0);
+        \\    assert.sameValue(subclassNativeIndex > subclassCallbackIndex, true);
+        \\    assert.sameValue(subclassOuterIndex > subclassNativeIndex, true);
+        \\    return 42;
+        \\};
+        \\
+        \\var promiseExecutorOther = $262.createRealm().global;
+        \\var promiseExecutorForeign = promiseExecutorOther.eval(
+        \\    "(function promiseExecutorForeign(resolve) { resolve(20); })"
+        \\);
+        \\globalThis.__promiseExecutorForeignOuter = function () {
+        \\    new Promise(promiseExecutorForeign);
+        \\    new Promise(function promiseExecutorLocal(resolve) {
+        \\        resolve(22);
+        \\    });
+        \\    return 42;
+        \\};
+        \\globalThis.__promiseExecutorInterrupt = function () {
+        \\    globalThis.__promiseExecutorInterruptReason = "";
+        \\    new Promise(function promiseExecutorInterruptCallback(resolve) {
+        \\        resolve(promiseExecutorHelper(41));
+        \\    }).catch(function promiseExecutorInterruptReaction(error) {
+        \\        globalThis.__promiseExecutorInterruptReason =
+        \\            error.name + ":" + error.message;
+        \\    });
+        \\    return 42;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__promiseExecutorOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const executor_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), executor_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 6), executor_metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), executor_metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    try js.runJobs();
+    const reaction_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 3), reaction_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 6), reaction_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const reaction_value_key = try js.runtime.internAtom("__promiseExecutorReactionValue");
+    defer js.runtime.atoms.free(reaction_value_key);
+    const reaction_value = try global.getProperty(reaction_value_key);
+    defer reaction_value.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), reaction_value.asInt32());
+    const order_key = try js.runtime.internAtom("__promiseExecutorJobOrder");
+    defer js.runtime.atoms.free(order_key);
+    const order = try global.getProperty(order_key);
+    defer order.free(js.runtime);
+    try helpers.expectStringValueBytes(order, "throw,outer,success-job,reject-job");
+
+    const foreign_key = try js.runtime.internAtom("__promiseExecutorForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__promiseExecutorInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    inline_calls.resetMachineTestMetrics();
+    const interrupted_executor_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer interrupted_executor_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), interrupted_executor_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(!js.context.hasException());
+
+    js.runtime.setInterruptHandler(null, null);
+    try js.runJobs();
+    const interrupt_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), interrupt_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), interrupt_metrics.same_machine_sync_calls);
+    const interrupt_reason_key = try js.runtime.internAtom("__promiseExecutorInterruptReason");
+    defer js.runtime.atoms.free(interrupt_reason_key);
+    const interrupt_reason = try global.getProperty(interrupt_reason_key);
+    defer interrupt_reason.free(js.runtime);
+    try helpers.expectStringValueBytes(interrupt_reason, "InternalError:interrupted");
+
+    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

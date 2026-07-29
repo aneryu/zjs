@@ -2133,6 +2133,34 @@ fn constructDateBuiltinNativeVm(
     };
 }
 
+/// Promise remains on the legacy constructor-name dispatcher rather than the
+/// internal record table. Give it the same C-function preflight, native
+/// backtrace scope, and error materialization boundary as record-dispatched
+/// constructors before it synchronously invokes the executor.
+fn constructPromiseNativeVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    // Promise.length is 1; this is the JSCFunctionListEntry length analogue
+    // used by QuickJS's native-stack preflight, not the observable argument
+    // count or mutable `length` property.
+    try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, 1);
+    var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+    native_scope.push();
+    defer native_scope.deinit();
+
+    return promise_ops.qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+        return err;
+    };
+}
+
 fn constructDateBuiltinNativeInScope(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2534,7 +2562,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             defer prototype.deinit(ctx.runtime);
             return constructArrayNativeRecordVm(ctx, output, global, function_object, prototype.object(), args, caller_function, caller_frame);
         }
-        if (std.mem.eql(u8, name, "Promise")) return promise_ops.qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "Promise")) return constructPromiseNativeVm(ctx, output, global, function_object, new_target, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "DisposableStack")) {
             var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "DisposableStack", new_target, caller_function, caller_frame);
             defer prototype.deinit(ctx.runtime);

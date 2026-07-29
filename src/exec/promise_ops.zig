@@ -697,7 +697,7 @@ pub fn qjsPromiseConstructWithPrototype(
     defer resolve.free(ctx.runtime);
     const reject = resolving.reject;
     defer reject.free(ctx.runtime);
-    const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), executor, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
+    const result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, core.JSValue.undefinedValue(), executor, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
         _ = objectFromValue(promise) orelse return err;
         var reason = try promiseRejectionReason(ctx, global, err);
         defer reason.deinit(ctx.runtime);

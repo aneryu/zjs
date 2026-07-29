@@ -254,6 +254,50 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "cohort-five-reentry-oom-ok" },
     },
     .{
+        .name = "native-callback-promise-executor",
+        .source =
+        \\function oomPromiseHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let promiseTrace;
+        \\function oomPromiseOuter() {
+        \\  return new Promise(function oomPromiseExecutor(resolve) {
+        \\    promiseTrace = new Error("promise-executor-trace").stack;
+        \\    resolve(Reflect.apply(oomPromiseHelper, null, [41]));
+        \\  });
+        \\}
+        \\globalThis.oomPromiseValue = 0;
+        \\globalThis.oomPromiseOrder = [];
+        \\oomPromiseOuter().then(function oomPromiseReaction(value) {
+        \\  oomPromiseValue = value;
+        \\});
+        \\new Promise(function oomPromiseThrowingExecutor() {
+        \\  oomPromiseOrder.push("executor");
+        \\  throw new RangeError("executor");
+        \\}).catch(function oomPromiseRejectReaction(error) {
+        \\  if (!(error instanceof RangeError)) throw error;
+        \\  oomPromiseOrder.push("reaction");
+        \\});
+        \\oomPromiseOrder.push("outer");
+        \\globalThis.oomPromiseTrace = promiseTrace;
+        \\"scheduled"
+        ,
+        .expect = .{ .string = "scheduled" },
+        .drain_jobs = true,
+        .post_source =
+        \\const executorAt = oomPromiseTrace.indexOf("    at oomPromiseExecutor");
+        \\const promiseAt = oomPromiseTrace.indexOf("Promise (native)", executorAt);
+        \\const outerAt = oomPromiseTrace.indexOf("    at oomPromiseOuter", promiseAt);
+        \\oomPromiseValue === 42 &&
+        \\oomPromiseOrder.join(",") === "executor,outer,reaction" &&
+        \\executorAt === 0 &&
+        \\promiseAt > executorAt &&
+        \\outerAt > promiseAt
+        \\  ? "promise-executor-oom-ok" : "promise-executor-oom-bad"
+        ,
+        .post_expect = "promise-executor-oom-ok",
+    },
+    .{
         .name = "tail-moved-args",
         .source =
         \\function target(a,b,c,d,e,f,g,h,i,j) {
@@ -1196,6 +1240,10 @@ test "oom recovery canary: JSON reviver replacer and toJSON callbacks" {
 
 test "oom recovery canary: String Iterator helper and DisposableStack callbacks" {
     try recoveryCanarySweep(corpusSnippetNamed("native-callback-string-iterator-dispose"));
+}
+
+test "oom recovery canary: Promise executor callback" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-promise-executor"));
 }
 
 test "oom recovery canary: repeated private class identity" {
