@@ -74,7 +74,9 @@ pub const BigInt = struct {
 
     pub fn div(self: BigInt, other: BigInt) !BigInt {
         if (other.isZero()) return error.DivisionByZero;
-        const out = try divRemAlloc(self.allocator, self, other);
+        const out = try divRemAllocOutput(self.allocator, self, other, .quotient);
+        // Empty unless the single-limb path produced one anyway; deinit on an
+        // empty value is a no-op.
         var remainder = out[1];
         remainder.deinit();
         return out[0];
@@ -82,7 +84,7 @@ pub const BigInt = struct {
 
     pub fn rem(self: BigInt, other: BigInt) !BigInt {
         if (other.isZero()) return error.DivisionByZero;
-        const out = try divRemAlloc(self.allocator, self, other);
+        const out = try divRemAllocOutput(self.allocator, self, other, .remainder);
         var quotient = out[0];
         quotient.deinit();
         return out[1];
@@ -253,7 +255,7 @@ pub const BigInt = struct {
         defer abs_value.deinit();
         var divisor = try pow2(allocator, shift);
         defer divisor.deinit();
-        const div_rem = try divRemAbsAlloc(allocator, abs_value, divisor);
+        const div_rem = try divRemAbsAlloc(allocator, abs_value, divisor, .both);
         var quotient = div_rem[0];
         var remainder = div_rem[1];
         defer remainder.deinit();
@@ -483,6 +485,15 @@ pub const BigInt = struct {
 };
 
 pub fn divRemAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
+    return divRemAllocOutput(allocator, lhs, rhs, .both);
+}
+
+fn divRemAllocOutput(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    rhs: BigInt,
+    want: DivOutput,
+) !struct { BigInt, BigInt } {
     if (rhs.isZero()) return error.DivisionByZero;
     // Borrowed magnitudes rather than cloned ones. `divRemAbsAlloc` never
     // writes through either operand: the `lhs < rhs` arm clones, the
@@ -497,7 +508,7 @@ pub fn divRemAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !stru
     // corrupt a caller's BigInt.
     const lhs_abs = BigInt{ .negative = false, .limbs = lhs.limbs, .allocator = allocator };
     const rhs_abs = BigInt{ .negative = false, .limbs = rhs.limbs, .allocator = allocator };
-    const div_rem = try divRemAbsAlloc(allocator, lhs_abs, rhs_abs);
+    const div_rem = try divRemAbsAlloc(allocator, lhs_abs, rhs_abs, want);
     var quotient = div_rem[0];
     var remainder = div_rem[1];
     quotient.negative = (lhs.negative != rhs.negative) and !quotient.isZero();
@@ -613,6 +624,18 @@ fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
     return @intCast(remainder);
 }
 
+/// Which halves of a division the caller will use. `div` and `rem` each keep
+/// exactly one, and materializing the other means an allocation and a copy that
+/// are thrown away immediately.
+///
+/// The division itself is identical in all three modes -- the quotient digits
+/// are still computed, because the algorithm needs them, and the numerator
+/// scratch is still consumed in place. Only the final construction differs, so
+/// the estimate loop carries no extra branch: the "was a quotient requested"
+/// question is folded into the `j < quotient_writes` bound that loop already
+/// tested.
+pub const DivOutput = enum { quotient, remainder, both };
+
 /// Reciprocal of a normalized limb, mirroring qjs `udiv1norm_init`
 /// (quickjs.c:11433). `divisor` must have its high bit set.
 ///
@@ -694,6 +717,7 @@ noinline fn divRemAbsNormalizedLong(
     allocator: std.mem.Allocator,
     lhs: BigInt,
     rhs: BigInt,
+    want: DivOutput,
 ) !struct { BigInt, BigInt } {
     const na = lhs.limbs.len;
     const nb = rhs.limbs.len;
@@ -708,6 +732,8 @@ noinline fn divRemAbsNormalizedLong(
     // divisor. `lhs < rhs` was handled by the caller, so this is at least 1.
     const quotient_len = if (compareAbsParts(lhs.limbs[m..na], rhs.limbs) != .lt) m + 1 else m;
     std.debug.assert(quotient_len >= 1);
+    const want_quotient = want != .remainder;
+    const want_remainder = want != .quotient;
 
     // `u` and `v` are pure scratch and are always released. Keeping them as two
     // allocations rather than one shared block is deliberate for this cut: it
@@ -717,8 +743,14 @@ noinline fn divRemAbsNormalizedLong(
     defer allocator.free(u);
     const v = try allocator.alloc(Limb, nb);
     defer allocator.free(v);
-    const q = try allocator.alloc(Limb, quotient_len);
+    // Empty when the caller only wants the remainder. The digits are still
+    // computed -- the algorithm needs them -- they are simply not stored.
+    const q: []Limb = if (want_quotient) try allocator.alloc(Limb, quotient_len) else &.{};
     errdefer allocator.free(q);
+    // The loop already tested `j < quotient_len` to skip the provably-zero top
+    // digit, so folding "no buffer" into that same bound adds no branch to the
+    // hot path.
+    const quotient_writes = q.len;
 
     if (shift == 0) {
         @memcpy(v, rhs.limbs);
@@ -783,13 +815,15 @@ noinline fn divRemAbsNormalizedLong(
             addBackAt(window, v);
         }
 
-        if (j < quotient_len) {
+        if (j < quotient_writes) {
             q[j] = qhat;
         } else {
-            std.debug.assert(qhat == 0);
+            // Either the top digit is provably zero, or no quotient was asked
+            // for and there is nowhere to put it.
+            std.debug.assert(!want_quotient or qhat == 0);
         }
     }
-    std.debug.assert(q[quotient_len - 1] != 0);
+    if (want_quotient) std.debug.assert(q[quotient_len - 1] != 0);
     // The remainder is below the divisor, so it fits in `nb` limbs.
     std.debug.assert(u[nb] == 0);
 
@@ -797,14 +831,15 @@ noinline fn divRemAbsNormalizedLong(
     // unshifted length first so it can be allocated at exactly that size --
     // building `nb` limbs and normalizing afterwards would mean a shrinking
     // realloc, which is the one thing this function avoids everywhere.
-    var remainder_len = nb;
-    while (remainder_len > 0 and unshiftedLimbAt(u, remainder_len - 1, shift) == 0) : (remainder_len -= 1) {}
-
     var remainder = BigInt{ .allocator = allocator };
-    if (remainder_len != 0) {
-        const r = try allocator.alloc(Limb, remainder_len);
-        for (r, 0..) |*limb, i| limb.* = unshiftedLimbAt(u, i, shift);
-        remainder = .{ .limbs = r, .allocator = allocator };
+    if (want_remainder) {
+        var remainder_len = nb;
+        while (remainder_len > 0 and unshiftedLimbAt(u, remainder_len - 1, shift) == 0) : (remainder_len -= 1) {}
+        if (remainder_len != 0) {
+            const r = try allocator.alloc(Limb, remainder_len);
+            for (r, 0..) |*limb, i| limb.* = unshiftedLimbAt(u, i, shift);
+            remainder = .{ .limbs = r, .allocator = allocator };
+        }
     }
     return .{ BigInt{ .limbs = q, .allocator = allocator }, remainder };
 }
@@ -869,13 +904,25 @@ fn addBackAt(numerator: []Limb, divisor: []const Limb) void {
     numerator[divisor.len] +%= carry;
 }
 
-fn divRemAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
+fn divRemAbsAlloc(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    rhs: BigInt,
+    want: DivOutput,
+) !struct { BigInt, BigInt } {
     if (rhs.isZero()) return error.DivisionByZero;
     if (compareAbs(lhs, rhs) == .lt) {
+        // Quotient zero, remainder the dividend. Cloning the dividend is the
+        // only allocation here, so skip it when the caller wants the quotient.
+        if (want == .quotient) return .{ .{ .allocator = allocator }, .{ .allocator = allocator } };
         return .{ .{ .allocator = allocator }, try lhs.cloneWithAllocator(allocator) };
     }
+    // The single-limb path is left alone on purpose: it is already down to two
+    // allocations and is the fastest shape in the matrix, so threading the
+    // output selection through it would risk a well-behaved path to save at
+    // most one small allocation.
     if (rhs.limbs.len == 1) return divRemAbsByLimbAlloc(allocator, lhs, rhs.limbs[0]);
-    return divRemAbsNormalizedLong(allocator, lhs, rhs);
+    return divRemAbsNormalizedLong(allocator, lhs, rhs, want);
 }
 
 pub fn addAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
