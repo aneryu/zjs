@@ -209,6 +209,32 @@ pub inline fn resolveInlineDirectConstructorFunction(global: *core.Object, func:
     };
 }
 
+/// Constructor-spread resolver. Unlike the measured direct-constructor path,
+/// spread must also admit a base-class body reached by `super(...args)`.
+/// Plain-call rejection is irrelevant because this path enters with a real
+/// `new.target`; function kind, function class, and Realm are still checked by
+/// the caller before the operand transaction commits.
+pub inline fn resolveInlineSpreadConstructorFunction(global: *core.Object, func: core.JSValue) ?ResolvedInlineFunction {
+    const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
+    const function_data = function_object.bytecodeFunctionStoragePtr();
+    const fb = function_data.function_bytecode orelse return null;
+    const captures_raw: [*]*core.VarRef = @ptrCast(function_data.var_refs);
+    if (comptime builtin.mode == .Debug) {
+        const checked = function_data.captureSlice();
+        std.debug.assert(checked.len == fb.closureVarCount());
+        std.debug.assert(checked.len == 0 or checked.ptr == captures_raw);
+    }
+    if (fb.functionKind() != .normal) return null;
+    const function_realm = fb.realmContext() orelse return null;
+    const function_global = function_realm.global orelse return null;
+    if (function_global != global) return null;
+    return .{
+        .var_refs = captures_raw,
+        .fb = fb,
+        .call_facts = fb.canonicalCallFacts(),
+    };
+}
+
 /// Resolve `func` to an inline-eligible bytecode call target for a call with
 /// receiver `receiver` (`undefined` for plain calls, the property base for
 /// method calls). Mirrors the plain-call leg of

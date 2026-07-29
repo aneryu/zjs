@@ -202,7 +202,10 @@ pub const OwnershipDisposition = packed struct(u8) {
     current_function: Ownership = .owned,
     var_refs: Ownership = .owned,
     storage: Ownership = .borrowed,
-    _reserved: u4 = 0,
+    /// Appended inside the former reserved tail so the established hot
+    /// this/function/var-ref/storage bit positions do not move.
+    new_target: Ownership = .borrowed,
+    _reserved: u3 = 0,
 };
 
 comptime {
@@ -302,18 +305,22 @@ pub const Frame = struct {
 
     pub fn freeColdBox(self: *Frame, account: *memory.MemoryAccount) void {
         if (self.cold) |c| {
+            std.debug.assert(self.ownership.new_target == .borrowed);
             account.destroy(FrameCold, c);
             self.cold = null;
         }
     }
 
-    /// Release the owned original-args snapshot VALUES and then free the box.
-    /// `new_target` is a borrowed call binding. Idempotent. `original_args`
+    /// Release the owned original-args snapshot VALUES and any explicitly
+    /// transferred constructor `new_target`, then free the box. Ordinary call
+    /// bindings keep borrowing `new_target`. Idempotent. `original_args`
     /// VALUES must be released BEFORE the storage backing them is reclaimed —
     /// call this before freeing `storage_values`.
     pub fn freeCold(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         const c = self.cold orelse return;
         releaseValueSliceNoReset(rt, c.original_args);
+        if (self.ownership.new_target == .owned) c.new_target.free(rt);
+        self.ownership.new_target = .borrowed;
         account.destroy(FrameCold, c);
         self.cold = null;
     }
@@ -332,6 +339,18 @@ pub const Frame = struct {
     pub inline fn newTargetValue(self: *const Frame) JSValue {
         return if (self.cold) |c| c.new_target else JSValue.undefinedValue();
     }
+
+    /// Replace an already-installed borrowed constructor binding with the
+    /// parser-owned new-target operand transferred by constructor spread.
+    /// The constructor Entry guarantees the cold box exists, so this commit
+    /// step is infallible after frame setup succeeds.
+    pub inline fn takeConstructorNewTarget(self: *Frame, value: JSValue) void {
+        const c = self.cold orelse unreachable;
+        std.debug.assert(self.ownership.new_target == .borrowed);
+        c.new_target = value;
+        self.ownership.new_target = .owned;
+    }
+
     pub inline fn originalArgs(self: *const Frame) []JSValue {
         return if (self.cold) |c| c.original_args else &.{};
     }

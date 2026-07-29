@@ -26,6 +26,10 @@ pub const CallStep = enum {
     /// The InlineCallRequest is written through the caller's shared `req_out`
     /// slot, not carried in the result (payload-free → no per-call sret alloca).
     inline_call,
+    /// OP_apply(1) materialized `[callable, new_target, args...]` in the
+    /// caller's operand region. The constructor opcode adapter consumes the
+    /// shared request metadata and enters with a constructor continuation.
+    inline_constructor,
 };
 
 pub const TailCallMethodResult = union(enum) {
@@ -832,25 +836,69 @@ pub noinline fn apply(
     const is_new = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
     if (is_new != 0) {
-        const array_value = try stack.pop();
-        defer array_value.free(ctx.runtime);
-        const this_value = try stack.pop();
-        defer this_value.free(ctx.runtime);
-        const func = try stack.pop();
-        defer func.free(ctx.runtime);
-        const apply_args = try collection_vm.argsFromArray(ctx.runtime, array_value);
+        // Parser-emitted constructor spread owns one operand transaction:
+        // `[callable, new_target, materialized-array]`. Preserve it through
+        // observable list creation. An eligible target rewrites only the array
+        // suffix into final args; every fallback retains the authoritative
+        // recursive [[Construct]] path.
+        if (stack.len() < 3) return error.StackUnderflow;
+        const region_base = stack.len() - 3;
+        const func = stack.values[region_base];
+        const new_target = stack.values[region_base + 1];
+        const array_value = stack.values[region_base + 2];
+        var apply_args = collection_vm.argsFromArray(ctx.runtime, array_value) catch |err| {
+            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
         defer call_runtime.freeArgs(ctx.runtime, apply_args);
-        // Parser-emitted apply(1) is already a constructor operation. Its
-        // explicit stack operand is the new.target: ordinary `new F(...xs)`
-        // pushes F, while `super(...xs)` pushes the outer constructor's
-        // new.target. Callee identity must not grant construction permission
-        // to an ordinary spread call.
-        const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, this_value) catch |err| {
+        var apply_args_root = collection_vm.ValueSliceRoot{};
+        apply_args_root.init(ctx.runtime, &apply_args);
+        defer apply_args_root.deinit();
+
+        if (call_runtime.resolveSameMachineSpreadConstructor(global, func, new_target)) |candidate| {
+            const final_len = try std.math.add(usize, region_base + 2, apply_args.len);
+            const current_len = stack.len();
+            if (final_len > current_len) {
+                stack.reserveAdditional(final_len - current_len) catch |err| {
+                    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+            }
+
+            // reserveAdditional may relocate the backing. Keep the callable
+            // and new.target in their original owned slots; replace only the
+            // materialized-array suffix with the final moved argument list.
+            const rooted_func = stack.values[region_base];
+            const rooted_array = stack.values[region_base + 2];
+            stack.values[region_base + 2] = core.JSValue.undefinedValue();
+            stack.setLen(region_base + 2);
+            rooted_array.free(ctx.runtime);
+            for (apply_args, 0..) |*arg, index| {
+                stack.values[region_base + 2 + index] = arg.*;
+                arg.* = core.JSValue.undefinedValue();
+            }
+            stack.setLen(final_len);
+            req_out.* = .{
+                // The constructor adapter uses the receiver-independent
+                // witness after reloading the committed operand region.
+                .target = candidate.resolved.bind(core.JSValue.undefinedValue(), rooted_func),
+                .region_base = region_base,
+                .argc = @intCast(apply_args.len),
+                .layout = .method,
+            };
+            return .inline_constructor;
+        }
+
+        const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, new_target) catch |err| {
+            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         errdefer result.free(ctx.runtime);
-        try stack.pushOwned(result);
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        stack.pushOwnedAssumeCapacity(result);
         return .done;
     }
 

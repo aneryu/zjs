@@ -2111,6 +2111,34 @@ pub fn resolveSameMachineConstructor(
     };
 }
 
+/// OP_apply(1) admission. Spread construction has an owned new-target operand,
+/// so same-Realm `super(...args)` may preserve a differing new.target without
+/// borrowing it from the caller frame. Cross-Realm targets remain execution
+/// roots until Entry carries an explicit Realm/global binding.
+pub fn resolveSameMachineSpreadConstructor(
+    global: *core.Object,
+    func: core.JSValue,
+    new_target: core.JSValue,
+) ?SameMachineConstructorTarget {
+    const resolved = inline_calls.resolveInlineSpreadConstructorFunction(global, func) orelse return null;
+    if (!resolved.fb.hasPrototype()) return null;
+    const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
+    if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
+    if (!new_target.sameValue(func)) {
+        // `callableObjectFromValue` is the native/bound-call adapter and
+        // deliberately excludes the bytecode-function class. A super-call's
+        // differing new.target is normally precisely that class, so inspect
+        // the general object and use its authoritative FunctionRealm instead.
+        const new_target_object = object_ops.objectFromValue(new_target) orelse return null;
+        const new_target_global = object_ops.objectRealmGlobal(new_target_object) orelse return null;
+        if (new_target_global != global) return null;
+    }
+    return .{
+        .resolved = resolved,
+        .function_object = function_object,
+    };
+}
+
 pub const SameMachineConstructorPreparation = union(enum) {
     /// The QuickJS-style simple-field writer completed construction without
     /// entering the bytecode body.
@@ -2131,6 +2159,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     output: ?*std.Io.Writer,
     global: *core.Object,
     func: core.JSValue,
+    new_target: core.JSValue,
     target: *const SameMachineConstructorTarget,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
@@ -2144,7 +2173,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
         target.function_object,
         target.resolved.fb,
         args,
-        func,
+        new_target,
         false,
     )) |constructed| {
         return .{ .completed = constructed };
@@ -2156,7 +2185,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
         global,
         func,
         target.function_object,
-        func,
+        new_target,
         caller_function,
         caller_frame,
     );

@@ -755,6 +755,140 @@ test "ordinary spread calls enter eligible bytecode targets on the current Machi
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
 
+test "constructor spread preserves new target on the current Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\let spreadConstructorNewTarget;
+        \\function SpreadOrdinary(value) {
+        \\    this.value = value;
+        \\    this.trace = new Error("ordinary spread constructor").stack;
+        \\}
+        \\class SpreadBase {
+        \\    constructor(value) {
+        \\        spreadConstructorNewTarget = new.target;
+        \\        this.value = value;
+        \\    }
+        \\}
+        \\class SpreadDerived extends SpreadBase {
+        \\    constructor(...args) {
+        \\        super(...args);
+        \\        this.derived = true;
+        \\    }
+        \\}
+        \\globalThis.__spreadBaseConstructor = SpreadBase;
+        \\globalThis.__spreadDerivedConstructor = SpreadDerived;
+        \\globalThis.__spreadOrdinaryConstructorOuter = function () {
+        \\    const ordinary = new SpreadOrdinary(...[20]);
+        \\    assert.sameValue(ordinary.trace.indexOf("apply (native)"), -1);
+        \\    return ordinary.value;
+        \\};
+        \\globalThis.__spreadDerivedConstructorOuter = function () {
+        \\    const derived = new SpreadDerived(...[21]);
+        \\    assert.sameValue(spreadConstructorNewTarget, SpreadDerived);
+        \\    assert.sameValue(derived.derived, true);
+        \\    return derived.value;
+        \\};
+        \\
+        \\var spreadConstructorOther = $262.createRealm().global;
+        \\var spreadConstructorForeign = spreadConstructorOther.eval(
+        \\    "(function SpreadConstructorForeign(value) {" +
+        \\        "var adjusted = value + 1; this.value = adjusted - 1;" +
+        \\    "})"
+        \\);
+        \\globalThis.__spreadConstructorForeignOuter = function () {
+        \\    return new spreadConstructorForeign(...[42]).value;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const base_key = try js.runtime.internAtom("__spreadBaseConstructor");
+    defer js.runtime.atoms.free(base_key);
+    const base_constructor = try global.getProperty(base_key);
+    defer base_constructor.free(js.runtime);
+    const derived_key = try js.runtime.internAtom("__spreadDerivedConstructor");
+    defer js.runtime.atoms.free(derived_key);
+    const derived_constructor = try global.getProperty(derived_key);
+    defer derived_constructor.free(js.runtime);
+    try std.testing.expect(engine.exec.call_runtime.resolveSameMachineSpreadConstructor(
+        global,
+        derived_constructor,
+        derived_constructor,
+    ) != null);
+    try std.testing.expect(engine.exec.call_runtime.resolveSameMachineSpreadConstructor(
+        global,
+        base_constructor,
+        derived_constructor,
+    ) != null);
+
+    const ordinary_outer_key = try js.runtime.internAtom("__spreadOrdinaryConstructorOuter");
+    defer js.runtime.atoms.free(ordinary_outer_key);
+    const ordinary_outer = try global.getProperty(ordinary_outer_key);
+    defer ordinary_outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const ordinary_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        ordinary_outer,
+        &.{},
+        null,
+        null,
+    );
+    defer ordinary_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 20), ordinary_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), inline_calls.machineTestMetrics().machine_inits);
+
+    const derived_outer_key = try js.runtime.internAtom("__spreadDerivedConstructorOuter");
+    defer js.runtime.atoms.free(derived_outer_key);
+    const derived_outer = try global.getProperty(derived_outer_key);
+    defer derived_outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const derived_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        derived_outer,
+        &.{},
+        null,
+        null,
+    );
+    defer derived_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 21), derived_result.asInt32());
+    const derived_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), derived_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), derived_metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_outer_key = try js.runtime.internAtom("__spreadConstructorForeignOuter");
+    defer js.runtime.atoms.free(foreign_outer_key);
+    const foreign_outer = try global.getProperty(foreign_outer_key);
+    defer foreign_outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign_outer,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 2), inline_calls.machineTestMetrics().machine_inits);
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

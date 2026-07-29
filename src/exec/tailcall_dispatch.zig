@@ -1517,6 +1517,53 @@ fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.
             vm.tail_is_reuse = false;
             return .tail;
         },
+        .inline_constructor => {
+            const req = &vm.tail_request;
+            const region_start = vm.stack.values + req.region_base;
+            const func = region_start[0];
+            const new_target = region_start[1];
+            if (call_runtime.resolveSameMachineSpreadConstructor(vm.global, func, new_target)) |candidate| {
+                const entered = enterSameMachineSpreadConstructor(
+                    vm,
+                    req.region_base,
+                    req.argc,
+                    &candidate,
+                );
+                return switch (entered) {
+                    .entry => |entry| enterEntry(
+                        vm,
+                        entry,
+                        candidate.resolved.fb.byteCodeAssumeMaterialized().ptr,
+                    ),
+                    .handled => coldNext(vb, vm),
+                    .threw => .threw,
+                };
+            }
+
+            // The admission witness is made from immutable callable/Realm
+            // facts before the operand transaction commits, so this arm is
+            // defensive. Keep it semantically complete: the materialized
+            // `[func, new_target, args...]` region can still enter the
+            // authoritative recursive constructor without reconstructing the
+            // original spread array.
+            const args = (region_start + 2)[0..req.argc];
+            const result = call_runtime.constructValueOrBytecodeWithNewTarget(
+                vm.ctx,
+                vm.output,
+                vm.global,
+                func,
+                args,
+                vm.function,
+                vm.frame,
+                new_target,
+            ) catch |err| {
+                if (!constructorRegionRecover(vm, req.region_base, err)) return .threw;
+                return coldNext(vb, vm);
+            };
+            call_runtime.popOwnedStackRegion(vm.rt, vm.stack, req.region_base);
+            vm.stack.pushOwnedAssumeCapacity(result);
+            return coldNext(vb, vm);
+        },
     }
 }
 
@@ -1654,6 +1701,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             vm.tail_is_reuse = false;
             return .tail;
         },
+        .inline_constructor => unreachable,
     }
 }
 
@@ -1710,6 +1758,126 @@ noinline fn pushDerivedConstructorEntry(
     return .{ .entry = entry };
 }
 
+/// Derived spread preserves an independently-owned new.target and has already
+/// advanced OP_apply's operand before reaching this adapter.
+noinline fn pushSpreadDerivedConstructorEntry(
+    vm: *Vm,
+    region_base: usize,
+    region_start: [*]JSValue,
+    func: JSValue,
+    candidate: *const call_runtime.SameMachineConstructorTarget,
+    argc: u16,
+) DerivedConstructorEntryResult {
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    const interrupt_global = vm.ctx.global orelse vm.global;
+    exception_ops.pollInterrupt(vm.ctx, interrupt_global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+
+    const constructor_func = region_start[0];
+    const owned_new_target = region_start[1];
+    const constructor_this = JSValue.uninitialized();
+    region_start[0] = constructor_this;
+    region_start[1] = constructor_func;
+    const target = candidate.resolved.bind(constructor_this, func);
+    vm.stack.setTopPtr(region_start);
+    const entry = vm.machine.pushDerivedConstructorCall(
+        vm.global,
+        vm.stack,
+        &target,
+        region_start,
+        argc,
+    ) catch |err| {
+        owned_new_target.free(vm.rt);
+        if (!constructorSetupRecover(vm, err)) return .threw;
+        return .handled;
+    };
+    entry.frame.takeConstructorNewTarget(owned_new_target);
+    return .{ .entry = entry };
+}
+
+/// Enter constructor spread from its committed owned
+/// `[func, new_target, args...]` operand transaction. The direct constructor
+/// handler below retains its measured in-handler shape.
+fn enterSameMachineSpreadConstructor(
+    vm: *Vm,
+    region_base: usize,
+    argc: u16,
+    candidate: *const call_runtime.SameMachineConstructorTarget,
+) DerivedConstructorEntryResult {
+    const region_start = vm.stack.values + region_base;
+    const func = region_start[0];
+    const new_target = region_start[1];
+    if (candidate.resolved.fb.isDerivedClassConstructor()) {
+        return pushSpreadDerivedConstructorEntry(
+            vm,
+            region_base,
+            region_start,
+            func,
+            candidate,
+            argc,
+        );
+    }
+
+    // First JS_CallConstructorInternal poll: before instance creation,
+    // constructibility effects, and the inner bytecode-call poll.
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    const args = (region_start + 2)[0..argc];
+    const prepared = call_runtime.prepareSameMachineConstructorAfterFirstPoll(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        func,
+        new_target,
+        candidate,
+        args,
+        vm.function,
+        vm.frame,
+    ) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    switch (prepared) {
+        .completed => |result| {
+            call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+            vm.stack.pushOwnedAssumeCapacity(result);
+            return .handled;
+        },
+        .instance => |instance| {
+            // Move both call bindings out of the parser-owned region: func
+            // becomes the method-shaped callable, while new.target moves into
+            // the callee FrameCold binding. This covers both duplicated
+            // `new F(...)` and differing `super(...)` new targets.
+            const constructor_func = region_start[0];
+            const owned_new_target = region_start[1];
+            region_start[0] = instance;
+            region_start[1] = constructor_func;
+            const target = candidate.resolved.bind(instance, func);
+            vm.stack.setTopPtr(region_start);
+            const entry = vm.machine.pushConstructorCall(
+                vm.global,
+                vm.stack,
+                &target,
+                region_start,
+                argc,
+            ) catch |err| {
+                owned_new_target.free(vm.rt);
+                if (!constructorSetupRecover(vm, err)) return .threw;
+                return .handled;
+            };
+            entry.frame.takeConstructorNewTarget(owned_new_target);
+            return .{ .entry = entry };
+        },
+    }
+}
+
 fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp); // frame.pc points at the u16 argc operand
     const argc = readInt(u16, pc + 1);
@@ -1749,6 +1917,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                 vm.ctx,
                 vm.output,
                 vm.global,
+                func,
                 func,
                 &candidate,
                 args,
