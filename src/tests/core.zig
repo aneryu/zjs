@@ -10185,3 +10185,177 @@ test "single-limb division is exact and allocation-bounded" {
         }
     }
 }
+
+/// Fail-index injector for the BigInt division allocation contract.
+///
+/// Two independent modes. `fail_alloc_index` refuses one numbered allocation,
+/// which sweeps the division's allocation points. `fail_shrink` refuses every
+/// shrinking realloc -- both the remap attempt and the alloc-and-copy fallback
+/// the standard allocator falls back to -- which is the only way to reach
+/// `normalize`'s error path, and that path is where ownership has to have been
+/// transferred exactly once.
+const DivFailAllocator = struct {
+    backing: std.mem.Allocator,
+    fail_alloc_index: ?usize = null,
+    fail_shrink: bool = false,
+    alloc_attempts: usize = 0,
+    induced: bool = false,
+    refuse_next_alloc: bool = false,
+    live: isize = 0,
+
+    fn allocator(self: *DivFailAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        if (self.refuse_next_alloc) {
+            self.refuse_next_alloc = false;
+            self.induced = true;
+            return null;
+        }
+        const index = self.alloc_attempts;
+        self.alloc_attempts += 1;
+        if (self.fail_alloc_index) |target| {
+            if (index == target) {
+                self.induced = true;
+                return null;
+            }
+        }
+        const result = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        self.live += 1;
+        return result;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        if (self.fail_shrink and new_len < memory.len) return false;
+        return self.backing.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        if (self.fail_shrink and new_len < memory.len) {
+            // Make the alloc-and-copy fallback fail too, so the realloc really
+            // fails instead of quietly succeeding down the slow path.
+            self.refuse_next_alloc = true;
+            return null;
+        }
+        return self.backing.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        self.live -= 1;
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+fn expectDivisionUnderInjection(
+    inject: *DivFailAllocator,
+    lhs_limbs: []const engine.libs.bigint.Limb,
+    lhs_negative: bool,
+    rhs_limbs: []const engine.libs.bigint.Limb,
+    rhs_negative: bool,
+    expected_quotient: engine.libs.bigint.BigInt,
+    expected_remainder: engine.libs.bigint.BigInt,
+) !void {
+    const bigint = engine.libs.bigint;
+    const alloc = inject.allocator();
+    const lhs = bigint.BigInt{ .negative = lhs_negative, .limbs = @constCast(lhs_limbs), .allocator = alloc };
+    const rhs = bigint.BigInt{ .negative = rhs_negative, .limbs = @constCast(rhs_limbs), .allocator = alloc };
+
+    if (bigint.divRemAlloc(alloc, lhs, rhs)) |pair| {
+        var quotient = pair[0];
+        defer quotient.deinit();
+        var remainder = pair[1];
+        defer remainder.deinit();
+        // Succeeding under injection is fine; the result must still be right.
+        try std.testing.expectEqual(std.math.Order.eq, quotient.compare(expected_quotient));
+        try std.testing.expectEqual(std.math.Order.eq, remainder.compare(expected_remainder));
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+    // Whatever happened, nothing may be left outstanding and the inputs must be
+    // untouched -- the caller still owns them.
+    try std.testing.expectEqual(@as(isize, 0), inject.live);
+    try std.testing.expectEqualSlices(bigint.Limb, lhs_limbs, lhs.limbs);
+    try std.testing.expectEqualSlices(bigint.Limb, rhs_limbs, rhs.limbs);
+}
+
+test "multi-limb division survives a failure at every allocation point" {
+    const bigint = engine.libs.bigint;
+    // 6 limbs by 3, chosen so the numerator is strictly larger and the division
+    // is a real multi-limb one rather than the early return or the single-limb
+    // path.
+    const lhs_limbs = [_]bigint.Limb{
+        0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210, 0xAAAA_AAAA_AAAA_AAAB,
+        0x0000_0000_0000_0007, 0xFFFF_FFFF_FFFF_FFFF, 0x8000_0000_0000_0001,
+    };
+    const rhs_limbs = [_]bigint.Limb{
+        0xDEAD_BEEF_CAFE_BABE, 0x0000_0000_0000_0001, 0x4000_0000_0000_0000,
+    };
+
+    // Reference results, computed with a plain allocator.
+    const reference_lhs = bigint.BigInt{ .limbs = @constCast(lhs_limbs[0..]), .allocator = std.testing.allocator };
+    const reference_rhs = bigint.BigInt{ .limbs = @constCast(rhs_limbs[0..]), .allocator = std.testing.allocator };
+    var expected_quotient = try reference_lhs.div(reference_rhs);
+    defer expected_quotient.deinit();
+    var expected_remainder = try reference_lhs.rem(reference_rhs);
+    defer expected_remainder.deinit();
+
+    // How many allocations a clean division makes, so the sweep covers all of
+    // them and stops once the index is past the end.
+    var counter = DivFailAllocator{ .backing = std.testing.allocator };
+    {
+        const pair = try bigint.divRemAlloc(counter.allocator(), reference_lhs, reference_rhs);
+        var q = pair[0];
+        q.deinit();
+        var r = pair[1];
+        r.deinit();
+    }
+    try std.testing.expectEqual(@as(isize, 0), counter.live);
+    try std.testing.expect(counter.alloc_attempts > 3);
+
+    for (0..counter.alloc_attempts) |fail_index| {
+        inline for (.{ false, true }) |lhs_negative| {
+            inline for (.{ false, true }) |rhs_negative| {
+                var inject = DivFailAllocator{ .backing = std.testing.allocator, .fail_alloc_index = fail_index };
+                try expectDivisionUnderInjection(
+                    &inject,
+                    &lhs_limbs,
+                    lhs_negative,
+                    &rhs_limbs,
+                    rhs_negative,
+                    expected_quotient,
+                    expected_remainder,
+                );
+            }
+        }
+    }
+
+    // The shrinking-realloc path specifically: `normalize` frees what it is
+    // given when this fails, so a caller that kept an aliasing errdefer would
+    // free twice here. std.testing.allocator turns that into a failure.
+    var shrink = DivFailAllocator{ .backing = std.testing.allocator, .fail_shrink = true };
+    try expectDivisionUnderInjection(
+        &shrink,
+        &lhs_limbs,
+        false,
+        &rhs_limbs,
+        false,
+        expected_quotient,
+        expected_remainder,
+    );
+
+    // And the runtime keeps working afterwards.
+    var again = try reference_lhs.div(reference_rhs);
+    defer again.deinit();
+    try std.testing.expectEqual(std.math.Order.eq, again.compare(expected_quotient));
+}
+

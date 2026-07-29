@@ -415,7 +415,12 @@ pub const BigInt = struct {
             }
             a.* = @intCast(diff);
         }
-        self.* = try normalize(self.*);
+        // Hand the limbs to `normalize` before calling: it frees them if it
+        // fails, and leaving `self` aliasing the same slice would make the
+        // caller's `deinit` a second free.
+        const owned = self.*;
+        self.* = .{ .allocator = owned.allocator };
+        self.* = try normalize(owned);
     }
 
     fn absCloneWithAllocator(self: BigInt, allocator: std.mem.Allocator) !BigInt {
@@ -433,7 +438,9 @@ pub const BigInt = struct {
             self.limbs[index] = @intCast(current / divisor);
             remainder = current % divisor;
         }
-        self.* = try normalize(self.*);
+        const owned = self.*;
+        self.* = .{ .allocator = owned.allocator };
+        self.* = try normalize(owned);
         return @intCast(remainder);
     }
 
@@ -621,7 +628,21 @@ fn divRemAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struc
             try setBit(&quotient, bit);
         }
     }
-    return .{ try normalize(quotient), try normalize(remainder) };
+    // Transfer each value out of the local before normalizing it. `normalize`
+    // frees what it is given when its shrinking realloc fails, so leaving the
+    // `errdefer` above aliasing the same limbs would free them twice; and if
+    // the second normalize fails, the errdefer must not act on a `quotient`
+    // whose limbs normalize has already moved.
+    const quotient_owned = quotient;
+    quotient = .{ .allocator = allocator };
+    const normalized_quotient = try normalize(quotient_owned);
+    errdefer {
+        var owned = normalized_quotient;
+        owned.deinit();
+    }
+    const remainder_owned = remainder;
+    remainder = .{ .allocator = allocator };
+    return .{ normalized_quotient, try normalize(remainder_owned) };
 }
 
 pub fn addAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
@@ -866,6 +887,11 @@ fn compareAbsParts(lhs_limbs: []const Limb, rhs_limbs: []const Limb) std.math.Or
     return .eq;
 }
 
+/// Consuming: takes ownership of `value.limbs` and frees them on its own error
+/// path, so a caller must transfer ownership before calling and must not keep
+/// an `errdefer` or a live copy aliasing the same slice. Callers below use the
+/// `const owned = x; x = .{ .allocator = ... };` handoff for exactly that
+/// reason.
 fn normalize(value: BigInt) !BigInt {
     var owned = value;
     errdefer if (owned.limbs.len != 0) owned.allocator.free(owned.limbs);
