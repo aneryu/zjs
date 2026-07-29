@@ -40,7 +40,7 @@ const qjsDefinePropertiesOnTarget = call_runtime.qjsDefinePropertiesOnTarget;
 const isCallableValue = call_runtime.isCallableValue;
 const iteratorForValue = call_runtime.iteratorForValue;
 const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const valueTruthy = coercion_ops.valueTruthy;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -964,7 +964,7 @@ fn objectAddEntriesStepValue(
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
 
-    const next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
+    const next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
     defer next_result_value.free(ctx.runtime);
     const next_result = objectFromValue(next_result_value) orelse return error.TypeError;
     if (next_result.class_id == core.class.ids.regexp) return .{ .value = core.JSValue.undefinedValue(), .done = false };

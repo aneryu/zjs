@@ -221,7 +221,7 @@ pub const EventLoop = struct {
                     return true;
                 }
             }
-            const call_result = try exec.call_runtime.callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
+            const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
             call_result.free(rt);
             if (repeats and !self.timerExists(timer_id)) return true;
             return true;
@@ -360,14 +360,14 @@ pub const EventLoop = struct {
                 if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.isNull()) {
                     const callback = handler.read_callback.dup();
                     defer callback.free(rt);
-                    const call_result = try exec.call_runtime.callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
+                    const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
                     call_result.free(rt);
                     return true;
                 }
                 if ((pollfd.revents & (libc.POLLOUT | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.write_callback.isNull()) {
                     const callback = handler.write_callback.dup();
                     defer callback.free(rt);
-                    const call_result = try exec.call_runtime.callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
+                    const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
                     call_result.free(rt);
                     return true;
                 }
@@ -448,7 +448,7 @@ pub const EventLoop = struct {
             os_pending_signals &= ~mask;
             const callback = handler.callback.dup();
             defer callback.free(rt);
-            const call_result = try exec.call_runtime.callValueOrBytecode(ctx, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
+            const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
             call_result.free(rt);
             return true;
         }

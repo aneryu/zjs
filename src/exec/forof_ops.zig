@@ -13,7 +13,7 @@ const object_ops = @import("object_ops.zig");
 // Helpers that remain in call_runtime.zig (generic utilities outside the for-of
 // iterator cluster).
 const appendAtom = core.atom.appendAtom;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const freeAtomList = core.atom.freeAtomList;
 const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
@@ -427,7 +427,7 @@ pub fn closeIteratorFromVmImpl(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
-    const out = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    const out = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
     defer out.free(ctx.runtime);
     if (!out.isObject()) return error.TypeError;
 }

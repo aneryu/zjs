@@ -3190,7 +3190,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method, false);
     }
     vm.stack.setTopPtr(sp);
-    const value = call_runtime.callValueOrBytecodePreRooted(
+    const value = call_runtime.callValueOrBytecodeRootPreRooted(
         vm.ctx,
         vm.output,
         vm.global,

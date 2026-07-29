@@ -1,7 +1,8 @@
 # Call-machinery faithful frontier — current state & conclusion
 
 > **Single source of truth** for where zjs's call/dispatch alignment to QuickJS stands.
-> Updated 2026-07-15: the same-Machine internal for-of callback and its result/setup refinements are in §7. Method-A's
+> Updated 2026-07-29: explicit execution-root calls and synchronous native-to-bytecode same-Machine
+> re-entry are in §8; the earlier for-of continuation is in §7. Method-A's
 > first tranche landed 2026-07-04 (`952592f` + `f3a517d`) — see §0. This doc consolidates and replaces a
 > cluster of now-historical plan/investigation/handover docs (DISPATCH-TAX-FINDINGS,
 > TAILCALL-DISPATCH-ONESHOT-BLUEPRINT, FRAME-MODEL-ONESHOT-BLUEPRINT, FRAME-RAW-SP-BLUEPRINT,
@@ -468,6 +469,119 @@ ownership, or a second caller-frame lookup.
   `finishForOfNextResult` only where the same proof also helps ordinary calls;
   other internal `runWithArgsState` callers still require their own storage and
   suspension proof, so do not generalize this fast path by callable class alone.
+
+## 8. Synchronous native-to-bytecode re-entry (2026-07-29)
+
+The execution-root boundary is now explicit in API names and at production
+call sites:
+
+| Route | API / mechanism | Contract |
+|---|---|---|
+| Embedding, event-loop, job, module, async/generator resume | `callValueOrBytecodeRoot*` | A bytecode target starts a fresh `runWithArgsState` Machine. |
+| Bytecode to bytecode | `InlineCallRequest` / current Machine push | The current Machine gains an ordinary `.next` Entry. |
+| Native builtin to synchronous bytecode callback | `callValueOrBytecodeSyncInternal*` or `SyncInternalCallSite` | An eligible target gains a `.native_boundary` Entry on the active Machine. |
+| Ineligible synchronous target | Authoritative root dispatch fallback | Native, bound/wrapper, Proxy, class-invalid, cross-Realm, generator, async, and other non-normal targets retain the established semantics. |
+
+`callValueOrBytecodeRootPreRooted*` states only that inputs already have a
+proven root. It does not grant same-Machine authority. Conversely, a native
+algorithm must opt in through the `SyncInternal` name; existing callers never
+change behavior merely because an invocation happens to be active.
+
+### 8.1 Active invocation and the native fence
+
+`runWithArgsState` creates one stack-local `ActiveInvocation` only after its
+Machine has reached its final address. It publishes that exec-owned record
+through `JSRuntime.active_invocation` as an opaque borrowed pointer and
+restores the previous pointer with `defer`. The record owns no runtime
+lifetime; it grants access to the current `Machine` and current
+`MachineBacktraceView`. Execution authority is never recovered by casting the
+observable `current_backtrace_frame` chain.
+
+Every synchronous route performs the normal call-entry interrupt poll, then
+uses `resolveInlineTarget`'s proof: same context and global/Realm, normal
+bytecode function, legal plain call, and non-suspendable body. A cached
+`SyncInternalCallSite` additionally verifies that the exact invocation which
+prepared its route is still active before every iteration. Any failed proof
+uses the authoritative dispatch after the already-completed poll.
+
+An eligible call opens a stack-local `NativeBoundaryScope` and records its
+Machine depth, operand top, VM-stack arena mark, call depths, and active
+bytecode-stack budget. Its callback Entry uses the existing return-action byte
+with `.native_boundary`; Entry size and the ordinary `.next` layout are
+unchanged. Native-boundary frames deliberately avoid the empty/exact leaf
+epilogues. Proper tail replacement transfers the action to the replacement
+Entry.
+
+On success, the cold continuation pops only the callback Entry and returns
+`.native_returned` to the nested driver. It neither pushes the result onto the
+suspended outer bytecode operand stack nor resumes its next opcode. The owned
+result returns to the still-running Zig builtin. On error,
+`unwindForErrorToDepth` first honors catches inside the callback, but an
+uncaught error stops at the recorded fence. The builtin therefore completes
+its defers, iterator cleanup, and state restoration before the outer VM can
+search for a catch.
+
+### 8.2 Backtrace and ownership contracts
+
+Backtrace enumeration is segmented instead of walking the whole shared
+Machine twice. Entering a callback freezes the outer view at `fence_top`, puts
+a callback-only live view above the native backtrace scope, and thaws the
+outer view on return. Nested native-to-JS-to-native-to-JS calls stack more
+segments. The observable order remains:
+
+```text
+helper
+callback
+apply / map / forEach / ... (native)
+outer bytecode caller
+```
+
+`OwnedArgList` is the cold general-layout ownership transaction. Its
+initialized prefix is rooted while values are duplicated, successful setup
+moves values into the Entry/frame, and setup failure frees only untransferred
+slots. The simple eligible path can copy or move already-rooted arguments
+directly into its final writable frame; it never lends an immutable native
+array as writable argument storage. Empty argument lists allocate no argument
+buffer.
+
+Debug/ReleaseSafe fence validation asserts restoration of Machine depth,
+operand top, VM-stack mark, call depth, native-call depth, and active stack
+bytes. Machine/chunk/carve counters remain test/profile-only and add no default
+ReleaseFast hot-path work.
+
+### 8.3 Explicitly migrated cohorts and retained roots
+
+The synchronous API is used only by the reviewed callback cohorts:
+
+- `Function.prototype.apply` and `Reflect.apply`;
+- Array and TypedArray iteration, mapping, filtering, reduction, sorting, and
+  `Array.from` mappers;
+- Map/Set callbacks and grouping;
+- getters, setters, Proxy traps, and `ToPrimitive`;
+- JSON reviver, replacer, and `toJSON`;
+- String/RegExp replacers, iterator helpers, and DisposableStack cleanup;
+- the Promise constructor executor.
+
+Dense `CreateListFromArrayLike` materialization is permitted only for a real,
+non-exotic, fully dense Array whose count equals its length. Holey, sparse,
+accessor, prototype-indexed, and Proxy sources snapshot length and perform
+ordered observable `[[Get]]` operations. VM spread does not enter the native
+bridge: eligible normal calls and constructors issue an `InlineCallRequest`
+directly, while constructor continuation retains `new.target`.
+
+Promise reactions and thenable jobs, the event loop, module jobs, generator
+and async resume, FinalizationRegistry jobs, and embedder calls remain fresh
+roots. Cross-Realm same-Machine execution would require Entry-level
+Realm/global state and is intentionally out of scope. Shared wrappers and
+protocol state machines also keep an explicit root call unless their whole
+cleanup/lifetime contract has been migrated as a named synchronous cohort.
+
+The historical **M-RETURN-CONT** census had a narrower denominator: it counted
+non-`.next` return actions only after a call had already entered a Machine. It
+did not count embedding/job/root calls, native algorithms waiting outside the
+driver, or this new `.native_returned` driver outcome. Root-call classification
+and return-continuation classification must therefore remain separate; neither
+number can be inferred from the other.
 
 ## Pointers
 

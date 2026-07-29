@@ -115,7 +115,7 @@ pub fn execCall(
     // OP_call is never a constructor call. Legal super() is emitted as
     // call_constructor (or apply(1)); superclass identity alone cannot grant a
     // normal call permission to invoke a class constructor.
-    const result = callValueOrBytecodePreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
+    const result = callValueOrBytecodeRootPreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
         try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
@@ -242,7 +242,7 @@ pub fn tryCatchInFrame(
     return true;
 }
 
-pub fn callValueOrBytecode(
+pub fn callValueOrBytecodeRoot(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -340,8 +340,8 @@ pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, er
 /// Variant for callers whose `this_value`, `func`, and `args` are already
 /// rooted (e.g. borrowed directly from a frame-rooted operand stack).
 /// Skips the defensive copy and extra value-root frame of
-/// `callValueOrBytecode`.
-pub fn callValueOrBytecodePreRooted(
+/// `callValueOrBytecodeRoot`.
+pub fn callValueOrBytecodeRootPreRooted(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -357,7 +357,7 @@ pub fn callValueOrBytecodePreRooted(
 /// Bytecode-opcode call whose argument window is already rooted. Unlike the
 /// C-API/JS_Call-shaped helper above, OP_call and shadowed OP_eval pass
 /// flags=0 and may borrow argv when the actual arity already covers formals.
-pub fn callValueOrBytecodePreRootedInternal(
+pub fn callValueOrBytecodeRootPreRootedInternal(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -372,7 +372,7 @@ pub fn callValueOrBytecodePreRootedInternal(
 
 /// VM fast-call fallback after the opcode path has already performed the
 /// caller-Realm call-entry poll.
-pub fn callValueOrBytecodePreRootedAfterInterruptPoll(
+pub fn callValueOrBytecodeRootPreRootedAfterInterruptPoll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1535,7 +1535,7 @@ noinline fn callNativeCallableByName(
     return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
 }
 
-test "callValueOrBytecode roots inline args before bytecode frame allocation" {
+test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
@@ -1596,7 +1596,7 @@ test "callValueOrBytecode roots inline args before bytecode frame allocation" {
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    const result = try callValueOrBytecode(
+    const result = try callValueOrBytecodeRoot(
         ctx,
         null,
         global,
@@ -1818,7 +1818,7 @@ pub fn qjsFunctionCallCall(
     // outer native call keeps `this_value` and `args` rooted for this complete
     // synchronous invocation, so rebuilding the defensive eight-slot argument
     // copy/root frame here is redundant.
-    return callValueOrBytecodePreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
+    return callValueOrBytecodeRootPreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
 }
 
 /// Function.prototype.apply body. `argsFromArrayLike` is the shared
@@ -3333,7 +3333,7 @@ pub fn callAssertThrowsCallback(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, caller_function, caller_frame);
+    return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, caller_function, caller_frame);
 }
 
 pub fn qjsCollectIteratorValues(
@@ -3356,7 +3356,7 @@ pub fn qjsCollectIteratorValues(
 
     var index: u32 = 0;
     while (true) : (index += 1) {
-        const next = callValueOrBytecode(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
+        const next = callValueOrBytecodeRoot(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
             try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
@@ -3399,7 +3399,7 @@ pub fn qjsIteratorClose(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
     result.free(ctx.runtime);
 }
 
@@ -3435,7 +3435,7 @@ pub fn iteratorForValue(
     const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
     defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-    const iterator_value = try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
+    const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
     errdefer iterator_value.free(ctx.runtime);
     _ = property_ops.expectObject(iterator_value) catch return error.TypeError;
     try cacheIteratorNextMethod(ctx, output, global, iterator_value);
@@ -3483,7 +3483,7 @@ pub fn appendIteratorValues(
             _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
             return error.TypeError;
         }
-        break :blk try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, null, null);
+        break :blk try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
     };
     defer iterator_value.free(ctx.runtime);
     if (!iterator_value.isObject()) return error.TypeError;
@@ -3544,7 +3544,7 @@ pub fn appendSpreadValuesEnumerate(
     }
 
     // enumobj = src[@@iterator]()  (qjs GetIterator, quickjs.c:16843)
-    const iterator_value = try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, null, null);
+    const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
     defer iterator_value.free(rt);
     const iterator = property_ops.expectObject(iterator_value) catch return error.TypeError;
 
@@ -3619,7 +3619,7 @@ pub fn iteratorStepValue(
     };
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
-    var next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, null, null);
+    var next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, null, null);
     defer next_result_value.free(ctx.runtime);
     if (object_ops.objectFromValue(next_result_value)) |promise| {
         if (promise.class_id == core.class.ids.promise) {
@@ -3660,7 +3660,7 @@ pub fn iteratorStepResult(
     };
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
-    const next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{next_arg}, null, null);
+    const next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{next_arg}, null, null);
     errdefer next_result_value.free(ctx.runtime);
     const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
     const done_key = core.atom.predefinedId("done", .string).?;
@@ -6086,7 +6086,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     }
     if (!isCallableValue(return_method)) return error.TypeError;
 
-    const result_value = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{return_arg}, null, null);
+    const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{return_arg}, null, null);
     errdefer result_value.free(ctx.runtime);
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
@@ -6129,7 +6129,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
     }
     if (!isCallableValue(throw_method)) return error.TypeError;
 
-    const result_value = try callValueOrBytecode(ctx, output, global, iterator_value, throw_method, &.{thrown}, null, null);
+    const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, throw_method, &.{thrown}, null, null);
     errdefer result_value.free(ctx.runtime);
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
@@ -6163,7 +6163,7 @@ pub fn qjsGeneratorYieldStarCloseForMissingThrow(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
     defer result.free(ctx.runtime);
     _ = property_ops.expectObject(result) catch return error.TypeError;
 }
@@ -6575,7 +6575,7 @@ pub fn iteratorFromSourceForIteratorFrom(
     if (source.isString()) {
         const iterator_method = try getIteratorMethod(ctx, output, global, source);
         defer iterator_method.free(ctx.runtime);
-        const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         errdefer iterator.free(ctx.runtime);
         return .{ .iterator = iterator };
     }
@@ -6589,7 +6589,7 @@ pub fn iteratorFromSourceForIteratorFrom(
     defer iterator_method.free(ctx.runtime);
     if (!iterator_method.isUndefined() and !iterator_method.isNull()) {
         if (!isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         errdefer iterator.free(ctx.runtime);
         _ = object_ops.objectFromValue(iterator) orelse return error.TypeError;
         return .{ .iterator = iterator };
@@ -6719,7 +6719,7 @@ pub fn qjsIteratorWrapNext(
         break :blk method;
     };
     defer next_method.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
     _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
@@ -6746,7 +6746,7 @@ pub fn qjsIteratorWrapReturn(
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
     if (!isCallableValue(return_method)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
     _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
@@ -7085,7 +7085,7 @@ pub fn callBoundFunction(
     const bound_this = object.boundThis() orelse return error.TypeError;
     const combined = try boundFunctionArgs(ctx.runtime, object, args);
     defer freeArgs(ctx.runtime, combined);
-    return callValueOrBytecode(ctx, output, global, bound_this, target, combined, caller_function, caller_frame);
+    return callValueOrBytecodeRoot(ctx, output, global, bound_this, target, combined, caller_function, caller_frame);
 }
 
 pub fn boundFunctionArgs(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) ![]core.JSValue {
@@ -7497,7 +7497,7 @@ pub fn closeIteratorForFromEntriesAbrupt(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
-    const out = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    const out = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
     out.free(ctx.runtime);
 }
 
@@ -7667,7 +7667,7 @@ pub fn instanceofOp(
     const has_instance = try object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
     defer has_instance.free(ctx.runtime);
     if (!has_instance.isUndefined() and !has_instance.isNull()) {
-        const result = try callValueOrBytecode(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
+        const result = try callValueOrBytecodeRoot(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
         defer result.free(ctx.runtime);
         stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
         return;

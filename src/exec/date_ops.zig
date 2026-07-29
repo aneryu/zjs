@@ -241,7 +241,7 @@ pub fn qjsDateToJsonCall(
     const method = try object_ops.getValueProperty(ctx, output, global, this_value, key, caller_function, caller_frame);
     defer method.free(ctx.runtime);
     if (!call_runtime.isCallableValue(method)) return error.TypeError;
-    return try call_runtime.callValueOrBytecode(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
+    return try call_runtime.callValueOrBytecodeRoot(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
 
 pub fn qjsDateConstructWithPrototype(

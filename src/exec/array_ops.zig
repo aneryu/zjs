@@ -39,7 +39,7 @@ const atomicsBufferObject = object_ops.atomicsBufferObject;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
 const cacheIteratorNextMethod = call_runtime.cacheIteratorNextMethod;
 const callCollectionAdderFromVm = builtin_glue.callCollectionAdderFromVm;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
@@ -362,7 +362,7 @@ pub fn aggregateErrorsIterableToArray(
     iterator_method = try getIteratorMethod(ctx, output, global, rooted_iterable);
     if (iterator_method.isUndefined() or iterator_method.isNull() or !isCallableValue(iterator_method)) return error.TypeError;
 
-    iterator_value = try callValueOrBytecode(ctx, output, global, rooted_iterable, iterator_method, &.{}, caller_function, caller_frame);
+    iterator_value = try callValueOrBytecodeRoot(ctx, output, global, rooted_iterable, iterator_method, &.{}, caller_function, caller_frame);
     const iterator = objectFromValue(iterator_value) orelse return error.TypeError;
 
     const next_key = try ctx.runtime.internAtom("next");
@@ -384,7 +384,7 @@ pub fn aggregateErrorsIterableToArray(
         item.free(ctx.runtime);
         item = core.JSValue.undefinedValue();
 
-        next_result_value = try callValueOrBytecode(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame);
+        next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame);
         const next_result = objectFromValue(next_result_value) orelse return error.TypeError;
         done = try getValueProperty(ctx, output, global, next_result.value(), done_key, caller_function, caller_frame);
         if (valueTruthy(done)) break;
@@ -890,7 +890,7 @@ pub fn qjsTypedArrayConstructFromIterable(
     defer done.free(ctx.runtime);
     defer item.free(ctx.runtime);
 
-    iterator = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, caller_function, caller_frame);
+    iterator = try callValueOrBytecodeRoot(ctx, output, global, args[0], iterator_method, &.{}, caller_function, caller_frame);
 
     const values = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
     values_value = values.value();
@@ -906,7 +906,7 @@ pub fn qjsTypedArrayConstructFromIterable(
     while (true) : (index += 1) {
         next.free(ctx.runtime);
         next = core.JSValue.undefinedValue();
-        next = callValueOrBytecode(ctx, output, global, iterator_object.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
+        next = callValueOrBytecodeRoot(ctx, output, global, iterator_object.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
             try qjsIteratorClose(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
             return err;
         };
@@ -3871,7 +3871,7 @@ pub fn qjsArrayFromCall(
     defer iterator_method.free(ctx.runtime);
     if (!iterator_method.isUndefined() and !iterator_method.isNull()) {
         if (!isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         defer iterator.free(ctx.runtime);
         return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
     }
@@ -4093,7 +4093,7 @@ fn fromAsyncStart(
         // then nextMethod = Get(iterator, "next"). The sync branch wraps the
         // sync iterator CreateAsyncFromSyncIterator-style so each value is
         // awaited/unwrapped by the shared machinery.
-        const iterator = try callValueOrBytecode(ctx, output, global, items, method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, items, method, &.{}, caller_function, caller_frame);
         {
             var iterator_owned = true;
             defer if (iterator_owned) iterator.free(rt);
@@ -4280,7 +4280,7 @@ fn fromAsyncResume(
                 const this_arg = fromAsyncStateGet(rt, state, "this_arg");
                 defer this_arg.free(rt);
                 const k = fromAsyncStateNumber(rt, state, "k");
-                const mapped = try callValueOrBytecode(ctx, output, global, this_arg, mapfn, &.{ settled, core.JSValue.number(k) }, caller_function, caller_frame);
+                const mapped = try callValueOrBytecodeRoot(ctx, output, global, this_arg, mapfn, &.{ settled, core.JSValue.number(k) }, caller_function, caller_frame);
                 defer mapped.free(rt);
                 try fromAsyncAwait(ctx, output, global, state, mapped, from_async_phase_array_mapped);
                 return;
@@ -4344,7 +4344,7 @@ fn fromAsyncOnNextResult(
         const this_arg = fromAsyncStateGet(rt, state, "this_arg");
         defer this_arg.free(rt);
         const k = fromAsyncStateNumber(rt, state, "k");
-        const mapped = callValueOrBytecode(ctx, output, global, this_arg, mapfn, &.{ next_value, core.JSValue.number(k) }, caller_function, caller_frame) catch |err| {
+        const mapped = callValueOrBytecodeRoot(ctx, output, global, this_arg, mapfn, &.{ next_value, core.JSValue.number(k) }, caller_function, caller_frame) catch |err| {
             return fromAsyncCloseWithError(ctx, output, global, state, err, caller_function, caller_frame);
         };
         defer mapped.free(rt);
@@ -4396,7 +4396,7 @@ fn fromAsyncIterStep(
     defer iterator.free(rt);
     const next_method = fromAsyncStateGet(rt, state, "next");
     defer next_method.free(rt);
-    const next_result = try callValueOrBytecode(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
+    const next_result = try callValueOrBytecodeRoot(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
     defer next_result.free(rt);
     try fromAsyncAwait(ctx, output, global, state, next_result, from_async_phase_iter_next);
 }
@@ -4522,7 +4522,7 @@ fn fromAsyncCloseWithValue(
     if (return_method.isUndefined() or return_method.isNull() or !isCallableValue(return_method)) {
         return fromAsyncReject(ctx, output, global, state, reason, caller_function, caller_frame);
     }
-    const inner = callValueOrBytecode(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame) catch {
+    const inner = callValueOrBytecodeRoot(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame) catch {
         if (ctx.hasException()) ctx.clearException();
         return fromAsyncReject(ctx, output, global, state, reason, caller_function, caller_frame);
     };
@@ -4553,7 +4553,7 @@ pub fn qjsTypedArrayFromStaticCall(
     defer iterator_method.free(ctx.runtime);
     if (!iterator_method.isUndefined() and !iterator_method.isNull()) {
         if (!isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         defer iterator.free(ctx.runtime);
         return try qjsTypedArrayFromIteratorValue(ctx, output, global, constructor_value, iterator, map_fn, this_arg, caller_function, caller_frame);
     }
@@ -4738,7 +4738,7 @@ pub fn qjsArrayFromIteratorLike(
 
     var index: u32 = 0;
     while (true) : (index += 1) {
-        const next = callValueOrBytecode(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
+        const next = callValueOrBytecodeRoot(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
             try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
@@ -6429,7 +6429,7 @@ pub fn iteratorFlattenableForIteratorFrom(
     defer iterator_method.free(ctx.runtime);
     if (!iterator_method.isUndefined() and !iterator_method.isNull()) {
         if (!isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         errdefer iterator.free(ctx.runtime);
         _ = objectFromValue(iterator) orelse return error.TypeError;
         try cacheIteratorNextMethod(ctx, output, global, iterator);

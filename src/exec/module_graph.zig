@@ -267,7 +267,7 @@ fn settleModuleEvaluationWaiters(
         const waiter = waiters.items[index];
         const callback = if (rejected) waiter.reject else waiter.resolve;
         const payload = if (rejected) reason orelse core.JSValue.undefinedValue() else namespace;
-        const result = try exec.call_runtime.callValueOrBytecode(
+        const result = try exec.call_runtime.callValueOrBytecodeRoot(
             context,
             output,
             global,
@@ -697,13 +697,13 @@ fn dynamicImportJobRun(
                 return core.JSValue.undefinedValue();
             }
         }
-        const settle = try exec.call_runtime.callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{namespace}, null, null);
+        const settle = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{namespace}, null, null);
         settle.free(rt);
     } else |err| {
         if (err == error.OutOfMemory or err == error.ProcessExit or err == error.StackOverflow) return err;
         const reason = try dynamicImportRejectionValue(ctx, global, err, specifier_bytes.items);
         defer reason.free(rt);
-        const settle = try exec.call_runtime.callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, null, null);
+        const settle = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, null, null);
         settle.free(rt);
     }
     return core.JSValue.undefinedValue();

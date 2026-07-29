@@ -61,7 +61,7 @@ const atomicsWaiterIo = call_runtime.atomicsWaiterIo;
 const atomicsWaiterKey = call_runtime.atomicsWaiterKey;
 const boundFunctionArgs = call_runtime.boundFunctionArgs;
 const cachedRealmObject = object_ops.cachedRealmObject;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
 const closeIteratorFromVm = forof_ops.closeIteratorFromVm;
 const closeIteratorFromVmImpl = forof_ops.closeIteratorFromVmImpl;
@@ -427,7 +427,7 @@ pub fn qjsPromiseResolveCapability(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{value}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{value}, caller_function, caller_frame);
     result.free(ctx.runtime);
 }
 
@@ -572,9 +572,9 @@ pub fn qjsAsyncDisposeResource(
 ) !core.JSValue {
     if (resource.method.isUndefined()) return core.JSValue.undefinedValue();
     const result = switch (resource.kind) {
-        .use => try callValueOrBytecode(ctx, output, global, resource.value, resource.method, &.{}, caller_function, caller_frame),
-        .adopt => try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{resource.value}, caller_function, caller_frame),
-        .defer_ => try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{}, caller_function, caller_frame),
+        .use => try callValueOrBytecodeRoot(ctx, output, global, resource.value, resource.method, &.{}, caller_function, caller_frame),
+        .adopt => try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{resource.value}, caller_function, caller_frame),
+        .defer_ => try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{}, caller_function, caller_frame),
     };
     if (resource.method_kind == .async_from_sync) {
         result.free(ctx.runtime);
@@ -705,7 +705,7 @@ pub fn qjsPromiseConstructWithPrototype(
         // (qjs js_promise_constructor: JS_Call(resolving_funcs[1], ...)), which
         // honors the [[AlreadyResolved]] once-guard, instead of settling the
         // promise directly (which would override a prior resolve()).
-        const rejected = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject, &.{reason.value}, caller_function, caller_frame);
+        const rejected = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject, &.{reason.value}, caller_function, caller_frame);
         rejected.free(ctx.runtime);
         reason.commit(ctx);
         return promise;
@@ -1951,7 +1951,7 @@ pub fn qjsPromiseThenableJobCall(
 
     invoke: {
         if (payload.phase == .invoke) {
-            const then_result = callValueOrBytecode(
+            const then_result = callValueOrBytecodeRoot(
                 ctx,
                 output,
                 global,
@@ -1976,7 +1976,7 @@ pub fn qjsPromiseThenableJobCall(
     }
 
     std.debug.assert(payload.phase == .reject);
-    const reject_result = try callValueOrBytecode(
+    const reject_result = try callValueOrBytecodeRoot(
         ctx,
         output,
         global,
@@ -2032,7 +2032,7 @@ pub fn qjsPromiseReactionJobCall(
                 break :invoke;
             }
 
-            const callback_result = callValueOrBytecode(
+            const callback_result = callValueOrBytecodeRoot(
                 ctx,
                 output,
                 global,
@@ -2066,7 +2066,7 @@ pub fn qjsPromiseReactionJobCall(
     // 'await' implementation of async functions" — an undefined resolving
     // function is skipped and the value dropped.
     if (settle.isUndefined()) return core.JSValue.undefinedValue();
-    const settle_result = callValueOrBytecode(
+    const settle_result = callValueOrBytecodeRoot(
         ctx,
         output,
         global,
@@ -2206,7 +2206,7 @@ pub fn qjsPromiseCombinatorElementCall(
     const reject_value = state.promiseCombinatorReject() orelse return error.TypeError;
     switch (mode) {
         .all_resolve, .all_settled_fulfill, .all_settled_reject => {
-            const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{values_value}, caller_function, caller_frame) catch |err| {
+            const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{values_value}, caller_function, caller_frame) catch |err| {
                 const reason = try qjsPromiseErrorValue(ctx, global, err);
                 defer reason.free(ctx.runtime);
                 try qjsPromiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
@@ -2219,7 +2219,7 @@ pub fn qjsPromiseCombinatorElementCall(
             const keys = objectFromValue(keys_value) orelse return error.TypeError;
             const keyed_result = try qjsPromiseKeyedResult(ctx.runtime, keys, values);
             defer keyed_result.free(ctx.runtime);
-            const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{keyed_result}, caller_function, caller_frame) catch |err| {
+            const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{keyed_result}, caller_function, caller_frame) catch |err| {
                 const reason = try qjsPromiseErrorValue(ctx, global, err);
                 defer reason.free(ctx.runtime);
                 try qjsPromiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
@@ -2230,7 +2230,7 @@ pub fn qjsPromiseCombinatorElementCall(
         .any_reject => {
             const aggregate_error = try qjsPromiseAggregateError(ctx, global, values);
             defer aggregate_error.free(ctx.runtime);
-            const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{aggregate_error}, caller_function, caller_frame);
+            const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{aggregate_error}, caller_function, caller_frame);
             result.free(ctx.runtime);
         },
     }
@@ -2553,7 +2553,7 @@ pub fn qjsPromiseRejectCapability(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
     result.free(ctx.runtime);
 }
 
@@ -2699,7 +2699,7 @@ pub fn qjsPromiseCombinatorCall(
         try qjsPromiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
         return capability.releaseCallbacks(ctx.runtime);
     }
-    const iterator_value = callValueOrBytecode(ctx, output, global, iterable, iterator_method, &.{}, caller_function, caller_frame) catch |err| {
+    const iterator_value = callValueOrBytecodeRoot(ctx, output, global, iterable, iterator_method, &.{}, caller_function, caller_frame) catch |err| {
         const reason = try qjsPromiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
         try qjsPromiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2744,7 +2744,7 @@ pub fn qjsPromiseCombinatorCall(
     var iterator_done = false;
     var index: u32 = 0;
     while (true) {
-        const next_result_value = callValueOrBytecode(ctx, output, global, iterator_value, iterator_next, &.{}, caller_function, caller_frame) catch |err| {
+        const next_result_value = callValueOrBytecodeRoot(ctx, output, global, iterator_value, iterator_next, &.{}, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             const reason = try qjsPromiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
@@ -2784,7 +2784,7 @@ pub fn qjsPromiseCombinatorCall(
             (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
         }
 
-        const next_promise = callValueOrBytecode(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
+        const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             const reason = try qjsPromiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
@@ -2832,7 +2832,7 @@ pub fn qjsPromiseCombinatorCall(
         };
         defer on_rejected.free(ctx.runtime);
 
-        const then_result = callValueOrBytecode(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
+        const then_result = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             const reason = try qjsPromiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
@@ -2850,7 +2850,7 @@ pub fn qjsPromiseCombinatorCall(
         if (next_remaining == 0) {
             switch (mode) {
                 .all, .all_settled => {
-                    const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{values.?.value()}, caller_function, caller_frame) catch |err| {
+                    const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{values.?.value()}, caller_function, caller_frame) catch |err| {
                         const reason = try qjsPromiseErrorValue(ctx, global, err);
                         defer reason.free(ctx.runtime);
                         try qjsPromiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2861,7 +2861,7 @@ pub fn qjsPromiseCombinatorCall(
                 .any => {
                     const aggregate_error = try qjsPromiseAggregateError(ctx, global, values.?);
                     defer aggregate_error.free(ctx.runtime);
-                    const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{aggregate_error}, caller_function, caller_frame);
+                    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{aggregate_error}, caller_function, caller_frame);
                     result.free(ctx.runtime);
                 },
                 .race => {},
@@ -2961,7 +2961,7 @@ pub fn qjsPromiseKeyedCombinatorCall(
         try qjsPromiseSetArrayIndex(ctx.runtime, values, index, core.JSValue.undefinedValue());
         (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
 
-        const next_promise = callValueOrBytecode(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
+        const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
             const reason = try qjsPromiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try qjsPromiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -2996,7 +2996,7 @@ pub fn qjsPromiseKeyedCombinatorCall(
             capability.reject.dup();
         defer on_rejected.free(ctx.runtime);
 
-        const then_result = callValueOrBytecode(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
+        const then_result = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
             const reason = try qjsPromiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try qjsPromiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -3012,7 +3012,7 @@ pub fn qjsPromiseKeyedCombinatorCall(
     if (next_remaining == 0) {
         const keyed_result = try qjsPromiseKeyedResult(ctx.runtime, keys, values);
         defer keyed_result.free(ctx.runtime);
-        const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{keyed_result}, caller_function, caller_frame) catch |err| {
+        const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{keyed_result}, caller_function, caller_frame) catch |err| {
             const reason = try qjsPromiseErrorValue(ctx, global, err);
             defer reason.free(ctx.runtime);
             try qjsPromiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
@@ -3053,7 +3053,7 @@ pub fn qjsPromiseResolveStaticCall(
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
     var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
     errdefer capability.deinit(ctx.runtime);
-    const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
+    const resolve_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
     resolve_result.free(ctx.runtime);
     return capability.releaseCallbacks(ctx.runtime);
 }
@@ -3088,7 +3088,7 @@ pub fn qjsPromiseStaticCall(
             const reason = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
             errdefer capability.deinit(ctx.runtime);
-            const reject_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
+            const reject_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
             reject_result.free(ctx.runtime);
             return capability.releaseCallbacks(ctx.runtime);
         },
@@ -3097,15 +3097,15 @@ pub fn qjsPromiseStaticCall(
             const callback_args = if (args.len >= 1) args[1..] else args[0..0];
             var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
             errdefer capability.deinit(ctx.runtime);
-            const callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback, callback_args, caller_function, caller_frame) catch |err| {
+            const callback_result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback, callback_args, caller_function, caller_frame) catch |err| {
                 const reason = try qjsPromiseErrorValue(ctx, global, err);
                 defer reason.free(ctx.runtime);
-                const reject_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
+                const reject_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
                 reject_result.free(ctx.runtime);
                 return capability.releaseCallbacks(ctx.runtime);
             };
             defer callback_result.free(ctx.runtime);
-            const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{callback_result}, caller_function, caller_frame);
+            const resolve_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{callback_result}, caller_function, caller_frame);
             resolve_result.free(ctx.runtime);
             return capability.releaseCallbacks(ctx.runtime);
         },
@@ -3655,7 +3655,7 @@ pub fn qjsAsyncFunctionSettle(
     defer resolving.resolve.free(ctx.runtime);
     defer resolving.reject.free(ctx.runtime);
     const settle = if (rejected) resolving.reject else resolving.resolve;
-    const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{rooted_value}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{rooted_value}, caller_function, caller_frame);
     result.free(ctx.runtime);
 }
 
@@ -3737,7 +3737,7 @@ pub fn qjsAsyncIteratorAsyncDispose(
         return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
     }
 
-    const result = callValueOrBytecode(ctx, output, global, receiver, return_method, &.{core.JSValue.undefinedValue()}, caller_function, caller_frame) catch |err| {
+    const result = callValueOrBytecodeRoot(ctx, output, global, receiver, return_method, &.{core.JSValue.undefinedValue()}, caller_function, caller_frame) catch |err| {
         return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
     defer result.free(ctx.runtime);
@@ -3819,9 +3819,9 @@ pub fn qjsAsyncFromSyncIteratorThrow(
         return core.promise.rejectedWithPrototype(ctx, reason, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     const result = if (args.len > 0)
-        callValueOrBytecode(ctx, output, global, sync_iterator, throw_method, args[0..1], caller_function, caller_frame)
+        callValueOrBytecodeRoot(ctx, output, global, sync_iterator, throw_method, args[0..1], caller_function, caller_frame)
     else
-        callValueOrBytecode(ctx, output, global, sync_iterator, throw_method, &.{}, caller_function, caller_frame);
+        callValueOrBytecodeRoot(ctx, output, global, sync_iterator, throw_method, &.{}, caller_function, caller_frame);
     const throw_result = result catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
@@ -3885,9 +3885,9 @@ pub fn qjsAsyncFromSyncIteratorNext(
     };
     defer next_method.free(ctx.runtime);
     const result = if (args.len > 0)
-        callValueOrBytecode(ctx, output, global, sync_iterator, next_method, args[0..1], caller_function, caller_frame)
+        callValueOrBytecodeRoot(ctx, output, global, sync_iterator, next_method, args[0..1], caller_function, caller_frame)
     else
-        callValueOrBytecode(ctx, output, global, sync_iterator, next_method, &.{}, caller_function, caller_frame);
+        callValueOrBytecodeRoot(ctx, output, global, sync_iterator, next_method, &.{}, caller_function, caller_frame);
     const next_result = result catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
@@ -3918,9 +3918,9 @@ pub fn qjsAsyncFromSyncIteratorReturn(
     }
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = if (args.len > 0)
-        callValueOrBytecode(ctx, output, global, sync_iterator, return_method, args[0..1], caller_function, caller_frame)
+        callValueOrBytecodeRoot(ctx, output, global, sync_iterator, return_method, args[0..1], caller_function, caller_frame)
     else
-        callValueOrBytecode(ctx, output, global, sync_iterator, return_method, &.{}, caller_function, caller_frame);
+        callValueOrBytecodeRoot(ctx, output, global, sync_iterator, return_method, &.{}, caller_function, caller_frame);
     const return_result = result catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
@@ -4141,7 +4141,7 @@ pub fn qjsPromiseFinallyCallbackCall(
             const on_finally = function_object.functionPromiseFinallyCallback() orelse return error.TypeError;
             const constructor_value = function_object.functionPromiseFinallyConstructor() orelse return error.TypeError;
 
-            const callback_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), on_finally, &.{}, caller_function, caller_frame);
+            const callback_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), on_finally, &.{}, caller_function, caller_frame);
             defer callback_result.free(ctx.runtime);
             const resolved = try qjsPromiseStaticCall(ctx, output, global, constructor_value, &.{callback_result}, .resolve, caller_function, caller_frame);
             defer resolved.free(ctx.runtime);
@@ -4161,7 +4161,7 @@ pub fn qjsPromiseFinallyCallbackCall(
             const then_value = try getValueProperty(ctx, output, global, resolved, then_key, caller_function, caller_frame);
             defer then_value.free(ctx.runtime);
             if (!isCallableValue(then_value)) return error.TypeError;
-            return try callValueOrBytecode(ctx, output, global, resolved, then_value, &.{continuation}, caller_function, caller_frame);
+            return try callValueOrBytecodeRoot(ctx, output, global, resolved, then_value, &.{continuation}, caller_function, caller_frame);
         },
     }
 }
@@ -4195,7 +4195,7 @@ pub fn qjsPromiseFinally(
     const then_value = try getValueProperty(ctx, output, global, receiver, then_atom, caller_function, caller_frame);
     defer then_value.free(ctx.runtime);
     if (!isCallableValue(then_value)) return error.TypeError;
-    return callValueOrBytecode(ctx, output, global, receiver, then_value, &.{ then_fulfilled, then_rejected }, caller_function, caller_frame);
+    return callValueOrBytecodeRoot(ctx, output, global, receiver, then_value, &.{ then_fulfilled, then_rejected }, caller_function, caller_frame);
 }
 
 pub fn qjsAtomicsWaitAsyncPromise(rt: *core.JSRuntime, promise: *core.Object) bool {
@@ -4407,7 +4407,7 @@ pub fn qjsPromiseCatchGeneric(
     if (!isCallableValue(then_value)) return error.TypeError;
     const on_rejected = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const catch_args = [_]core.JSValue{ core.JSValue.undefinedValue(), on_rejected };
-    return callValueOrBytecode(ctx, output, global, receiver, then_value, &catch_args, null, null);
+    return callValueOrBytecodeRoot(ctx, output, global, receiver, then_value, &catch_args, null, null);
 }
 
 pub fn settlePendingPromiseReaction(
@@ -4436,7 +4436,7 @@ pub fn settlePendingPromiseReaction(
     try promise.setPromiseReactionArg(ctx.runtime, null);
 
     const callback_args = [_]core.JSValue{arg};
-    const callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback_value, &callback_args, null, null) catch |err| {
+    const callback_result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback_value, &callback_args, null, null) catch |err| {
         const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
         defer rejected.free(ctx.runtime);
         const rejected_object = objectFromValue(rejected) orelse return error.TypeError;
@@ -4611,13 +4611,13 @@ pub fn drainOnePendingJob(
                         return err;
                     };
                 } else if (isCallableValue(job)) {
-                    result = callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
+                    result = callValueOrBytecodeRoot(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
                         if (job_ctx.hasException()) return .exception;
                         return err;
                     };
                 }
             } else if (isCallableValue(job)) {
-                result = callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
+                result = callValueOrBytecodeRoot(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
                     if (job_ctx.hasException()) return .exception;
                     return err;
                 };
@@ -4703,7 +4703,7 @@ pub fn drainOnePendingJob(
             std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
         },
         .finalization => |*payload| {
-            result = callValueOrBytecode(job_ctx, output, job_global, core.JSValue.undefinedValue(), payload.callback, &.{payload.held_value}, null, null) catch |err| {
+            result = callValueOrBytecodeRoot(job_ctx, output, job_global, core.JSValue.undefinedValue(), payload.callback, &.{payload.held_value}, null, null) catch |err| {
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
@@ -4751,7 +4751,7 @@ pub fn awaitThenableValue(
     const reject = resolving.reject;
     defer reject.free(ctx.runtime);
 
-    const then_result = callValueOrBytecode(ctx, output, global, awaited, then_value, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
+    const then_result = callValueOrBytecodeRoot(ctx, output, global, awaited, then_value, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
         var reason = try promiseRejectionReason(ctx, global, err);
         defer reason.deinit(ctx.runtime);
         try promise_object.setPromiseResult(ctx.runtime, reason.value);

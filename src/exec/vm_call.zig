@@ -667,7 +667,7 @@ pub noinline fn callMethod(
     const result = if (maybe_array_result) |array_result|
         array_result
     else
-        call_runtime.callValueOrBytecodePreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodeRootPreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
             call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
@@ -757,7 +757,7 @@ pub noinline fn tailCallMethod(
     const result = if (maybe_array_result) |array_result|
         array_result
     else
-        call_runtime.callValueOrBytecodePreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodeRootPreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
             call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
             return err;
@@ -959,7 +959,7 @@ pub noinline fn apply(
         return .inline_call;
     }
 
-    const result = call_runtime.callValueOrBytecodePreRooted(ctx, output, global, this_value, func, apply_args, function, frame) catch |err| {
+    const result = call_runtime.callValueOrBytecodeRootPreRooted(ctx, output, global, this_value, func, apply_args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;

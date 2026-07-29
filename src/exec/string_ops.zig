@@ -48,7 +48,7 @@ const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
 const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
 const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
 const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
@@ -1362,7 +1362,7 @@ pub fn qjsStringMatchAll(
                 return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
         }
         if (!matcher.isUndefined() and !matcher.isNull()) {
-            return callValueOrBytecode(ctx, output, global, regexp, matcher, &.{string_value}, caller_function, caller_frame);
+            return callValueOrBytecodeRoot(ctx, output, global, regexp, matcher, &.{string_value}, caller_function, caller_frame);
         }
     }
 
@@ -1374,7 +1374,7 @@ pub fn qjsStringMatchAll(
     const match_all = try getValueProperty(ctx, output, global, matcher, match_all_atom, caller_function, caller_frame);
     defer match_all.free(ctx.runtime);
     if (match_all.isUndefined() or match_all.isNull()) return error.TypeError;
-    return callValueOrBytecode(ctx, output, global, matcher, match_all, &.{string_value}, caller_function, caller_frame);
+    return callValueOrBytecodeRoot(ctx, output, global, matcher, match_all, &.{string_value}, caller_function, caller_frame);
 }
 
 pub fn qjsRegExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
@@ -2800,7 +2800,7 @@ pub fn callStringWellKnownMethod(
     if (method.isUndefined() or method.isNull()) return null;
     if (!isCallableValue(method)) return error.TypeError;
     const method_args = [_]core.JSValue{this_value};
-    return try callValueOrBytecode(ctx, output, global, candidate, method, &method_args, caller_function, caller_frame);
+    return try callValueOrBytecodeRoot(ctx, output, global, candidate, method, &method_args, caller_function, caller_frame);
 }
 
 pub fn qjsStringSplit(
@@ -2823,7 +2823,7 @@ pub fn qjsStringSplit(
             if (!isCallableValue(splitter)) return error.TypeError;
             const split_limit = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             const split_args = [_]core.JSValue{ this_value, split_limit };
-            return callValueOrBytecode(ctx, output, global, separator, splitter, &split_args, caller_function, caller_frame);
+            return callValueOrBytecodeRoot(ctx, output, global, separator, splitter, &split_args, caller_function, caller_frame);
         }
     }
 
@@ -4422,7 +4422,7 @@ pub fn qjsArrayToStringCall(
     const join_value = try getValueProperty(ctx, output, global, object_value, join_atom, caller_function, caller_frame);
     defer join_value.free(ctx.runtime);
     if (isCallableValue(join_value)) {
-        return try callValueOrBytecode(ctx, output, global, object_value, join_value, &.{}, caller_function, caller_frame);
+        return try callValueOrBytecodeRoot(ctx, output, global, object_value, join_value, &.{}, caller_function, caller_frame);
     }
     return try qjsObjectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
 }
@@ -4473,7 +4473,7 @@ pub fn qjsArrayToLocaleStringCall(
         if (!item.isUndefined() and !item.isNull()) {
             const method = try getValueProperty(ctx, output, global, item, to_locale_key, caller_function, caller_frame);
             defer method.free(ctx.runtime);
-            const locale_value = try callValueOrBytecode(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
+            const locale_value = try callValueOrBytecodeRoot(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
             defer locale_value.free(ctx.runtime);
             const locale_string = try toStringForAnnexB(ctx, output, global, locale_value, caller_function, caller_frame);
             defer locale_string.free(ctx.runtime);
@@ -4495,7 +4495,7 @@ pub fn qjsObjectToLocaleStringCall(
     defer ctx.runtime.atoms.free(to_string_key);
     const method = try getValueProperty(ctx, output, global, this_value, to_string_key, caller_function, caller_frame);
     defer method.free(ctx.runtime);
-    return try callValueOrBytecode(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
+    return try callValueOrBytecodeRoot(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
 
 pub fn qjsObjectToStringCall(

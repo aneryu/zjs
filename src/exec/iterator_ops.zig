@@ -43,7 +43,7 @@ pub fn forOfStart(
         defer async_method.free(ctx.runtime);
         if (!async_method.isUndefined() and !async_method.isNull()) {
             if (!call_runtime.isCallableValue(async_method)) return error.TypeError;
-            const iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, async_method, &.{}, function, frame);
+            const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterable, async_method, &.{}, function, frame);
             errdefer iterator_value.free(ctx.runtime);
             _ = try property_ops.expectObject(iterator_value);
             const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty);
@@ -60,7 +60,7 @@ pub fn forOfStart(
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
         return error.TypeError;
     }
-    const iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
+    const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
     var owns_iterator_value = true;
     errdefer if (owns_iterator_value) iterator_value.free(ctx.runtime);
     _ = try property_ops.expectObject(iterator_value);
@@ -349,7 +349,7 @@ pub fn iteratorNext(
     const arg_value = stack.values[stack.len() - 1].dup();
     defer arg_value.free(ctx.runtime);
 
-    const result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{arg_value}, function, frame);
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{arg_value}, function, frame);
     const old_arg = stack.pop() catch |err| {
         result.free(ctx.runtime);
         return err;
@@ -418,7 +418,7 @@ pub fn forAwaitOfNext(
     stack.values[marker_index] = core.JSValue.undefinedValue();
     marker.free(ctx.runtime);
 
-    const result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, function, frame);
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, function, frame);
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
 }
@@ -516,9 +516,9 @@ pub fn iteratorCall(
     }
 
     const result = if ((flags & 2) != 0)
-        try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, method, &.{}, function, frame)
+        try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, method, &.{}, function, frame)
     else
-        try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, method, &.{arg_value}, function, frame);
+        try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, method, &.{arg_value}, function, frame);
 
     errdefer result.free(ctx.runtime);
     try stack.reserveAdditional(1);
@@ -2614,7 +2614,7 @@ fn iteratorStepWithNext(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
-    const next_result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
+    const next_result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
     defer next_result.free(ctx.runtime);
     const next_object = objectFromValue(next_result) orelse return error.TypeError;
     const done = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);

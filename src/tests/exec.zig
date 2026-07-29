@@ -233,7 +233,7 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
 
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -263,7 +263,7 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
     js.runtime.setInterruptHandler(null, null);
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -330,7 +330,7 @@ test "uncatchable interrupt skips outer inline for-of close and catch" {
 
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -484,7 +484,7 @@ test "synchronous native reentry crosses Entry chunk boundaries exactly" {
         const baseline_arena_mark = js.runtime.vm_stack.mark();
         inline_calls.resetMachineTestMetrics();
 
-        const result = try engine.exec.call_runtime.callValueOrBytecode(
+        const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -564,7 +564,7 @@ test "synchronous native fence restores every budget after interrupt" {
     inline_calls.resetMachineTestMetrics();
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -628,7 +628,7 @@ test "Function and Reflect apply opt into the active Machine explicitly" {
     defer outer.free(js.runtime);
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -675,7 +675,7 @@ test "synchronous apply fallbacks restore the outer active invocation" {
     defer outer.free(js.runtime);
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -735,7 +735,7 @@ test "ordinary spread calls enter eligible bytecode targets on the current Machi
     defer outer.free(js.runtime);
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -830,7 +830,7 @@ test "constructor spread preserves new target on the current Machine" {
     defer ordinary_outer.free(js.runtime);
 
     inline_calls.resetMachineTestMetrics();
-    const ordinary_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const ordinary_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -850,7 +850,7 @@ test "constructor spread preserves new target on the current Machine" {
     defer derived_outer.free(js.runtime);
 
     inline_calls.resetMachineTestMetrics();
-    const derived_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const derived_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -874,7 +874,7 @@ test "constructor spread preserves new target on the current Machine" {
     defer foreign_outer.free(js.runtime);
 
     inline_calls.resetMachineTestMetrics();
-    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -989,7 +989,7 @@ test "Array and TypedArray synchronous callback cohort stays on one Machine" {
     defer outer.free(js.runtime);
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1148,7 +1148,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1181,7 +1181,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     js.context.interrupt_counter = 4;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -1203,7 +1203,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     interrupt_exception.free(js.runtime);
 
     js.runtime.setInterruptHandler(null, null);
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1476,7 +1476,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1505,7 +1505,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     const foreign = try global.getProperty(foreign_key);
     defer foreign.free(js.runtime);
     inline_calls.resetMachineTestMetrics();
-    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1534,7 +1534,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     js.context.interrupt_counter = 3;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -1556,7 +1556,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     interrupt_exception.free(js.runtime);
 
     js.runtime.setInterruptHandler(null, null);
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1687,7 +1687,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1716,7 +1716,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     const foreign = try global.getProperty(foreign_key);
     defer foreign.free(js.runtime);
     inline_calls.resetMachineTestMetrics();
-    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1743,7 +1743,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     js.context.interrupt_counter = 4;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -1765,7 +1765,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     interrupt_exception.free(js.runtime);
 
     js.runtime.setInterruptHandler(null, null);
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1954,7 +1954,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -1983,7 +1983,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     const foreign = try global.getProperty(foreign_key);
     defer foreign.free(js.runtime);
     inline_calls.resetMachineTestMetrics();
-    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2010,7 +2010,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     js.context.interrupt_counter = 4;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -2032,7 +2032,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     interrupt_exception.free(js.runtime);
 
     js.runtime.setInterruptHandler(null, null);
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2191,7 +2191,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2238,7 +2238,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     const foreign = try global.getProperty(foreign_key);
     defer foreign.free(js.runtime);
     inline_calls.resetMachineTestMetrics();
-    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2264,7 +2264,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
     js.context.interrupt_counter = 4;
     inline_calls.resetMachineTestMetrics();
-    const interrupted_executor_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const interrupted_executor_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2296,7 +2296,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     defer interrupt_reason.free(js.runtime);
     try helpers.expectStringValueBytes(interrupt_reason, "InternalError:interrupted");
 
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2371,7 +2371,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
 
     // The host-to-outer entry leaves one poll; the nested/tail call consumes it.
     js.context.interrupt_counter = 2;
-    const nested_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const nested_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2389,7 +2389,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // A numeric condition takes the generic branch handler. It must not also
     // pay the boolean/plain-object hot-handler poll.
     js.context.interrupt_counter = 2;
-    const branch_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const branch_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2423,7 +2423,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // The same-Machine Function.prototype.call fast path fuses an outer native
     // call and an inner target call, but both entries still consume the budget.
     js.context.interrupt_counter = 3;
-    const forwarded_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const forwarded_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2443,7 +2443,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // its Promise. async_func_init only prepares the resident frame; charging
     // it as a fourth entry would fire this counter.
     js.context.interrupt_counter = 4;
-    const async_promise = try engine.exec.call_runtime.callValueOrBytecode(
+    const async_promise = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2460,7 +2460,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // Generator.next has one native call entry and one bytecode-resume entry.
     // The second next creates another Machine but continues the same counter.
     js.context.interrupt_counter = 3;
-    const first = try engine.exec.call_runtime.callValueOrBytecode(
+    const first = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2474,7 +2474,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     try std.testing.expectEqual(@as(usize, 4), state.hits);
     try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
 
-    const second = try engine.exec.call_runtime.callValueOrBytecode(
+    const second = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2525,7 +2525,7 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     js.context.interrupt_counter = 2;
     child.interrupt_counter = 100;
 
-    const promise_value = try engine.exec.call_runtime.callValueOrBytecode(
+    const promise_value = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         parent_global,
@@ -2621,7 +2621,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     child.interrupt_counter = 100;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -2650,7 +2650,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     child.interrupt_counter = 1;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -2681,7 +2681,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     defer js.runtime.setNativeStackSize(0);
     try std.testing.expectError(
         error.StackOverflow,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -2707,7 +2707,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     child.interrupt_counter = 100;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -2877,7 +2877,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     const driver = try global.getProperty(driver_key);
     defer driver.free(js.runtime);
 
-    const warm = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2905,7 +2905,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     // Keeping the forwarder live until setup commits lets ordinary unwind pop
     // that faulting frame and deliver the error to the driver's catch.
     arm.exhaust = true;
-    const caught = try engine.exec.call_runtime.callValueOrBytecode(
+    const caught = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2935,7 +2935,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     // creates headroom under the clamped limit. A second identical failure
     // must not grow either live allocation metric.
     arm.exhaust = true;
-    const caught_again = try engine.exec.call_runtime.callValueOrBytecode(
+    const caught_again = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2961,7 +2961,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -9527,7 +9527,7 @@ test "external C function preflight uses caller realm and callback errors use ca
     defer js.runtime.setNativeStackSize(0);
     try std.testing.expectError(
         error.StackOverflow,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             caller_global,
@@ -9560,7 +9560,7 @@ test "external C function preflight uses caller realm and callback errors use ca
     js.runtime.setNativeStackSize(0);
     try std.testing.expectError(
         error.JSException,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             caller_global,
@@ -14228,7 +14228,7 @@ test "ordinary root bytecode call carves one operand window" {
     defer callable.free(js.runtime);
 
     try std.testing.expectEqual(@as(usize, 0), js.runtime.vm_stack.chunk_count);
-    const result = try engine.exec.call_runtime.callValueOrBytecode(
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -17520,7 +17520,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
     defer argument_generator.free(js.runtime);
     const argument_values = [_]core.JSValue{argument};
 
-    const warm_argument = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm_argument = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -17531,7 +17531,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
         null,
     );
     warm_argument.free(js.runtime);
-    const warm_no_argument = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm_no_argument = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -17549,7 +17549,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     var alloc_calls = js.runtime.memory.alloc_calls;
     var create_calls = js.runtime.memory.create_calls;
-    const no_argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const no_argument_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -17567,7 +17567,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     alloc_calls = js.runtime.memory.alloc_calls;
     create_calls = js.runtime.memory.create_calls;
-    const argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const argument_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -17592,7 +17592,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
     defer js.runtime.atoms.free(capture_key);
     const capture_generator = try global.getProperty(capture_key);
     defer capture_generator.free(js.runtime);
-    const warm_capture = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm_capture = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -17606,7 +17606,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     alloc_calls = js.runtime.memory.alloc_calls;
     create_calls = js.runtime.memory.create_calls;
-    const no_capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const no_capture_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -17622,7 +17622,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     alloc_calls = js.runtime.memory.alloc_calls;
     create_calls = js.runtime.memory.create_calls;
-    const capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const capture_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,

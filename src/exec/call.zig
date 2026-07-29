@@ -195,7 +195,7 @@ pub fn callValueWithThisGlobalsAndGlobal(
         return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
     }
     if (core.class.isBytecodeFunctionClass(object.class_id)) {
-        return call_runtime.callValueOrBytecode(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
+        return call_runtime.callValueOrBytecodeRoot(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
     }
     if (object.class_id == core.class.ids.c_closure) {
         const closure_kind = closure_mod.closureKind(ctx.runtime, callee) catch 0;
