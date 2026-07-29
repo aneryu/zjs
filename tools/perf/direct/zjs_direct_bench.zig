@@ -498,7 +498,8 @@ fn runBigInt(allocator: std.mem.Allocator, iterations: usize, warmup: usize) !Be
     };
 }
 
-/// Basecase-multiply size matrix. `bigint/mul-multilimb` fixes one operand pair
+/// Basecase-multiply size matrix. Shapes are ORDERED: `AxB` means `lhs.len == A`
+/// and `rhs.len == B`. `bigint/mul-multilimb` fixes one operand pair
 /// (2 limbs by 2), which is small enough that the per-operation fixed cost
 /// dominates the kernel. A change to the multiply's write topology has to be
 /// read across sizes or it is fitted to that one point, so these cases sweep
@@ -562,10 +563,12 @@ fn bigIntSizeLoop(
     var checksum = initial_checksum;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var product = if (((checksum ^ @as(u64, @intCast(i))) & 1) == 0)
-            try bigint.mulAlloc(allocator, lhs, rhs)
-        else
-            try bigint.mulAlloc(allocator, rhs, lhs);
+        // Fixed operand order, unlike the QuickJS-comparable loop which
+        // alternates. `AxB` in a size case name means lhs has A limbs and rhs
+        // has B, and the basecase loop treats those asymmetrically, so
+        // alternating here would silently average 1x8 with 8x1 and make the
+        // matrix unable to answer the question it exists for.
+        var product = try bigint.mulAlloc(allocator, lhs, rhs);
         const len = product.limbs.len;
         checksum = mixU64(checksum, @as(u64, len));
         if (len != 0) {
