@@ -211,31 +211,38 @@ pub const BigInt = struct {
 
     // ---- single-allocation multiplication -----------------------------------
 
-    /// True when `heap x heap` multiplication may be routed to
+    /// True when the product of two heap BigInts provably cannot compact to a
+    /// short BigInt, which is the precondition for routing to
     /// `createMulInline`.
+    ///
+    /// **Heap representation does not imply a magnitude above the short-BigInt
+    /// range.** The parser only folds literals inside the i32 range
+    /// (`parseBigIntI32`) while short BigInts cover all of i64, so
+    /// `3000000000n` is a one-limb heap BigInt and `3000000000n *
+    /// 3000000000n` is `9e18 < 2^63` -- a product that does fit a short. qjs
+    /// compacts every multiplication result (`JS_CompactBigInt` at
+    /// quickjs.c:15054, collapsing at `len == 1`), so skipping that collapse
+    /// would be an alignment divergence. The FAM path therefore runs only
+    /// where the collapse is provably impossible; everything else keeps the
+    /// old path and its `createBigIntOwned` collapse.
     ///
     /// Two conditions, both required:
     ///
     /// * both operands own limbs, so the product is not zero. A zero heap
     ///   BigInt should not exist -- every collapsing constructor turns zero
-    ///   into a short BigInt -- but the route must be total on its own terms
-    ///   rather than on that invariant;
+    ///   into a short BigInt -- but the predicate must be total on its own
+    ///   terms rather than on that invariant;
     /// * the product needs at least two limbs. A normalized `p`-limb value is
     ///   at least `2^(64*(p-1))`, so the product of a `p`- and a `q`-limb value
     ///   is at least `2^(64*(p+q-2))` and therefore occupies `p+q-1` or `p+q`
     ///   limbs. Requiring `p+q >= 3` makes the result at least two limbs, i.e.
     ///   at least `2^64`, which never fits a short BigInt.
     ///
-    /// That second condition is what lets the FAM path skip the short-result
-    /// collapse that `createBigIntOwned` performs, and it has to be a gate
-    /// rather than an assumption: qjs compacts every multiplication result
-    /// (`JS_CompactBigInt` at quickjs.c:15054, collapsing at `len == 1`), and
-    /// zjs must match. A one-limb heap BigInt is reachable here -- the parser
-    /// emits a heap literal for anything outside the i32 range while short
-    /// BigInts hold the full i64 range -- so `3000000000n * 3000000000n` has
-    /// two heap operands and a product that does fit a short. That shape keeps
-    /// the collapsing path.
-    pub inline fn mulInlineEligible(lhs: *const BigInt, rhs: *const BigInt) bool {
+    /// Conservative by construction: it rejects one-limb x one-limb outright
+    /// instead of computing the product and testing it, so a future change to
+    /// the parser or to literal folding can only cost this route coverage, not
+    /// correctness.
+    pub inline fn mulResultCannotCompactToShort(lhs: *const BigInt, rhs: *const BigInt) bool {
         if (lhs.len == 0 or rhs.len == 0) return false;
         return lhs.len + rhs.len >= 3;
     }
@@ -251,7 +258,7 @@ pub const BigInt = struct {
     /// boundary. The object is fully initialized before the caller can publish
     /// it as a JSValue.
     pub fn createMulInline(rt: *JSRuntime, lhs: *const BigInt, rhs: *const BigInt) !*BigInt {
-        std.debug.assert(mulInlineEligible(lhs, rhs));
+        std.debug.assert(mulResultCannotCompactToShort(lhs, rhs));
 
         // Mirrors the js_bigint_new cap that bounds mulAlloc
         // (quickjs.c:11592-11596). `capacity` cannot overflow before the check:

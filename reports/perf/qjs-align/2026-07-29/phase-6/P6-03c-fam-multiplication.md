@@ -206,13 +206,24 @@ wrapper 恒为 56 B。P1 的融合块 512 B（+8 = 520 > 512）才是第一次�
 qjs 对每个乘法结果都做 `JS_CompactBigInt`（quickjs.c:15054，`len == 1` 即折叠），
 不折叠就是对齐偏离。
 
-处理：`mulInlineEligible` 把它变成**门而不是假设** —— 要求
+处理：`mulResultCannotCompactToShort` 把它变成**门而不是假设** —— 要求
 `lhs.len + rhs.len >= 3`。归一化后 `p` limb 的值至少是 `2^(64(p−1))`，
 故 `p`×`q` 的乘积占 `p+q−1` 或 `p+q` 个 limb；要求 `p+q ≥ 3` 即保证乘积至少 2 limb，
 即至少 `2^64`，**永远不可能是 short**。那一个形态（1 limb × 1 limb）留在折叠路径上。
 
 实测确认：`3000000000n * 3000000000n` 的 `createInlineUninitialized` 命中 **0 次**，
 `mulAlloc` 1 次，`createFromOwned` **0 次**（结果被折叠成 short），输出与 qjs 相同。
+
+**永久合同**（取代原 PRD 的表述）：
+
+> heap 表示并不保证 magnitude 超过 short-BigInt 范围。
+> FAM 路径必须在**能够静态证明结果不可能 compact 为 short** 时才启用，
+> 否则沿用旧路径并执行 short-result collapse。
+
+回归用例 `heap bigint multiplication still compacts a short-representable product`
+（`src/tests/exec.zig`，在 `test-exec` 门禁内）永久保留
+`3000000000n * 3000000000n`，外加边界两侧的 `2147483648n²`、`-3000000000n × 3000000000n`
+与刚过门的 `4000000000n²`。
 
 ### OOM / memory limit / GC threshold
 

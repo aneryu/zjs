@@ -630,8 +630,10 @@
   "prd_premise": "the PRD assumed two canonical heap BigInts can never be short-representable, so the product needs no short-result collapse",
   "why_it_does_not_hold": "the parser only collapses literals inside the i32 range (parseBigIntI32) while short BigInts cover the whole i64 range, so 3000000000n is a one-limb heap BigInt and 3000000000n * 3000000000n = 9e18 < 2^63 does fit a short",
   "why_it_matters": "qjs compacts every multiplication result (JS_CompactBigInt, quickjs.c:15054, collapsing at len == 1); not collapsing would be an alignment divergence",
-  "resolution": "mulInlineEligible gates on lhs.len + rhs.len >= 3. A normalized p-limb value is at least 2^(64(p-1)), so a p x q product occupies p+q-1 or p+q limbs; requiring p+q >= 3 makes the product at least two limbs, hence at least 2^64, hence never short-representable.",
-  "verified": "3000000000n * 3000000000n takes 0 createInlineUninitialized, 1 mulAlloc, 0 createFromOwned (collapsed to a short) and matches qjs"
+  "resolution": "mulResultCannotCompactToShort gates on lhs.len + rhs.len >= 3. A normalized p-limb value is at least 2^(64(p-1)), so a p x q product occupies p+q-1 or p+q limbs; requiring p+q >= 3 makes the product at least two limbs, hence at least 2^64, hence never short-representable.",
+  "verified": "3000000000n * 3000000000n takes 0 createInlineUninitialized, 1 mulAlloc, 0 createFromOwned (collapsed to a short) and matches qjs",
+  "permanent_contract": "Heap representation does not guarantee a magnitude above the short-BigInt range. The FAM path may only run where the result provably cannot compact to a short; everything else keeps the old path and its short-result collapse.",
+  "permanent_regression_test": "src/tests/exec.zig, 'heap bigint multiplication still compacts a short-representable product', inside the test-exec gate: 3000000000n * 3000000000n plus 2147483648n squared, the negative sign, and 4000000000n squared just past the gate"
  },
  "correctness": {
   "test262": {

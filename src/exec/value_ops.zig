@@ -815,7 +815,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
     if (op == bytecode.opcode.op.mul) {
         if (heapBigInt(a)) |lhs_big| {
             if (heapBigInt(b)) |rhs_big| {
-                if (core.bigint.BigInt.mulInlineEligible(lhs_big, rhs_big)) {
+                if (core.bigint.BigInt.mulResultCannotCompactToShort(lhs_big, rhs_big)) {
                     const product = try core.bigint.BigInt.createMulInline(rt, lhs_big, rhs_big);
                     return product.valueRef();
                 }

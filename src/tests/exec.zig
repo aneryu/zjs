@@ -2430,6 +2430,36 @@ test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "heap bigint multiplication still compacts a short-representable product" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Heap representation does not imply a magnitude above the short-BigInt
+    // range: the parser only folds literals inside the i32 range while short
+    // BigInts cover all of i64, so both operands below are one-limb heap
+    // BigInts whose product still fits a short. qjs compacts every
+    // multiplication result (JS_CompactBigInt, quickjs.c:15054), so the
+    // single-allocation FAM path -- which does not collapse -- must decline
+    // this shape. This is the regression guard for that gate: if a future
+    // parser or literal-folding change makes the eligibility predicate
+    // unsound, the representation silently diverges from qjs, and only a
+    // direct check like this one catches it.
+    const result = try js.eval(
+        \\assert.sameValue(3000000000n * 3000000000n, 9000000000000000000n);
+        \\assert.sameValue(String(3000000000n * 3000000000n), "9000000000000000000");
+        \\assert.sameValue(typeof (3000000000n * 3000000000n), "bigint");
+        \\assert.sameValue((3000000000n * 3000000000n) === 9000000000000000000n, true);
+        \\// One limb short of the boundary on either side is still excluded.
+        \\assert.sameValue(2147483648n * 2147483648n, 4611686018427387904n);
+        \\assert.sameValue(-3000000000n * 3000000000n, -9000000000000000000n);
+        \\// Just past it the FAM path takes over and must agree.
+        \\assert.sameValue(4000000000n * 4000000000n, 16000000000000000000n);
+        \\assert.sameValue(String(4000000000n * 4000000000n), "16000000000000000000");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "numeric discarded immediates preserve comma control and completion semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

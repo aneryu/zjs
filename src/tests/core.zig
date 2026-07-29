@@ -9896,7 +9896,7 @@ fn expectLockstepMul(
             defer rhs.valueRef().free(rt);
             try std.testing.expectEqual(lhs_inline, lhs.isInline());
             try std.testing.expectEqual(rhs_inline, rhs.isInline());
-            try std.testing.expect(core.bigint.BigInt.mulInlineEligible(lhs, rhs));
+            try std.testing.expect(core.bigint.BigInt.mulResultCannotCompactToShort(lhs, rhs));
 
             const product = try core.bigint.BigInt.createMulInline(rt, lhs, rhs);
             defer product.valueRef().free(rt);
