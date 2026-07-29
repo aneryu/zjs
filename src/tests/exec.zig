@@ -1779,6 +1779,273 @@ test "JSON synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
 }
 
+test "string regexp iterator helpers and DisposableStack stay on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function cohortFiveHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function cohortFiveIterator(values, closeOrder) {
+        \\    var index = 0;
+        \\    var iterator = values.values();
+        \\    iterator.next = function cohortFiveIteratorNext() {
+        \\        if (index >= values.length) return { value: undefined, done: true };
+        \\        return { value: values[index++], done: false };
+        \\    };
+        \\    iterator.return = function cohortFiveIteratorReturn() {
+        \\        if (closeOrder) closeOrder.push("close");
+        \\        return { value: undefined, done: true };
+        \\    };
+        \\    return iterator;
+        \\}
+        \\var cohortFiveTrace;
+        \\var cohortFiveOrder = [];
+        \\globalThis.__cohortFiveOuter = function __cohortFiveOuter() {
+        \\    var tailResult = "1".replace("1", function cohortFiveTailReplacer(value) {
+        \\        cohortFiveTrace = new Error("cohort five").stack;
+        \\        return cohortFiveHelper(Number(value));
+        \\    });
+        \\    assert.sameValue(tailResult, "2");
+        \\    var callbackIndex = cohortFiveTrace.indexOf("    at cohortFiveTailReplacer");
+        \\    var nativeIndex = cohortFiveTrace.indexOf("replace (native)");
+        \\    var outerIndex = cohortFiveTrace.indexOf("    at __cohortFiveOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    assert.sameValue("aa".replaceAll("a", function cohortFiveReplaceAll() {
+        \\        return "b";
+        \\    }), "bb");
+        \\    assert.sameValue("aa".replace(/a/g, function cohortFiveRegExpReplacer() {
+        \\        return "c";
+        \\    }), "cc");
+        \\
+        \\    var customReplace = {
+        \\        [Symbol.replace]: function cohortFiveSymbolReplace(value, replacer) {
+        \\            return replacer(value, 0, value);
+        \\        }
+        \\    };
+        \\    assert.sameValue("x".replace(customReplace, function cohortFiveDelegatedReplacer() {
+        \\        return "d";
+        \\    }), "d");
+        \\
+        \\    var execCalls = 0;
+        \\    var customRegExp = {
+        \\        flags: "",
+        \\        exec: function cohortFiveExec(value) {
+        \\            execCalls++;
+        \\            return { 0: value, index: 0, length: 1, groups: undefined };
+        \\        }
+        \\    };
+        \\    assert.sameValue(
+        \\        RegExp.prototype[Symbol.replace].call(
+        \\            customRegExp,
+        \\            "q",
+        \\            function cohortFiveCustomExecReplacer(value) {
+        \\                return cohortFiveHelper(value.charCodeAt(0)) === 114 ? "r" : "bad";
+        \\            }
+        \\        ),
+        \\        "r"
+        \\    );
+        \\    assert.sameValue(execCalls, 1);
+        \\
+        \\    assert.sameValue("x".replace("x", function cohortFiveOuterReplace(value) {
+        \\        return value.replace("x", function cohortFiveInnerReplace() {
+        \\            return "y";
+        \\        });
+        \\    }), "y");
+        \\
+        \\    cohortFiveOrder = [];
+        \\    try {
+        \\        "x".replace("x", function cohortFiveThrowingReplace() {
+        \\            cohortFiveOrder.push("callback");
+        \\            throw new RangeError("replace");
+        \\        });
+        \\    } catch (error) {
+        \\        cohortFiveOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(cohortFiveOrder.join(","), "callback,outer");
+        \\
+        \\    var mapped = cohortFiveIterator([1, 2], null).map(function cohortFiveMap(value) {
+        \\        return cohortFiveHelper(value);
+        \\    }).toArray();
+        \\    assert.compareArray(mapped, [2, 3]);
+        \\    var reduced = cohortFiveIterator([1, 2], null).reduce(function cohortFiveReduce(accumulator, value) {
+        \\        return accumulator + value;
+        \\    }, 0);
+        \\    assert.sameValue(reduced, 3);
+        \\
+        \\    cohortFiveOrder = [];
+        \\    try {
+        \\        cohortFiveIterator([1], cohortFiveOrder).forEach(function cohortFiveThrowingIteratorCallback() {
+        \\            cohortFiveOrder.push("callback");
+        \\            throw new RangeError("iterator");
+        \\        });
+        \\    } catch (error) {
+        \\        cohortFiveOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(cohortFiveOrder.join(","), "callback,close,outer");
+        \\
+        \\    cohortFiveOrder = [];
+        \\    var stack = new DisposableStack();
+        \\    stack.defer(function cohortFiveDeferredDispose() {
+        \\        cohortFiveOrder.push("defer");
+        \\    });
+        \\    stack.adopt(2, function cohortFiveAdoptDispose(value) {
+        \\        cohortFiveOrder.push("adopt:" + value);
+        \\    });
+        \\    stack.use({
+        \\        [Symbol.dispose]: function cohortFiveUseDispose() {
+        \\            cohortFiveOrder.push("use");
+        \\        }
+        \\    });
+        \\    stack.dispose();
+        \\    assert.sameValue(cohortFiveOrder.join(","), "use,adopt:2,defer");
+        \\
+        \\    cohortFiveOrder = [];
+        \\    var throwingStack = new DisposableStack();
+        \\    throwingStack.defer(function cohortFiveDisposeCleanup() {
+        \\        cohortFiveOrder.push("cleanup");
+        \\    });
+        \\    throwingStack.defer(function cohortFiveThrowingDispose() {
+        \\        cohortFiveOrder.push("callback");
+        \\        throw new RangeError("dispose");
+        \\    });
+        \\    try {
+        \\        throwingStack.dispose();
+        \\    } catch (error) {
+        \\        cohortFiveOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(cohortFiveOrder.join(","), "callback,cleanup,outer");
+        \\    return 42;
+        \\};
+        \\
+        \\var cohortFiveOther = $262.createRealm().global;
+        \\var cohortFiveForeignReplacer = cohortFiveOther.eval(
+        \\    "(function cohortFiveForeignReplacer() { return 'a'; })"
+        \\);
+        \\globalThis.__cohortFiveForeignOuter = function () {
+        \\    return "x".replace("x", cohortFiveForeignReplacer)
+        \\        + "y".replace("y", function cohortFiveLocalReplacer() { return "b"; });
+        \\};
+        \\globalThis.__cohortFiveInterrupt = function () {
+        \\    return "41".replace("41", function cohortFiveInterruptReplacer(value) {
+        \\        return cohortFiveHelper(Number(value));
+        \\    });
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__cohortFiveOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 29), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_key = try js.runtime.internAtom("__cohortFiveForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try helpers.expectStringValueBytes(foreign_result, "ab");
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__cohortFiveInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try helpers.expectStringValueBytes(recovered, "42");
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

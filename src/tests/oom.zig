@@ -214,6 +214,46 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "json-reentry-oom-ok" },
     },
     .{
+        .name = "native-callback-string-iterator-dispose",
+        .source =
+        \\function oomCohortFiveHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\const mapped = Iterator.from([1]).map(function oomIteratorCallback(value) {
+        \\  return String(value).replace("1", function oomStringReplacer(text) {
+        \\    trace = new Error("cohort-five-callback-trace").stack;
+        \\    return oomCohortFiveHelper(Number(text));
+        \\  });
+        \\}).toArray();
+        \\const order = [];
+        \\const stack = new DisposableStack();
+        \\stack.defer(function oomDisposeCleanup() {
+        \\  order.push("cleanup");
+        \\});
+        \\stack.defer(function oomDisposeThrow() {
+        \\  order.push("callback");
+        \\  throw new RangeError("dispose");
+        \\});
+        \\try {
+        \\  stack.dispose();
+        \\} catch (error) {
+        \\  if (!(error instanceof RangeError)) throw error;
+        \\  order.push("outer");
+        \\}
+        \\const replacerAt = trace.indexOf("    at oomStringReplacer");
+        \\const replaceAt = trace.indexOf("replace (native)", replacerAt);
+        \\const iteratorAt = trace.indexOf("    at oomIteratorCallback", replaceAt);
+        \\mapped[0] === "2" &&
+        \\order.join(",") === "callback,cleanup,outer" &&
+        \\replacerAt === 0 &&
+        \\replaceAt > replacerAt &&
+        \\iteratorAt > replaceAt
+        \\  ? "cohort-five-reentry-oom-ok" : "cohort-five-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "cohort-five-reentry-oom-ok" },
+    },
+    .{
         .name = "tail-moved-args",
         .source =
         \\function target(a,b,c,d,e,f,g,h,i,j) {
@@ -1152,6 +1192,10 @@ test "oom recovery canary: accessor Proxy and primitive coercion callbacks" {
 
 test "oom recovery canary: JSON reviver replacer and toJSON callbacks" {
     try recoveryCanarySweep(corpusSnippetNamed("native-callback-json"));
+}
+
+test "oom recovery canary: String Iterator helper and DisposableStack callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-string-iterator-dispose"));
 }
 
 test "oom recovery canary: repeated private class identity" {

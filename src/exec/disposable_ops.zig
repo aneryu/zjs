@@ -7,7 +7,7 @@ const exception_ops = @import("vm_exception_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const object_ops = @import("object_ops.zig");
 const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const objectFromValue = object_ops.objectFromValue;
 const isCallableValue = call_runtime.isCallableValue;
 const getValueProperty = object_ops.getValueProperty;
@@ -238,10 +238,12 @@ pub fn qjsDisposeResource(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
+    // AsyncDisposableStack awaits each result in promise continuations owned
+    // by promise_ops. This helper is only the synchronous disposal algorithm.
     const result = switch (resource.kind) {
-        .use => try callValueOrBytecode(ctx, output, global, resource.value, resource.method, &.{}, caller_function, caller_frame),
-        .adopt => try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{resource.value}, caller_function, caller_frame),
-        .defer_ => try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{}, caller_function, caller_frame),
+        .use => try callValueOrBytecodeSyncInternal(ctx, output, global, resource.value, resource.method, &.{}, caller_function, caller_frame),
+        .adopt => try callValueOrBytecodeSyncInternal(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{resource.value}, caller_function, caller_frame),
+        .defer_ => try callValueOrBytecodeSyncInternal(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{}, caller_function, caller_frame),
     };
     result.free(ctx.runtime);
 }
