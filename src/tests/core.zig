@@ -9579,3 +9579,97 @@ test "finalization registry pending jobs preserve callback and held symbols" {
     try std.testing.expect(rt.atoms.name(cleanup_sym) == null);
     try std.testing.expect(rt.atoms.name(held_sym) == null);
 }
+
+/// Basecase multiplication writes every result limb before reading it, so it
+/// must not depend on the allocator handing back zeroed memory. Run it against
+/// an allocator that poisons fresh allocations with a non-zero pattern: any
+/// limb the kernel forgets to write, or reads before writing, changes the
+/// product. Zeroed memory would hide all three failures, which is why the
+/// production path deliberately no longer pre-zeroes and this test does not
+/// re-add the guarantee for it.
+const PoisonAllocator = struct {
+    backing: std.mem.Allocator,
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        @memset(ptr[0..len], 0xa5);
+        return ptr;
+    }
+    fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(buf, alignment, new_len, ra);
+    }
+    fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawRemap(buf, alignment, new_len, ra);
+    }
+    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(buf, alignment, ra);
+    }
+    fn allocator(self: *PoisonAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+};
+
+/// Deliberately zero-initialized schoolbook multiply, kept in the test rather
+/// than in the kernel: it is the thing the production path stopped doing, so it
+/// has to exist somewhere independent to compare against. Returns unnormalized
+/// limbs with trailing zeros stripped, matching what `mulAlloc` returns.
+fn referenceMul(alloc: std.mem.Allocator, lhs: []const engine.libs.bigint.Limb, rhs: []const engine.libs.bigint.Limb) ![]engine.libs.bigint.Limb {
+    const Limb = engine.libs.bigint.Limb;
+    const Double = u128;
+    const out = try alloc.alloc(Limb, lhs.len + rhs.len);
+    errdefer alloc.free(out);
+    @memset(out, 0);
+    for (lhs, 0..) |a, i| {
+        var carry: Double = 0;
+        for (rhs, 0..) |b, j| {
+            const current: Double = @as(Double, a) * b + out[i + j] + carry;
+            out[i + j] = @truncate(current);
+            carry = current >> 64;
+        }
+        out[i + rhs.len] = @intCast(carry);
+    }
+    var len = out.len;
+    while (len > 0 and out[len - 1] == 0) : (len -= 1) {}
+    if (len == out.len) return out;
+    return try alloc.realloc(out, len);
+}
+
+test "basecase multiplication never reads an uninitialized result limb" {
+    const bigint = engine.libs.bigint;
+    var poison = PoisonAllocator{ .backing = std.testing.allocator };
+    const alloc = poison.allocator();
+
+    const shapes = [_][2]usize{
+        .{ 1, 1 }, .{ 1, 2 }, .{ 2, 1 }, .{ 2, 2 }, .{ 2, 4 },
+        .{ 4, 2 }, .{ 3, 5 }, .{ 4, 4 }, .{ 1, 8 }, .{ 8, 1 },
+        .{ 8, 8 },
+    };
+    // Both the all-ones pattern (maximal carry propagation, top carry non-zero)
+    // and a single high bit (top carry zero) are exercised per shape.
+    for (shapes) |shape| {
+        inline for (.{ true, false }) |saturated| {
+            const lhs_limbs = try alloc.alloc(bigint.Limb, shape[0]);
+            defer alloc.free(lhs_limbs);
+            const rhs_limbs = try alloc.alloc(bigint.Limb, shape[1]);
+            defer alloc.free(rhs_limbs);
+            for (lhs_limbs) |*l| l.* = if (saturated) std.math.maxInt(bigint.Limb) else 0;
+            for (rhs_limbs) |*l| l.* = if (saturated) std.math.maxInt(bigint.Limb) else 0;
+            if (!saturated) {
+                lhs_limbs[shape[0] - 1] = @as(bigint.Limb, 1) << 63;
+                rhs_limbs[shape[1] - 1] = 1;
+            }
+            const lhs = bigint.BigInt{ .limbs = lhs_limbs, .allocator = alloc };
+            const rhs = bigint.BigInt{ .limbs = rhs_limbs, .allocator = alloc };
+
+            var product = try bigint.mulAlloc(alloc, lhs, rhs);
+            defer product.deinit();
+            const expected = try referenceMul(alloc, lhs_limbs, rhs_limbs);
+            defer alloc.free(expected);
+            try std.testing.expectEqualSlices(bigint.Limb, expected, product.limbs);
+        }
+    }
+}

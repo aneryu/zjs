@@ -590,14 +590,40 @@ pub fn mulAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt 
     // squaring (quickjs.c:12169/12175) the same way qjs does.
     try checkLimbCount(lhs.limbs.len + rhs.limbs.len);
     const limbs = try allocator.alloc(Limb, lhs.limbs.len + rhs.limbs.len);
-    @memset(limbs, 0);
+    errdefer allocator.free(limbs);
+    // qjs mp_mul_basecase (quickjs.c:11401-11413) writes its first pass with
+    // mp_mul1 and only accumulates from the second, so js_bigint_new hands back
+    // uninitialized memory and no pre-zeroing pass exists at all. Mirror that:
+    // the first row overwrites, later rows accumulate.
+    //
+    // Every result limb is written before it is read. Row 0 overwrites
+    // `limbs[0..rhs.len]` and then its carry slot at `rhs.len`, so the
+    // initialized prefix is `limbs[0..rhs.len + 1]`. Row `i` reads
+    // `limbs[i..i + rhs.len]`, whose highest index is `i + rhs.len - 1`, and
+    // rows `0..i-1` have already initialized through exactly that index; it then
+    // overwrites one new slot at `i + rhs.len`. After the final row the prefix
+    // covers the whole buffer, and the top limb is written even when its carry
+    // is zero, which `normalize` then strips.
+    //
+    // The loop nesting is deliberately unchanged. Swapping it to qjs's
+    // outer-over-rhs order was measured separately and is worth nothing on
+    // square shapes but 5.9% at 2x4 and 13.3% at 1x8, so it is a second
+    // mechanism and belongs in its own cut rather than riding along in this one.
     for (lhs.limbs, 0..) |a, i| {
         var carry: DoubleLimb = 0;
-        for (rhs.limbs, 0..) |b, j| {
-            const index = i + j;
-            const current: DoubleLimb = @as(DoubleLimb, a) * b + limbs[index] + carry;
-            limbs[index] = @truncate(current);
-            carry = current >> limb_bits;
+        if (i == 0) {
+            for (rhs.limbs, 0..) |b, j| {
+                const current: DoubleLimb = @as(DoubleLimb, a) * b + carry;
+                limbs[j] = @truncate(current);
+                carry = current >> limb_bits;
+            }
+        } else {
+            for (rhs.limbs, 0..) |b, j| {
+                const index = i + j;
+                const current: DoubleLimb = @as(DoubleLimb, a) * b + limbs[index] + carry;
+                limbs[index] = @truncate(current);
+                carry = current >> limb_bits;
+            }
         }
         limbs[i + rhs.limbs.len] = @intCast(carry);
     }
