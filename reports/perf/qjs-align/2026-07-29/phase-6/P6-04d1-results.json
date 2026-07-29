@@ -2,7 +2,7 @@
  "note": "P6-04d1 normalized reciprocal quotient estimation. P0 = d757a8a6, P1 = 39c35b8c.",
  "p0": "d757a8a6",
  "p1": "39c35b8c",
- "verdict": "every mechanism gate met; two performance gates missed by margin (8x4 10.2% against 15%, JS div_8x4 4.0% against 5%). The shortfall is measured, not guessed: it is this mechanism's arithmetic ceiling, not a codegen problem.",
+ "verdict": "ACCEPT_WITH_WAIVER: every mechanism gate met, single-cut gain bounded by a provable helper-replacement ceiling, remaining gap belongs to the fixed-cost layers",
  "mechanism": {
   "aligned_with": "qjs udiv1norm_init (quickjs.c:11433) and udiv1norm (quickjs.c:11444), UDIV1NORM_THRESHOLD 3",
   "scope": "only the (u_hi:u_lo) / normalized_divisor_top step; scratch allocation, normalization, second-limb correction, multiply-subtract, add-back, sign handling and result construction are untouched, and the single-limb path is not modified",
@@ -711,5 +711,36 @@
    "nb8": "16.7 (was 23.4)"
   },
   "next_cut": "P6-04d2a, removing the lhs/rhs abs clones (6 allocations to 4), which targets the 26.3% JS-level allocator share on 8x4 and does not overlap d1's per-digit cost"
+ },
+ "decision": {
+  "verdict": "ACCEPT_WITH_WAIVER",
+  "merged": true,
+  "reverted": false,
+  "reason": [
+   "quotient estimation mechanism fully aligned",
+   "__udivti3 calls reduced D->1",
+   "qhat/correction/submul behavior identical",
+   "8x4 improvement bounded by instruction-level replacement ceiling",
+   "remaining gap belongs to fixed-cost layers"
+  ],
+  "wording": "P6-04d1's single-cut gain is bounded by a provable helper-replacement ceiling. Every mechanism gate is met, every eligible workload moves the same way, and the instruction reduction matches the theoretical bound; the remaining cost belongs to the fixed-cost layers (allocation and result construction).",
+  "contrast_with_P6_03c": "P6-03c was waived because the gain far exceeded the gate while one small shape regressed; P6-04d1 is waived because the mechanism is correct and the gain is capped by a cost model, not by an implementation shortfall"
+ },
+ "sentinels": {
+  "name": "small-shape dispatcher/codegen sensitivity sentinels",
+  "members": [
+   {
+    "case": "div-size-6x4",
+    "regression_percent": 1.04,
+    "from": "P6-04d1"
+   },
+   {
+    "case": "mod-size-2x1",
+    "regression_percent": 3.47,
+    "from": "P6-04c"
+   }
+  ],
+  "obligation": "every d2 cut re-measures both; re-judged together once d2 completes",
+  "explicitly_not_doing": "moving the reciprocal threshold to hide a 1.3 ns effect"
  }
 }

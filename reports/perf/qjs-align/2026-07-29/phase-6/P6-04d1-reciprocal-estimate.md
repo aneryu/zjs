@@ -2,8 +2,20 @@
 
 - **日期**：2026-07-29
 - **P0**：`d757a8a6`　**P1**：`39c35b8c`
-- **裁决**：**机制门槛全部达成，两项性能门槛未达**（`8×4` 10.2% vs 15%、JS `div_8x4` 4.0% vs 5%）。
-  未达的原因已实测定位，**不是 codegen 问题，是这个机制本身的天花板**
+- **裁决**：**`ACCEPT_WITH_WAIVER`（合入，不回退）**
+  > P6-04d1 的单项收益受**可证明的 helper 替换上限**约束。机制门槛全部满足，
+  > eligible workload 全部同向，指令下降与理论上界一致；
+  > 剩余成本属于后续的固定成本层（allocation / result construction）。
+
+  ```text
+  Decision: ACCEPT_WITH_WAIVER
+  Reason:
+      - quotient estimation mechanism fully aligned
+      - __udivti3 calls reduced D->1
+      - qhat/correction/submul behavior identical
+      - 8x4 improvement bounded by instruction-level replacement ceiling
+      - remaining gap belongs to fixed-cost layers
+  ```
 - **原始数据**：`P6-04d1-results.json`
 
 ---
@@ -197,15 +209,19 @@ P6-04d0 预测 `8×4` 146 → 112–118 ns，依据是 `udivmod` 的
 
 ## 7. 需要裁决的两处
 
-### 7.1 `8×4` / `16×8` 的 15% 门槛与 JS 5% 门槛
+### 7.1 `8×4` / `16×8` 的 15% 门槛与 JS 5% 门槛 —— **已裁决 ACCEPT_WITH_WAIVER**
 
-机制完全正确、方向全部一致、没有任何 eligible 形态变慢，
-但**这个机制在 `8×4` 上的数学上界就是 9.6%**（§6），15% 无法由 d1 单独达到。
-`16×8`（9 商位）拿到 13.9%，`16×4`（13 商位）拿到 22.7%、`24×8` 19.7% ——
-**商位越多越接近门槛**，因为 init 的一次性成本被摊薄。
+⚠️ 这与 P6-03c 的 waiver **原因不同**：
+P6-03c 是**收益远超门槛**（28x–272x）而单一小形态回退；
+P6-04d1 是**机制正确、收益受理论上限约束**。
 
-建议按 P6-04c 的先例作**显式 waiver**（而不是写成通过），
-理由是机制门槛全达、无回退、且 d2a/d2b 针对的是另一块成本（`8×4` 的 JS 分配器占 26.3%）。
+要求 `8×4` ≥15% 等于要求这次替换违反自己的成本模型：
+`__udivti3` 只占该形态指令流约 15%，保留一次 init 后上界就是 9.6%，实测 9.55%。
+`16×8`（9 商位）13.9%、`16×4`（13 商位）22.7%、`24×8` 19.7% ——
+**商位越多越接近门槛**，因为 init 被摊薄。
+
+剩余差距归属**固定成本层**（allocation / result construction），由 d2a/d2b 处理：
+`8×4` 在 JS 层的分配器占比是 26.3%。
 
 ### 7.2 `6×4` +1.04%
 
@@ -213,8 +229,17 @@ P6-04d0 预测 `8×4` 146 → 112–118 ns，依据是 `udivmod` 的
 16/16 组合同向，geomean 1.0104，绝对量 **1.3 ns**。
 `5×4`（m=1）与 `9×8`（m=1）都跨 1.0，只有紧贴阈值下方的这一个形态受影响。
 
-⚠️ **不建议现在调阈值去掩盖它**（PRD 明确禁止）。
-建议同样记为哨兵，与 `mod-size-2x1` 一起在 d2a/d2b/d2c 每一刀复测。
+⚠️ **不调阈值**（PRD 明确禁止，且为 1.3 ns 重设计阈值不合理）。
+
+与 P6-04c 的 `mod-size-2x1 +3.47%` 合并为同一类，正式命名：
+
+```text
+small-shape dispatcher/codegen sensitivity sentinels
+    div-size-6x4    +1.04%   (P6-04d1)
+    mod-size-2x1    +3.47%   (P6-04c)
+```
+
+**d2 的每一刀都必须复测这两个哨兵**，全部完成后统一复判。
 
 ## 8. 正确性门禁
 
