@@ -176,8 +176,8 @@ wrapper 恒为 56 B。P1 的融合块 512 B（+8 = 520 > 512）才是第一次�
 | test-core / parser / bytecode / exec / builtins / runtime / runner | 305 / 463 / 188 / 388 / 193 / 72 / 43 全绿 |
 | test-oom | 14 通过 |
 | test-altrepr | 1992 通过 |
-| ReleaseSafe `test-core` | 303 通过（新增 OOM 两项前的计数） |
-| force-GC `test-core` | 303 通过；force-GC 二进制的 chain 与 3702 行差分**均与 qjs 逐字节相同** |
+| ReleaseSafe `test-core` | **305 通过** |
+| force-GC `test-core` | **305 通过**；force-GC 二进制的 chain 与 3702 行差分**均与 qjs 逐字节相同** |
 | 跨引擎随机差分 3702 行 | **与 pinned qjs 逐字节相同** |
 | chain 探针（inline×external / inline×inline / 60 次连乘 / 三种符号组合 / div·mod·pow·bitwise·compare·clone·Number·toString(36)·asIntN） | **与 qjs 逐字节相同** |
 | poison-allocator basecase 测试 | 通过 |

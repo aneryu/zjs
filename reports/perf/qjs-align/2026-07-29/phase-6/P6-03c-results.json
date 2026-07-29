@@ -651,8 +651,8 @@
   },
   "oom": 14,
   "altrepr": 1992,
-  "release_safe_core": 303,
-  "force_gc_core": 303,
+  "release_safe_core": 305,
+  "force_gc_core": 305,
   "force_gc_cross_engine": "chain probe and the 3702-line differential both byte-identical to qjs",
   "cross_engine_differential": {
    "lines": 3702,
