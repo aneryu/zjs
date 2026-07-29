@@ -49,6 +49,15 @@ same source shape as the process-level comparison tools.
   calls for already exist: `fib_rec` is recursion, `method_call_loop` is
   call-method, and `call_body_loop` is call-closure.
 
+- `bigint_mul_2x2`, `bigint_mul_1x8`, `bigint_mul_8x1`, `bigint_mul_8x8`,
+  `bigint_mul_16x16`: P6-02 JS-level BigInt allocation-topology probes, not
+  policy sentinels. Shapes are ordered -- `AxB` means the left operand has A
+  64-bit limbs and the right has B -- because the basecase loop treats operand
+  order asymmetrically. Both operands are built once at module scope so the
+  retained `run()` times only multiplication, each iteration overwrites the
+  result so operand size never grows, and the checksum is `String(r).length`
+  rather than the CLI inspector so it is identical across engines.
+
 The callable shapes are necessary because each harness evaluates the source
 once, retains global `run`, and invokes that function for warmup and timed
 samples without recompiling the source.
