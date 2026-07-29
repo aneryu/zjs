@@ -7,6 +7,7 @@ import process from 'node:process';
 import { performance } from 'node:perf_hooks';
 import { cases as microbenchCases, categories as microbenchCategories } from './microbench_cases.js';
 import { cases as hotpathCases, categories as hotpathCategories } from './hotpath_cases.js';
+import { cases as nativeCallbackCases, categories as nativeCallbackCategories } from './native_callback_cases.js';
 
 const toolDir = import.meta.dir;
 const root = path.resolve(toolDir, '../..');
@@ -20,6 +21,8 @@ let zjsBin = process.env.QJS_ZIG || defaultZjs;
 let qjsBin = process.env.QJS || defaultQjs;
 let iters = parseInteger(process.env.BENCH_ITERS, 10);
 let warmup = parseInteger(process.env.BENCH_WARMUP, 3);
+let sessions = parseInteger(process.env.BENCH_SESSIONS, 1);
+let interleaved = false;
 let includeUnsupported = false;
 let zjsOnly = false;
 let emitJson = false;
@@ -41,6 +44,11 @@ const suites = {
         categories: hotpathCategories,
         description: 'focused hotpath calibration suite',
     },
+    'native-callback': {
+        cases: nativeCallbackCases,
+        categories: nativeCallbackCategories,
+        description: 'synchronous native callback and execution-root control suite',
+    },
 };
 
 function parseInteger(value, fallback) {
@@ -59,9 +67,11 @@ Use --zjs-only for self-baseline reports that compare zjs to a checked-in zjs re
 Options:
   --iters N                 Timed iterations per case and binary (default: ${iters})
   --warmup N                Warmup runs per case and binary (default: ${warmup})
+  --sessions N              Independent timing sessions (default: ${sessions})
+  --interleaved              Run each session in ABBA binary order; requires even --iters
   --case NAME               Run one case; repeatable
   --category NAME           Run one category; repeatable
-  --suite NAME              Case suite: microbench or hotpath (default: ${suiteName})
+  --suite NAME              Case suite: microbench, hotpath, or native-callback (default: ${suiteName})
   --include-unsupported     Show unsupported cases in the terminal table
   --zjs-only                Use zjs for the reference column; does not require C qjs
   --json                    Print the JSON report to stdout instead of the table
@@ -76,7 +86,8 @@ Environment:
   QJS_ZIG                   Path to zjs
   QJS                       Path to C qjs
   BENCH_ITERS               Default iteration count
-  BENCH_WARMUP              Default warmup count`);
+  BENCH_WARMUP              Default warmup count
+  BENCH_SESSIONS            Default independent session count`);
 }
 
 function fail(message, code = 2) {
@@ -107,19 +118,101 @@ function runBinary(binary, script, captureOutput) {
 }
 
 function bench(binary, script) {
-    for (let i = 0; i < warmup; i += 1) {
-        const result = runBinary(binary, script, false);
-        if (result.exitCode !== 0) return { exitCode: result.exitCode, samples: [] };
+    const samples = [];
+    const sessionRows = [];
+    for (let session = 0; session < sessions; session += 1) {
+        for (let i = 0; i < warmup; i += 1) {
+            const result = runBinary(binary, script, false);
+            if (result.exitCode !== 0) {
+                return { exitCode: result.exitCode, samples, sessions: sessionRows };
+            }
+        }
+
+        const sessionSamples = [];
+        for (let i = 0; i < iters; i += 1) {
+            const start = performance.now();
+            const result = runBinary(binary, script, false);
+            sessionSamples.push(performance.now() - start);
+            if (result.exitCode !== 0) {
+                return { exitCode: result.exitCode, samples, sessions: sessionRows };
+            }
+        }
+        samples.push(...sessionSamples);
+        sessionRows.push(stats(sessionSamples));
+    }
+    return { exitCode: 0, samples, sessions: sessionRows };
+}
+
+function runTimedBinary(binary, script) {
+    const start = performance.now();
+    const result = runBinary(binary, script, false);
+    return {
+        exitCode: result.exitCode,
+        elapsedMs: performance.now() - start,
+    };
+}
+
+// Interleave each binary within every timing pair so drift cannot line up
+// with engine order. One pair is A,B,B,A and contributes two samples per
+// binary; `iters` therefore remains the per-binary sample count.
+function benchInterleaved(script) {
+    const qjsSamples = [];
+    const zjsSamples = [];
+    const sessionRows = [];
+
+    for (let session = 0; session < sessions; session += 1) {
+        for (let i = 0; i < warmup; i += 1) {
+            const order = i % 2 === 0
+                ? [{ role: 'qjs', binary: qjsBin }, { role: 'zjs', binary: zjsBin }]
+                : [{ role: 'zjs', binary: zjsBin }, { role: 'qjs', binary: qjsBin }];
+            for (const step of order) {
+                const result = runBinary(step.binary, script, false);
+                if (result.exitCode !== 0) {
+                    return {
+                        qjs: { exitCode: step.role === 'qjs' ? result.exitCode : 0, samples: qjsSamples },
+                        zjs: { exitCode: step.role === 'zjs' ? result.exitCode : 0, samples: zjsSamples },
+                        sessions: sessionRows,
+                    };
+                }
+            }
+        }
+
+        const qjsSessionSamples = [];
+        const zjsSessionSamples = [];
+        for (let pair = 0; pair < iters / 2; pair += 1) {
+            const order = [
+                { role: 'qjs', binary: qjsBin },
+                { role: 'zjs', binary: zjsBin },
+                { role: 'zjs', binary: zjsBin },
+                { role: 'qjs', binary: qjsBin },
+            ];
+            for (const step of order) {
+                const timed = runTimedBinary(step.binary, script);
+                if (timed.exitCode !== 0) {
+                    return {
+                        qjs: { exitCode: step.role === 'qjs' ? timed.exitCode : 0, samples: qjsSamples },
+                        zjs: { exitCode: step.role === 'zjs' ? timed.exitCode : 0, samples: zjsSamples },
+                        sessions: sessionRows,
+                    };
+                }
+                const destination = step.role === 'qjs' ? qjsSessionSamples : zjsSessionSamples;
+                destination.push(timed.elapsedMs);
+            }
+        }
+        qjsSamples.push(...qjsSessionSamples);
+        zjsSamples.push(...zjsSessionSamples);
+        sessionRows.push({
+            session: session + 1,
+            qjs: stats(qjsSessionSamples),
+            zjs: stats(zjsSessionSamples),
+        });
     }
 
-    const samples = [];
-    for (let i = 0; i < iters; i += 1) {
-        const start = performance.now();
-        const result = runBinary(binary, script, false);
-        samples.push(performance.now() - start);
-        if (result.exitCode !== 0) return { exitCode: result.exitCode, samples };
-    }
-    return { exitCode: 0, samples };
+    return {
+        qjs: { exitCode: 0, samples: qjsSamples },
+        zjs: { exitCode: 0, samples: zjsSamples },
+        sessions: sessionRows,
+    };
 }
 
 function stats(samples) {
@@ -130,14 +223,25 @@ function stats(samples) {
         ? sorted[(sorted.length - 1) / 2]
         : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
     const variance = sorted.reduce((sum, value) => sum + (value - avg) ** 2, 0) / sorted.length;
+    const stdev = Math.sqrt(variance);
     return {
         samples,
         avg,
         median,
         min: sorted[0],
         max: sorted[sorted.length - 1],
-        stdev: Math.sqrt(variance),
+        stdev,
+        cv: avg === 0 ? null : stdev / avg,
     };
+}
+
+function pairedSessionRows(qjsResult, zjsResult) {
+    const count = Math.min(qjsResult.sessions?.length ?? 0, zjsResult.sessions?.length ?? 0);
+    return Array.from({ length: count }, (_, index) => ({
+        session: index + 1,
+        qjs: qjsResult.sessions[index],
+        zjs: zjsResult.sessions[index],
+    }));
 }
 
 function geometricMean(values) {
@@ -247,6 +351,8 @@ function makeReport(rows, selected) {
         zjs: zjsBin,
         iters,
         warmup,
+        sessions,
+        interleaved,
         selected: selected.length,
         summary: {
             compatible: compatible.length,
@@ -266,8 +372,9 @@ function makeReport(rows, selected) {
 function measureStartupBaseline(tempDir) {
     const script = path.join(tempDir, '__startup_empty.js');
     fs.writeFileSync(script, '');
-    const qjsResult = bench(qjsBin, script);
-    const zjsResult = bench(zjsBin, script);
+    const pair = interleaved ? benchInterleaved(script) : null;
+    const qjsResult = pair?.qjs ?? bench(qjsBin, script);
+    const zjsResult = pair?.zjs ?? bench(zjsBin, script);
     if (qjsResult.exitCode !== 0 || zjsResult.exitCode !== 0) {
         return {
             status: 'skipped',
@@ -381,6 +488,16 @@ for (let i = 0; i < args.length; i += 1) {
             if (!Number.isFinite(warmup) || warmup < 0) fail('error: warmup must be >= 0');
             break;
         }
+        case '--sessions': {
+            const value = args[++i];
+            if (value == null) fail('error: --sessions requires a value');
+            sessions = parseInteger(value, Number.NaN);
+            if (!Number.isFinite(sessions) || sessions <= 0) fail('error: sessions must be > 0');
+            break;
+        }
+        case '--interleaved':
+            interleaved = true;
+            break;
         case '--case': {
             const value = args[++i];
             if (value == null) fail('error: --case requires a value');
@@ -446,6 +563,7 @@ for (let i = 0; i < args.length; i += 1) {
 }
 
 activeSuite();
+if (interleaved && iters % 2 !== 0) fail('error: --interleaved requires an even --iters value');
 if (shouldList) {
     listCases();
     process.exit(0);
@@ -488,8 +606,9 @@ try {
             continue;
         }
 
-        const qjsResult = bench(qjsBin, script);
-        const zjsResult = bench(zjsBin, script);
+        const pair = interleaved ? benchInterleaved(script) : null;
+        const qjsResult = pair?.qjs ?? bench(qjsBin, script);
+        const zjsResult = pair?.zjs ?? bench(zjsBin, script);
         if (qjsResult.exitCode !== 0 || zjsResult.exitCode !== 0) {
             rows.push({
                 name: item.name,
@@ -517,6 +636,7 @@ try {
             notes: item.notes,
             qjs: qjsStats,
             zjs: zjsStats,
+            sessions: pair?.sessions ?? pairedSessionRows(qjsResult, zjsResult),
             ratio,
             winner: winnerForRatio(ratio),
         });

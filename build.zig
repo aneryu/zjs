@@ -476,6 +476,30 @@ pub fn build(b: *std.Build) void {
     const perf_hotpath_step = b.step("perf-hotpath", "Record independent hotpath calibration benchmark report");
     perf_hotpath_step.dependOn(&run_perf_hotpath.step);
 
+    const run_perf_native_callback = b.addSystemCommand(&.{
+        "bun",
+        "tools/compare/run_microbench.js",
+        "--suite",
+        "native-callback",
+        "--zjs-only",
+        "--interleaved",
+        "--sessions",
+        "3",
+        "--iters",
+        "30",
+        "--warmup",
+        "5",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs"),
+        "--output",
+        ".zig-cache/perf/current/native-callback-zjs-releasefast.json",
+        "--emit-scripts",
+        ".zig-cache/perf/current/native-callback-scripts",
+    });
+    run_perf_native_callback.step.dependOn(&install_zjs.step);
+    const perf_native_callback_step = b.step("perf-native-callback", "Record the native callback and execution-root benchmark suite");
+    perf_native_callback_step.dependOn(&run_perf_native_callback.step);
+
     const run_architecture_deps = b.addSystemCommand(&.{
         "node",
         "tools/architecture/check_deps.js",

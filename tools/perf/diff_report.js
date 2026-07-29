@@ -40,7 +40,7 @@ Options:
   --geomean-improvement-ratio N  Require summary geomean to improve by this ratio
   --warn-case-regressions        Report case regressions but do not fail on them
   --ignore-geomean-regression    Report geomean but do not fail on regression
-  --allow-sample-config-drift    Allow comparing reports with different iters/warmup
+  --allow-sample-config-drift    Allow comparing reports with different sampling/order settings
   -h, --help                     Show this help`);
 }
 
@@ -120,19 +120,27 @@ function sampleConfig(report) {
     const iters = report && report.iters;
     const warmup = report && report.warmup;
     if (!Number.isFinite(iters) || !Number.isFinite(warmup)) return null;
-    return { iters, warmup };
+    return {
+        iters,
+        warmup,
+        sessions: Number.isFinite(report.sessions) ? report.sessions : 1,
+        interleaved: report.interleaved === true,
+    };
 }
 
 function sameSampleConfig(oldReport, newReport) {
     const oldConfig = sampleConfig(oldReport);
     const newConfig = sampleConfig(newReport);
     if (oldConfig == null || newConfig == null) return false;
-    return oldConfig.iters === newConfig.iters && oldConfig.warmup === newConfig.warmup;
+    return oldConfig.iters === newConfig.iters &&
+        oldConfig.warmup === newConfig.warmup &&
+        oldConfig.sessions === newConfig.sessions &&
+        oldConfig.interleaved === newConfig.interleaved;
 }
 
 function sampleConfigText(config) {
     if (config == null) return 'missing';
-    return `iters=${config.iters}, warmup=${config.warmup}`;
+    return `iters=${config.iters}, warmup=${config.warmup}, sessions=${config.sessions}, interleaved=${config.interleaved}`;
 }
 
 function compareReports(oldReport, newReport) {
