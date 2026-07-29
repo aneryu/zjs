@@ -327,6 +327,113 @@ test "heap BigInt limbs participate in runtime memory limit and accounting" {
     try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
 }
 
+test "heap BigInt external storage reads through the storage accessors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const baseline = rt.memory.allocated_bytes;
+
+    // Zero owns no limbs in either storage mode, so `limbs_ptr` is null and the
+    // accessors must still hand back an empty slice rather than deref it.
+    const zero = try core.bigint.BigInt.create(rt, 0);
+    try std.testing.expect(zero.isExternal());
+    try std.testing.expect(!zero.isInline());
+    try std.testing.expect(!zero.negative());
+    try std.testing.expectEqual(@as(usize, 0), zero.limbs().len);
+    try std.testing.expectEqual(@as(usize, 0), zero.famBytes());
+    zero.valueRef().free(rt);
+
+    const negative_multi = try core.bigint.BigInt.create(rt, -(@as(i128, 1) << 90));
+    try std.testing.expect(negative_multi.isExternal());
+    try std.testing.expect(negative_multi.negative());
+    try std.testing.expectEqual(@as(usize, 2), negative_multi.limbs().len);
+    try std.testing.expectEqual(@as(engine.libs.bigint.Limb, 0), negative_multi.limbs()[0]);
+    try std.testing.expectEqual(@as(engine.libs.bigint.Limb, 1) << 26, negative_multi.limbs()[1]);
+    // External storage is adopted from an already-normalized library value, so
+    // the whole allocation is live.
+    try std.testing.expectEqual(negative_multi.limbs().len, negative_multi.capacitySliceMut().len);
+    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(engine.libs.bigint.Limb)), negative_multi.famBytes());
+
+    const borrowed = negative_multi.borrowedValue(rt.memory.allocator);
+    try std.testing.expect(borrowed.negative);
+    try std.testing.expectEqualSlices(engine.libs.bigint.Limb, negative_multi.limbs(), borrowed.limbs);
+
+    negative_multi.valueRef().free(rt);
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
+test "heap BigInt inline storage destroys by capacity across the slab boundary" {
+    const bigint = engine.libs.bigint;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const baseline = rt.memory.allocated_bytes;
+
+    // 56 wrapper bytes plus the FAM must stay under the slab's 504-byte payload
+    // ceiling, so capacity 56 is the last slab-backed size and 57 is the first
+    // standalone one. Both destroy paths have to release `capacity` limbs even
+    // when the published length is shorter.
+    const capacities = [_]usize{ 0, 1, 2, 4, 55, 56, 57, 64 };
+    // Assert the boundary rather than assume it, so a future `block_sizes` or
+    // wrapper-size change cannot silently turn this into a slab-only test.
+    const slab = core.memory.SmallObjectSlab;
+    const wrapper = @sizeOf(core.bigint.BigInt);
+    try std.testing.expect(slab.canUse(wrapper + 56 * @sizeOf(bigint.Limb), .@"8"));
+    try std.testing.expect(!slab.canUse(wrapper + 57 * @sizeOf(bigint.Limb), .@"8"));
+
+    for (capacities) |capacity| {
+        const big = try core.bigint.BigInt.createInlineUninitialized(rt, capacity);
+        try std.testing.expectEqual(
+            slab.canUse(wrapper + capacity * @sizeOf(bigint.Limb), .@"8"),
+            capacity <= 56,
+        );
+        try std.testing.expect(big.isInline());
+        try std.testing.expect(!big.isExternal());
+        try std.testing.expectEqual(@as(usize, 0), big.limbs().len);
+        try std.testing.expectEqual(capacity, big.capacitySliceMut().len);
+        try std.testing.expectEqual(capacity * @sizeOf(bigint.Limb), big.famBytes());
+
+        // The FAM tail must start right after the struct and be limb-aligned.
+        if (capacity != 0) {
+            const expected_base = @intFromPtr(big) + @sizeOf(core.bigint.BigInt);
+            try std.testing.expectEqual(expected_base, @intFromPtr(big.capacitySliceMut().ptr));
+            try std.testing.expectEqual(@as(usize, 0), expected_base % @alignOf(bigint.Limb));
+        }
+
+        const window = big.capacitySliceMut();
+        for (window, 0..) |*limb, i| limb.* = @as(bigint.Limb, @intCast(i)) + 1;
+        // Publish one limb short of capacity where possible: that is exactly the
+        // shape an inline product takes when it normalizes away a leading zero,
+        // and the case where destroying by `len` would free the wrong size.
+        const published = if (capacity == 0) 0 else capacity - 1;
+        big.publishInline(published, true);
+        try std.testing.expectEqual(published, big.limbs().len);
+        try std.testing.expectEqual(capacity, big.capacitySliceMut().len);
+        try std.testing.expectEqual(published != 0, big.negative());
+        for (big.limbs(), 0..) |limb, i| {
+            try std.testing.expectEqual(@as(bigint.Limb, @intCast(i)) + 1, limb);
+        }
+        const borrowed = big.borrowedValue(rt.memory.allocator);
+        try std.testing.expectEqualSlices(bigint.Limb, big.limbs(), borrowed.limbs);
+
+        big.valueRef().free(rt);
+        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    }
+
+    // len == capacity is the ordinary published shape.
+    const full = try core.bigint.BigInt.createInlineUninitialized(rt, 3);
+    for (full.capacitySliceMut()) |*limb| limb.* = std.math.maxInt(bigint.Limb);
+    full.publishInline(3, false);
+    try std.testing.expectEqual(@as(usize, 3), full.limbs().len);
+    try std.testing.expect(!full.negative());
+    full.valueRef().free(rt);
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+
+    try std.testing.expectError(
+        error.BigIntTooLarge,
+        core.bigint.BigInt.createInlineUninitialized(rt, bigint.max_limbs + 1),
+    );
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
 test "runtime and context init-deinit are leak free" {
     var i: usize = 0;
     while (i < 3) : (i += 1) {
