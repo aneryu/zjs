@@ -58,6 +58,16 @@ same source shape as the process-level comparison tools.
   result so operand size never grows, and the checksum is `String(r).length`
   rather than the CLI inspector so it is identical across engines.
 
+- `bigint_mul_28x28`, `bigint_mul_28x29`, `bigint_mul_29x29`: P6-03c
+  allocation-boundary probes, not policy sentinels. Once a multiplication
+  result is one wrapper plus a trailing limb array, the product's size decides
+  its allocator route: a 56-byte wrapper plus 56 limbs is exactly 504 bytes,
+  the slab's payload ceiling, so capacity 56 is the last slab-eligible product
+  and 57 the first standalone one. These three shapes bracket that step
+  (56 / 57 / 58 limbs) to show whether crossing it produces a cliff. They run
+  2,000 multiplications per `run()` rather than 20,000 because the operands are
+  an order of magnitude wider than the shapes above.
+
 The callable shapes are necessary because each harness evaluates the source
 once, retains global `run`, and invokes that function for warmup and timed
 samples without recompiling the source.
