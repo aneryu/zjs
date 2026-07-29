@@ -10531,3 +10531,65 @@ test "normalized long division covers the operand relations" {
     try expectDivisionIdentity(largest.limbs, false, &divisor, false);
     try expectDivisionIdentity(largest.limbs, true, &divisor, true);
 }
+
+test "reciprocal two-by-one division is exactly the wide division" {
+    const bigint = engine.libs.bigint;
+    const Limb = bigint.Limb;
+    const Double = u128;
+
+    // Not an approximation: for every input the reciprocal helper must return
+    // the same quotient and remainder the direct u128 / u64 would. If it ever
+    // differed, the second-limb correction and add-back counts downstream would
+    // move, which would be an implementation defect rather than a performance
+    // difference.
+    const Case = struct {
+        fn check(high: Limb, low: Limb, divisor: Limb) !void {
+            const reciprocal = bigint.normalizedReciprocalInit(divisor);
+            const got = bigint.divTwoByOneReciprocal(high, low, divisor, reciprocal);
+            const numerator = (@as(Double, high) << 64) | low;
+            try std.testing.expectEqual(@as(Limb, @intCast(numerator / divisor)), got.quotient);
+            try std.testing.expectEqual(@as(Limb, @intCast(numerator % divisor)), got.remainder);
+        }
+    };
+
+    const divisors = [_]Limb{
+        @as(Limb, 1) << 63,
+        (@as(Limb, 1) << 63) + 1,
+        (@as(Limb, 1) << 63) | 0x5555_5555_5555_5555,
+        std.math.maxInt(Limb) - 1,
+        std.math.maxInt(Limb),
+        0xFFFF_FFFF_0000_0000,
+        0x8000_0000_0000_0001,
+        0xC000_0000_0000_0000,
+    };
+    const lows = [_]Limb{
+        0, 1, std.math.maxInt(Limb), std.math.maxInt(Limb) - 1,
+        @as(Limb, 1) << 63, (@as(Limb, 1) << 63) - 1,
+        0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555,
+    };
+    for (divisors) |divisor| {
+        // high must stay below divisor, which the division loop guarantees by
+        // routing `top == v1` to the clamped branch.
+        const highs = [_]Limb{ 0, 1, divisor - 1, divisor - 2, divisor >> 1, (divisor >> 1) + 1 };
+        for (highs) |high| {
+            for (lows) |low| try Case.check(high, low, divisor);
+        }
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x604D1);
+    const random = prng.random();
+    for (0..1_000_000) |_| {
+        const divisor = random.int(Limb) | (@as(Limb, 1) << 63);
+        const high = random.uintLessThan(Limb, divisor);
+        const low = random.int(Limb);
+        try Case.check(high, low, divisor);
+    }
+    // Extra weight on the boundary divisors, where the reciprocal is at its
+    // smallest and its largest.
+    for (0..200_000) |_| {
+        const divisor = if (random.boolean()) @as(Limb, 1) << 63 else std.math.maxInt(Limb);
+        const high = random.uintLessThan(Limb, divisor);
+        const low = random.int(Limb);
+        try Case.check(high, low, divisor);
+    }
+}

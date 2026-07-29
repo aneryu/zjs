@@ -604,6 +604,65 @@ fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
     return @intCast(remainder);
 }
 
+/// Reciprocal of a normalized limb, mirroring qjs `udiv1norm_init`
+/// (quickjs.c:11433). `divisor` must have its high bit set.
+///
+/// The value is `floor((2^128 - 1) / divisor) - 2^64`, built as qjs builds it
+/// -- numerator `((-divisor - 1) : -1)` -- so no 129-bit intermediate is
+/// needed. It is never zero (the smallest case, `divisor = 2^64 - 1`, gives
+/// 1), which is what lets `0` serve as the "no reciprocal" sentinel in the
+/// division loop, exactly as qjs uses `b1_inv`.
+///
+/// This is the one wide division that remains: a reciprocal-eligible division
+/// pays it once instead of once per quotient limb.
+pub fn normalizedReciprocalInit(divisor: Limb) Limb {
+    std.debug.assert(divisor >> (limb_bits - 1) == 1);
+    const a1: Limb = (0 -% divisor) -% 1;
+    const a0: Limb = std.math.maxInt(Limb);
+    const reciprocal: Limb = @intCast(((@as(DoubleLimb, a1) << limb_bits) | a0) / divisor);
+    std.debug.assert(reciprocal != 0);
+    return reciprocal;
+}
+
+/// Exact `(high:low) / divisor` and its remainder, from the precomputed
+/// reciprocal. Mirrors qjs `udiv1norm` (quickjs.c:11444).
+///
+/// **Not an approximation.** The result is identical to what
+/// `((high:low)) / divisor` and `% divisor` produce, which is what lets the
+/// second-limb correction, multiply-subtract and add-back below stay exactly
+/// as they were -- their counts must not move.
+///
+/// Every step is wrapping on purpose: the middle term deliberately goes
+/// negative and is recovered through the all-ones high half.
+pub inline fn divTwoByOneReciprocal(
+    high: Limb,
+    low: Limb,
+    divisor: Limb,
+    reciprocal: Limb,
+) struct { quotient: Limb, remainder: Limb } {
+    std.debug.assert(divisor >> (limb_bits - 1) == 1);
+    std.debug.assert(high < divisor);
+    // 0 or all-ones, depending on `low`'s top bit.
+    const n1m: Limb = @bitCast(@as(i64, @bitCast(low)) >> (limb_bits - 1));
+    const n_adj: Limb = low +% (n1m & divisor);
+    const estimate: DoubleLimb = @as(DoubleLimb, reciprocal) * (high -% n1m) + n_adj;
+    var quotient: Limb = @as(Limb, @truncate(estimate >> limb_bits)) +% high;
+    // Recover the exact quotient and remainder: subtract one divisor too many
+    // so the sign of the result selects the final correction without a branch.
+    var value: DoubleLimb = (@as(DoubleLimb, high) << limb_bits) | low;
+    value = value -% @as(DoubleLimb, quotient) *% divisor -% divisor;
+    const high_half: Limb = @truncate(value >> limb_bits);
+    quotient = quotient +% 1 +% high_half;
+    const remainder: Limb = @as(Limb, @truncate(value)) +% (high_half & divisor);
+    return .{ .quotient = quotient, .remainder = remainder };
+}
+
+/// Quotient-position count at which precomputing the reciprocal pays for
+/// itself, matching qjs `UDIV1NORM_THRESHOLD` (quickjs.c:11463). Below it the
+/// loop keeps the direct `u128 / u64` estimate, so short quotients pay neither
+/// the initialization nor the extra code.
+const reciprocal_threshold: usize = 3;
+
 /// Multi-limb divisor: normalized schoolbook long division, one quotient limb
 /// per step. This is qjs's mechanism (`js_bigint_divrem` normalizes and then
 /// runs `mp_divnorm`, quickjs.c:11893-11976): normalize so the divisor's top
@@ -667,6 +726,10 @@ noinline fn divRemAbsNormalizedLong(
 
     const v1 = v[nb - 1];
     const v0 = v[nb - 2];
+    // One wide division for the whole operation instead of one per quotient
+    // limb. Zero means "not eligible", which the reciprocal itself can never
+    // be; qjs uses `b1_inv` the same way.
+    const reciprocal: Limb = if (m >= reciprocal_threshold) normalizedReciprocalInit(v1) else 0;
     var j = m + 1;
     while (j > 0) {
         j -= 1;
@@ -682,9 +745,14 @@ noinline fn divRemAbsNormalizedLong(
         var rhat: DoubleLimb = undefined;
         if (top == v1) {
             // The true digit would be the base itself; clamp and let the
-            // correction below walk it down.
+            // correction below walk it down. The reciprocal helper requires
+            // `high < divisor`, so this case never reaches it.
             qhat = std.math.maxInt(Limb);
             rhat = @as(DoubleLimb, high) + v1;
+        } else if (reciprocal != 0) {
+            const estimate = divTwoByOneReciprocal(top, high, v1, reciprocal);
+            qhat = estimate.quotient;
+            rhat = estimate.remainder;
         } else {
             const numerator = (@as(DoubleLimb, top) << limb_bits) | high;
             qhat = @intCast(numerator / v1);
