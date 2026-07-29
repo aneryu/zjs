@@ -785,6 +785,16 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .output = m.output,
         .code_base = func.byteCode().ptr,
         .catch_target = level.catch_target,
+        // Every consumer publishes these outcome/property payloads before
+        // reading them. Avoid clearing cold scratch fields at each driver
+        // entry, which is especially visible for short native callbacks.
+        .property_atom = undefined,
+        .local_fast_blocked = undefined,
+        .return_value = undefined,
+        .return_action = undefined,
+        .return_payload = undefined,
+        .pending_error = undefined,
+        .tail_is_reuse = undefined,
     };
     return tailcall_dispatch.run(&vm);
 }
@@ -800,19 +810,40 @@ pub fn runActiveInvocationUntilNativeBoundary(
 ) HostError!core.JSValue {
     const machine = invocation.machine;
     std.debug.assert(machine.depth > scope.fence_depth);
+    const result = runTC(machine) catch |err|
+        return runActiveInvocationAfterNativeBoundaryError(machine, scope, err);
+    std.debug.assert(machine.depth == scope.fence_depth);
+    std.debug.assert(machine.top == scope.view.bottom_exclusive);
+    return result;
+}
+
+/// Callback throws are uncommon but require the complete bounded-unwind loop.
+/// Keep that machinery out of the successful synchronous-return driver so a
+/// short callback pays one `runTC` call and one outcome check.
+noinline fn runActiveInvocationAfterNativeBoundaryError(
+    machine: *inline_calls.Machine,
+    scope: *const inline_calls.NativeBoundaryScope,
+    initial_err: HostError,
+) HostError!core.JSValue {
+    var pending_err = initial_err;
     while (true) {
-        const result = runTC(machine) catch |err| {
-            if (machine.depth > scope.fence_depth and
-                try machine.unwindForErrorToDepth(machine.global, scope.fence_depth, err))
-            {
-                continue;
-            }
+        if (machine.depth <= scope.fence_depth or
+            !try machine.unwindForErrorToDepth(
+                machine.global,
+                scope.fence_depth,
+                pending_err,
+            ))
+        {
             std.debug.assert(machine.depth == scope.fence_depth);
-            std.debug.assert(machine.top == scope.fence_top);
-            return err;
+            std.debug.assert(machine.top == scope.view.bottom_exclusive);
+            return pending_err;
+        }
+        const result = runTC(machine) catch |err| {
+            pending_err = err;
+            continue;
         };
         std.debug.assert(machine.depth == scope.fence_depth);
-        std.debug.assert(machine.top == scope.fence_top);
+        std.debug.assert(machine.top == scope.view.bottom_exclusive);
         return result;
     }
 }

@@ -441,7 +441,7 @@ test "synchronous native fence reuses one Machine and restores native cleanup or
     try std.testing.expectEqual(@as(usize, 5), probe.invoke_calls);
     try std.testing.expect(probe.cleanup_ran);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
@@ -587,7 +587,7 @@ test "synchronous native fence restores every budget after interrupt" {
     defer caught.free(js.runtime);
     try std.testing.expectEqual(false, caught.asBool().?);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
@@ -646,7 +646,7 @@ test "Function and Reflect apply opt into the active Machine explicitly" {
     try std.testing.expectEqual(@as(usize, 5), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
 
 test "synchronous apply fallbacks restore the outer active invocation" {
@@ -692,7 +692,7 @@ test "synchronous apply fallbacks restore the outer active invocation" {
     try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
 
 test "nested calls and generator resumes share one Realm interrupt cadence" {

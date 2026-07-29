@@ -6099,6 +6099,40 @@ pub const CellSliceRoot = struct {
     }
 };
 
+pub const OwnedArrayLikeArgs = struct {
+    const Storage = enum {
+        empty,
+        arena,
+        heap,
+    };
+
+    rt: ?*core.JSRuntime = null,
+    values: []core.JSValue = &.{},
+    storage: Storage = .empty,
+    arena_mark: core.VmStackArena.Mark = .{ .chunk = 0, .used = 0 },
+
+    pub fn deinit(self: *OwnedArrayLikeArgs) void {
+        const rt = self.rt orelse return;
+        for (self.values) |*value| {
+            value.free(rt);
+            value.* = core.JSValue.undefinedValue();
+        }
+        switch (self.storage) {
+            .empty => {},
+            .arena => rt.vm_stack.restore(self.arena_mark),
+            .heap => rt.memory.free(core.JSValue, self.values),
+        }
+        self.* = .{};
+    }
+
+    fn takeHeap(self: *OwnedArrayLikeArgs) []core.JSValue {
+        std.debug.assert(self.storage == .empty or self.storage == .heap);
+        const values = self.values;
+        self.* = .{};
+        return values;
+    }
+};
+
 pub fn argsFromArrayLike(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -6107,14 +6141,72 @@ pub fn argsFromArrayLike(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) ![]core.JSValue {
-    _ = objectFromValue(array_value) orelse return error.TypeError;
+    var owned = try materializeArgsFromArrayLike(
+        ctx,
+        output,
+        global,
+        array_value,
+        caller_function,
+        caller_frame,
+        false,
+    );
+    return owned.takeHeap();
+}
+
+/// Transactional CreateListFromArrayLike materialization for synchronous
+/// native algorithms. Values are snapshotted before call entry, published as
+/// a GC root by the caller, and then either moved to a resident Entry or
+/// borrowed by the authoritative fallback. The LIFO arena backing avoids a
+/// per-call heap allocation while preserving an owned writable list.
+pub fn ownedArgsFromArrayLike(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    array_value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !OwnedArrayLikeArgs {
+    return materializeArgsFromArrayLike(
+        ctx,
+        output,
+        global,
+        array_value,
+        caller_function,
+        caller_frame,
+        true,
+    );
+}
+
+fn materializeArgsFromArrayLike(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    array_value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    prefer_arena: bool,
+) !OwnedArrayLikeArgs {
+    const object = objectFromValue(array_value) orelse return error.TypeError;
     // CreateListFromArrayLike performs observable [[Get]] operations even
     // when the source is an Array. A dense bulk copy is only valid after
-    // proving that every indexed property is an own dense data property;
-    // keep the generic path authoritative until that proof is made here.
-    const length_value = try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
-    defer length_value.free(ctx.runtime);
-    const length = try toLengthIndex(ctx, output, global, length_value);
+    // proving that every indexed property is an own dense data property.
+    const dense_array_length: ?usize = if (object.isArray() and
+        object.proxyTarget() == null and
+        !object.hasExoticMethods() and
+        object.isFastArray() and
+        object.arrayElementStorageMode() == .dense)
+        @intCast(object.arrayLength())
+    else
+        null;
+    // An ordinary Array's non-configurable own `length` data property is the
+    // same internal value returned by [[Get]]. Reading it directly is
+    // unobservable; Proxy/exotic and every non-dense source still use the
+    // full VM property path.
+    const length = dense_array_length orelse blk: {
+        const length_value = try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
+        defer length_value.free(ctx.runtime);
+        break :blk try toLengthIndex(ctx, output, global, length_value);
+    };
     // qjs build_arg_list cap (quickjs.c:41173-41177, JS_MAX_LOCAL_VARS = 65534):
     // apply/Reflect.apply/Reflect.construct reject huge array-likes up front
     // instead of materializing them.
@@ -6122,30 +6214,62 @@ pub fn argsFromArrayLike(
         _ = try exception_ops.throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
         return error.RangeError;
     }
-    if (length == 0) return &.{};
-    const args = try ctx.runtime.memory.alloc(core.JSValue, length);
-    errdefer ctx.runtime.memory.free(core.JSValue, args);
-    var rooted_args: []core.JSValue = args[0..0];
+    if (length == 0) return .{};
+
+    const rt = ctx.runtime;
+    const arena_mark = rt.vm_stack.mark();
+    const arena_values = if (prefer_arena)
+        rt.vm_stack.carve(&rt.memory, length)
+    else
+        null;
+    const storage: OwnedArrayLikeArgs.Storage = if (arena_values != null) .arena else .heap;
+    const values = arena_values orelse try rt.memory.alloc(core.JSValue, length);
+    errdefer switch (storage) {
+        .empty => {},
+        .arena => rt.vm_stack.restore(arena_mark),
+        .heap => rt.memory.free(core.JSValue, values),
+    };
+    var rooted_args: []core.JSValue = values[0..0];
     var args_root = ValueSliceRoot{};
-    args_root.init(ctx.runtime, &rooted_args);
+    args_root.init(rt, &rooted_args);
     defer args_root.deinit();
     var initialized: usize = 0;
     errdefer {
-        for (args[0..initialized]) |*value| {
-            value.free(ctx.runtime);
+        for (values[0..initialized]) |*value| {
+            value.free(rt);
             value.* = core.JSValue.undefinedValue();
         }
         rooted_args = &.{};
     }
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-        defer key.deinit(ctx.runtime);
-        args[index] = try getValueProperty(ctx, output, global, array_value, key.atom, caller_function, caller_frame);
-        initialized += 1;
-        rooted_args = args[0..initialized];
+
+    const dense_values: ?[]const core.JSValue = if (dense_array_length != null and
+        @as(usize, @intCast(object.fastArrayCount())) == length)
+        object.fastArrayValues()
+    else
+        null;
+    if (dense_values) |dense| {
+        std.debug.assert(dense.len == length);
+        for (dense, 0..) |value, index| {
+            values[index] = value.dup();
+            initialized += 1;
+            rooted_args = values[0..initialized];
+        }
+    } else {
+        var index: usize = 0;
+        while (index < length) : (index += 1) {
+            const key = try propertyAtomFromLengthIndex(rt, index);
+            defer key.deinit(rt);
+            values[index] = try getValueProperty(ctx, output, global, array_value, key.atom, caller_function, caller_frame);
+            initialized += 1;
+            rooted_args = values[0..initialized];
+        }
     }
-    return args;
+    return .{
+        .rt = rt,
+        .values = values,
+        .storage = storage,
+        .arena_mark = arena_mark,
+    };
 }
 
 pub fn qjsArrayIteratorMethod(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {

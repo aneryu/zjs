@@ -1174,13 +1174,13 @@ pub const JSContext = struct {
     }
 
     pub fn pushActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        frame.previous = self.runtime.current_backtrace_frame;
-        self.runtime.current_backtrace_frame = frame;
+        frame.previous = self.runtime.hot.current_backtrace_frame;
+        self.runtime.hot.current_backtrace_frame = frame;
     }
 
     pub fn popActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        std.debug.assert(self.runtime.current_backtrace_frame == frame);
-        self.runtime.current_backtrace_frame = frame.previous;
+        std.debug.assert(self.runtime.hot.current_backtrace_frame == frame);
+        self.runtime.hot.current_backtrace_frame = frame.previous;
         frame.previous = null;
     }
 
@@ -1191,7 +1191,7 @@ pub const JSContext = struct {
         // stops the entire walk (and is itself excluded), matching qjs.
         var active_count: usize = 0;
         {
-            var active = self.runtime.current_backtrace_frame;
+            var active = self.runtime.hot.current_backtrace_frame;
             count: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
@@ -1215,7 +1215,7 @@ pub const JSContext = struct {
         // order the previous per-node walk produced.
         var active_index = active_count;
         {
-            var active = self.runtime.current_backtrace_frame;
+            var active = self.runtime.hot.current_backtrace_frame;
             fill: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {

@@ -1174,43 +1174,51 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    if (machine.topEntry().isForwardedLeaf() and machine.topEntry().stack.len() == 0) {
-        // Forwarded-leaf return (O3): the zero-arg leaf epilogue plus the
-        // owned native `call` frame release inside `popReturnedForwardedLeaf`.
-        // No resume record exists for this shape (its default-repr storage
-        // holds `native_caller` for observable backtraces), so the caller
-        // resume {pc, sp} is re-derived through `prev` — the same chain
-        // `reloadAfterPop` walks — before the flat republication the leaf
-        // arms established. The len==0 guard routes parser-elided operand
-        // leftovers to the general return path below, whose teardown
-        // releases the remaining window (and the native frame) exactly once.
-        const dying = machine.topEntry();
-        const caller_opt = dying.prev;
-        machine.popReturnedForwardedLeaf(vm.rt);
-        if (caller_opt) |caller| {
-            std.debug.assert(caller == machine.top.?);
-            const caller_function = caller.frame.function;
-            const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
-            const resume_sp = caller.stack.topPtr();
-            vm.frame = &caller.frame;
-            vm.stack = &caller.stack;
-            vm.catch_target = &caller.catch_target;
-            vm.function = caller_function;
-            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
-            vb2 = caller.frame.locals.ptr;
-            // Deliver the result on the caller stack: the retired target slot
-            // at the caller's operand top is dead (its value transferred into
-            // the callee frame at push), exactly where the generic path would
-            // push.
-            resume_sp[0] = value;
-            caller.stack.setTopPtr(resume_sp + 1);
-            return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
+    if (machine.topEntry().hasSpecialReturn()) {
+        if (machine.topEntry().isNativeBoundaryReturn()) {
+            machine.popReturnedNativeBoundary(vm.rt);
+            vm.return_value = value;
+            return .native_returned;
         }
-        // L0 caller: keep the authoritative reload (stop-boundary republication).
-        reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
-        vm.stack.pushOwnedAssumeCapacity(value);
-        sp2 += 1;
-        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+        if (machine.topEntry().isForwardedLeaf() and machine.topEntry().stack.len() == 0) {
+            // Forwarded-leaf return (O3): the zero-arg leaf epilogue plus the
+            // owned native `call` frame release inside `popReturnedForwardedLeaf`.
+            // No resume record exists for this shape (its default-repr storage
+            // holds `native_caller` for observable backtraces), so the caller
+            // resume {pc, sp} is re-derived through `prev` — the same chain
+            // `reloadAfterPop` walks — before the flat republication the leaf
+            // arms established. The len==0 guard routes parser-elided operand
+            // leftovers to the general return path below, whose teardown
+            // releases the remaining window (and the native frame) exactly once.
+            const dying = machine.topEntry();
+            const caller_opt = dying.prev;
+            machine.popReturnedForwardedLeaf(vm.rt);
+            if (caller_opt) |caller| {
+                std.debug.assert(caller == machine.top.?);
+                const caller_function = caller.frame.function;
+                const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
+                const resume_sp = caller.stack.topPtr();
+                vm.frame = &caller.frame;
+                vm.stack = &caller.stack;
+                vm.catch_target = &caller.catch_target;
+                vm.function = caller_function;
+                vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
+                vb2 = caller.frame.locals.ptr;
+                // Deliver the result on the caller stack: the retired target
+                // slot at the caller's operand top is dead (its value
+                // transferred into the callee frame at push), exactly where
+                // the generic path would push.
+                resume_sp[0] = value;
+                caller.stack.setTopPtr(resume_sp + 1);
+                return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
+            }
+            // L0 caller: keep the authoritative reload (stop-boundary
+            // republication).
+            reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
+            vm.stack.pushOwnedAssumeCapacity(value);
+            sp2 += 1;
+            return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+        }
     }
     if (machine.topEntry().completesConstructor()) {
         const completed = machine.popConstructorReturn(value);

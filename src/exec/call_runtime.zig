@@ -430,6 +430,35 @@ const OwnedArgList = struct {
         }
     }
 
+    fn initTakeArgs(
+        self: *OwnedArgList,
+        rt: *core.JSRuntime,
+        receiver: core.JSValue,
+        callable: core.JSValue,
+        args: []core.JSValue,
+    ) HostError!void {
+        std.debug.assert(self.rt == null);
+        const total = try std.math.add(usize, args.len, 2);
+        self.rt = rt;
+        self.values = if (total <= self.inline_values.len)
+            self.inline_values[0..total]
+        else blk: {
+            self.heap_backed = true;
+            break :blk try rt.memory.alloc(core.JSValue, total);
+        };
+        self.rooted_prefix = self.values[0..0];
+        self.root.init(rt, &self.rooted_prefix);
+        errdefer self.deinit();
+
+        self.values[0] = receiver.dup();
+        self.rooted_prefix = self.values[0..1];
+        self.values[1] = callable.dup();
+        self.rooted_prefix = self.values[0..2];
+        @memcpy(self.values[2..], args);
+        @memset(args, core.JSValue.undefinedValue());
+        self.rooted_prefix = self.values;
+    }
+
     fn deinit(self: *OwnedArgList) void {
         const rt = self.rt orelse return;
         var index = self.rooted_prefix.len;
@@ -448,6 +477,145 @@ const OwnedArgList = struct {
     }
 };
 
+const SyncInlineRoute = struct {
+    invocation: *inline_calls.ActiveInvocation,
+    target: inline_calls.InlineTarget,
+};
+
+inline fn resolveSyncInlineRoute(
+    route: *SyncInlineRoute,
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+) bool {
+    const invocation = inline_calls.activeInvocation(ctx.runtime) orelse return false;
+    const machine = invocation.machine;
+    if (machine.ctx != ctx or
+        machine.global != global or
+        machine.output != output)
+    {
+        return false;
+    }
+    route.invocation = invocation;
+    return inline_calls.resolveInlineTargetInto(
+        &route.target,
+        ctx,
+        global,
+        this_value,
+        func,
+    );
+}
+
+noinline fn runSyncInlineRouteMoved(
+    route: *SyncInlineRoute,
+    global: *core.Object,
+    moved_values: []core.JSValue,
+) HostError!core.JSValue {
+    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    boundary.push();
+    errdefer boundary.deinit();
+
+    _ = try route.invocation.machine.pushMovedCall(
+        global,
+        &route.target,
+        moved_values,
+        .method,
+        .native_boundary,
+        0,
+    );
+    inline_calls.recordSameMachineSyncCall();
+    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    boundary.finish();
+    return result;
+}
+
+noinline fn runSyncInlineRouteCopiedArgs(
+    route: *SyncInlineRoute,
+    global: *core.Object,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
+    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    boundary.push();
+    errdefer boundary.deinit();
+
+    const machine = route.invocation.machine;
+    if (machine.tryPushNativeBoundaryCopiedArgsFast(
+        machine.ctx.runtime,
+        &route.target,
+        args,
+    ) == null) {
+        _ = (try machine.pushNativeBoundaryCopiedArgs(
+            global,
+            &route.target,
+            args,
+        )).?;
+    }
+    inline_calls.recordSameMachineSyncCall();
+    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    boundary.finish();
+    return result;
+}
+
+noinline fn runSyncInlineRouteMovedArgs(
+    route: *SyncInlineRoute,
+    global: *core.Object,
+    args: []core.JSValue,
+) HostError!core.JSValue {
+    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
+    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    boundary.push();
+    errdefer boundary.deinit();
+
+    const machine = route.invocation.machine;
+    if (machine.tryPushNativeBoundaryMovedArgsFast(
+        machine.ctx.runtime,
+        &route.target,
+        args,
+    ) == null) {
+        _ = (try machine.pushNativeBoundaryMovedArgs(
+            global,
+            &route.target,
+            args,
+        )).?;
+    }
+    inline_calls.recordSameMachineSyncCall();
+    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    boundary.finish();
+    return result;
+}
+
+noinline fn runSyncInlineRouteOwnedCopy(
+    route: *SyncInlineRoute,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    var owned_args = OwnedArgList{};
+    try owned_args.init(ctx.runtime, this_value, func, args);
+    defer owned_args.deinit();
+    return runSyncInlineRouteMoved(route, global, owned_args.values);
+}
+
+noinline fn runSyncInlineRouteOwnedArgsGeneral(
+    route: *SyncInlineRoute,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []core.JSValue,
+) HostError!core.JSValue {
+    std.debug.assert(!inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
+    var owned_args = OwnedArgList{};
+    try owned_args.initTakeArgs(ctx.runtime, this_value, func, args);
+    defer owned_args.deinit();
+    return runSyncInlineRouteMoved(route, global, owned_args.values);
+}
+
 /// Explicit synchronous internal call boundary for native algorithms that
 /// must receive a bytecode callback result before they can finish. Inputs must
 /// remain rooted for this call (native invocation arguments and algorithm
@@ -456,7 +624,7 @@ const OwnedArgList = struct {
 /// Eligible same-context, same-Realm normal bytecode targets push an Entry on
 /// the active Machine and stop at `.native_boundary`. Every other target
 /// unconditionally retains the authoritative JS_Call-shaped root path.
-pub fn callValueOrBytecodeSyncInternal(
+pub inline fn callValueOrBytecodeSyncInternal(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -470,7 +638,8 @@ pub fn callValueOrBytecodeSyncInternal(
     // Machine or the authoritative fallback.
     try exception_ops.pollInterrupt(ctx, global);
 
-    const invocation = inline_calls.activeInvocation(ctx.runtime) orelse
+    var route: SyncInlineRoute = undefined;
+    if (!resolveSyncInlineRoute(&route, ctx, output, global, this_value, func))
         return callValueOrBytecodeDispatchAfterInterruptPoll(
             ctx,
             output,
@@ -482,25 +651,40 @@ pub fn callValueOrBytecodeSyncInternal(
             caller_frame,
             true,
         );
-    const machine = invocation.machine;
-    if (machine.ctx != ctx or
-        machine.ctx.runtime != ctx.runtime or
-        machine.global != global or
-        machine.output != output)
-    {
-        return callValueOrBytecodeDispatchAfterInterruptPoll(
-            ctx,
-            output,
-            global,
-            this_value,
-            func,
-            args,
-            caller_function,
-            caller_frame,
-            true,
-        );
+
+    if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+        return runSyncInlineRouteCopiedArgs(&route, global, args);
     }
-    const target = inline_calls.resolveInlineTarget(ctx, global, this_value, func) orelse
+    return runSyncInlineRouteOwnedCopy(
+        &route,
+        ctx,
+        global,
+        this_value,
+        func,
+        args,
+    );
+}
+
+/// Same synchronous routing contract as `callValueOrBytecodeSyncInternal`,
+/// but the caller supplies a rooted, owned argument list. Simple eligible
+/// targets move the arguments directly into the writable frame while
+/// receiver/callable remain borrowed from the still-live native algorithm.
+/// Other eligible bytecode layouts build the full owned transaction on their
+/// cold path. Fallback leaves every argument owned by the caller.
+pub inline fn callOwnedArgsValueOrBytecodeSyncInternal(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    try exception_ops.pollInterrupt(ctx, global);
+
+    var route: SyncInlineRoute = undefined;
+    if (!resolveSyncInlineRoute(&route, ctx, output, global, this_value, func))
         return callValueOrBytecodeDispatchAfterInterruptPoll(
             ctx,
             output,
@@ -512,25 +696,17 @@ pub fn callValueOrBytecodeSyncInternal(
             caller_frame,
             true,
         );
-
-    var owned_args = OwnedArgList{};
-    try owned_args.init(ctx.runtime, this_value, func, args);
-    defer owned_args.deinit();
-
-    var boundary = inline_calls.NativeBoundaryScope.init(invocation);
-    boundary.push();
-    defer boundary.deinit();
-
-    _ = try machine.pushMovedCall(
+    if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+        return runSyncInlineRouteMovedArgs(&route, global, args);
+    }
+    return runSyncInlineRouteOwnedArgsGeneral(
+        &route,
+        ctx,
         global,
-        &target,
-        owned_args.values,
-        .method,
-        .native_boundary,
-        0,
+        this_value,
+        func,
+        args,
     );
-    inline_calls.recordSameMachineSyncCall();
-    return zjs_vm.runActiveInvocationUntilNativeBoundary(invocation, &boundary);
 }
 
 /// Slow-path collection prototype methods reached by name without a baked
@@ -1505,23 +1681,148 @@ pub fn qjsFunctionApplyCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
+    if (!this_value.isFunctionBytecode()) {
+        const target_object = object_ops.objectFromValue(this_value) orelse
+            return qjsFunctionApplyUncommonCallable(
+                ctx,
+                output,
+                global,
+                this_value,
+                function_object,
+                args,
+                caller_function,
+                caller_frame,
+            );
+        if (target_object.class_id != core.class.ids.bytecode_function and
+            !isFunctionLikeClass(target_object.class_id))
+        {
+            return qjsFunctionApplyUncommonCallable(
+                ctx,
+                output,
+                global,
+                this_value,
+                function_object,
+                args,
+                caller_function,
+                caller_frame,
+            );
+        }
+    }
+    return qjsFunctionApplyCallable(
+        ctx,
+        output,
+        global,
+        this_value,
+        function_object,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+inline fn qjsFunctionApplyCallable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const arg_array = if (args.len >= 2 and !args[1].isNull() and !args[1].isUndefined()) args[1] else {
+    const arg_array = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    if (arg_array.isNull() or arg_array.isUndefined()) {
         return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
-    };
+    }
+    return qjsFunctionApplyArrayLike(
+        ctx,
+        output,
+        global,
+        this_arg,
+        this_value,
+        function_object,
+        arg_array,
+        caller_function,
+        caller_frame,
+    );
+}
+
+noinline fn qjsFunctionApplyUncommonCallable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    if (!isCallableValue(this_value)) {
+        return throwFunctionRealmTypeError(ctx, global, function_object);
+    }
+    return qjsFunctionApplyCallable(
+        ctx,
+        output,
+        global,
+        this_value,
+        function_object,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+/// Observable CreateListFromArrayLike materialization and its owned argument
+/// transaction are needed only when apply receives a non-null list. Keep that
+/// large cold state out of the zero-list native-fence caller frame.
+noinline fn qjsFunctionApplyArrayLike(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_arg: core.JSValue,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    arg_array: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
     if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
     if (object_ops.callableObjectFromValue(this_value)) |target_object| {
-        const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target_object);
-        defer ctx.runtime.memory.allocator.free(target_name);
-        if (std.mem.eql(u8, target_name, "fromCodePoint")) return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
+        if (core.function.decodeNativeBuiltinId(target_object.nativeFunctionId())) |native_ref| {
+            if (native_ref.domain == .string and
+                native_ref.id == @intFromEnum(method_ids.string.StaticMethod.from_code_point))
+            {
+                return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
+            }
+        }
     }
-    var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, arg_array, caller_function, caller_frame);
-    defer freeArgs(ctx.runtime, apply_args);
+    var owned_args = try array_ops.ownedArgsFromArrayLike(
+        ctx,
+        output,
+        global,
+        arg_array,
+        caller_function,
+        caller_frame,
+    );
+    defer owned_args.deinit();
+    var apply_args = owned_args.values;
+    if (apply_args.len == 0) {
+        return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
+    }
     var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
-    return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
+    return callOwnedArgsValueOrBytecodeSyncInternal(
+        ctx,
+        output,
+        global,
+        this_arg,
+        this_value,
+        apply_args,
+        caller_function,
+        caller_frame,
+    );
 }
 
 pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, _: *core.Object, message: []const u8) !core.JSValue {
@@ -3165,7 +3466,10 @@ pub fn iteratorStepResult(
 }
 
 pub fn isCallableValue(value: core.JSValue) bool {
-    return value.isFunctionBytecode() or object_ops.functionObjectFromValue(value) != null or object_ops.callableObjectFromValue(value) != null or object_ops.proxyTargetIsCallable(value);
+    if (value.isFunctionBytecode()) return true;
+    const object = object_ops.objectFromValue(value) orelse return false;
+    return isFunctionLikeClass(object.class_id) or
+        object_ops.proxyTargetIsCallableObject(object);
 }
 
 pub fn qjsReflectCallForNativeRecord(
@@ -6943,12 +7247,32 @@ pub fn qjsReflectApplyCall(
 ) !core.JSValue {
     if (args.len < 1 or !isCallableValue(args[0])) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     if (args.len < 3) return error.TypeError;
-    var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, args[2], caller_function, caller_frame);
-    defer freeArgs(ctx.runtime, apply_args);
+    var owned_args = try array_ops.ownedArgsFromArrayLike(
+        ctx,
+        output,
+        global,
+        args[2],
+        caller_function,
+        caller_frame,
+    );
+    defer owned_args.deinit();
+    var apply_args = owned_args.values;
+    if (apply_args.len == 0) {
+        return callValueOrBytecodeSyncInternal(ctx, output, global, args[1], args[0], &.{}, caller_function, caller_frame);
+    }
     var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
-    return callValueOrBytecodeSyncInternal(ctx, output, global, args[1], args[0], apply_args, caller_function, caller_frame);
+    return callOwnedArgsValueOrBytecodeSyncInternal(
+        ctx,
+        output,
+        global,
+        args[1],
+        args[0],
+        apply_args,
+        caller_function,
+        caller_frame,
+    );
 }
 
 pub fn closeIteratorForFromEntriesAbrupt(

@@ -221,9 +221,24 @@ pub inline fn resolveInlineDirectConstructorFunction(global: *core.Object, func:
 /// Arrow targets ARE eligible: their lexical `this` / `new.target` are
 /// ordinary closure cells, so call-target resolution has no arrow arm.
 pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
+    var target: InlineTarget = undefined;
+    if (!resolveInlineTargetInto(&target, ctx, global, receiver, func)) return null;
+    return target;
+}
+
+/// Out-parameter form for hot routes that already own stable target storage.
+/// Avoids materializing and then copying the 56-byte optional InlineTarget.
+pub inline fn resolveInlineTargetInto(
+    target: *InlineTarget,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    receiver: core.JSValue,
+    func: core.JSValue,
+) bool {
     _ = ctx;
-    const resolved = resolveInlineFunction(global, func) orelse return null;
-    return resolved.bind(receiver, func);
+    const resolved = resolveInlineFunction(global, func) orelse return false;
+    target.* = resolved.bind(receiver, func);
+    return true;
 }
 
 /// One active inline call level. Entries live in chunked, pointer-stable
@@ -286,15 +301,12 @@ pub const Entry = struct {
         /// the established zero-arg return arm retains its exact single-bit
         /// test (no args len probe on the argc==0 leaf family).
         exact_args_leaf: bool = false,
-        /// Function.prototype.call forwarding into a published zero-arg leaf
-        /// (O3): empty-leaf frame geometry PLUS the owned synthetic native
-        /// `call` frame. A separate bit (never combined with `empty_leaf`)
-        /// because the default-repr resume record overlays `native_caller`
-        /// storage, which this shape needs live for observable backtraces —
-        /// its return arm re-derives the caller resume through `prev`
-        /// instead of reading the record, and the established leaf arms keep
-        /// their exact single-bit tests.
-        forwarded_leaf: bool = false,
+        /// A return that must leave the ordinary `.next` resume path. This bit
+        /// covers Function.call's forwarded leaf and a synchronous native
+        /// fence; `has_native_caller` distinguishes the former. Reusing the
+        /// established cold-return test keeps ordinary Entry returns on their
+        /// exact branch sequence and does not grow Entry.
+        special_return: bool = false,
         /// This frame carries the logical depth and planned bytecode-stack
         /// cost of tail-call callers whose physical Entry storage was reused.
         /// QuickJS keeps those callers blocked in nested JS_CallInternal
@@ -370,7 +382,17 @@ pub const Entry = struct {
     }
 
     pub inline fn isForwardedLeaf(self: *const Entry) bool {
-        return self.teardown.forwarded_leaf;
+        return self.teardown.special_return and self.teardown.has_native_caller;
+    }
+
+    pub inline fn hasSpecialReturn(self: *const Entry) bool {
+        return self.teardown.special_return;
+    }
+
+    pub inline fn isNativeBoundaryReturn(self: *const Entry) bool {
+        return self.teardown.special_return and
+            !self.teardown.has_native_caller and
+            self.return_action == .native_boundary;
     }
 
     pub inline fn completesConstructor(self: *const Entry) bool {
@@ -439,7 +461,7 @@ pub const Entry = struct {
         std.debug.assert(!self.teardown.has_native_caller);
         std.debug.assert(!self.teardown.empty_leaf);
         std.debug.assert(!self.teardown.exact_args_leaf);
-        std.debug.assert(!self.teardown.forwarded_leaf);
+        std.debug.assert(!self.isForwardedLeaf());
         if (comptime core.value.nan_boxing) {
             comptime std.debug.assert(@sizeOf(@TypeOf(self._stride_padding)) >= @sizeOf(TailChainBudget));
             // An array-of-u8's type alignment remains one even when its field
@@ -461,6 +483,9 @@ pub const Entry = struct {
         std.debug.assert(self.continuation_payload == 0);
         self.return_action = continuation.action;
         self.continuation_payload = continuation.payload;
+        if (continuation.action == .native_boundary) {
+            self.teardown.special_return = true;
+        }
         continuation.action = .next;
         continuation.payload = 0;
     }
@@ -500,7 +525,7 @@ pub const Entry = struct {
         // Forwarded leaves (O3) share the empty-slice geometry and rely on
         // general teardown's established `has_native_caller` release.
         if (self.teardown.empty_leaf or self.teardown.exact_args_leaf or
-            self.teardown.forwarded_leaf)
+            self.isForwardedLeaf())
             self.deinitGeneral(ctx)
         else if (self.canUseSimpleTeardown())
             self.deinitSimple(ctx)
@@ -615,7 +640,7 @@ pub const Entry = struct {
     inline fn deinitForwardedLeafInline(self: *Entry, rt: *core.JSRuntime) void {
         const frame = &self.frame;
         std.debug.assert(self.teardown.simple);
-        std.debug.assert(self.teardown.forwarded_leaf and !self.teardown.empty_leaf);
+        std.debug.assert(self.isForwardedLeaf() and !self.teardown.empty_leaf);
         std.debug.assert(!self.teardown.exact_args_leaf);
         std.debug.assert(self.teardown.has_native_caller);
         std.debug.assert(frame.cold == null);
@@ -681,7 +706,7 @@ pub const Entry = struct {
     /// activation: both records are transferred to the replacement Entry.
     inline fn deinitForTailReplacement(self: *Entry, ctx: *core.JSContext) void {
         if (self.teardown.empty_leaf or self.teardown.exact_args_leaf or
-            self.teardown.forwarded_leaf)
+            self.isForwardedLeaf())
             self.deinitGeneralResources(ctx)
         else if (self.canUseSimpleTeardown())
             self.deinitSimpleResources(ctx)
@@ -754,6 +779,10 @@ pub const MachineBacktraceView = struct {
     pub fn segment(machine: *const Machine, bottom_exclusive: ?*Entry) MachineBacktraceView {
         return .{
             .machine = machine,
+            // A live segment reads Machine.top, never frozen_top. Nested
+            // native reentry calls freeze before flipping `live`, so the
+            // field is initialized before its first possible read.
+            .frozen_top = if (comptime builtin.mode == .ReleaseFast) undefined else null,
             .bottom_exclusive = bottom_exclusive,
             .include_l0 = false,
         };
@@ -842,6 +871,15 @@ pub inline fn activeInvocation(rt: *core.JSRuntime) ?*ActiveInvocation {
     return @ptrCast(@alignCast(invocation_ptr));
 }
 
+const NativeBoundaryValidation = if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) struct {
+    stack_top: [*]core.JSValue,
+    stack_len: usize,
+    arena_mark: core.VmStackArena.Mark,
+    call_depth: usize,
+    native_call_depth: usize,
+    stack_bytes: usize,
+} else struct {};
+
 /// One synchronous native -> bytecode transaction. It freezes the currently
 /// visible Machine segment, pushes a callback-only segment above the native
 /// frame, and records every execution budget that the callback must restore.
@@ -850,71 +888,104 @@ pub inline fn activeInvocation(rt: *core.JSRuntime) ?*ActiveInvocation {
 pub const NativeBoundaryScope = struct {
     invocation: *ActiveInvocation,
     outer_view: *MachineBacktraceView,
-    view: MachineBacktraceView = undefined,
+    rt: *core.JSRuntime,
+    view: MachineBacktraceView,
     frame: core.ActiveBacktraceFrame = undefined,
     fence_depth: usize,
-    fence_top: ?*Entry,
-    fence_stack_top: [*]core.JSValue,
-    fence_stack_len: usize,
-    fence_arena_mark: core.VmStackArena.Mark,
-    fence_call_depth: usize,
-    fence_native_call_depth: usize,
-    fence_stack_bytes: usize,
-    active: bool = false,
+    validation: NativeBoundaryValidation,
 
     pub fn init(invocation: *ActiveInvocation) NativeBoundaryScope {
         const machine = invocation.machine;
-        const stack = machine.currentLevel().stack;
         return .{
             .invocation = invocation,
             .outer_view = invocation.current_backtrace_view,
+            .rt = machine.ctx.runtime,
+            .view = MachineBacktraceView.segment(machine, machine.top),
             .fence_depth = machine.depth,
-            .fence_top = machine.top,
-            .fence_stack_top = stack.topPtr(),
-            .fence_stack_len = stack.len(),
-            .fence_arena_mark = machine.ctx.runtime.vm_stack.mark(),
-            .fence_call_depth = machine.ctx.runtime.hot.call_depth,
-            .fence_native_call_depth = machine.ctx.runtime.hot.native_call_depth,
-            .fence_stack_bytes = machine.ctx.runtime.hot.active_bytecode_stack_bytes,
+            .validation = if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) blk: {
+                const stack = machine.currentLevel().stack;
+                break :blk .{
+                    .stack_top = stack.topPtr(),
+                    .stack_len = stack.len(),
+                    .arena_mark = machine.ctx.runtime.vm_stack.mark(),
+                    .call_depth = machine.ctx.runtime.hot.call_depth,
+                    .native_call_depth = machine.ctx.runtime.hot.native_call_depth,
+                    .stack_bytes = machine.ctx.runtime.hot.active_bytecode_stack_bytes,
+                };
+            } else .{},
         };
     }
 
     pub fn push(self: *NativeBoundaryScope) void {
-        std.debug.assert(!self.active);
-        const machine = self.invocation.machine;
-        self.outer_view.freeze(self.fence_top);
-        self.view = MachineBacktraceView.segment(machine, self.fence_top);
+        self.outer_view.freeze(self.view.bottom_exclusive);
         self.frame = .{
             .data = &self.view,
             .resolver = resolveMachineBacktraceView,
         };
-        machine.ctx.pushActiveBacktraceFrame(&self.frame);
+        self.frame.previous = self.rt.hot.current_backtrace_frame;
+        self.rt.hot.current_backtrace_frame = &self.frame;
         self.invocation.current_backtrace_view = &self.view;
-        self.active = true;
     }
 
     pub fn deinit(self: *NativeBoundaryScope) void {
-        if (!self.active) return;
         const machine = self.invocation.machine;
         if (machine.depth > self.fence_depth) {
             machine.discardToDepth(self.fence_depth);
         }
         std.debug.assert(machine.depth == self.fence_depth);
-        std.debug.assert(machine.top == self.fence_top);
-        const stack = machine.currentLevel().stack;
-        std.debug.assert(stack.len() == self.fence_stack_len);
-        std.debug.assert(stack.topPtr() == self.fence_stack_top);
-        const mark = machine.ctx.runtime.vm_stack.mark();
-        std.debug.assert(mark.chunk == self.fence_arena_mark.chunk);
-        std.debug.assert(mark.used == self.fence_arena_mark.used);
-        std.debug.assert(machine.ctx.runtime.hot.call_depth == self.fence_call_depth);
-        std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.fence_native_call_depth);
-        std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.fence_stack_bytes);
+        std.debug.assert(machine.top == self.view.bottom_exclusive);
+        if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            const stack = machine.currentLevel().stack;
+            std.debug.assert(stack.len() == self.validation.stack_len);
+            std.debug.assert(stack.topPtr() == self.validation.stack_top);
+            const mark = machine.ctx.runtime.vm_stack.mark();
+            std.debug.assert(mark.chunk == self.validation.arena_mark.chunk);
+            std.debug.assert(mark.used == self.validation.arena_mark.used);
+            std.debug.assert(machine.ctx.runtime.hot.call_depth == self.validation.call_depth);
+            std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.validation.native_call_depth);
+            std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
+        }
 
-        machine.ctx.popActiveBacktraceFrame(&self.frame);
-        self.invocation.current_backtrace_view = self.outer_view;
-        self.outer_view.thaw();
-        self.active = false;
+        self.popBacktrace();
+    }
+
+    /// Successful callback completion has already popped exactly to the
+    /// native fence. Keep that common leg branch-free in ReleaseFast; the
+    /// error-only `deinit` path above retains bounded defensive cleanup.
+    pub fn finish(self: *NativeBoundaryScope) void {
+        const machine = self.invocation.machine;
+        std.debug.assert(machine.depth == self.fence_depth);
+        std.debug.assert(machine.top == self.view.bottom_exclusive);
+        if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            const stack = machine.currentLevel().stack;
+            std.debug.assert(stack.len() == self.validation.stack_len);
+            std.debug.assert(stack.topPtr() == self.validation.stack_top);
+            const mark = machine.ctx.runtime.vm_stack.mark();
+            std.debug.assert(mark.chunk == self.validation.arena_mark.chunk);
+            std.debug.assert(mark.used == self.validation.arena_mark.used);
+            std.debug.assert(machine.ctx.runtime.hot.call_depth == self.validation.call_depth);
+            std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.validation.native_call_depth);
+            std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
+        }
+        self.popBacktrace();
+    }
+
+    inline fn popBacktrace(self: *NativeBoundaryScope) void {
+        if (comptime builtin.mode == .ReleaseFast) {
+            // Successful and error exits both unlink this stack-local node
+            // permanently. Avoid clearing dead fields on the ReleaseFast hot
+            // leg; the next freeze overwrites `frozen_top`, and a live view
+            // never reads it.
+            std.debug.assert(self.rt.hot.current_backtrace_frame == &self.frame);
+            self.rt.hot.current_backtrace_frame = self.frame.previous;
+            self.invocation.current_backtrace_view = self.outer_view;
+            self.outer_view.live = true;
+        } else {
+            const machine = self.invocation.machine;
+            machine.ctx.popActiveBacktraceFrame(&self.frame);
+            self.invocation.current_backtrace_view = self.outer_view;
+            self.outer_view.thaw();
+        }
     }
 };
 
@@ -3064,6 +3135,585 @@ pub const Machine = struct {
         };
     }
 
+    pub fn nativeBoundarySimpleEligible(target: *const InlineTarget) bool {
+        const execution = target.call_facts.execution;
+        return execution.simple_inline_eligible or
+            execution.strict_simple_inline_eligible or
+            execution.strict_simple_snapshot_inline_eligible;
+    }
+
+    /// Synchronous native callbacks keep receiver/callable rooted in the
+    /// still-live native algorithm, so a simple bytecode frame can borrow both
+    /// bindings and materialize only its writable arguments. This is the
+    /// general native-fence prologue — it is selected by Function.apply and
+    /// every later callback cohort, not by argument count or receiver value.
+    pub fn pushNativeBoundaryCopiedArgs(
+        self: *Machine,
+        global: *core.Object,
+        target: *const InlineTarget,
+        args: []const core.JSValue,
+    ) HostError!?*Entry {
+        return self.pushNativeBoundarySimple(false, global, target, args, &.{});
+    }
+
+    /// Owned-argument twin. Setup moves only the argument tail after every
+    /// fallible allocation succeeds; receiver/callable remain borrowed from
+    /// the caller's rooted transaction prefix.
+    pub fn pushNativeBoundaryMovedArgs(
+        self: *Machine,
+        global: *core.Object,
+        target: *const InlineTarget,
+        args: []core.JSValue,
+    ) HostError!?*Entry {
+        return self.pushNativeBoundarySimple(true, global, target, args, args);
+    }
+
+    /// Allocation-free native-fence prologue for already-warmed Entry and VM
+    /// arena storage. A null result is a pure miss: budgets, ownership, arena
+    /// watermarks, and Machine links are unchanged, so the caller must take
+    /// the authoritative `pushNativeBoundaryCopiedArgs` path.
+    pub inline fn tryPushNativeBoundaryCopiedArgsFast(
+        self: *Machine,
+        rt: *core.JSRuntime,
+        target: *const InlineTarget,
+        args: []const core.JSValue,
+    ) ?*Entry {
+        return self.tryPushNativeBoundaryArgsFast(false, rt, target, args, &.{});
+    }
+
+    /// Owned-argument twin. Arguments move only after every admission and
+    /// capacity check succeeds; a miss leaves the caller's transaction intact.
+    pub inline fn tryPushNativeBoundaryMovedArgsFast(
+        self: *Machine,
+        rt: *core.JSRuntime,
+        target: *const InlineTarget,
+        args: []core.JSValue,
+    ) ?*Entry {
+        return self.tryPushNativeBoundaryArgsFast(true, rt, target, args, args);
+    }
+
+    inline fn tryPushNativeBoundaryArgsFast(
+        self: *Machine,
+        comptime move_args: bool,
+        rt: *core.JSRuntime,
+        target: *const InlineTarget,
+        args: []const core.JSValue,
+        moved_args: []core.JSValue,
+    ) ?*Entry {
+        std.debug.assert(rt == self.ctx.runtime);
+        if (!nativeBoundarySimpleEligible(target)) return null;
+        const execution = target.call_facts.execution;
+        if (args.len == 0 and
+            (execution.simple_inline_empty_leaf or
+                execution.raw_this_inline_empty_leaf))
+        {
+            return self.tryPushNativeBoundaryEmptyFast(rt, target);
+        }
+        if (args.len == target.fb.arg_count and
+            execution.exact_args_leaf_kind != .none)
+        {
+            return self.tryPushNativeBoundaryExactArgsFast(
+                move_args,
+                rt,
+                target,
+                args,
+                moved_args,
+            );
+        }
+        return null;
+    }
+
+    inline fn tryPushNativeBoundaryEmptyFast(
+        self: *Machine,
+        rt: *core.JSRuntime,
+        target: *const InlineTarget,
+    ) ?*Entry {
+        const function = target.fb;
+        const execution = target.call_facts.execution;
+        std.debug.assert(execution.simple_inline_empty_leaf or
+            execution.raw_this_inline_empty_leaf);
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            function,
+            0,
+            true,
+        );
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
+        const entry = self.entryAt(index);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
+
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .locals = carve.window[0..0],
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .storage = .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(
+            &rt.memory,
+            rt.vm_stack_arena_policy,
+            carve.window,
+        );
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+            .copy_argv = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
+    inline fn tryPushNativeBoundaryExactArgsFast(
+        self: *Machine,
+        comptime move_args: bool,
+        rt: *core.JSRuntime,
+        target: *const InlineTarget,
+        args: []const core.JSValue,
+        moved_args: []core.JSValue,
+    ) ?*Entry {
+        const function = target.fb;
+        std.debug.assert(args.len != 0);
+        std.debug.assert(args.len == function.arg_count);
+        std.debug.assert(target.call_facts.execution.exact_args_leaf_kind != .none);
+        if (move_args) std.debug.assert(args.ptr == moved_args.ptr and args.len == moved_args.len) else std.debug.assert(moved_args.len == 0);
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            function,
+            args.len,
+            true,
+        );
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
+        const entry = self.entryAt(index);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const total = args.len + stack_count;
+        const carve = rt.vm_stack.carveActiveMarked(total) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
+
+        const frame_args = carve.window[0..args.len];
+        const stack_window = carve.window[args.len..];
+        if (move_args) {
+            @memcpy(frame_args, moved_args);
+            @memset(moved_args, core.JSValue.undefinedValue());
+        } else {
+            for (args, 0..) |arg, arg_index| frame_args[arg_index] = arg.dup();
+        }
+        const captures = target.captureSlice();
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .actual_arg_count = @intCast(args.len),
+            .locals = stack_window[0..0],
+            .args = frame_args,
+            .var_refs = captures,
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(
+            &rt.memory,
+            rt.vm_stack_arena_policy,
+            stack_window,
+        );
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+            .copy_argv = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
+    fn pushNativeBoundarySimple(
+        self: *Machine,
+        comptime move_args: bool,
+        global: *core.Object,
+        target: *const InlineTarget,
+        args: []const core.JSValue,
+        moved_args: []core.JSValue,
+    ) HostError!?*Entry {
+        if (!nativeBoundarySimpleEligible(target)) return null;
+        if (move_args) std.debug.assert(args.ptr == moved_args.ptr and args.len == moved_args.len) else std.debug.assert(moved_args.len == 0);
+        if (args.len == 0 and
+            (target.call_facts.execution.simple_inline_empty_leaf or
+                target.call_facts.execution.raw_this_inline_empty_leaf))
+        {
+            return try self.pushNativeBoundaryEmpty(global, target);
+        }
+        if (args.len == target.fb.arg_count and
+            target.call_facts.execution.exact_args_leaf_kind != .none)
+        {
+            return try self.pushNativeBoundaryExactArgs(
+                move_args,
+                global,
+                target,
+                args,
+                moved_args,
+            );
+        }
+
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            target.fb,
+            args.len,
+            true,
+        );
+        try vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes);
+        errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = 0;
+        try setupNativeBoundarySimpleEntry(
+            move_args,
+            self.ctx,
+            entry,
+            target,
+            args,
+            moved_args,
+        );
+        entry.teardown.copy_argv = true;
+        entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
+    /// Exact-arity native-fence twin of `pushNativeBoundaryEmpty`. Published
+    /// exact-leaf facts prove there are no locals, open refs, captures,
+    /// arguments snapshot, or direct eval; arguments still live in an owned,
+    /// writable frame window and return uses the native special continuation.
+    fn pushNativeBoundaryExactArgs(
+        self: *Machine,
+        comptime move_args: bool,
+        global: *core.Object,
+        target: *const InlineTarget,
+        args: []const core.JSValue,
+        moved_args: []core.JSValue,
+    ) HostError!*Entry {
+        const function = target.fb;
+        std.debug.assert(args.len != 0);
+        std.debug.assert(args.len == function.arg_count);
+        std.debug.assert(target.call_facts.execution.exact_args_leaf_kind != .none);
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            function,
+            args.len,
+            true,
+        );
+        try vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes);
+        errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
+
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(self.ctx.runtime);
+        errdefer entry.profile_guard.deinit();
+
+        const rt = self.ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const total = try std.math.add(usize, args.len, stack_count);
+        var storage_on_heap = false;
+        const slab_values = if (rt.vm_stack.carveActiveMarked(total)) |active_carve| blk: {
+            entry.arena_mark = active_carve.mark;
+            break :blk active_carve.window;
+        } else blk: {
+            entry.arena_mark = rt.vm_stack.mark();
+            break :blk rt.vm_stack.carve(&rt.memory, total) orelse heap: {
+                storage_on_heap = true;
+                break :heap try rt.memory.alloc(core.JSValue, total);
+            };
+        };
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
+
+        const frame_args = slab_values[0..args.len];
+        const stack_window = slab_values[args.len..];
+        if (move_args) {
+            @memcpy(frame_args, moved_args);
+            @memset(moved_args, core.JSValue.undefinedValue());
+        } else {
+            for (args, 0..) |arg, index| frame_args[index] = arg.dup();
+        }
+        const captures = target.captureSlice();
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .actual_arg_count = @intCast(args.len),
+            .locals = stack_window[0..0],
+            .args = frame_args,
+            .var_refs = captures,
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .storage_values = if (storage_on_heap) slab_values else &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(
+            &rt.memory,
+            rt.vm_stack_arena_policy,
+            stack_window,
+        );
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+            .copy_argv = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
+    /// Native-fence prologue for a published zero-argument empty geometry.
+    /// It deliberately does not set the ordinary empty-leaf bit: return still
+    /// uses the native special-return arm, while publication skips the generic
+    /// args/locals/open-ref/snapshot partitioning that the call facts prove is
+    /// empty. Receiver and callable remain borrowed from the native algorithm.
+    fn pushNativeBoundaryEmpty(
+        self: *Machine,
+        global: *core.Object,
+        target: *const InlineTarget,
+    ) HostError!*Entry {
+        const function = target.fb;
+        const execution = target.call_facts.execution;
+        std.debug.assert(execution.simple_inline_empty_leaf or
+            execution.raw_this_inline_empty_leaf);
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            function,
+            0,
+            true,
+        );
+        try vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes);
+        errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
+
+        const entry = try self.acquireSlot(global);
+        const rt = self.ctx.runtime;
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        const stack_count = @as(usize, function.stack_size) + 1;
+        var storage_on_heap = false;
+        const stack_window = if (rt.vm_stack.carveActiveMarked(stack_count)) |active_carve| blk: {
+            entry.arena_mark = active_carve.mark;
+            break :blk active_carve.window;
+        } else blk: {
+            entry.arena_mark = rt.vm_stack.mark();
+            break :blk rt.vm_stack.carve(&rt.memory, stack_count) orelse heap: {
+                storage_on_heap = true;
+                break :heap try rt.memory.alloc(core.JSValue, stack_count);
+            };
+        };
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .locals = stack_window[0..0],
+            .storage_values = if (storage_on_heap) stack_window else &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(
+            &rt.memory,
+            rt.vm_stack_arena_policy,
+            stack_window,
+        );
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+            .copy_argv = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
+    noinline fn setupNativeBoundarySimpleEntry(
+        comptime move_args: bool,
+        ctx: *core.JSContext,
+        entry: *Entry,
+        target: *const InlineTarget,
+        args: []const core.JSValue,
+        moved_args: []core.JSValue,
+    ) HostError!void {
+        const rt = ctx.runtime;
+        const function = target.fb;
+        std.debug.assert(nativeBoundarySimpleEligible(target));
+        entry.catch_target = null;
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+        };
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        const actual_arg_count = args.len;
+        const frame_arg_count = frame_mod.frameArgCount(function, actual_arg_count);
+        const snapshot_count = frame_mod.originalArgCount(
+            actual_arg_count,
+            frame_mod.argumentsNeedsOriginalSnapshot(function),
+        );
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
+        const open_slots = if (open_var_ref_count == 0)
+            0
+        else
+            (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+        const args_and_locals = try std.math.add(usize, frame_arg_count, var_count);
+        const through_stack = try std.math.add(usize, args_and_locals, stack_count);
+        const through_open = try std.math.add(usize, through_stack, open_slots);
+        const total = try std.math.add(usize, through_open, snapshot_count);
+
+        var storage_on_heap = false;
+        const slab_values = if (rt.vm_stack.carveActiveMarked(total)) |active_carve| blk: {
+            entry.arena_mark = active_carve.mark;
+            break :blk active_carve.window;
+        } else blk: {
+            entry.arena_mark = rt.vm_stack.mark();
+            break :blk rt.vm_stack.carve(&rt.memory, total) orelse heap: {
+                const heap_values = try rt.memory.alloc(core.JSValue, total);
+                storage_on_heap = true;
+                break :heap heap_values;
+            };
+        };
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
+
+        const frame_args = slab_values[0..frame_arg_count];
+        const locals_start = frame_arg_count;
+        const stack_start = locals_start + var_count;
+        const open_start = stack_start + stack_count;
+        const snapshot_start = open_start + open_slots;
+        const locals = slab_values[locals_start..][0..var_count];
+        const stack_window = slab_values[stack_start..][0..stack_count];
+        const original_args = slab_values[snapshot_start..][0..snapshot_count];
+        const open_var_refs: []?*core.VarRef = if (open_slots == 0)
+            &.{}
+        else
+            std.mem.bytesAsSlice(
+                ?*core.VarRef,
+                std.mem.sliceAsBytes(slab_values[open_start..][0..open_slots]),
+            )[0..open_var_ref_count];
+
+        @memset(locals, core.JSValue.undefinedValue());
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
+
+        // FrameCold allocation is the final failable operation. Source owners
+        // therefore remain untouched on every setup failure.
+        const cold: ?*frame_mod.Frame.FrameCold = if (snapshot_count == 0) null else blk: {
+            const box = try rt.memory.create(frame_mod.Frame.FrameCold);
+            for (args, 0..) |arg, index| original_args[index] = arg.dup();
+            box.* = .{ .original_args = original_args };
+            break :blk box;
+        };
+
+        if (move_args) {
+            @memcpy(frame_args[0..actual_arg_count], moved_args);
+            @memset(moved_args, core.JSValue.undefinedValue());
+        } else {
+            for (args, 0..) |arg, index| frame_args[index] = arg.dup();
+        }
+        @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
+
+        const captures = target.captureSlice();
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .actual_arg_count = @intCast(actual_arg_count),
+            .locals = locals,
+            .args = frame_args,
+            .var_refs = captures,
+            .open_var_refs = open_var_refs,
+            .storage_values = if (storage_on_heap) slab_values else &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+            .cold = cold,
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(
+            &rt.memory,
+            rt.vm_stack_arena_policy,
+            stack_window,
+        );
+    }
+
     /// Push a call whose owned receiver/callable/arguments already live in a
     /// temporary moved region. The frame setup consumes entries by replacing
     /// them with undefined; the caller remains responsible for freeing any
@@ -3083,6 +3733,9 @@ pub const Machine = struct {
         else
             try self.pushFrame(.generic, false, true, global, target, source);
         entry.return_action = return_action;
+        if (return_action == .native_boundary) {
+            entry.teardown.special_return = true;
+        }
         entry.continuation_payload = switch (return_action) {
             .next => 0,
             .proxy_get => self.ctx.runtime.atoms.dup(@intCast(continuation_payload)),
@@ -3324,7 +3977,7 @@ pub const Machine = struct {
         entry.teardown = .{
             .simple = true,
             .has_native_caller = true,
-            .forwarded_leaf = true,
+            .special_return = true,
             .copy_argv = true,
         };
         entry.prev = self.top;
@@ -3552,6 +4205,43 @@ pub const Machine = struct {
         return self.popFrameMode(true);
     }
 
+    /// Retire a synchronous callback at its native fence without routing the
+    /// already-known continuation through the ordinary `.next` selector.
+    /// This is deliberately not an empty/exact leaf epilogue: every simple
+    /// frame still releases its complete locals/args/open-ref resource set,
+    /// while non-simple and tail-replacement frames retain the authoritative
+    /// returned-frame cleanup. Only the cold `.native_boundary` continuation
+    /// selects this adapter, so ordinary return layout is unchanged.
+    pub inline fn popReturnedNativeBoundary(self: *Machine, rt: *core.JSRuntime) void {
+        const dying = self.topEntry();
+        std.debug.assert(rt == self.ctx.runtime);
+        std.debug.assert(dying.isNativeBoundaryReturn());
+        std.debug.assert(dying.continuation_payload == 0);
+
+        const chain_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
+            dying.tailChainBudgetSlot().*
+        else
+            .{ .extra_depth = 0, .planned_stack_bytes = 0 };
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        ));
+
+        if (dying.canUseSimpleTeardown())
+            dying.deinitSimple(self.ctx)
+        else
+            dying.deinitReturned(self.ctx);
+        vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
+        std.debug.assert(rt.hot.call_depth >= chain_budget.extra_depth);
+        std.debug.assert(rt.hot.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
+        rt.hot.call_depth -= chain_budget.extra_depth;
+        rt.hot.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
+        self.depth -= 1;
+        self.top = dying.prev;
+    }
+
     /// Retire the proven ordinary empty-leaf return without materializing its
     /// statically fixed `.next/0` continuation. This is intentionally separate
     /// from popFrame: abrupt completion must still inspect and release the
@@ -3640,6 +4330,10 @@ pub const Machine = struct {
     /// return slot until their post-call action runs. Takes ownership of
     /// `result` either way and returns the selected action.
     pub fn popReturn(self: *Machine, result: core.JSValue) ReturnContinuation {
+        if (self.topEntry().isNativeBoundaryReturn()) {
+            self.popReturnedNativeBoundary(self.ctx.runtime);
+            return .{ .action = .native_boundary, .payload = 0 };
+        }
         if (self.topEntry().completesConstructor()) {
             const completed = self.popConstructorReturn(result);
             self.currentLevel().stack.pushOwnedAssumeCapacity(completed);

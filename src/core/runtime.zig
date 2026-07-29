@@ -758,7 +758,7 @@ pub const JSRuntime = struct {
     /// guarantees declaration-order layout (auto layout scrambles same-
     /// alignment buckets); `align(64)` on the field pins the cluster into the
     /// highest-alignment bucket, i.e. the lowest offsets of JSRuntime. All
-    /// seven scalars fit one cache line (56 bytes).
+    /// eight words fit one cache line (64 bytes).
     pub const HotExecState = extern struct {
         /// QuickJS runtime execution state. These fields describe the
         /// currently executing stack, not a Realm, and are shared by every
@@ -787,9 +787,20 @@ pub const JSRuntime = struct {
         native_stack_top: usize = 0,
         native_stack_limit: usize = 0,
         native_stack_size: usize = default_native_stack_size,
+        /// Head of the stack-local observable backtrace chain. Native calls
+        /// and synchronous native fences both replace this pointer on entry
+        /// and restore it on return, so use the eighth and final word of the
+        /// first runtime cache line instead of the cold registry tail.
+        current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
     };
 
     hot: HotExecState align(64) = .{},
+    /// Borrowed exec-owned authority for the currently running bytecode
+    /// invocation. Core deliberately keeps this opaque: synchronous native
+    /// callbacks recover the concrete Machine through exec without creating
+    /// a core -> exec import cycle. Routing reads it on every eligible native
+    /// callback, so keep it adjacent to the hot execution cache line.
+    active_invocation: ?*anyopaque = null,
 
     owner_thread_id: std.Thread.Id,
     memory: memory.MemoryAccount,
@@ -891,13 +902,7 @@ pub const JSRuntime = struct {
     formatting_error_stack: bool = false,
     backtrace_frames: []context_mod.BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
-    current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
     active_native_call: ?*const anyopaque = null,
-    /// Borrowed exec-owned authority for the currently running bytecode
-    /// invocation. Core deliberately keeps this opaque: synchronous native
-    /// callbacks recover the concrete Machine through exec without creating
-    /// a core -> exec import cycle.
-    active_invocation: ?*anyopaque = null,
     vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
     /// Per-runtime VM value-stack arena for bytecode call frames. Pinned
     /// `align(64)` alongside `hot` so its scalar head (chunk_count/active/
@@ -1069,7 +1074,7 @@ pub const JSRuntime = struct {
         rt.formatting_error_stack = false;
         rt.backtrace_frames = &.{};
         rt.backtrace_capacity = 0;
-        rt.current_backtrace_frame = null;
+        rt.hot.current_backtrace_frame = null;
         rt.active_native_call = null;
         rt.active_invocation = null;
         rt.hot.stack_size = options.stack_size;
@@ -1965,7 +1970,7 @@ pub const JSRuntime = struct {
         if (self.hot.call_depth != 0 or
             self.hot.native_call_depth != 0 or
             self.hot.active_bytecode_stack_bytes != 0 or
-            self.current_backtrace_frame != null or
+            self.hot.current_backtrace_frame != null or
             self.active_native_call != null or
             self.active_invocation != null or
             self.active_value_roots != null or
