@@ -66,6 +66,8 @@ pub fn main(init: std.process.Init) !void {
         try runPropertyLookup(init.gpa, iterations, warmup)
     else if (std.mem.eql(u8, case_name, "typed_array/int32-get"))
         try runTypedArray(init.gpa, iterations, warmup)
+    else if (std.mem.startsWith(u8, case_name, "bigint/mul-size-"))
+        try runBigIntSize(init.gpa, case_name, iterations, warmup)
     else if (std.mem.eql(u8, case_name, "bigint/mul-multilimb"))
         try runBigInt(init.gpa, iterations, warmup)
     else
@@ -494,6 +496,110 @@ fn runBigInt(allocator: std.mem.Allocator, iterations: usize, warmup: usize) !Be
         .memory = null,
         .allocations_reason = "BigInt kernel uses the caller allocator without a JSRuntime memoryUsage counter",
     };
+}
+
+/// Basecase-multiply size matrix. `bigint/mul-multilimb` fixes one operand pair
+/// (2 limbs by 2), which is small enough that the per-operation fixed cost
+/// dominates the kernel. A change to the multiply's write topology has to be
+/// read across sizes or it is fitted to that one point, so these cases sweep
+/// the operand shapes the basecase loop actually distinguishes: square, uneven,
+/// and single-limb-by-many.
+///
+/// Operands are built before timing, exactly like the fixed case. The timed
+/// loop does only `mulAlloc`, a low-limb checksum consume, and the free.
+fn runBigIntSize(
+    allocator: std.mem.Allocator,
+    case_name: []const u8,
+    iterations: usize,
+    warmup: usize,
+) !BenchResult {
+    const shape = case_name["bigint/mul-size-".len..];
+    const dims = parseSizeShape(shape) orelse return error.UnknownCase;
+
+    var lhs = try limbPattern(allocator, dims.lhs_limbs, 0x9e3779b97f4a7c15);
+    defer lhs.deinit();
+    var rhs = try limbPattern(allocator, dims.rhs_limbs, 0xc2b2ae3d27d4eb4f);
+    defer rhs.deinit();
+
+    const warmup_checksum = try bigIntSizeLoop(allocator, lhs, rhs, warmup, hash_offset);
+    const start = monotonicNanos();
+    const checksum = try bigIntSizeLoop(allocator, lhs, rhs, iterations, warmup_checksum);
+    const elapsed = elapsedNanosSince(start);
+    return .{
+        .category = "bigint",
+        .case_name = case_name["bigint/".len..],
+        .iterations = iterations,
+        .warmup = warmup,
+        .ns_total = elapsed,
+        .checksum = checksum,
+        .fidelity = "true-direct",
+        .entry = "libs/bigint.mulAlloc",
+        // zjs-only size matrix: there is no QuickJS counterpart harness for
+        // these shapes, so they are for within-zjs attribution and must not be
+        // read as a cross-engine comparison.
+        .comparable = false,
+        .checksum_comparable = false,
+        .caliber_note = "zjs-only basecase size matrix; operands built before timing; result allocation, multiplication, low-limb consume and deinit are timed",
+        .memory = null,
+        .allocations_reason = "BigInt kernel uses the caller allocator without a JSRuntime memoryUsage counter",
+    };
+}
+
+/// Separate loop from `bigIntLoop`, which mixes only the low limb because that
+/// is what the QuickJS-comparable case mirrors. A size matrix that only ever
+/// read `limbs[0]` would produce identical checksums for every shape -- the low
+/// limb depends only on the low operand limbs -- and would therefore not notice
+/// a change that corrupts a high limb or the top carry slot, which is exactly
+/// what a write-topology change puts at risk. Mix the top limb and the length
+/// as well.
+fn bigIntSizeLoop(
+    allocator: std.mem.Allocator,
+    lhs: bigint.BigInt,
+    rhs: bigint.BigInt,
+    iterations: usize,
+    initial_checksum: u64,
+) !u64 {
+    var checksum = initial_checksum;
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        var product = if (((checksum ^ @as(u64, @intCast(i))) & 1) == 0)
+            try bigint.mulAlloc(allocator, lhs, rhs)
+        else
+            try bigint.mulAlloc(allocator, rhs, lhs);
+        const len = product.limbs.len;
+        checksum = mixU64(checksum, @as(u64, len));
+        if (len != 0) {
+            checksum = mixU64(checksum, product.limbs[0]);
+            checksum = mixU64(checksum, product.limbs[len - 1]);
+        }
+        product.deinit();
+    }
+    return checksum;
+}
+
+const SizeShape = struct { lhs_limbs: usize, rhs_limbs: usize };
+
+fn parseSizeShape(shape: []const u8) ?SizeShape {
+    const x = std.mem.indexOfScalar(u8, shape, 'x') orelse return null;
+    const lhs = std.fmt.parseInt(usize, shape[0..x], 10) catch return null;
+    const rhs = std.fmt.parseInt(usize, shape[x + 1 ..], 10) catch return null;
+    if (lhs == 0 or rhs == 0 or lhs > 64 or rhs > 64) return null;
+    return .{ .lhs_limbs = lhs, .rhs_limbs = rhs };
+}
+
+/// Build an operand of exactly `limb_count` limbs with a non-degenerate bit
+/// pattern: every limb is dense and the top limb keeps its high bit set, so the
+/// result never normalizes away a limb and carry propagation stays realistic.
+fn limbPattern(allocator: std.mem.Allocator, limb_count: usize, seed: u64) !bigint.BigInt {
+    const limbs = try allocator.alloc(bigint.Limb, limb_count);
+    errdefer allocator.free(limbs);
+    var state = seed;
+    for (limbs, 0..) |*limb, index| {
+        state = state *% 0x5851f42d4c957f2d +% (@as(u64, index) | 1);
+        limb.* = state | 1;
+    }
+    limbs[limb_count - 1] |= @as(bigint.Limb, 1) << 63;
+    return bigint.BigInt{ .negative = false, .limbs = limbs, .allocator = allocator };
 }
 
 fn bigIntLoop(
