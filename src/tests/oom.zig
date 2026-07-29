@@ -182,6 +182,38 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "property-reentry-oom-ok" },
     },
     .{
+        .name = "native-callback-json",
+        .source =
+        \\function oomJsonHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\const parsed = JSON.parse('{"value":1}', function oomJsonReviver(key, value) {
+        \\  if (key === "value") {
+        \\    trace = new Error("json-callback-trace").stack;
+        \\    return oomJsonHelper(value);
+        \\  }
+        \\  return value;
+        \\});
+        \\const serializable = {
+        \\  value: parsed.value,
+        \\  toJSON: function oomJsonToJSON() {
+        \\    return {value: oomJsonHelper(this.value)};
+        \\  }
+        \\};
+        \\const text = JSON.stringify(serializable, function oomJsonReplacer(key, value) {
+        \\  return value;
+        \\});
+        \\const reviverAt = trace.indexOf("    at oomJsonReviver");
+        \\const parseAt = trace.indexOf("parse (native)", reviverAt);
+        \\text === '{"value":3}' &&
+        \\reviverAt === 0 &&
+        \\parseAt > reviverAt
+        \\  ? "json-reentry-oom-ok" : "json-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "json-reentry-oom-ok" },
+    },
+    .{
         .name = "tail-moved-args",
         .source =
         \\function target(a,b,c,d,e,f,g,h,i,j) {
@@ -1116,6 +1148,10 @@ test "oom recovery canary: nested Map and Set callbacks" {
 
 test "oom recovery canary: accessor Proxy and primitive coercion callbacks" {
     try recoveryCanarySweep(corpusSnippetNamed("native-callback-property-proxy-coercion"));
+}
+
+test "oom recovery canary: JSON reviver replacer and toJSON callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-json"));
 }
 
 test "oom recovery canary: repeated private class identity" {

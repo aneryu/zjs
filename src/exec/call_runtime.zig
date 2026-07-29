@@ -774,6 +774,48 @@ pub const SyncInternalCallSite = struct {
             true,
         );
     }
+
+    /// Reuse the prepared callable route while supplying the receiver for this
+    /// invocation. Recursive native algorithms such as JSON reviver/replacer
+    /// walks keep one callback but change the holder used as `this` at every
+    /// step. The copied route is stack-local so nested/reentrant calls cannot
+    /// mutate the site's immutable template.
+    pub noinline fn callWithThis(
+        self: *SyncInternalCallSite,
+        this_value: core.JSValue,
+        args: []const core.JSValue,
+    ) HostError!core.JSValue {
+        try exception_ops.pollInterrupt(self.ctx, self.global);
+
+        if (self.route) |template| {
+            if (inline_calls.activeInvocation(self.ctx.runtime) == template.invocation) {
+                var route = template;
+                route.target.this_value = this_value;
+                if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+                    return runSyncInlineRouteCopiedArgs(&route, self.global, args);
+                }
+                return runSyncInlineRouteOwnedCopy(
+                    &route,
+                    self.ctx,
+                    self.global,
+                    this_value,
+                    self.func,
+                    args,
+                );
+            }
+        }
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            self.ctx,
+            self.output,
+            self.global,
+            this_value,
+            self.func,
+            args,
+            self.caller_function,
+            self.caller_frame,
+            true,
+        );
+    }
 };
 
 /// Same synchronous routing contract as `callValueOrBytecodeSyncInternal`,

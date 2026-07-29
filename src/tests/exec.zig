@@ -1570,6 +1570,215 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
 }
 
+test "JSON synchronous callback cohort stays on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function jsonCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\var jsonCohortTrace;
+        \\var jsonCohortOrder = [];
+        \\globalThis.__jsonCallbackCohortOuter = function __jsonCallbackCohortOuter() {
+        \\    var parsed = JSON.parse(
+        \\        '{"a":1,"nested":{"b":2},"array":[3]}',
+        \\        function jsonCohortReviver(key, value, context) {
+        \\            assert.sameValue(arguments.length, 3);
+        \\            assert.sameValue(typeof this, "object");
+        \\            if (key === "b") {
+        \\                try {
+        \\                    throw new Error("local");
+        \\                } catch (error) {
+        \\                    assert.sameValue(error.message, "local");
+        \\                }
+        \\            }
+        \\            if (typeof value === "number") {
+        \\                assert.sameValue(context.source, String(value));
+        \\                return jsonCohortHelper(value);
+        \\            }
+        \\            assert.sameValue(context.source, undefined);
+        \\            return value;
+        \\        }
+        \\    );
+        \\    assert.sameValue(parsed.a, 2);
+        \\    assert.sameValue(parsed.nested.b, 3);
+        \\    assert.sameValue(parsed.array[0], 4);
+        \\
+        \\    var serializable = {
+        \\        first: 1,
+        \\        nested: {
+        \\            value: 2,
+        \\            toJSON: function jsonCohortToJSON(key) {
+        \\                assert.sameValue(arguments.length, 1);
+        \\                assert.sameValue(key, "nested");
+        \\                return { converted: jsonCohortHelper(this.value) };
+        \\            }
+        \\        }
+        \\    };
+        \\    var text = JSON.stringify(serializable, function jsonCohortReplacer(key, value) {
+        \\        assert.sameValue(arguments.length, 2);
+        \\        assert.sameValue(typeof this, "object");
+        \\        return value;
+        \\    });
+        \\    assert.sameValue(text, '{"first":1,"nested":{"converted":3}}');
+        \\
+        \\    var nested = JSON.parse("1", function jsonOuterReviver(key, value) {
+        \\        if (key === "") {
+        \\            return JSON.parse("2", function jsonInnerReviver(innerKey, innerValue) {
+        \\                return innerKey === "" ? jsonCohortHelper(innerValue) : innerValue;
+        \\            });
+        \\        }
+        \\        return value;
+        \\    });
+        \\    assert.sameValue(nested, 3);
+        \\
+        \\    jsonCohortTrace = undefined;
+        \\    JSON.parse("1", function jsonCohortTraceReviver(key, value) {
+        \\        jsonCohortTrace = new Error("json cohort").stack;
+        \\        return value;
+        \\    });
+        \\    var callbackIndex = jsonCohortTrace.indexOf("    at jsonCohortTraceReviver");
+        \\    var nativeIndex = jsonCohortTrace.indexOf("parse (native)");
+        \\    var outerIndex = jsonCohortTrace.indexOf("    at __jsonCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    jsonCohortOrder = [];
+        \\    try {
+        \\        JSON.parse("1", function jsonCohortThrowingReviver() {
+        \\            jsonCohortOrder.push("callback");
+        \\            throw new RangeError("json cohort throw");
+        \\        });
+        \\    } catch (error) {
+        \\        jsonCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(jsonCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+        \\
+        \\var jsonOther = $262.createRealm().global;
+        \\var jsonForeignReviver = jsonOther.eval(
+        \\    "(function jsonForeignReviver(key, value) { return value; })"
+        \\);
+        \\globalThis.__jsonCallbackForeignOuter = function () {
+        \\    return JSON.parse("20", jsonForeignReviver);
+        \\};
+        \\globalThis.__jsonCallbackInterrupt = function () {
+        \\    return JSON.parse("41", function jsonInterruptReviver(key, value) {
+        \\        return jsonCohortHelper(value);
+        \\    });
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__jsonCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 15), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_key = try js.runtime.internAtom("__jsonCallbackForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 20), foreign_result.asInt32());
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__jsonCallbackInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+}
+
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
