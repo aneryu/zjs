@@ -515,10 +515,26 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     errdefer if (!waiters_cleaned) zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
     var wrapper = BindingContext.borrowCore(ctx);
 
-    const value = try wrapper.eval(snippet.source, .{
+    const value = wrapper.eval(snippet.source, .{
         .mode = snippet.mode,
         .filename = corpus_filename,
-    });
+    }) catch |err| {
+        // A JS catch can observe the allocation-free preallocated OOM
+        // InternalError and rethrow that exact value. The embedding boundary
+        // then reports JSException even though the injected failure is still
+        // the sole cause. Normalize only that identity back to OutOfMemory so
+        // checkAllAllocationFailures retains its leak accounting; arbitrary
+        // user exceptions and freshly-created InternalErrors remain failures.
+        if (err == error.JSException and ctx.hasException()) {
+            if (ctx.preallocated_oom_error) |preallocated| {
+                if (ctx.runtime.current_exception.sameValue(preallocated)) {
+                    ctx.clearException();
+                    return error.OutOfMemory;
+                }
+            }
+        }
+        return err;
+    };
     {
         defer value.free(rt);
         try expectValue(rt, value, snippet.expect);
