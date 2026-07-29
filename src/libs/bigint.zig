@@ -484,10 +484,19 @@ pub const BigInt = struct {
 
 pub fn divRemAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
     if (rhs.isZero()) return error.DivisionByZero;
-    var lhs_abs = try lhs.absCloneWithAllocator(allocator);
-    defer lhs_abs.deinit();
-    var rhs_abs = try rhs.absCloneWithAllocator(allocator);
-    defer rhs_abs.deinit();
+    // Borrowed magnitudes rather than cloned ones. `divRemAbsAlloc` never
+    // writes through either operand: the `lhs < rhs` arm clones, the
+    // single-limb arm only reads, and the long division copies both into its
+    // own `u` and `v` scratch before touching anything. So the only thing the
+    // clones ever produced was a sign-cleared copy, which a borrowed view gives
+    // for free.
+    //
+    // The OOM sweep is what keeps this honest: it asserts the caller's operand
+    // limbs are byte-for-byte unchanged after every injected failure, so a
+    // future write through one of these would fail there rather than silently
+    // corrupt a caller's BigInt.
+    const lhs_abs = BigInt{ .negative = false, .limbs = lhs.limbs, .allocator = allocator };
+    const rhs_abs = BigInt{ .negative = false, .limbs = rhs.limbs, .allocator = allocator };
     const div_rem = try divRemAbsAlloc(allocator, lhs_abs, rhs_abs);
     var quotient = div_rem[0];
     var remainder = div_rem[1];
