@@ -419,6 +419,11 @@
   "1x1 is 18.5x, below the 20x line the gate names for 8x1; the gate's shape is met at 75x",
   "the normalization-shift axis is still inert, as expected: it only becomes live with P6-04c's Algorithm D",
   "multi-limb divisors are entirely untouched and remain at about 2.5 allocations per numerator bit",
-  "a pre-existing double-free hazard was noticed while working here and is recorded separately, not fixed"
- ]
+  "an unsound normalize ownership pattern was noticed here and recorded; it was later measured to be unreachable (the tail normalize shrinks 0 times in 2001 divisions), so it is a model hardening rather than a live defect - see P6-04c section 7"
+ ],
+ "ownership_pattern_note": {
+  "original_wording": "recorded as a pre-existing double free that test-oom did not reach",
+  "corrected": "the failing branch is dead: instrumented, the two tail normalize calls shrink 0 times in 2001 divisions because subAbsAlloc normalizes the remainder every iteration and setBit leaves the quotient's top limb non-zero, so realloc is never called",
+  "status": "ownership-model hardening in ad6bd639, not a fix for a dynamically reachable double free"
+ }
 }

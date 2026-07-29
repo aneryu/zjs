@@ -115,33 +115,30 @@ bigint_div_8x1   110.2x 更快
 
 **通过。**
 
-## 6. 一处既有缺陷（本刀未修，仅记录）
+## 6. 一处所有权模型隐患（本刀未修，且**不是**可达缺陷）
+
+⚠️ **本节的原标题与定性已更正。**原文写「既有 double free，`test-oom` 未覆盖」——**过强**。
 
 `divRemAbsAlloc` 的多 limb 尾部：
 
 ```zig
 var quotient = BigInt{ .allocator = allocator };
 errdefer quotient.deinit();
-var remainder = BigInt{ .allocator = allocator };
-errdefer remainder.deinit();
 ...
 return .{ try normalize(quotient), try normalize(remainder) };
 ```
 
-`normalize` 按值接收，并且**在自己失败时释放收到的 limbs**
-（`errdefer if (owned.limbs.len != 0) owned.allocator.free(owned.limbs);`，
-唯一的可失败点是收缩用的 `realloc`）。于是：
+`normalize` 按值接收并**在自己失败时释放收到的 limbs**，
+唯一的可失败点是收缩用的 `realloc`。调用者若还留着别名同一 slice 的 `errdefer`，
+模式上就是双重释放。
 
-- `normalize(quotient)` 失败 → 它释放了 `quotient.limbs`，
-  随后调用者的 `errdefer quotient.deinit()` 对同一指针再释放一次 → **double free**；
-- `normalize(remainder)` 失败 → 已归一化的商泄漏，
-  且 `errdefer quotient.deinit()` 作用在**旧的** `quotient` 上，其 limbs 可能已被 realloc 移动。
+**但那条失败分支是死的。**加计数器实测：这两次尾部 `normalize`
+在 **2001 次除法中收缩 0 次** —— `subAbsAlloc` 每轮都已把余数归一化，
+`setBit` 也让商的最高 limb 非零，所以 `len == owned.limbs.len`，`realloc` 根本不被调用。
 
-⚠️ **这是既有代码，不是本刀引入的**（新增的单 limb 路径刻意不调用 `normalize`，
-因此不含这条路径）。触发需要收缩 realloc 失败，`test-oom` 当前未覆盖到。
-
-**未在本刀修复**：它属于正确性而非性能，且 **P6-04c 会整体重写这个函数的多 limb 分支**，
-届时这段代码会消失。若 P6-04c 因故推迟，应单独立一刀修它。
+正确定性：**这是一个不成立的所有权模型，不是一个动态可达的 double free。**
+`ad6bd639` 做的是**模型加固**；随之加入的 fail-index sweep 的价值是
+**向前的 OOM 合同**，不是对某个已修缺陷的回归测试。
 
 ## 7. 限制
 
@@ -150,7 +147,7 @@ return .{ try normalize(quotient), try normalize(remainder) };
 - 归一化 shift 轴仍然惰性（`8x4s0/1/32/63` 在 P1 上仍是 11.6 µs 量级），符合预期：
   它要到 P6-04c 的 Algorithm D 才会变活；
 - 多 limb 除数**完全未动**，仍是约 2.5 × 分子比特数次分配；
-- §6 的既有缺陷未修。
+- §6 的所有权模型隐患本刀未修（由 `ad6bd639` 加固，且已证不可达）。
 
 ## 8. 下一步
 

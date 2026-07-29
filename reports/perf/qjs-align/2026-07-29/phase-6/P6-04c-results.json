@@ -2,7 +2,7 @@
  "note": "P6-04c multi-limb normalized long division. P0 = ca31bb9c (the P6-04a baseline), P1 = 8eb4decf.",
  "p0": "ca31bb9c",
  "p1": "8eb4decf",
- "verdict": "pass with one gate missed and recorded: multi-limb 28.4x to 271.8x with every combination same-direction, allocations from O(numerator bits) to a constant 6, and two JS shapes already inside the 2x second-stage target",
+ "verdict": "clear success with one approved performance waiver: multi-limb 28.4x to 271.8x with every combination same-direction, allocations from O(numerator bits) to a constant 6, two JS shapes already inside the 2x second-stage target, and the one missed gate (mod-size-2x1) accepted as an explicit waiver rather than reported as a pass",
  "commits": {
   "ad6bd639": "normalize ownership transferred exactly once, plus the multi-limb fail-index OOM sweep",
   "8eb4decf": "bit-at-a-time branch deleted and replaced by normalized limb division"
@@ -493,7 +493,18 @@
   },
   "verdict": "MISSED. mod-size-2x1 is the one shape with all sixteen combinations above 1.0 (range 1.0216 to 1.0672), a 3.5% geomean and 1.5 ns in absolute terms. div-size-1x1, div-size-2x1 and mod-size-1x1 all have ranges straddling 1.0, so they are noise. 8x1 and 16x1 are slightly faster at 0.991 to 0.997.",
   "cause": "almost certainly code layout: divRemAbsAlloc went from two branches plus an inlined bit loop to two branches plus two noinline calls, moving the dispatcher's codegen",
-  "not_chased": "1.5 ns per operation against 28x to 272x elsewhere; P6-04d will touch this dispatcher again if it merges the scratch allocations, and it should be re-measured then"
+  "not_chased": "1.5 ns per operation against 28x to 272x elsewhere; P6-04d will touch this dispatcher again if it merges the scratch allocations, and it should be re-measured then",
+  "waiver": {
+   "status": "approved explicit waiver, not a pass",
+   "statement": "the regression is real, stable and does not meet the original gate: mod-size-2x1 at +3.47% geomean and +1.51 ns, all sixteen combinations above 1.0 with a lower bound of 1.0216",
+   "accepted_because": "it is weighed against 28.7x to 271.8x on the multi-limb path",
+   "obligations": [
+    "keep mod-size-2x1 as a permanent sentinel",
+    "every P6-04d cut must re-measure div/mod at 1x1, 2x1, 8x1 and 16x1",
+    "re-judge after P6-04d completes; if mod 2x1 still regresses above 1%, take a separate one-cut that inspects the dispatcher body and the single-limb helper's call placement",
+    "that cut must not re-inline the multi-limb algorithm and must not trade 8x1 or 16x1 away for this 1.5 ns"
+   ]
+  }
  },
  "correctness": {
   "directed_vectors": {
@@ -551,9 +562,9 @@
   "8x8_at_least_20x_same_direction": "127.0x and 127.5x, same-direction",
   "16x16_at_least_20x_same_direction": "271.8x and 271.5x, same-direction",
   "allocations_to_constant": "640 / 1278 / 2554 become a constant 6",
-  "single_limb_no_stable_regression": "MISSED on mod-size-2x1 at +3.5% geomean, 1.5 ns absolute, all sixteen combinations above 1.0",
+  "single_limb_no_stable_regression": "MISSED on mod-size-2x1 at +3.5% geomean, 1.5 ns absolute, all sixteen combinations above 1.0 - accepted as an approved explicit waiver, not a pass",
   "correctness": true,
-  "overall": "pass with the single-limb gate explicitly missed and recorded"
+  "overall": "clear success with an approved waiver on the single-limb gate"
  },
  "limits": [
   "the 1.6-3.5% regression on the smallest single-limb shapes was not chased and the gate is missed",
