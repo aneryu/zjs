@@ -385,6 +385,154 @@ pub fn callValueOrBytecodePreRootedAfterInterruptPoll(
     return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame, false);
 }
 
+/// Transactional owned staging for a synchronous native -> bytecode call.
+/// The first two slots are `[receiver, callable]`, followed by arguments.
+/// Construction publishes only the initialized prefix to the Runtime root
+/// chain; successful frame setup replaces every transferred slot with
+/// undefined, while any failure releases exactly the remaining owners.
+const OwnedArgList = struct {
+    const inline_capacity = 10;
+
+    rt: ?*core.JSRuntime = null,
+    inline_values: [inline_capacity]core.JSValue = undefined,
+    values: []core.JSValue = &.{},
+    rooted_prefix: []core.JSValue = &.{},
+    root: array_ops.ValueSliceRoot = .{},
+    heap_backed: bool = false,
+
+    fn init(
+        self: *OwnedArgList,
+        rt: *core.JSRuntime,
+        receiver: core.JSValue,
+        callable: core.JSValue,
+        args: []const core.JSValue,
+    ) HostError!void {
+        std.debug.assert(self.rt == null);
+        const total = try std.math.add(usize, args.len, 2);
+        self.rt = rt;
+        self.values = if (total <= self.inline_values.len)
+            self.inline_values[0..total]
+        else blk: {
+            self.heap_backed = true;
+            break :blk try rt.memory.alloc(core.JSValue, total);
+        };
+        self.rooted_prefix = self.values[0..0];
+        self.root.init(rt, &self.rooted_prefix);
+        errdefer self.deinit();
+
+        self.values[0] = receiver.dup();
+        self.rooted_prefix = self.values[0..1];
+        self.values[1] = callable.dup();
+        self.rooted_prefix = self.values[0..2];
+        for (args, 0..) |arg, index| {
+            self.values[index + 2] = arg.dup();
+            self.rooted_prefix = self.values[0 .. index + 3];
+        }
+    }
+
+    fn deinit(self: *OwnedArgList) void {
+        const rt = self.rt orelse return;
+        var index = self.rooted_prefix.len;
+        while (index > 0) {
+            index -= 1;
+            const value = self.values[index];
+            self.values[index] = core.JSValue.undefinedValue();
+            value.free(rt);
+        }
+        self.rooted_prefix = self.values[0..0];
+        self.root.deinit();
+        if (self.heap_backed) rt.memory.free(core.JSValue, self.values);
+        self.values = &.{};
+        self.rt = null;
+        self.heap_backed = false;
+    }
+};
+
+/// Explicit synchronous internal call boundary for native algorithms that
+/// must receive a bytecode callback result before they can finish. Inputs must
+/// remain rooted for this call (native invocation arguments and algorithm
+/// OwnedArgList values already satisfy that contract).
+///
+/// Eligible same-context, same-Realm normal bytecode targets push an Entry on
+/// the active Machine and stop at `.native_boundary`. Every other target
+/// unconditionally retains the authoritative JS_Call-shaped root path.
+pub fn callValueOrBytecodeSyncInternal(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    // One call-entry poll regardless of whether routing selects the resident
+    // Machine or the authoritative fallback.
+    try exception_ops.pollInterrupt(ctx, global);
+
+    const invocation = inline_calls.activeInvocation(ctx.runtime) orelse
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            ctx,
+            output,
+            global,
+            this_value,
+            func,
+            args,
+            caller_function,
+            caller_frame,
+            true,
+        );
+    const machine = invocation.machine;
+    if (machine.ctx != ctx or
+        machine.ctx.runtime != ctx.runtime or
+        machine.global != global or
+        machine.output != output)
+    {
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            ctx,
+            output,
+            global,
+            this_value,
+            func,
+            args,
+            caller_function,
+            caller_frame,
+            true,
+        );
+    }
+    const target = inline_calls.resolveInlineTarget(ctx, global, this_value, func) orelse
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            ctx,
+            output,
+            global,
+            this_value,
+            func,
+            args,
+            caller_function,
+            caller_frame,
+            true,
+        );
+
+    var owned_args = OwnedArgList{};
+    try owned_args.init(ctx.runtime, this_value, func, args);
+    defer owned_args.deinit();
+
+    var boundary = inline_calls.NativeBoundaryScope.init(invocation);
+    boundary.push();
+    defer boundary.deinit();
+
+    _ = try machine.pushMovedCall(
+        global,
+        &target,
+        owned_args.values,
+        .method,
+        .native_boundary,
+        0,
+    );
+    inline_calls.recordSameMachineSyncCall();
+    return zjs_vm.runActiveInvocationUntilNativeBoundary(invocation, &boundary);
+}
+
 /// Slow-path collection prototype methods reached by name without a baked
 /// native id (the id-carrying path already routed through
 /// `call_mod.callNativeFunctionRecord` above). Replaces the retired

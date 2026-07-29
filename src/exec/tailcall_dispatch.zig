@@ -78,6 +78,10 @@ pub const Outcome = enum(u32) {
     /// A cold callee (native / generator / class-ctor / cross-realm) needs the full
     /// prologue: the driver runs the cold call path and re-enters.
     reenter,
+    /// A synchronous bytecode callback reached the native fence that entered
+    /// it. The nested driver returns the owned result to the still-running
+    /// Zig builtin without resuming the suspended outer opcode.
+    native_returned,
 };
 
 // ===========================================================================
@@ -997,6 +1001,10 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
             completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err);
         },
         .constructor => unreachable,
+        .native_boundary => {
+            vm.return_value = result;
+            return .native_returned;
+        },
         .next => unreachable,
     }
     return coldNext(var_buf, vm);
@@ -4040,6 +4048,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 switch (continuation.action) {
                     .proxy_get => try completeProxyGetContinuation(vm, result, continuation.takeAtom()),
                     .for_of_next => try completeForOfNextContinuation(vm, result, continuation.takeForOfDepth()),
+                    .native_boundary => return result,
                     .constructor => unreachable,
                     .next => unreachable,
                 }
@@ -4094,6 +4103,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
             },
             .suspended => return vm.return_value,
             .reenter => unreachable, // cold callees complete inside call_vm.call.
+            .native_returned => return vm.return_value,
         }
     }
 }

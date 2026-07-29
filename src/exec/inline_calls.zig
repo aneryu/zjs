@@ -28,6 +28,31 @@ const vm_call = @import("vm_call.zig");
 
 const HostError = @import("exceptions.zig").HostError;
 
+pub const MachineTestMetrics = struct {
+    machine_inits: usize = 0,
+    entry_chunk_allocations: usize = 0,
+    same_machine_sync_calls: usize = 0,
+    max_depth: usize = 0,
+};
+
+const TestMetricStorage = if (builtin.is_test) struct {
+    var metrics: MachineTestMetrics = .{};
+} else struct {};
+
+pub fn resetMachineTestMetrics() void {
+    if (!builtin.is_test) @compileError("test-only helper");
+    TestMetricStorage.metrics = .{};
+}
+
+pub fn machineTestMetrics() MachineTestMetrics {
+    if (!builtin.is_test) @compileError("test-only helper");
+    return TestMetricStorage.metrics;
+}
+
+pub inline fn recordSameMachineSyncCall() void {
+    if (comptime builtin.is_test) TestMetricStorage.metrics.same_machine_sync_calls += 1;
+}
+
 /// An eligible bytecode-to-bytecode call target resolved from a callable
 /// value on the operand stack. All values are borrowed from the caller's
 /// (rooted) operand stack region.
@@ -213,6 +238,10 @@ pub const ReturnAction = enum(u8) {
     proxy_get,
     for_of_next,
     constructor,
+    /// Return to the still-running native builtin that synchronously entered
+    /// this bytecode frame. The result must not reach the suspended outer
+    /// bytecode caller stack or resume its next opcode.
+    native_boundary,
 };
 
 pub const ReturnContinuation = struct {
@@ -703,15 +732,59 @@ pub const L0State = struct {
 const entries_per_chunk: usize = 16;
 const max_chunks: usize = 512;
 
-/// Indexed resolver for an invocation node backed directly by Machine: index
-/// 0 is the innermost inline frame, walking outward through Entry.prev to the
-/// L0 frame; null past the end. Machine is initialized at its final address
-/// before this resolver is published, so `data` has no parallel holder state.
-pub fn resolveMachineBacktrace(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
-    const machine: *const Machine = @ptrCast(@alignCast(data.?));
+/// A stack-local view over one contiguous segment of a Machine. The outer
+/// view is frozen at a native fence while a synchronous callback installs a
+/// live inner view above the native backtrace node. Nested native -> JS calls
+/// therefore compose as independent segments instead of enumerating the same
+/// outer Entry chain more than once.
+pub const MachineBacktraceView = struct {
+    machine: *const Machine,
+    frozen_top: ?*Entry = null,
+    bottom_exclusive: ?*Entry = null,
+    include_l0: bool,
+    live: bool = true,
+
+    pub fn root(machine: *const Machine) MachineBacktraceView {
+        return .{
+            .machine = machine,
+            .include_l0 = true,
+        };
+    }
+
+    pub fn segment(machine: *const Machine, bottom_exclusive: ?*Entry) MachineBacktraceView {
+        return .{
+            .machine = machine,
+            .bottom_exclusive = bottom_exclusive,
+            .include_l0 = false,
+        };
+    }
+
+    fn freeze(self: *MachineBacktraceView, top: ?*Entry) void {
+        std.debug.assert(self.live);
+        self.frozen_top = top;
+        self.live = false;
+    }
+
+    fn thaw(self: *MachineBacktraceView) void {
+        std.debug.assert(!self.live);
+        self.frozen_top = null;
+        self.live = true;
+    }
+};
+
+fn resolveMachineBacktraceRange(
+    machine: *const Machine,
+    top: ?*Entry,
+    bottom_exclusive: ?*Entry,
+    include_l0: bool,
+    index: usize,
+) ?core.ActiveBacktraceSnapshot {
     var remaining = index;
-    var cursor = machine.top;
+    var cursor = top;
     while (cursor) |entry| {
+        if (bottom_exclusive) |bottom| {
+            if (entry == bottom) break;
+        }
         if (remaining == 0) return exception_ops.frameBacktraceSnapshot(&entry.frame);
         remaining -= 1;
         if (entry.teardown.has_native_caller) {
@@ -720,8 +793,28 @@ pub fn resolveMachineBacktrace(data: ?*const anyopaque, index: usize) ?core.Acti
         }
         cursor = entry.prev;
     }
-    if (remaining == 0) return exception_ops.frameBacktraceSnapshot(machine.l0.level.frame);
+    if (include_l0 and remaining == 0) return exception_ops.frameBacktraceSnapshot(machine.l0.level.frame);
     return null;
+}
+
+/// Backwards-compatible whole-Machine resolver used by colocated machinery
+/// tests. Active invocations publish `resolveMachineBacktraceView` instead so
+/// synchronous native callbacks can split the chain at their fence.
+pub fn resolveMachineBacktrace(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
+    const machine: *const Machine = @ptrCast(@alignCast(data.?));
+    return resolveMachineBacktraceRange(machine, machine.top, null, true, index);
+}
+
+pub fn resolveMachineBacktraceView(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot {
+    const view: *const MachineBacktraceView = @ptrCast(@alignCast(data.?));
+    const top = if (view.live) view.machine.top else view.frozen_top;
+    return resolveMachineBacktraceRange(
+        view.machine,
+        top,
+        view.bottom_exclusive,
+        view.include_l0,
+        index,
+    );
 }
 
 fn nativeBacktraceSnapshot(function_value: core.JSValue) core.ActiveBacktraceSnapshot {
@@ -734,6 +827,96 @@ fn nativeBacktraceSnapshot(function_value: core.JSValue) core.ActiveBacktraceSna
         .is_native = true,
     };
 }
+
+/// Exec-owned authority published through JSRuntime.active_invocation for the
+/// lifetime of one `runWithArgsState`. Runtime stores only an opaque borrowed
+/// pointer; callback routing must recover this type rather than deriving
+/// execution authority from the observable backtrace chain.
+pub const ActiveInvocation = struct {
+    machine: *Machine,
+    current_backtrace_view: *MachineBacktraceView,
+};
+
+pub inline fn activeInvocation(rt: *core.JSRuntime) ?*ActiveInvocation {
+    const invocation_ptr = rt.active_invocation orelse return null;
+    return @ptrCast(@alignCast(invocation_ptr));
+}
+
+/// One synchronous native -> bytecode transaction. It freezes the currently
+/// visible Machine segment, pushes a callback-only segment above the native
+/// frame, and records every execution budget that the callback must restore.
+/// `push` is separate from `init` because the active frame borrows `self.view`
+/// and therefore may only be wired after this scope reaches its final address.
+pub const NativeBoundaryScope = struct {
+    invocation: *ActiveInvocation,
+    outer_view: *MachineBacktraceView,
+    view: MachineBacktraceView = undefined,
+    frame: core.ActiveBacktraceFrame = undefined,
+    fence_depth: usize,
+    fence_top: ?*Entry,
+    fence_stack_top: [*]core.JSValue,
+    fence_stack_len: usize,
+    fence_arena_mark: core.VmStackArena.Mark,
+    fence_call_depth: usize,
+    fence_native_call_depth: usize,
+    fence_stack_bytes: usize,
+    active: bool = false,
+
+    pub fn init(invocation: *ActiveInvocation) NativeBoundaryScope {
+        const machine = invocation.machine;
+        const stack = machine.currentLevel().stack;
+        return .{
+            .invocation = invocation,
+            .outer_view = invocation.current_backtrace_view,
+            .fence_depth = machine.depth,
+            .fence_top = machine.top,
+            .fence_stack_top = stack.topPtr(),
+            .fence_stack_len = stack.len(),
+            .fence_arena_mark = machine.ctx.runtime.vm_stack.mark(),
+            .fence_call_depth = machine.ctx.runtime.hot.call_depth,
+            .fence_native_call_depth = machine.ctx.runtime.hot.native_call_depth,
+            .fence_stack_bytes = machine.ctx.runtime.hot.active_bytecode_stack_bytes,
+        };
+    }
+
+    pub fn push(self: *NativeBoundaryScope) void {
+        std.debug.assert(!self.active);
+        const machine = self.invocation.machine;
+        self.outer_view.freeze(self.fence_top);
+        self.view = MachineBacktraceView.segment(machine, self.fence_top);
+        self.frame = .{
+            .data = &self.view,
+            .resolver = resolveMachineBacktraceView,
+        };
+        machine.ctx.pushActiveBacktraceFrame(&self.frame);
+        self.invocation.current_backtrace_view = &self.view;
+        self.active = true;
+    }
+
+    pub fn deinit(self: *NativeBoundaryScope) void {
+        if (!self.active) return;
+        const machine = self.invocation.machine;
+        if (machine.depth > self.fence_depth) {
+            machine.discardToDepth(self.fence_depth);
+        }
+        std.debug.assert(machine.depth == self.fence_depth);
+        std.debug.assert(machine.top == self.fence_top);
+        const stack = machine.currentLevel().stack;
+        std.debug.assert(stack.len() == self.fence_stack_len);
+        std.debug.assert(stack.topPtr() == self.fence_stack_top);
+        const mark = machine.ctx.runtime.vm_stack.mark();
+        std.debug.assert(mark.chunk == self.fence_arena_mark.chunk);
+        std.debug.assert(mark.used == self.fence_arena_mark.used);
+        std.debug.assert(machine.ctx.runtime.hot.call_depth == self.fence_call_depth);
+        std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.fence_native_call_depth);
+        std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.fence_stack_bytes);
+
+        machine.ctx.popActiveBacktraceFrame(&self.frame);
+        self.invocation.current_backtrace_view = self.outer_view;
+        self.outer_view.thaw();
+        self.active = false;
+    }
+};
 
 pub const Machine = struct {
     ctx: *core.JSContext,
@@ -755,6 +938,7 @@ pub const Machine = struct {
     /// Maintained in lockstep with `depth` by pushFrame/popFrame.
     top: ?*Entry = null,
     pub fn init(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, l0: *const L0State) Machine {
+        if (comptime builtin.is_test) TestMetricStorage.metrics.machine_inits += 1;
         return .{
             .ctx = ctx,
             .output = output,
@@ -845,6 +1029,7 @@ pub const Machine = struct {
         }
         std.debug.assert(chunk_index == self.chunk_count);
         const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
+        if (comptime builtin.is_test) TestMetricStorage.metrics.entry_chunk_allocations += 1;
         // Pre-define each slot's `frame.var_refs` so the warm borrowed-
         // iterator constructor's store-elision compare
         // (`finishBorrowedIteratorFrame`) reads defined memory even on a
@@ -994,6 +1179,9 @@ pub const Machine = struct {
         entry.prev = self.top;
         self.top = entry;
         self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
         return entry;
     }
 
@@ -2899,8 +3087,11 @@ pub const Machine = struct {
             .next => 0,
             .proxy_get => self.ctx.runtime.atoms.dup(@intCast(continuation_payload)),
             .for_of_next => continuation_payload,
+            .native_boundary => 0,
             .constructor => unreachable,
         };
+        std.debug.assert(return_action != .native_boundary or
+            (!entry.isEmptyLeaf() and !entry.isExactArgsLeaf() and !entry.isForwardedLeaf()));
         return entry;
     }
 
@@ -3481,6 +3672,52 @@ pub const Machine = struct {
         }
         result.free(self.ctx.runtime);
         return fallback;
+    }
+
+    /// Abruptly retire every Entry above `depth` without attempting another
+    /// observable catch/IteratorClose operation. This is the recovery tail for
+    /// an error raised while the bounded unwind itself is already cleaning up.
+    pub fn discardToDepth(self: *Machine, depth: usize) void {
+        std.debug.assert(depth <= self.depth);
+        while (self.depth > depth) {
+            var continuation = self.popFrame();
+            continuation.deinit(self.ctx.runtime);
+        }
+    }
+
+    /// Native-fence variant of `unwindForError`: catches remain visible inside
+    /// the callback segment, but an uncaught callback error stops exactly at
+    /// `fence_depth`. The suspended outer bytecode frame cannot catch until
+    /// the native builtin has regained control and run its cleanup.
+    pub fn unwindForErrorToDepth(
+        self: *Machine,
+        global: *core.Object,
+        fence_depth: usize,
+        err: anyerror,
+    ) HostError!bool {
+        std.debug.assert(fence_depth <= self.depth);
+        errdefer self.discardToDepth(fence_depth);
+        const ctx = self.ctx;
+        while (self.depth > fence_depth) {
+            var continuation = self.popFrame();
+            const iterator_next_depth: ?u8 = if (continuation.action == .for_of_next)
+                continuation.takeForOfDepth()
+            else
+                null;
+            continuation.deinit(ctx.runtime);
+
+            // The outer level belongs to the still-running native builtin.
+            // Do not close its iterators or consult its catch markers yet.
+            if (self.depth == fence_depth) return false;
+
+            const level = self.currentLevel();
+            if (iterator_next_depth) |depth| {
+                try forof_ops.abandonForOfIteratorAtDepth(ctx.runtime, level.stack, depth);
+            }
+            try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, level.stack);
+            if (try call_runtime.tryCatchInFrame(ctx, self.output, level.stack, level.frame, level.catch_target, global, err)) return true;
+        }
+        return false;
     }
 
     /// Unwind inline frames looking for a catch handler for `err`. The top

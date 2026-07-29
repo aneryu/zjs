@@ -86,6 +86,35 @@ const InterruptOomArm = struct {
     }
 };
 
+const NativeFenceProbe = struct {
+    cleanup_ran: bool = false,
+    invoke_calls: usize = 0,
+
+    fn invoke(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.invoke_calls += 1;
+        self.cleanup_ran = false;
+        defer self.cleanup_ran = true;
+        if (invocation.args.len == 0) return error.TypeError;
+        const global = invocation.realm.global orelse return error.InvalidBuiltinRegistry;
+        return engine.exec.call_runtime.callValueOrBytecodeSyncInternal(
+            invocation.realm,
+            invocation.output,
+            global,
+            core.JSValue.undefinedValue(),
+            invocation.args[0],
+            invocation.args[1..],
+            null,
+            null,
+        );
+    }
+
+    fn cleanupObserved(ptr: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        return core.JSValue.boolean(self.cleanup_ran);
+    }
+};
+
 test "eval lazily materializes a bare core context global before root closure construction" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -321,6 +350,248 @@ test "uncatchable interrupt skips outer inline for-of close and catch" {
     defer caught.free(js.runtime);
     try std.testing.expectEqual(false, closed.asBool().?);
     try std.testing.expectEqual(false, caught.asBool().?);
+
+    const exception = js.context.takeException();
+    exception.free(js.runtime);
+    try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
+test "synchronous native fence reuses one Machine and restores native cleanup order" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    var probe = NativeFenceProbe{};
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceInvoke",
+        1,
+        &probe,
+        NativeFenceProbe.invoke,
+        null,
+    );
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceCleanupObserved",
+        0,
+        &probe,
+        NativeFenceProbe.cleanupObserved,
+        null,
+    );
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    inline_calls.resetMachineTestMetrics();
+
+    const result = try js.eval(
+        \\var fenceOrder = [];
+        \\function fenceHelper(value) {
+        \\    if (value < 0) throw new Error("negative");
+        \\    return value + 1;
+        \\}
+        \\function catchesInsideCallback() {
+        \\    try {
+        \\        fenceHelper(-1);
+        \\    } catch (error) {
+        \\        fenceOrder.push("inner:" + error.message);
+        \\    }
+        \\    return 7;
+        \\}
+        \\assert.sameValue(__nativeFenceInvoke(catchesInsideCallback), 7);
+        \\
+        \\function throwsThroughFence() {
+        \\    fenceOrder.push("callback");
+        \\    throw new RangeError("through-fence");
+        \\}
+        \\try {
+        \\    __nativeFenceInvoke(throwsThroughFence);
+        \\} catch (error) {
+        \\    fenceOrder.push("outer:" + __nativeFenceCleanupObserved());
+        \\    assert.sameValue(error instanceof RangeError, true);
+        \\    assert.sameValue(error.message, "through-fence");
+        \\}
+        \\
+        \\function tailTarget(value) {
+        \\    return value + 1;
+        \\}
+        \\function tailCallback(value) {
+        \\    return tailTarget(value);
+        \\}
+        \\assert.sameValue(__nativeFenceInvoke(tailCallback, 40), 41);
+        \\
+        \\function nestedTarget(value) {
+        \\    return fenceHelper(value);
+        \\}
+        \\function reentrantCallback(value) {
+        \\    return __nativeFenceInvoke(nestedTarget, value);
+        \\}
+        \\assert.sameValue(__nativeFenceInvoke(reentrantCallback, 40), 41);
+        \\assert.sameValue(
+        \\    fenceOrder.join(","),
+        \\    "inner:negative,callback,outer:true"
+        \\);
+    );
+    defer result.free(js.runtime);
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 5), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(metrics.max_depth >= 2);
+    try std.testing.expectEqual(@as(usize, 5), probe.invoke_calls);
+    try std.testing.expect(probe.cleanup_ran);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
+test "synchronous native reentry crosses Entry chunk boundaries exactly" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    var probe = NativeFenceProbe{};
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceInvoke",
+        1,
+        &probe,
+        NativeFenceProbe.invoke,
+        null,
+    );
+
+    const setup = try js.eval(
+        \\globalThis.__nativeFenceDepth = function nativeFenceDepth(depth) {
+        \\    if (depth === 0) return 0;
+        \\    return __nativeFenceInvoke(__nativeFenceDepth, depth - 1) + 1;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const function_key = try js.runtime.internAtom("__nativeFenceDepth");
+    defer js.runtime.atoms.free(function_key);
+    const function = try global.getProperty(function_key);
+    defer function.free(js.runtime);
+    const depths = [_]usize{ 15, 16, 17, 31, 32, 33 };
+
+    for (depths) |depth| {
+        const baseline_call_depth = js.runtime.hot.call_depth;
+        const baseline_native_depth = js.runtime.hot.native_call_depth;
+        const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+        const baseline_arena_mark = js.runtime.vm_stack.mark();
+        inline_calls.resetMachineTestMetrics();
+
+        const result = try engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            function,
+            &.{core.JSValue.int32(@intCast(depth))},
+            null,
+            null,
+        );
+        defer result.free(js.runtime);
+        try std.testing.expectEqual(@as(?i32, @intCast(depth)), result.asInt32());
+
+        const metrics = inline_calls.machineTestMetrics();
+        try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+        try std.testing.expectEqual(depth, metrics.same_machine_sync_calls);
+        try std.testing.expectEqual(depth, metrics.max_depth);
+        try std.testing.expectEqual(
+            std.math.divCeil(usize, depth, 16) catch unreachable,
+            metrics.entry_chunk_allocations,
+        );
+        try std.testing.expect(js.runtime.active_invocation == null);
+        try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+        try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+        try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+        try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    }
+}
+
+test "synchronous native fence restores every budget after interrupt" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    var probe = NativeFenceProbe{};
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceInvoke",
+        1,
+        &probe,
+        NativeFenceProbe.invoke,
+        null,
+    );
+    const setup = try js.eval(
+        \\globalThis.__nativeFenceInterruptCaught = false;
+        \\function nativeFenceInterruptCallback(spin) {
+        \\    while (spin) {}
+        \\}
+        \\globalThis.__nativeFenceInterruptOuter = function () {
+        \\    try {
+        \\        return __nativeFenceInvoke(nativeFenceInterruptCallback, true);
+        \\    } catch (_) {
+        \\        globalThis.__nativeFenceInterruptCaught = true;
+        \\        return -1;
+        \\    }
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__nativeFenceInterruptOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const caught_key = try js.runtime.internAtom("__nativeFenceInterruptCaught");
+    defer js.runtime.atoms.free(caught_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+
+    // Root call, native call, and sync-callback entry consume the first three
+    // ticks. The callback loop consumes the fourth after its fence is live.
+    js.context.interrupt_counter = 4;
+    inline_calls.resetMachineTestMetrics();
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            outer,
+            &.{},
+            null,
+            null,
+        ),
+    );
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expectEqual(@as(usize, 1), probe.invoke_calls);
+    try std.testing.expect(probe.cleanup_ran);
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
+    try std.testing.expect(js.context.exceptionIsUncatchable());
+    const caught = try global.getProperty(caught_key);
+    defer caught.free(js.runtime);
+    try std.testing.expectEqual(false, caught.asBool().?);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
     const exception = js.context.takeException();
     exception.free(js.runtime);

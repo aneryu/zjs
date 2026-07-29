@@ -282,6 +282,12 @@ noinline fn throwCFunctionStackOverflow(
 /// pending exception and therefore take the allocation-free first return.
 pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err: anytype) HostError!void {
     const error_global = global orelse return;
+    // A synchronous native -> bytecode callback may return the VM's
+    // uncatchable interrupt sentinel through this native-call seam. Its
+    // prebuilt pending InternalError is authoritative; rebuilding it here
+    // would clear the uncatchable bit and incorrectly expose it to the
+    // suspended outer JavaScript catch.
+    if (@as(anyerror, err) == error.Interrupted and ctx.exceptionIsUncatchable()) return;
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return;
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return;
     const error_value = exception_ops.createNamedError(ctx, error_global, error_info.name, error_info.message) catch |create_err| {

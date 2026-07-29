@@ -580,19 +580,26 @@ fn runWithArgsState(
         .stop_before_pc = entry_stop_before_pc,
         .suspend_on_module_await = entry_suspend_on_module_await,
     };
-    // Construct Machine at its final address before publishing the invocation
-    // Adapter that points to it. Machine is the resolver's only execution-state
-    // source; the separate link preserves Machine's existing hot layout. It must
-    // not move until the link is popped.
+    // Construct Machine at its final address before publishing either borrowed
+    // execution authority. Machine must not move until both scopes are gone.
     var machine = inline_calls.Machine.init(ctx, output, global, &l0_state);
+    var root_backtrace_view = inline_calls.MachineBacktraceView.root(&machine);
     var active_backtrace_frame = core.ActiveBacktraceFrame{
-        .data = &machine,
-        .resolver = inline_calls.resolveMachineBacktrace,
+        .data = &root_backtrace_view,
+        .resolver = inline_calls.resolveMachineBacktraceView,
     };
     ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
     defer ctx.popActiveBacktraceFrame(&active_backtrace_frame);
-    // Register after the pop defer so inline frames are drained while this
-    // invocation is still observable; the L0 Frame is destroyed afterwards.
+
+    var invocation = inline_calls.ActiveInvocation{
+        .machine = &machine,
+        .current_backtrace_view = &root_backtrace_view,
+    };
+    const previous_invocation = ctx.runtime.active_invocation;
+    ctx.runtime.active_invocation = &invocation;
+    defer ctx.runtime.active_invocation = previous_invocation;
+    // Register last so inline frames are drained while both the invocation
+    // authority and its backtrace view remain observable.
     defer machine.deinit();
 
     if (entry_generator_state == null) {
@@ -780,6 +787,34 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .catch_target = level.catch_target,
     };
     return tailcall_dispatch.run(&vm);
+}
+
+/// Drive a callback Entry on an already-active Machine until its
+/// `.native_boundary` continuation returns control to the native builtin.
+/// Errors may be caught within the callback segment; an uncaught error is
+/// bounded at the fence and returned without consulting the suspended outer
+/// bytecode frame.
+pub fn runActiveInvocationUntilNativeBoundary(
+    invocation: *inline_calls.ActiveInvocation,
+    scope: *const inline_calls.NativeBoundaryScope,
+) HostError!core.JSValue {
+    const machine = invocation.machine;
+    std.debug.assert(machine.depth > scope.fence_depth);
+    while (true) {
+        const result = runTC(machine) catch |err| {
+            if (machine.depth > scope.fence_depth and
+                try machine.unwindForErrorToDepth(machine.global, scope.fence_depth, err))
+            {
+                continue;
+            }
+            std.debug.assert(machine.depth == scope.fence_depth);
+            std.debug.assert(machine.top == scope.fence_top);
+            return err;
+        };
+        std.debug.assert(machine.depth == scope.fence_depth);
+        std.debug.assert(machine.top == scope.fence_top);
+        return result;
+    }
 }
 
 fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *const bytecode.FunctionBytecode) !void {
