@@ -12208,6 +12208,44 @@ test "inline operand Stack keeps limit and ownership flags in one word" {
     }
 }
 
+test "ordinary root bytecode call carves one operand window" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    // Slightly more than half a chunk makes a duplicate stack-size carve
+    // cross the chunk boundary deterministically. Frame metadata is empty, so
+    // one operand window fits in one chunk while two require exactly two.
+    const stack_size = core.VmStackArena.chunk_slots / 2 + 1;
+    const code = [_]u8{op.return_undef};
+    const callable = try createTailOpcodeFixture(
+        &js,
+        "__singleOperandWindow",
+        &code,
+        @intCast(stack_size),
+    );
+    defer callable.free(js.runtime);
+
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.vm_stack.chunk_count);
+    const result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        callable,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.vm_stack.chunk_count);
+    try std.testing.expectEqual(
+        core.VmStackArena.Mark{ .chunk = 0, .used = 0 },
+        js.runtime.vm_stack.mark(),
+    );
+}
+
 test "method calls preserve receiver arguments eval captures and abrupt ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

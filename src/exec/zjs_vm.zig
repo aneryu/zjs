@@ -692,6 +692,10 @@ noinline fn initFreshEntryFrame(
         generator.generatorCombinedFrameStorage()
     else
         &.{};
+    const stack_count = if (entry_stack.capacity == 0)
+        @as(usize, entry_function.stack_size) + 1
+    else
+        0;
     const slab = if (entry_prepared_frame) |prepared| blk: {
         frame_storage.installResidentStorage(prepared.slab.storage);
         break :blk prepared.slab;
@@ -714,7 +718,7 @@ noinline fn initFreshEntryFrame(
             frame_arg_count,
             frame_mod.originalArgCount(args.len, need_original_args),
             entry_function.var_count,
-            @as(usize, entry_function.stack_size) + 1,
+            stack_count,
             frame_mod.frameVarRefStorageCount(entry_function, var_refs),
             open_var_ref_count,
         )) |windows| break :blk windows;
