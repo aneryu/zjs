@@ -1,4 +1,3 @@
-const build_options = @import("build_options");
 const array = @import("array.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
@@ -9023,11 +9022,7 @@ pub const Object = extern struct {
     }
 
     pub fn hasProperty(self: *const Object, atom_id: atom.Atom) bool {
-        // Gated the same way as the other opcode-profile counters
-        // (core/value.zig, exec/vm_profile.zig): without the build flag the
-        // counter is dead, and so is the `isGlobal()` load that was previously
-        // evaluated as its argument on every call regardless of the flag.
-        if (comptime build_options.zjs_enable_opcode_profile) profile.recordPropLookup(self.isGlobal());
+        profile.recordPropLookup(self.isGlobal());
         if (self.hasOwnProperty(atom_id)) return true;
         if (self.getPrototype()) |proto| return proto.hasProperty(atom_id);
         return false;
@@ -9037,7 +9032,7 @@ pub const Object = extern struct {
     /// and leave the placeholder intact for an explicit retry; no generic read
     /// path converts them to `undefined`.
     pub fn getProperty(self: *const Object, atom_id: atom.Atom) context_mod.DynamicImportError!JSValue {
-        if (comptime build_options.zjs_enable_opcode_profile) profile.recordPropLookup(self.isGlobal());
+        profile.recordPropLookup(self.isGlobal());
         if (self.isArray() and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
         if (self.mappedArgumentsTaggedBindingIndex(atom_id)) |mapped_index| {
             if (self.mappedArgumentsBindingValue(mapped_index)) |mapped| return mapped;
