@@ -2906,8 +2906,8 @@
     "ms": 15.586307499979736,
     "note": "suite-wide constant, not a case",
     "rank": 1,
-    "share": 0.22000572052496958,
-    "cumulative_share": 0.22000572052496958
+    "share": 0.2658560136189549,
+    "cumulative_share": 0.2658560136189549
    },
    {
     "item": "array_map_callback",
@@ -2923,198 +2923,198 @@
     "subsystem": "call",
     "ms": 5.744664633333617,
     "note": "paired=1.313",
-    "rank": 3,
-    "share": 0.08108778052996297,
-    "cumulative_share": 0.4735563784969355
+    "rank": 2,
+    "share": 0.09798687976596485,
+    "cumulative_share": 0.3638428933849197
    },
    {
     "item": "call2_loop",
     "subsystem": "call",
     "ms": 4.992149600000385,
     "note": "paired=1.296",
-    "rank": 4,
-    "share": 0.07046578990681092,
-    "cumulative_share": 0.5440221684037465
+    "rank": 3,
+    "share": 0.08515121314315709,
+    "cumulative_share": 0.4489941065280768
    },
    {
     "item": "closure_call_loop",
     "subsystem": "call",
     "ms": 4.882403500001114,
     "note": "paired=1.309",
-    "rank": 5,
-    "share": 0.06891668856865393,
-    "cumulative_share": 0.6129388569724005
+    "rank": 4,
+    "share": 0.08327927133422824,
+    "cumulative_share": 0.5322733778623051
    },
    {
     "item": "uri_decode_4byte",
     "subsystem": "string",
     "ms": 4.741287966666928,
     "note": "paired=1.290",
-    "rank": 6,
-    "share": 0.0669247976356351,
-    "cumulative_share": 0.6798636546080357
+    "rank": 5,
+    "share": 0.08087226036309295,
+    "cumulative_share": 0.6131456382253979
    },
    {
     "item": "prop_read_mono",
     "subsystem": "property",
     "ms": 4.642772799999872,
     "note": "paired=1.234",
-    "rank": 7,
-    "share": 0.06553422451719436,
-    "cumulative_share": 0.74539787912523
+    "rank": 6,
+    "share": 0.07919188484816457,
+    "cumulative_share": 0.6923375230735626
    },
    {
     "item": "vm_int_sum_large",
     "subsystem": "call",
     "ms": 4.282531300000542,
     "note": "paired=1.248",
-    "rank": 8,
-    "share": 0.06044930040861692,
-    "cumulative_share": 0.805847179533847
+    "rank": 7,
+    "share": 0.07304723710975322,
+    "cumulative_share": 0.7653847601833158
    },
    {
     "item": "uri_component_decode_4byte",
     "subsystem": "string",
     "ms": 3.249328100000259,
     "note": "paired=1.205",
-    "rank": 9,
-    "share": 0.04586530644692573,
-    "cumulative_share": 0.8517124859807726
+    "rank": 8,
+    "share": 0.05542386582628661,
+    "cumulative_share": 0.8208086260096024
    },
    {
     "item": "global_read_loop",
     "subsystem": "property",
     "ms": 3.248974900000455,
     "note": "paired=1.200",
-    "rank": 10,
-    "share": 0.04586032091584684,
-    "cumulative_share": 0.8975728068966194
+    "rank": 9,
+    "share": 0.05541784128558265,
+    "cumulative_share": 0.876226467295185
    },
    {
     "item": "dense_array_write_read",
     "subsystem": "array/typed-array",
     "ms": 1.0719881333341625,
     "note": "paired=1.175",
-    "rank": 11,
-    "share": 0.015131455713208931,
-    "cumulative_share": 0.9127042626098284
+    "rank": 10,
+    "share": 0.018284926803568816,
+    "cumulative_share": 0.8945113940987539
    },
    {
     "item": "func_call",
     "subsystem": "call",
     "ms": 0.9932093000002622,
     "note": "paired=1.361",
-    "rank": 12,
-    "share": 0.014019467258614169,
-    "cumulative_share": 0.9267237298684425
+    "rank": 11,
+    "share": 0.016941194390504975,
+    "cumulative_share": 0.9114525884892588
    },
    {
     "item": "math_min",
     "subsystem": "number/dtoa",
     "ms": 0.8006267666669604,
     "note": "paired=1.268",
-    "rank": 13,
-    "share": 0.011301103142766196,
-    "cumulative_share": 0.9380248330112089
+    "rank": 12,
+    "share": 0.01365630958987483,
+    "cumulative_share": 0.9251088980791337
    },
    {
     "item": "map_string_keys",
     "subsystem": "property",
     "ms": 0.780958633333527,
     "note": "paired=1.255",
-    "rank": 14,
-    "share": 0.011023481143751433,
-    "cumulative_share": 0.9490483141549603
+    "rank": 13,
+    "share": 0.013320829777009626,
+    "cumulative_share": 0.9384297278561432
    },
    {
     "item": "prop_read_poly3",
     "subsystem": "property",
     "ms": 0.7297062000000807,
     "note": "paired=1.024",
-    "rank": 15,
-    "share": 0.01030003663810457,
-    "cumulative_share": 0.9593483507930648
+    "rank": 14,
+    "share": 0.012446615816177724,
+    "cumulative_share": 0.950876343672321
    },
    {
     "item": "string_concat_loop",
     "subsystem": "string",
     "ms": 0.6176878333337905,
     "note": "paired=1.368",
-    "rank": 16,
-    "share": 0.008718861528446337,
-    "cumulative_share": 0.9680672123215112
+    "rank": 15,
+    "share": 0.010535915901265546,
+    "cumulative_share": 0.9614122595735864
    },
    {
     "item": "array_read",
     "subsystem": "array/typed-array",
     "ms": 0.5629817000002619,
     "note": "paired=1.380",
-    "rank": 17,
-    "share": 0.00794666694155052,
-    "cumulative_share": 0.9760138792630617
+    "rank": 16,
+    "share": 0.009602792098300806,
+    "cumulative_share": 0.9710150516718873
    },
    {
     "item": "global_read",
     "subsystem": "property",
     "ms": 0.5235616333336415,
     "note": "paired=1.400",
-    "rank": 18,
-    "share": 0.007390240079694789,
-    "cumulative_share": 0.9834041193427565
+    "rank": 17,
+    "share": 0.008930403094003619,
+    "cumulative_share": 0.979945454765891
    },
    {
     "item": "prop_read",
     "subsystem": "property",
     "ms": 0.4099509000002799,
     "note": "paired=1.270",
-    "rank": 19,
-    "share": 0.005786588204713566,
-    "cumulative_share": 0.9891907075474701
+    "rank": 18,
+    "share": 0.006992542143398552,
+    "cumulative_share": 0.9869379969092895
    },
    {
     "item": "array_for",
     "subsystem": "array/typed-array",
     "ms": 0.3360361333334976,
     "note": "paired=1.232",
-    "rank": 20,
-    "share": 0.0047432576084205326,
-    "cumulative_share": 0.9939339651558906
+    "rank": 19,
+    "share": 0.005731776229879169,
+    "cumulative_share": 0.9926697731391688
    },
    {
     "item": "arrow_tail_recursion",
     "subsystem": "call",
     "ms": 0.2461331333330845,
     "note": "paired=1.220",
-    "rank": 21,
-    "share": 0.003474247979778666,
-    "cumulative_share": 0.9974082131356693
+    "rank": 20,
+    "share": 0.004198298644342903,
+    "cumulative_share": 0.9968680717835117
    },
    {
     "item": "int_sum",
     "subsystem": "number/dtoa",
     "ms": 0.18361516666693456,
     "note": "paired=1.196",
-    "rank": 22,
-    "share": 0.0025917868643310056,
-    "cumulative_share": 1.0000000000000004
+    "rank": 21,
+    "share": 0.0031319282164883945,
+    "cumulative_share": 1.0
    },
    {
     "item": "proto_read",
     "subsystem": "property",
     "ms": 0.0,
     "note": "paired=0.997",
-    "rank": 23,
+    "rank": 22,
     "share": 0.0,
-    "cumulative_share": 1.0000000000000004
+    "cumulative_share": 1.0
    },
    {
     "item": "regexp_test_cached",
     "subsystem": "regexp",
     "ms": 0.0,
     "note": "paired=0.832",
-    "rank": 24,
+    "rank": 23,
     "share": 0.0,
-    "cumulative_share": 1.0000000000000004
+    "cumulative_share": 1.0
    }
   ],
   "top10_cumulative_share": 0.8975728068966194
@@ -3139,8 +3139,239 @@
     "instructions": 1.121
    },
    "other_top_cases_moved_by_at_most": 0.194,
-   "verdict": "the rank-1 Pareto item and its 17.2% share are void; the rest of the Pareto broadly stands"
+   "verdict": "the rank-1 Pareto item and its 17.2% share are void; the rest of the Pareto broadly stands",
+   "causation_not_attributable": "No A/B was run against a rebuilt 0f726fc0, so the 2.618 -> 1.364 movement cannot be split between the missing 63c409c0 and the unpinned affinity. The correct statement is that 2.618 is disqualified as an arbitration figure by two confounds, and that the authoritative current-branch value pinned to CPU 19 is 1.364x cycles / 1.121x instructions. Rebuilding 0f726fc0 would only serve a historical study of 63c409c0 in isolation and would not change the current routing, so it is deliberately not done."
   },
-  "method_lesson": "this report validated the numeric structure of the input JSON but not its meta.host sampling conditions, nor the ancestry of the snapshot binary relative to the current branch. Future analyses of archived snapshots must read the affinity fields and confirm binary currency first."
+  "method_lesson": "this report validated the numeric structure of the input JSON but not its meta.host sampling conditions, nor the ancestry of the snapshot binary relative to the current branch. Future analyses of archived snapshots must read the affinity fields and confirm binary currency first.",
+  "scope_of_surviving_claims": {
+   "historical_only": [
+    "the 52/75 startup-dominated split and every per-case level or share quoted here are statistics of this archived snapshot, not authoritative counts for the current commit"
+   ],
+   "still_valid": [
+    "startupAdjustedGeometricMean is arithmetically unusable at this suite composition",
+    "short cases mix process startup heavily into the paired geomean",
+    "the ratio ordering and the absolute-time ordering disagree, so one aggregate cannot rank work",
+    "the aggregate under-reports real progress and invents regressions in startup-dominated cases"
+   ],
+   "routing_rule": "current-branch routing must use pinned measurements on the current binary, not this snapshot",
+   "repair": "a full 75-case re-collection on the current binary belongs to the measurement-contract repair, not here"
+  }
+ },
+ "pareto_excluding_voided_rank1": {
+  "basis": "same construction as `pareto`, with array_map_callback removed because P7-40 voided it",
+  "removed": "array_map_callback (was rank 2 of 24 including the startup item, 17.2% share)",
+  "item_count": 23,
+  "total_ms": 58.62687583331939,
+  "items": [
+   {
+    "item": "startup/bootstrap (75 x 208us)",
+    "subsystem": "startup/bootstrap",
+    "ms": 15.586307499979736,
+    "note": "suite-wide constant, not a case",
+    "rank": 1,
+    "share": 0.2658560136189549,
+    "cumulative_share": 0.2658560136189549
+   },
+   {
+    "item": "arrow_call_loop",
+    "subsystem": "call",
+    "ms": 5.744664633333617,
+    "note": "paired=1.313",
+    "rank": 2,
+    "share": 0.09798687976596485,
+    "cumulative_share": 0.3638428933849197
+   },
+   {
+    "item": "call2_loop",
+    "subsystem": "call",
+    "ms": 4.992149600000385,
+    "note": "paired=1.296",
+    "rank": 3,
+    "share": 0.08515121314315709,
+    "cumulative_share": 0.4489941065280768
+   },
+   {
+    "item": "closure_call_loop",
+    "subsystem": "call",
+    "ms": 4.882403500001114,
+    "note": "paired=1.309",
+    "rank": 4,
+    "share": 0.08327927133422824,
+    "cumulative_share": 0.5322733778623051
+   },
+   {
+    "item": "uri_decode_4byte",
+    "subsystem": "string",
+    "ms": 4.741287966666928,
+    "note": "paired=1.290",
+    "rank": 5,
+    "share": 0.08087226036309295,
+    "cumulative_share": 0.6131456382253979
+   },
+   {
+    "item": "prop_read_mono",
+    "subsystem": "property",
+    "ms": 4.642772799999872,
+    "note": "paired=1.234",
+    "rank": 6,
+    "share": 0.07919188484816457,
+    "cumulative_share": 0.6923375230735626
+   },
+   {
+    "item": "vm_int_sum_large",
+    "subsystem": "call",
+    "ms": 4.282531300000542,
+    "note": "paired=1.248",
+    "rank": 7,
+    "share": 0.07304723710975322,
+    "cumulative_share": 0.7653847601833158
+   },
+   {
+    "item": "uri_component_decode_4byte",
+    "subsystem": "string",
+    "ms": 3.249328100000259,
+    "note": "paired=1.205",
+    "rank": 8,
+    "share": 0.05542386582628661,
+    "cumulative_share": 0.8208086260096024
+   },
+   {
+    "item": "global_read_loop",
+    "subsystem": "property",
+    "ms": 3.248974900000455,
+    "note": "paired=1.200",
+    "rank": 9,
+    "share": 0.05541784128558265,
+    "cumulative_share": 0.876226467295185
+   },
+   {
+    "item": "dense_array_write_read",
+    "subsystem": "array/typed-array",
+    "ms": 1.0719881333341625,
+    "note": "paired=1.175",
+    "rank": 10,
+    "share": 0.018284926803568816,
+    "cumulative_share": 0.8945113940987539
+   },
+   {
+    "item": "func_call",
+    "subsystem": "call",
+    "ms": 0.9932093000002622,
+    "note": "paired=1.361",
+    "rank": 11,
+    "share": 0.016941194390504975,
+    "cumulative_share": 0.9114525884892588
+   },
+   {
+    "item": "math_min",
+    "subsystem": "number/dtoa",
+    "ms": 0.8006267666669604,
+    "note": "paired=1.268",
+    "rank": 12,
+    "share": 0.01365630958987483,
+    "cumulative_share": 0.9251088980791337
+   },
+   {
+    "item": "map_string_keys",
+    "subsystem": "property",
+    "ms": 0.780958633333527,
+    "note": "paired=1.255",
+    "rank": 13,
+    "share": 0.013320829777009626,
+    "cumulative_share": 0.9384297278561432
+   },
+   {
+    "item": "prop_read_poly3",
+    "subsystem": "property",
+    "ms": 0.7297062000000807,
+    "note": "paired=1.024",
+    "rank": 14,
+    "share": 0.012446615816177724,
+    "cumulative_share": 0.950876343672321
+   },
+   {
+    "item": "string_concat_loop",
+    "subsystem": "string",
+    "ms": 0.6176878333337905,
+    "note": "paired=1.368",
+    "rank": 15,
+    "share": 0.010535915901265546,
+    "cumulative_share": 0.9614122595735864
+   },
+   {
+    "item": "array_read",
+    "subsystem": "array/typed-array",
+    "ms": 0.5629817000002619,
+    "note": "paired=1.380",
+    "rank": 16,
+    "share": 0.009602792098300806,
+    "cumulative_share": 0.9710150516718873
+   },
+   {
+    "item": "global_read",
+    "subsystem": "property",
+    "ms": 0.5235616333336415,
+    "note": "paired=1.400",
+    "rank": 17,
+    "share": 0.008930403094003619,
+    "cumulative_share": 0.979945454765891
+   },
+   {
+    "item": "prop_read",
+    "subsystem": "property",
+    "ms": 0.4099509000002799,
+    "note": "paired=1.270",
+    "rank": 18,
+    "share": 0.006992542143398552,
+    "cumulative_share": 0.9869379969092895
+   },
+   {
+    "item": "array_for",
+    "subsystem": "array/typed-array",
+    "ms": 0.3360361333334976,
+    "note": "paired=1.232",
+    "rank": 19,
+    "share": 0.005731776229879169,
+    "cumulative_share": 0.9926697731391688
+   },
+   {
+    "item": "arrow_tail_recursion",
+    "subsystem": "call",
+    "ms": 0.2461331333330845,
+    "note": "paired=1.220",
+    "rank": 20,
+    "share": 0.004198298644342903,
+    "cumulative_share": 0.9968680717835117
+   },
+   {
+    "item": "int_sum",
+    "subsystem": "number/dtoa",
+    "ms": 0.18361516666693456,
+    "note": "paired=1.196",
+    "rank": 21,
+    "share": 0.0031319282164883945,
+    "cumulative_share": 1.0
+   },
+   {
+    "item": "proto_read",
+    "subsystem": "property",
+    "ms": 0.0,
+    "note": "paired=0.997",
+    "rank": 22,
+    "share": 0.0,
+    "cumulative_share": 1.0
+   },
+   {
+    "item": "regexp_test_cached",
+    "subsystem": "regexp",
+    "ms": 0.0,
+    "note": "paired=0.832",
+    "rank": 23,
+    "share": 0.0,
+    "cumulative_share": 1.0
+   }
+  ],
+  "top10_cumulative_share": 0.8945113940987539,
+  "caveat": "still computed from the unpinned snapshot; levels are historical, not authoritative for the current commit"
  }
 }
