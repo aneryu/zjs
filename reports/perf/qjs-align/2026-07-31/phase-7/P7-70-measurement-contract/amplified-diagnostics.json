@@ -1,0 +1,458 @@
+{
+  "tool": "P7-70-amplified-diagnostics",
+  "diagnosticOnly": true,
+  "partOfCompatibilityGeomean": false,
+  "replacesHistoricalCases": false,
+  "generation": "2026-07-30T18:06:00.360Z#2061644",
+  "engineCommit": "1fb79bc39b3b4277a382d96283f18a41d53894cb",
+  "zjsSha256": "c5625b9977ebd1c2de212e973c03e6724ececb537c33d454d29cf8bc4c0dbd5b",
+  "qjsCommit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+  "qjsSha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+  "startupBaseline": {
+    "qjsMedianMs": 0.43356949999997596,
+    "zjsMedianMs": 0.5747235000003457
+  },
+  "amplificationTarget": "qjs workload execution time >= 5x the qjs startup baseline",
+  "cases": [
+    {
+      "name": "amp_date_now",
+      "derivedFrom": "date_now",
+      "category": "date",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-MERaJg/amp_date_now.js",
+      "sourceSha256": "81ab1c891c0c08b10bf90ec85d8a7afd59e6b945a914249ea328c072184fff25",
+      "qjsMedianMs": 28.192582499999958,
+      "zjsMedianMs": 39.532141499999966,
+      "qjsIqrMs": 0.488505250000145,
+      "zjsIqrMs": 0.3713369999999543,
+      "qjsExecutionMs": 27.75901299999998,
+      "amplificationFactorVsStartup": 64.0243674889528,
+      "targetMet": true,
+      "pairedRatio": 1.4109583290238839,
+      "pairedP25": 1.406318138629571,
+      "pairedP75": 1.4208774450764177,
+      "absoluteDeltaMs": 11.339559000000008,
+      "startupShareQjs": 0.015378850092926982,
+      "resolvabilityClass": "execution-dominant",
+      "qjsSamplesMs": [
+        28.449506999999926,
+        28.559984999999983,
+        28.091300000000047,
+        27.808802000000014,
+        27.80707499999994,
+        28.308946000000105,
+        28.29386499999987,
+        27.871173999999883
+      ],
+      "zjsSamplesMs": [
+        39.998580999999945,
+        39.43542600000001,
+        39.50875300000007,
+        39.5552909999999,
+        39.508992000000035,
+        39.81973300000004,
+        40.2065520000001,
+        39.446173000000044
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "sourceCaseInSuite": {
+        "pairedRatio": 1.4527798754836372,
+        "absoluteDeltaMs": 0.1960305000000062,
+        "resolvabilityClass": "startup-dominated",
+        "startupShareQjs": 0.8901127918432985
+      }
+    },
+    {
+      "name": "amp_json_roundtrip",
+      "derivedFrom": "json_roundtrip",
+      "category": "json",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-MERaJg/amp_json_roundtrip.js",
+      "sourceSha256": "fafd1e1082f189337edd78e3e94649ee2a4ff16eb9af228217e8a128e66d9248",
+      "qjsMedianMs": 41.078242000000046,
+      "zjsMedianMs": 21.18967150000003,
+      "qjsIqrMs": 0.25056975000029524,
+      "zjsIqrMs": 0.13776300000006358,
+      "qjsExecutionMs": 40.64467250000007,
+      "amplificationFactorVsStartup": 93.74430742937943,
+      "targetMet": true,
+      "pairedRatio": 0.5154989138593971,
+      "pairedP25": 0.5141685776579916,
+      "pairedP75": 0.5168258995418105,
+      "absoluteDeltaMs": -19.888570500000014,
+      "startupShareQjs": 0.010554723836525805,
+      "resolvabilityClass": "execution-dominant",
+      "qjsSamplesMs": [
+        41.300463000000036,
+        41.047182999999904,
+        41.04377700000009,
+        41.03480500000023,
+        41.302318000000014,
+        41.295714000000316,
+        41.05161399999997,
+        41.10487000000012
+      ],
+      "zjsSamplesMs": [
+        21.31343199999992,
+        21.183473999999933,
+        21.116831000000047,
+        21.30014200000005,
+        21.19586900000013,
+        21.160363999999845,
+        21.310601000000133,
+        21.166537000000062
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "sourceCaseInSuite": {
+        "pairedRatio": 1.3706077774654462,
+        "absoluteDeltaMs": 0.18233100000003333,
+        "resolvabilityClass": "startup-dominated",
+        "startupShareQjs": 0.8869920320363882
+      }
+    },
+    {
+      "name": "amp_sort_bench",
+      "derivedFrom": "sort_bench",
+      "category": "sort",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-MERaJg/amp_sort_bench.js",
+      "sourceSha256": "8a5b4b3085e9d2e3a4ab4a9eba9b9e03e5634131b1904591feefcf5d9b3d16fa",
+      "qjsMedianMs": 16.74112150000019,
+      "zjsMedianMs": 48.729057999999895,
+      "qjsIqrMs": 0.047922749999656844,
+      "zjsIqrMs": 0.07258000000012998,
+      "qjsExecutionMs": 16.307552000000214,
+      "amplificationFactorVsStartup": 37.61231359678464,
+      "targetMet": true,
+      "pairedRatio": 2.9085802801421545,
+      "pairedP25": 2.9041828399021594,
+      "pairedP75": 2.914853114002473,
+      "absoluteDeltaMs": 31.987936499999705,
+      "startupShareQjs": 0.02589847400605575,
+      "resolvabilityClass": "execution-dominant",
+      "qjsSamplesMs": [
+        16.726104000000305,
+        16.809091999999964,
+        16.72028300000011,
+        16.75129300000026,
+        16.697621000000254,
+        16.73095000000012,
+        16.777442000000065,
+        16.770947999999862
+      ],
+      "zjsSamplesMs": [
+        48.746513999999934,
+        48.52558700000009,
+        48.76002799999969,
+        48.65461899999991,
+        48.78256099999999,
+        48.71160199999986,
+        48.75011200000017,
+        48.688474999999926
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "sourceCaseInSuite": {
+        "pairedRatio": 1.37602135244251,
+        "absoluteDeltaMs": 0.18425050000018928,
+        "resolvabilityClass": "startup-dominated",
+        "startupShareQjs": 0.8908193939195724
+      }
+    },
+    {
+      "name": "amp_string_slice3",
+      "derivedFrom": "string_slice3",
+      "category": "string",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-MERaJg/amp_string_slice3.js",
+      "sourceSha256": "0bf660e4370bbe8d51881dea368ac46e3089222b8fa1ac8f071faded0332c546",
+      "qjsMedianMs": 14.909465999999838,
+      "zjsMedianMs": 18.951438499999767,
+      "qjsIqrMs": 0.009258000000158972,
+      "zjsIqrMs": 0.12006675000009182,
+      "qjsExecutionMs": 14.475896499999862,
+      "amplificationFactorVsStartup": 33.38771869331368,
+      "targetMet": true,
+      "pairedRatio": 1.2719863626067216,
+      "pairedP25": 1.269696443987403,
+      "pairedP75": 1.2783827925569313,
+      "absoluteDeltaMs": 4.041972499999929,
+      "startupShareQjs": 0.029080149483554987,
+      "resolvabilityClass": "execution-dominant",
+      "qjsSamplesMs": [
+        14.912570999999843,
+        14.885635999999977,
+        14.909433999999692,
+        15.011196999999811,
+        14.908889999999701,
+        14.909497999999985,
+        14.89817499999981,
+        14.924164000000019
+      ],
+      "zjsSamplesMs": [
+        18.948691999999937,
+        18.954184999999597,
+        18.93280199999981,
+        20.045640999999705,
+        19.14506100000017,
+        19.031446999999844,
+        18.898289000000204,
+        18.94211099999984
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "sourceCaseInSuite": {
+        "pairedRatio": 1.391205481742936,
+        "absoluteDeltaMs": 0.18979650000005677,
+        "resolvabilityClass": "startup-dominated",
+        "startupShareQjs": 0.9199246962104239
+      }
+    },
+    {
+      "name": "amp_map_set",
+      "derivedFrom": "map_set",
+      "category": "collection",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-MERaJg/amp_map_set.js",
+      "sourceSha256": "5e8b797dfba3b120dde5c014403dfaa409298592959b747ce9fcde3abcb3dc64",
+      "qjsMedianMs": 16.275778499999888,
+      "zjsMedianMs": 24.079653500000404,
+      "qjsIqrMs": 0.07320725000045059,
+      "zjsIqrMs": 0.03638749999981883,
+      "qjsExecutionMs": 15.842208999999912,
+      "amplificationFactorVsStartup": 36.53903007476492,
+      "targetMet": true,
+      "pairedRatio": 1.478514945033262,
+      "pairedP25": 1.4725450949879906,
+      "pairedP75": 1.4811716231036445,
+      "absoluteDeltaMs": 7.803875000000517,
+      "startupShareQjs": 0.026638940803967007,
+      "resolvabilityClass": "execution-dominant",
+      "qjsSamplesMs": [
+        16.279521000000386,
+        16.322957000000315,
+        16.27203599999939,
+        16.369736999999986,
+        16.23952199999985,
+        16.267845999999736,
+        16.24224099999992,
+        16.450548999999228
+      ],
+      "zjsSamplesMs": [
+        24.052041999999346,
+        23.992339999999786,
+        24.089593000000605,
+        24.11986799999977,
+        24.312982000000375,
+        24.069714000000204,
+        24.09373500000038,
+        24.06782700000076
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "sourceCaseInSuite": {
+        "pairedRatio": 1.3878674733120666,
+        "absoluteDeltaMs": 0.17991349999988415,
+        "resolvabilityClass": "startup-dominated",
+        "startupShareQjs": 0.9403810339549254
+      }
+    }
+  ],
+  "contract": {
+    "complete": true,
+    "headline": 1.3196431472702992,
+    "policyRef": {
+      "policy_id": "qjs-align-p7-70-whole-process-measurement",
+      "policy_version": 1,
+      "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+      "path": "/home/aneryu/worktrees/zjs-p7-measurement-contract/tools/compare/measurement_policy.json"
+    }
+  }
+}
