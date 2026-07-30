@@ -27,6 +27,39 @@
 
 **当前状态**：不抢占 P7-50 / P7-41 的顺序，也不在两条画像完成前启动。
 
+## same-flags property replacement should gate shape COW（deferred alignment fix）
+
+**登记日期**：2026-07-30
+**来源**：P7-50 归因 + P7-51A 事件普查（`P7-51A-redefine-census.md`）
+
+状态：
+
+```text
+correct alignment opportunity
+but dynamically cold in current representative corpus
+→ deferred
+```
+
+`Object.replaceProperty` 在 `next_flags == old_flags` 时仍无条件调用
+`ensureUniqueShapeForMutation`，函数对象 shape 被 hash-cons 共享，于是白克隆并销毁一整个
+Shape。qjs 的 `js_update_property_flags`（`quickjs.c:10332`）把 shape prepare 与 flags 写入
+**都**放在 `flags != (*pprs)->flags` 之内。**机制方向已核验为不忠实偏差，单事件成本 423.6 cycles，
+一刀形状也已预批准** —— 唯一缺的是动态频次。
+
+普查结果：除三个合成 NamedEvaluation case 外，170 个语料条目合计仅 **6 次**事件，
+单条最大 1 次；`gbemu` 整轮 **21 次 ≈ 8.9k cycles**，而 builtin bridge 在 10 万次 callback 下
+是 **2.74M cycles**。因此**不得**因为机制方向正确就抢在 P7-42 之前。
+
+**重启条件（任一成立）**：
+
+- 真实产品 workload 中出现高频 same-flags + shared-shape replacement；
+- 在某个 Pareto case 中贡献超过约 10%；
+- NamedEvaluation 赋值成为实际热点；
+- 对其余 14 个 `ensureUniqueShapeForMutation` 调用点的**独立**普查发现高频同类路径
+  （P7-51A 只统计了 `replaceProperty`，其结论不可外推到那些调用点）。
+
+现在**不实现**，也**不继续扩大普查范围**。
+
 ## 已从候选转为结论或关闭的条目
 
 - **SmallObjectSlab empty-arena retention** → P7-00 裁决 `does not generalise → permanently close`，
