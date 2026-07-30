@@ -1,0 +1,2115 @@
+{
+ "line": "P7-40",
+ "question": "is the 2.618x mainly callback invocation, result-array construction, or per-element property machinery?",
+ "answer": {
+  "headline": "the 2.618 does not reproduce on the current tree; pinned it is 1.364x cycles / 1.121x instructions. Of what remains, callback invocation is the single largest term (70.9% of the cycle delta), the inline arrow's per-iteration closure allocation is a second, nearly equal term (48.1%) that is not part of map, result-array construction is small (+9.0%) and the per-element result define is negative (-38.5%, zjs faster). Source-element property machinery is near parity and zjs does strictly less of it.",
+  "primary_metric": "cycles, process payload net of an empty-script baseline, median of 6 ABBA samples on CPU 19"
+ },
+ "stale_binary_evidence": {
+  "claim": "the P7-20 snapshot measured a zjs binary that predates 63c409c0 'perf: reuse active Machine for array callbacks'",
+  "snapshot_zjs_commit": "0f726fc0",
+  "snapshot_zjs_sha256": "df03ae4919b571f227af2da3af490680b28a7daad67e340856e0c3360eb3d14c",
+  "snapshot_zjs_path_sha256_now": "d0eef3c1fc55e2bb95673eef2b80043fab873eba5430b9e1b401bbf6f6002e0d",
+  "snapshot_zjs_binary_still_available": false,
+  "63c409c0_is_ancestor_of_0f726fc0": false,
+  "245ccaea_is_ancestor_of_0f726fc0": false,
+  "96a3f8ff_is_ancestor_of_0f726fc0": false,
+  "entered_through_merge": "222df098",
+  "SyncInternalCallSite_occurrences_at_0f726fc0": {
+   "src/exec/array_ops.zig": 0,
+   "src/exec/call_runtime.zig": 0
+  },
+  "map_element_loop_call_at_0f726fc0": "callValueOrBytecode(ctx, output, global, callback_this, args[0], ...)",
+  "map_element_loop_call_at_a5bbbe52": "callback_call.call(&.{ item, index_value, receiver_object_value })",
+  "verified_by_rebuild": false,
+  "not_established": "0f726fc0 was not rebuilt and re-measured; this line may not create worktrees or touch src/"
+ },
+ "extra_counts": {
+  "zjs_ensureArrayBufferCapacity_hits_count_map": 1001,
+  "zjs_ensureArrayBufferCapacity_per_map_call": 10.0,
+  "note": "separate single-symbol gdb run; the function returns early when capacity suffices, and its growth policy mirrors qjs expand_fast_array, so the real reallocation count is 7 per call on both engines (0->1->2->3->4->6->9->10)"
+ },
+ "cleanliness": {
+  "git_diff_a5bbbe52_src": "empty",
+  "temporary_instrumentation_in_src": false,
+  "instruments": [
+   "gdb breakpoint hit counts",
+   "perf stat",
+   "perf record"
+  ],
+  "git_stash_used": false
+ },
+ "collectors": {
+  "ladder": "ladder.json",
+  "counts": "counts.json"
+ },
+ "provenance": {
+  "cpu": 19,
+  "pmu": "armv8_pmuv3_1",
+  "samples_per_case_per_engine": 6,
+  "sampling_order": "ABBA, per case, exclusive host lock held per case",
+  "first_position_counts": {
+   "qjs": 84,
+   "zjs": 84
+  },
+  "first_position_balanced": true,
+  "zjs_binary": "/home/aneryu/worktrees/zjs-p7-pareto/zig-out/bin/zjs",
+  "qjs_binary": "/home/aneryu/quickjs/qjs",
+  "events": [
+   "armv8_pmuv3_1/instructions/",
+   "armv8_pmuv3_1/cycles/",
+   "task-clock"
+  ]
+ },
+ "ladder": {
+  "loop_outer": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 197.78849,
+    "zjs_per_iteration": 180.251265,
+    "ratio": 0.9113334400803605
+   },
+   "cycles": {
+    "qjs_per_iteration": 29.90225,
+    "zjs_per_iteration": 29.30528,
+    "ratio": 0.9800359504719545
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 7.66032e-06,
+    "zjs_per_iteration": 7.502000000000001e-06,
+    "ratio": 0.9793324560853857
+   },
+   "ipc": {
+    "qjs": 6.614501918751934,
+    "zjs": 6.150811901473045
+   },
+   "paired_instruction_ratios": [
+    0.9896257151266538,
+    0.9891318271490704,
+    0.9902044621857189,
+    0.9893730495627896,
+    0.9900160287644181,
+    0.9896979557904398
+   ],
+   "paired_cycle_ratios": [
+    1.184910399673567,
+    1.1739982966890634,
+    1.204589474198647,
+    1.1228118523262234,
+    1.1529051461193445,
+    1.1453897776412487
+   ]
+  },
+  "loop_nested": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 2256.44405,
+    "zjs_per_iteration": 2018.55257,
+    "ratio": 0.8945724003216476
+   },
+   "cycles": {
+    "qjs_per_iteration": 346.111415,
+    "zjs_per_iteration": 343.14668,
+    "ratio": 0.9914341600088514
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 8.874928e-05,
+    "zjs_per_iteration": 8.798528e-05,
+    "ratio": 0.9913914794576361
+   },
+   "ipc": {
+    "qjs": 6.519415287126545,
+    "zjs": 5.882477341759507
+   },
+   "paired_instruction_ratios": [
+    0.9022504602762854,
+    0.9019936187374032,
+    0.9025285311431152,
+    0.9020765631070541,
+    0.9025770808931003,
+    0.9020434478303784
+   ],
+   "paired_cycle_ratios": [
+    1.0147651440332761,
+    1.0157379130173483,
+    1.0247448550872802,
+    1.0092173294746962,
+    1.0111127293976407,
+    1.002391363809582
+   ]
+  },
+  "elem_get": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 2867.219765,
+    "zjs_per_iteration": 2670.20048,
+    "ratio": 0.9312856002860318
+   },
+   "cycles": {
+    "qjs_per_iteration": 445.592635,
+    "zjs_per_iteration": 454.24179,
+    "ratio": 1.0194104532270827
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00011425839999999999,
+    "zjs_per_iteration": 0.00011646608000000001,
+    "ratio": 1.0193218179144818
+   },
+   "ipc": {
+    "qjs": 6.434621086140708,
+    "zjs": 5.8783681703966515
+   },
+   "paired_instruction_ratios": [
+    0.9373686993541057,
+    0.9371439755161755,
+    0.9364172293738923,
+    0.9373779135897884,
+    0.9371378109617847,
+    0.9369993216959773
+   ],
+   "paired_cycle_ratios": [
+    1.0518381875414307,
+    1.0183533366260387,
+    1.0264600401227124,
+    1.0499023092127793,
+    1.0259177355497726,
+    1.04951658608505
+   ]
+  },
+  "elem_getset": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 3487.84334,
+    "zjs_per_iteration": 3670.96688,
+    "ratio": 1.052503373044272
+   },
+   "cycles": {
+    "qjs_per_iteration": 516.03261,
+    "zjs_per_iteration": 623.233625,
+    "ratio": 1.2077407763048154
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00013232088,
+    "zjs_per_iteration": 0.00015981608,
+    "ratio": 1.2077918466080335
+   },
+   "ipc": {
+    "qjs": 6.758959167328592,
+    "zjs": 5.890193873926491
+   },
+   "paired_instruction_ratios": [
+    1.0565524266533044,
+    1.05671110340647,
+    1.0567360370255092,
+    1.0563143426350161,
+    1.0563389413006947,
+    1.0563607845925214
+   ],
+   "paired_cycle_ratios": [
+    1.2262633014688575,
+    1.2098019257991999,
+    1.2257857641977992,
+    1.1950888174729974,
+    1.2158462473081848,
+    1.2169270953139422
+   ]
+  },
+  "elem_getset_add": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 3858.515825,
+    "zjs_per_iteration": 4091.286735,
+    "ratio": 1.0603265401924327
+   },
+   "cycles": {
+    "qjs_per_iteration": 579.17476,
+    "zjs_per_iteration": 694.22976,
+    "ratio": 1.198653339106145
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00014851912000000001,
+    "zjs_per_iteration": 0.00017801496,
+    "ratio": 1.1985996146489422
+   },
+   "ipc": {
+    "qjs": 6.6620925003707,
+    "zjs": 5.893274778367323
+   },
+   "paired_instruction_ratios": [
+    1.0639690338150916,
+    1.0639912501340107,
+    1.063786593648987,
+    1.064102140434139,
+    1.0639986730515967,
+    1.0639477157181287
+   ],
+   "paired_cycle_ratios": [
+    1.186515581310273,
+    1.2073708635208624,
+    1.1966582415388498,
+    1.205247531712617,
+    1.2087930279890646,
+    1.2052346499660103
+   ]
+  },
+  "elem_getcall": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 5902.522105,
+    "zjs_per_iteration": 6285.570465,
+    "ratio": 1.0648957095265295
+   },
+   "cycles": {
+    "qjs_per_iteration": 970.233305,
+    "zjs_per_iteration": 1096.049655,
+    "ratio": 1.12967638747466
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00024880103999999994,
+    "zjs_per_iteration": 0.00028106008,
+    "ratio": 1.1296579789216317
+   },
+   "ipc": {
+    "qjs": 6.08361110114644,
+    "zjs": 5.734749731753713
+   },
+   "paired_instruction_ratios": [
+    1.0669372571811282,
+    1.0672672768498022,
+    1.0672708712197962,
+    1.0672773116471064,
+    1.0670891920040888,
+    1.067321478061695
+   ],
+   "paired_cycle_ratios": [
+    1.1257003723372425,
+    1.1332610012376256,
+    1.1366873424798967,
+    1.1352510576359733,
+    1.1383724142717995,
+    1.1314473561863934
+   ]
+  },
+  "elem_getcallset": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 6522.88771,
+    "zjs_per_iteration": 7286.606255,
+    "ratio": 1.117082890117696
+   },
+   "cycles": {
+    "qjs_per_iteration": 1056.280805,
+    "zjs_per_iteration": 1254.341525,
+    "ratio": 1.187507639126321
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00027086264,
+    "zjs_per_iteration": 0.00032165336000000006,
+    "ratio": 1.1875146753350703
+   },
+   "ipc": {
+    "qjs": 6.175334891179812,
+    "zjs": 5.809108691510471
+   },
+   "paired_instruction_ratios": [
+    1.1187113704830307,
+    1.1191507110204055,
+    1.1189421658711507,
+    1.119055120454667,
+    1.1189657249268754,
+    1.119072379120968
+   ],
+   "paired_cycle_ratios": [
+    1.186677431824457,
+    1.1924081716500132,
+    1.191603555914691,
+    1.1854215835063917,
+    1.2258891939229113,
+    1.2059722973504474
+   ]
+  },
+  "alloc_only": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 1505.78641,
+    "zjs_per_iteration": 2134.429105,
+    "ratio": 1.4174846384753865
+   },
+   "cycles": {
+    "qjs_per_iteration": 237.008485,
+    "zjs_per_iteration": 394.358815,
+    "ratio": 1.6639016742375277
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 6.0800160000000005e-05,
+    "zjs_per_iteration": 0.00010112536,
+    "ratio": 1.6632416756798007
+   },
+   "ipc": {
+    "qjs": 6.353301697194511,
+    "zjs": 5.412403688757408
+   },
+   "paired_instruction_ratios": [
+    1.4210625657257845,
+    1.422042672319149,
+    1.4200640396138406,
+    1.4208730501267177,
+    1.417072877799597,
+    1.4214795459060472
+   ],
+   "paired_cycle_ratios": [
+    1.6809181508090827,
+    1.6304517593006453,
+    1.6525907794915682,
+    1.6478254575403328,
+    1.6563764141810668,
+    1.672895348087202
+   ]
+  },
+  "alloc_fill": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 7457.689355,
+    "zjs_per_iteration": 10176.09683,
+    "ratio": 1.3645106876404616
+   },
+   "cycles": {
+    "qjs_per_iteration": 1110.41938,
+    "zjs_per_iteration": 1743.616825,
+    "ratio": 1.5702327034313828
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00028475327999999997,
+    "zjs_per_iteration": 0.00044711368,
+    "ratio": 1.57017920917364
+   },
+   "ipc": {
+    "qjs": 6.716101582268855,
+    "zjs": 5.8362001811952
+   },
+   "paired_instruction_ratios": [
+    1.3650085953215267,
+    1.365078054799058,
+    1.365995387852838,
+    1.3651984446043162,
+    1.365977310330503,
+    1.365800648021567
+   ],
+   "paired_cycle_ratios": [
+    1.569049011189996,
+    1.5636831761022685,
+    1.5845642586242463,
+    1.5721200286139319,
+    1.566592067531274,
+    1.566625892882185
+   ]
+  },
+  "alloc_getcallset": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 10122.15474,
+    "zjs_per_iteration": 11751.706195,
+    "ratio": 1.1609885935215412
+   },
+   "cycles": {
+    "qjs_per_iteration": 1581.37655,
+    "zjs_per_iteration": 1943.629155,
+    "ratio": 1.2290742233404184
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00040551656,
+    "zjs_per_iteration": 0.0004984061600000001,
+    "ratio": 1.2290648746872386
+   },
+   "ipc": {
+    "qjs": 6.400850410991613,
+    "zjs": 6.046269765386391
+   },
+   "paired_instruction_ratios": [
+    1.162427084934781,
+    1.1623070817476064,
+    1.161893824452798,
+    1.1619697312409332,
+    1.161889652979981,
+    1.16236960143309
+   ],
+   "paired_cycle_ratios": [
+    1.2281673831384392,
+    1.2321772592082936,
+    1.2321701706285866,
+    1.2319324627493684,
+    1.2328479642050547,
+    1.23017435617269
+   ]
+  },
+  "closure_only": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 1820.094915,
+    "zjs_per_iteration": 4725.70523,
+    "ratio": 2.5964059297424056
+   },
+   "cycles": {
+    "qjs_per_iteration": 285.62306,
+    "zjs_per_iteration": 927.67775,
+    "ratio": 3.2479091499124753
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 7.323864000000001e-05,
+    "zjs_per_iteration": 0.00023790039999999998,
+    "ratio": 3.248290792947547
+   },
+   "ipc": {
+    "qjs": 6.3723668355069085,
+    "zjs": 5.094123719147085
+   },
+   "paired_instruction_ratios": [
+    2.590117234787093,
+    2.580916460224015,
+    2.580873900789473,
+    2.5921614185300994,
+    2.57334952765646,
+    2.5827586982758426
+   ],
+   "paired_cycle_ratios": [
+    3.2132447526219923,
+    3.1827383184945504,
+    3.150734508438944,
+    3.221280898491664,
+    3.0912694007622155,
+    3.1464761720997974
+   ]
+  },
+  "map_inline_arrow": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 12096.350335,
+    "zjs_per_iteration": 13499.541975,
+    "ratio": 1.1160012401376933
+   },
+   "cycles": {
+    "qjs_per_iteration": 1937.740705,
+    "zjs_per_iteration": 2612.580515,
+    "ratio": 1.3482611518964815
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.0004968964000000001,
+    "zjs_per_iteration": 0.0006699403199999999,
+    "ratio": 1.348249494260775
+   },
+   "ipc": {
+    "qjs": 6.24250205602199,
+    "zjs": 5.16712954777587
+   },
+   "paired_instruction_ratios": [
+    1.1174638941288917,
+    1.1179242537754066,
+    1.1173799618670117,
+    1.1162509692773974,
+    1.1166257813618403,
+    1.117047144306047
+   ],
+   "paired_cycle_ratios": [
+    1.3595111389494734,
+    1.3466828374228952,
+    1.3545867449265407,
+    1.348305702483513,
+    1.343059839972127,
+    1.3719883501135046
+   ]
+  },
+  "map_pre_arrow": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 10771.73771,
+    "zjs_per_iteration": 10990.158625,
+    "ratio": 1.0202772218262637
+   },
+   "cycles": {
+    "qjs_per_iteration": 1683.90443,
+    "zjs_per_iteration": 2034.24798,
+    "ratio": 1.2080542955754323
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00043180384,
+    "zjs_per_iteration": 0.0005216396800000001,
+    "ratio": 1.2080478024465926
+   },
+   "ipc": {
+    "qjs": 6.396881864607957,
+    "zjs": 5.402565829265319
+   },
+   "paired_instruction_ratios": [
+    1.0217626631830639,
+    1.0215542013743093,
+    1.0209446919258738,
+    1.0217455002274045,
+    1.0215040953273558,
+    1.0218196000999886
+   ],
+   "paired_cycle_ratios": [
+    1.2107776518215345,
+    1.2090592586850033,
+    1.1972035304294717,
+    1.2110296809521917,
+    1.219651961624373,
+    1.21303244113585
+   ]
+  },
+  "map_decl_fn": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 10764.44021,
+    "zjs_per_iteration": 10984.44002,
+    "ratio": 1.0204376452196393
+   },
+   "cycles": {
+    "qjs_per_iteration": 1685.664765,
+    "zjs_per_iteration": 2051.696735,
+    "ratio": 1.2171439882947308
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00043225432,
+    "zjs_per_iteration": 0.0005261145600000001,
+    "ratio": 1.2171412422205523
+   },
+   "ipc": {
+    "qjs": 6.38587246616619,
+    "zjs": 5.353832188069452
+   },
+   "paired_instruction_ratios": [
+    1.0214958626655322,
+    1.0219298132816712,
+    1.0217494416205979,
+    1.0218003196832066,
+    1.0220025247886497,
+    1.0218058217425452
+   ],
+   "paired_cycle_ratios": [
+    1.2128183076471735,
+    1.2098690369452934,
+    1.2223956615554226,
+    1.2246048334624398,
+    1.4110055357256372,
+    1.1494329734803959
+   ]
+  },
+  "map_identity": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 10399.988905,
+    "zjs_per_iteration": 10570.104875,
+    "ratio": 1.0163573222581241
+   },
+   "cycles": {
+    "qjs_per_iteration": 1608.122785,
+    "zjs_per_iteration": 1951.763845,
+    "ratio": 1.2136908096852816
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00041237159999999996,
+    "zjs_per_iteration": 0.0005004872,
+    "ratio": 1.2136800885415002
+   },
+   "ipc": {
+    "qjs": 6.467160966816349,
+    "zjs": 5.4156679365069404
+   },
+   "paired_instruction_ratios": [
+    1.0178173583233554,
+    1.0176920930171511,
+    1.017840046866126,
+    1.01737749259983,
+    1.017309447874353,
+    1.017923983765811
+   ],
+   "paired_cycle_ratios": [
+    1.2243906589564142,
+    1.2125581055947428,
+    1.2252343440312707,
+    1.20891744765816,
+    1.2290029520987933,
+    1.2401004634875794
+   ]
+  },
+  "foreach_pre_arrow": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 5353.513995,
+    "zjs_per_iteration": 6581.185805,
+    "ratio": 1.2293207435614446
+   },
+   "cycles": {
+    "qjs_per_iteration": 781.33039,
+    "zjs_per_iteration": 1347.53234,
+    "ratio": 1.724663928661472
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00020035624,
+    "zjs_per_iteration": 0.00034554664,
+    "ratio": 1.7246612334110483
+   },
+   "ipc": {
+    "qjs": 6.851792869595154,
+    "zjs": 4.883879673715289
+   },
+   "paired_instruction_ratios": [
+    1.2307404112103495,
+    1.2313749303109176,
+    1.2312699252317638,
+    1.2311664397949869,
+    1.231019783981835,
+    1.231172310473249
+   ],
+   "paired_cycle_ratios": [
+    1.7222888183245437,
+    1.7223788475360111,
+    1.7168289240434003,
+    1.7157358623186818,
+    1.7287460819119098,
+    1.7179055562139744
+   ]
+  },
+  "map_len0": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 2378.36452,
+    "zjs_per_iteration": 2979.01122,
+    "ratio": 1.2525461067675192
+   },
+   "cycles": {
+    "qjs_per_iteration": 394.43864,
+    "zjs_per_iteration": 540.532895,
+    "ratio": 1.3703852518100155
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00010114152,
+    "zjs_per_iteration": 0.00013861016000000001,
+    "ratio": 1.3704575529416605
+   },
+   "ipc": {
+    "qjs": 6.029745260251379,
+    "zjs": 5.511248709479558
+   },
+   "paired_instruction_ratios": [
+    1.2564656102929854,
+    1.256052465227432,
+    1.2564504494941175,
+    1.2571587935453028,
+    1.2566333163166432,
+    1.2565740459857786
+   ],
+   "paired_cycle_ratios": [
+    1.3777095031956035,
+    1.3708064856925308,
+    1.3784713080072306,
+    1.366359479606196,
+    1.3931259115144428,
+    1.3692457647627294
+   ]
+  },
+  "map_len1": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 3232.89386,
+    "zjs_per_iteration": 3790.8195,
+    "ratio": 1.1725777783499518
+   },
+   "cycles": {
+    "qjs_per_iteration": 546.643085,
+    "zjs_per_iteration": 700.71489,
+    "ratio": 1.2818508259370005
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.00014016704,
+    "zjs_per_iteration": 0.00017968639999999997,
+    "ratio": 1.281944742501518
+   },
+   "ipc": {
+    "qjs": 5.914085348760974,
+    "zjs": 5.409931420181467
+   },
+   "paired_instruction_ratios": [
+    1.174160617603396,
+    1.1763711158611527,
+    1.1729830078592802,
+    1.1761215290233682,
+    1.1760587885838822,
+    1.176361211818131
+   ],
+   "paired_cycle_ratios": [
+    1.2897789825499288,
+    1.2956070822295382,
+    1.2905291279687074,
+    1.2620918793527975,
+    1.2973125265850287,
+    1.271797736817875
+   ]
+  },
+  "map_len100": {
+   "iterations": 10000,
+   "instructions": {
+    "qjs_per_iteration": 76926.44155,
+    "zjs_per_iteration": 73004.1225,
+    "ratio": 0.9490120825691566
+   },
+   "cycles": {
+    "qjs_per_iteration": 11274.55125,
+    "zjs_per_iteration": 14461.29145,
+    "ratio": 1.2826489613056662
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.0028911544,
+    "zjs_per_iteration": 0.0037083216,
+    "ratio": 1.2826439155238474
+   },
+   "ipc": {
+    "qjs": 6.82301582069619,
+    "zjs": 5.0482436338699195
+   },
+   "paired_instruction_ratios": [
+    0.9510884040115177,
+    0.9511546404657328,
+    0.9511104286707488,
+    0.951238059569246,
+    0.9512669979859648,
+    0.9511513178692602
+   ],
+   "paired_cycle_ratios": [
+    1.2891753482073394,
+    1.2888353270503738,
+    1.2674140603469108,
+    1.5691483228186962,
+    1.288625253105563,
+    1.282578503609356
+   ]
+  },
+  "foreach_len0": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 849.98322,
+    "zjs_per_iteration": 1243.266415,
+    "ratio": 1.4626952459132077
+   },
+   "cycles": {
+    "qjs_per_iteration": 141.675375,
+    "zjs_per_iteration": 227.176015,
+    "ratio": 1.603496832106497
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 3.6325040000000005e-05,
+    "zjs_per_iteration": 5.8254720000000005e-05,
+    "ratio": 1.603706974582822
+   },
+   "ipc": {
+    "qjs": 5.999512759362733,
+    "zjs": 5.472701046367065
+   },
+   "paired_instruction_ratios": [
+    1.4693157148940912,
+    1.4689384274099495,
+    1.466668187055551,
+    1.4677009127647662,
+    1.4677471992599904,
+    1.4681188255853763
+   ],
+   "paired_cycle_ratios": [
+    1.602524223504867,
+    1.5960850768761785,
+    1.58784515747536,
+    1.6052930845866185,
+    1.604376355512816,
+    1.5856423409344587
+   ]
+  },
+  "foreach_len1": {
+   "iterations": 100000,
+   "instructions": {
+    "qjs_per_iteration": 1308.40427,
+    "zjs_per_iteration": 1789.118805,
+    "ratio": 1.3674052019105685
+   },
+   "cycles": {
+    "qjs_per_iteration": 207.165585,
+    "zjs_per_iteration": 342.964265,
+    "ratio": 1.6555079117026124
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 5.311176e-05,
+    "zjs_per_iteration": 8.794808000000001e-05,
+    "ratio": 1.6559059613162888
+   },
+   "ipc": {
+    "qjs": 6.3157414393901385,
+    "zjs": 5.216633298515809
+   },
+   "paired_instruction_ratios": [
+    1.3739482928019842,
+    1.3716954474583067,
+    1.375238517921479,
+    1.3724391247764236,
+    1.372622624489458,
+    1.3714750613340523
+   ],
+   "paired_cycle_ratios": [
+    1.666113840766659,
+    1.6044190987054552,
+    1.6529843110965134,
+    1.6340484059149682,
+    1.6664750125352141,
+    1.6379120252527666
+   ]
+  },
+  "foreach_len100": {
+   "iterations": 10000,
+   "instructions": {
+    "qjs_per_iteration": 45881.23745,
+    "zjs_per_iteration": 54610.84945,
+    "ratio": 1.190265400088942
+   },
+   "cycles": {
+    "qjs_per_iteration": 6483.5004,
+    "zjs_per_iteration": 11327.2252,
+    "ratio": 1.7470848309039977
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.0016625999999999998,
+    "zjs_per_iteration": 0.0029046744,
+    "ratio": 1.7470674846625769
+   },
+   "ipc": {
+    "qjs": 7.07661519539661,
+    "zjs": 4.8212027646453075
+   },
+   "paired_instruction_ratios": [
+    1.1924573501828173,
+    1.19237649826886,
+    1.1926825087205388,
+    1.1930080226886974,
+    1.1927996786671842,
+    1.1926079975902157
+   ],
+   "paired_cycle_ratios": [
+    1.7431036462585092,
+    1.7418462698059682,
+    1.72501010730407,
+    1.745454750157274,
+    1.7420249339144027,
+    1.734598972018808
+   ]
+  },
+  "map_original_toplevel": {
+   "iterations": 10000,
+   "instructions": {
+    "qjs_per_iteration": 12151.04405,
+    "zjs_per_iteration": 13624.2756,
+    "ratio": 1.1212432070806295
+   },
+   "cycles": {
+    "qjs_per_iteration": 1958.63405,
+    "zjs_per_iteration": 2672.11445,
+    "ratio": 1.3642744799621962
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.0005021712000000001,
+    "zjs_per_iteration": 0.0006851696,
+    "ratio": 1.3644143670525108
+   },
+   "ipc": {
+    "qjs": 6.203835805877061,
+    "zjs": 5.098687146428178
+   },
+   "paired_instruction_ratios": [
+    1.1318614948345056,
+    1.130380424283939,
+    1.1321179283731297,
+    1.1314883372745315,
+    1.131870687298997,
+    1.1315782441814144
+   ],
+   "paired_cycle_ratios": [
+    1.3979349991055827,
+    1.34255489841281,
+    1.3670333985099892,
+    1.378992251133468,
+    1.3756274530553694,
+    1.385904541967084
+   ]
+  },
+  "map_original_local": {
+   "iterations": 10000,
+   "instructions": {
+    "qjs_per_iteration": 12114.97555,
+    "zjs_per_iteration": 13571.76565,
+    "ratio": 1.1202470524176997
+   },
+   "cycles": {
+    "qjs_per_iteration": 1938.0542,
+    "zjs_per_iteration": 2654.67505,
+    "ratio": 1.369763059258095
+   },
+   "task_clock_ms": {
+    "qjs_per_iteration": 0.000496924,
+    "zjs_per_iteration": 0.00068076,
+    "ratio": 1.3699479196013875
+   },
+   "ipc": {
+    "qjs": 6.2511025491443934,
+    "zjs": 5.112401854984097
+   },
+   "paired_instruction_ratios": [
+    1.1279939484878745,
+    1.1288809180658708,
+    1.1309725649229294,
+    1.130363796204768,
+    1.1309737917405316,
+    1.1305745346422602
+   ],
+   "paired_cycle_ratios": [
+    1.3664459359765273,
+    1.3668534708589126,
+    1.5525238775584467,
+    1.3713475453685282,
+    1.3928742092557198,
+    1.3767893342681827
+   ]
+  }
+ },
+ "model": {
+  "instructions": {
+   "qjs": {
+    "map_intercept_len0": 2378.36452,
+    "map_slope_1_to_10": 837.6493166666666,
+    "map_slope_10_to_100": 735.0522648888889,
+    "foreach_intercept_len0": 849.98322,
+    "foreach_slope_1_to_10": 449.45663611111115,
+    "foreach_slope_10_to_100": 450.30803838888886,
+    "result_construction_per_call": 1528.3813,
+    "define_per_element_1_to_10": 388.1926805555554,
+    "define_per_element_10_to_100": 284.7442265,
+    "predicted_map_len10": 10754.857686666666,
+    "measured_map_len10": 10771.73771,
+    "model_error_pct": -0.1567065944955427
+   },
+   "zjs": {
+    "map_intercept_len0": 2979.01122,
+    "map_slope_1_to_10": 799.9265694444445,
+    "map_slope_10_to_100": 689.0440430555556,
+    "foreach_intercept_len0": 1243.266415,
+    "foreach_slope_1_to_10": 532.4518888888889,
+    "foreach_slope_10_to_100": 533.6629293888889,
+    "result_construction_per_call": 1735.7448049999998,
+    "define_per_element_1_to_10": 267.47468055555555,
+    "define_per_element_10_to_100": 155.3811136666667,
+    "predicted_map_len10": 10978.276914444445,
+    "measured_map_len10": 10990.158625,
+    "model_error_pct": -0.10811227536359058
+   },
+   "deltas_zjs_minus_qjs": {
+    "map_intercept_len0": 600.6466999999998,
+    "foreach_intercept_len0": 393.2831950000001,
+    "result_construction_per_call": 207.3635049999998,
+    "foreach_slope_1_to_10": 82.99525277777775,
+    "define_per_element_1_to_10": -120.71799999999985,
+    "map_slope_1_to_10": -37.7227472222221
+   }
+  },
+  "cycles": {
+   "qjs": {
+    "map_intercept_len0": 394.43864,
+    "map_slope_1_to_10": 126.36237166666666,
+    "map_slope_10_to_100": 106.56274244444444,
+    "foreach_intercept_len0": 141.675375,
+    "foreach_slope_1_to_10": 63.79608944444445,
+    "foreach_slope_10_to_100": 63.35744455555555,
+    "result_construction_per_call": 252.76326500000002,
+    "define_per_element_1_to_10": 62.56628222222221,
+    "define_per_element_10_to_100": 43.205297888888886,
+    "predicted_map_len10": 1658.0623566666666,
+    "measured_map_len10": 1683.90443,
+    "model_error_pct": -1.5346520190182926
+   },
+   "zjs": {
+    "map_intercept_len0": 540.532895,
+    "map_slope_1_to_10": 148.17034333333334,
+    "map_slope_10_to_100": 138.07826077777779,
+    "foreach_intercept_len0": 227.176015,
+    "foreach_slope_1_to_10": 111.618675,
+    "foreach_slope_10_to_100": 110.88547622222224,
+    "result_construction_per_call": 313.35688000000005,
+    "define_per_element_1_to_10": 36.55166833333334,
+    "define_per_element_10_to_100": 27.192784555555548,
+    "predicted_map_len10": 2022.2363283333334,
+    "measured_map_len10": 2034.24798,
+    "model_error_pct": -0.5904713577086455
+   },
+   "deltas_zjs_minus_qjs": {
+    "map_intercept_len0": 146.09425500000003,
+    "foreach_intercept_len0": 85.50064,
+    "result_construction_per_call": 60.59361500000003,
+    "foreach_slope_1_to_10": 47.82258555555555,
+    "define_per_element_1_to_10": -26.014613888888874,
+    "map_slope_1_to_10": 21.807971666666674
+   }
+  }
+ },
+ "split": {
+  "instructions": {
+   "components_zjs_minus_qjs_per_map_call": {
+    "callback_invocation_and_source_get": 829.9525277777775,
+    "result_element_define": -1207.1799999999985,
+    "builtin_entry_fixed": 393.2831950000001,
+    "result_array_construction_and_species": 207.3635049999998,
+    "inline_arrow_closure_allocation": 1184.7707250000003
+   },
+   "component_sum": 1408.1899527777791,
+   "measured_total_inline_arrow": 1403.191640000001,
+   "measured_total_hoisted_callback": 218.4209150000006,
+   "closure_cost_per_call": {
+    "qjs": 1324.6126249999998,
+    "zjs": 2509.38335
+   },
+   "shares_of_inline_arrow_total_pct": {
+    "callback_invocation_and_source_get": 59.147482362265,
+    "result_element_define": -86.03101426687503,
+    "builtin_entry_fixed": 28.027760698460252,
+    "result_array_construction_and_species": 14.777988913902,
+    "inline_arrow_closure_allocation": 84.43399256569114
+   },
+   "shares_of_hoisted_total_pct": {
+    "callback_invocation_and_source_get": 379.9785051618227,
+    "result_element_define": -552.6851675353504,
+    "builtin_entry_fixed": 180.0574798434477,
+    "result_array_construction_and_species": 94.93756813535884
+   },
+   "closure_of_sum_pct": 84.13429755431328,
+   "residual_vs_measured_pct": 0.35621027344334855
+  },
+  "cycles": {
+   "components_zjs_minus_qjs_per_map_call": {
+    "callback_invocation_and_source_get": 478.2258555555555,
+    "result_element_define": -260.14613888888874,
+    "builtin_entry_fixed": 85.50064,
+    "result_array_construction_and_species": 60.59361500000003,
+    "inline_arrow_closure_allocation": 324.4962600000001
+   },
+   "component_sum": 688.670231666667,
+   "measured_total_inline_arrow": 674.8398100000002,
+   "measured_total_hoisted_callback": 350.34355000000005,
+   "closure_cost_per_call": {
+    "qjs": 253.8362749999999,
+    "zjs": 578.332535
+   },
+   "shares_of_inline_arrow_total_pct": {
+    "callback_invocation_and_source_get": 70.86509249588511,
+    "result_element_define": -38.5493171911255,
+    "builtin_entry_fixed": 12.669768252113043,
+    "result_array_construction_and_species": 8.978962725983816,
+    "inline_arrow_closure_allocation": 48.084931444693524
+   },
+   "shares_of_hoisted_total_pct": {
+    "callback_invocation_and_source_get": 136.50197229421104,
+    "result_element_define": -74.25458207776016,
+    "builtin_entry_fixed": 24.404799232068065,
+    "result_array_construction_and_species": 17.29548467497119
+   },
+   "closure_of_sum_pct": 47.11925172294425,
+   "residual_vs_measured_pct": 2.0494377275500058
+  }
+ },
+ "vm_layer_reference": {
+  "instructions": {
+   "qjs": {
+    "vm_dense_read_per_element": 61.077571499999976,
+    "vm_call_per_element": 303.530234,
+    "vm_read_plus_call": 364.6078055,
+    "builtin_get_plus_call_per_element": 449.45663611111115,
+    "builtin_surcharge": 84.84883061111117
+   },
+   "zjs": {
+    "vm_dense_read_per_element": 65.164791,
+    "vm_call_per_element": 361.5369985,
+    "vm_read_plus_call": 426.70178949999996,
+    "builtin_get_plus_call_per_element": 532.4518888888889,
+    "builtin_surcharge": 105.75009938888894
+   },
+   "delta_zjs_minus_qjs": {
+    "vm_dense_read_per_element": 4.0872195000000175,
+    "vm_call_per_element": 58.006764499999974,
+    "vm_read_plus_call": 62.09398399999998,
+    "builtin_get_plus_call_per_element": 82.99525277777775,
+    "builtin_surcharge": 20.901268777777773
+   }
+  },
+  "cycles": {
+   "qjs": {
+    "vm_dense_read_per_element": 9.948121999999994,
+    "vm_call_per_element": 52.464067,
+    "vm_read_plus_call": 62.412189,
+    "builtin_get_plus_call_per_element": 63.79608944444445,
+    "builtin_surcharge": 1.3839004444444498
+   },
+   "zjs": {
+    "vm_dense_read_per_element": 11.109510999999998,
+    "vm_call_per_element": 64.1807865,
+    "vm_read_plus_call": 75.2902975,
+    "builtin_get_plus_call_per_element": 111.618675,
+    "builtin_surcharge": 36.3283775
+   },
+   "delta_zjs_minus_qjs": {
+    "vm_dense_read_per_element": 1.1613890000000033,
+    "vm_call_per_element": 11.716719499999996,
+    "vm_read_plus_call": 12.878108499999996,
+    "builtin_get_plus_call_per_element": 47.82258555555555,
+    "builtin_surcharge": 34.94447705555555
+   }
+  }
+ },
+ "dynamic_counts": {
+  "instrument": "gdb breakpoint hit counts, ignore 1e9 (never stops)",
+  "map_calls": 100,
+  "elements_per_call": 10,
+  "engines": {
+   "qjs": {
+    "binary": "/home/aneryu/quickjs/qjs",
+    "raw": {
+     "count_baseline": {
+      "js_array_every": 0,
+      "JS_ArraySpeciesCreate": 0,
+      "JS_ArraySpeciesGetCtor": 0,
+      "js_array_constructor": 0,
+      "JS_GetPropertyInternal": 45,
+      "JS_HasProperty": 0,
+      "JS_GetPropertyValue": 0,
+      "JS_CallInternal": 2,
+      "JS_DefinePropertyValueValue": 0,
+      "expand_fast_array": 1,
+      "convert_fast_array_to_array": 0,
+      "js_closure": 1,
+      "js_call_c_function": 1,
+      "js_realloc2": 25,
+      "js_def_malloc": 58
+     },
+     "count_map": {
+      "js_array_every": 100,
+      "JS_ArraySpeciesCreate": 100,
+      "JS_ArraySpeciesGetCtor": 100,
+      "js_array_constructor": 100,
+      "JS_GetPropertyInternal": 445,
+      "JS_HasProperty": 1000,
+      "JS_GetPropertyValue": 1000,
+      "JS_CallInternal": 1203,
+      "JS_DefinePropertyValueValue": 1000,
+      "expand_fast_array": 702,
+      "convert_fast_array_to_array": 0,
+      "js_closure": 3,
+      "js_call_c_function": 201,
+      "js_realloc2": 742,
+      "js_def_malloc": 66
+     },
+     "count_foreach": {
+      "js_array_every": 100,
+      "JS_ArraySpeciesCreate": 0,
+      "JS_ArraySpeciesGetCtor": 0,
+      "js_array_constructor": 0,
+      "JS_GetPropertyInternal": 245,
+      "JS_HasProperty": 1000,
+      "JS_GetPropertyValue": 1000,
+      "JS_CallInternal": 1103,
+      "JS_DefinePropertyValueValue": 0,
+      "expand_fast_array": 2,
+      "convert_fast_array_to_array": 0,
+      "js_closure": 3,
+      "js_call_c_function": 101,
+      "js_realloc2": 41,
+      "js_def_malloc": 66
+     }
+    },
+    "net": {
+     "count_map": {
+      "js_array_every": 100,
+      "JS_ArraySpeciesCreate": 100,
+      "JS_ArraySpeciesGetCtor": 100,
+      "js_array_constructor": 100,
+      "JS_GetPropertyInternal": 400,
+      "JS_HasProperty": 1000,
+      "JS_GetPropertyValue": 1000,
+      "JS_CallInternal": 1201,
+      "JS_DefinePropertyValueValue": 1000,
+      "expand_fast_array": 701,
+      "convert_fast_array_to_array": 0,
+      "js_closure": 2,
+      "js_call_c_function": 200,
+      "js_realloc2": 717,
+      "js_def_malloc": 8
+     },
+     "count_foreach": {
+      "js_array_every": 100,
+      "JS_ArraySpeciesCreate": 0,
+      "JS_ArraySpeciesGetCtor": 0,
+      "js_array_constructor": 0,
+      "JS_GetPropertyInternal": 200,
+      "JS_HasProperty": 1000,
+      "JS_GetPropertyValue": 1000,
+      "JS_CallInternal": 1101,
+      "JS_DefinePropertyValueValue": 0,
+      "expand_fast_array": 1,
+      "convert_fast_array_to_array": 0,
+      "js_closure": 2,
+      "js_call_c_function": 100,
+      "js_realloc2": 16,
+      "js_def_malloc": 8
+     }
+    },
+    "per_map_or_foreach_call": {
+     "count_map": {
+      "js_array_every": 1.0,
+      "JS_ArraySpeciesCreate": 1.0,
+      "JS_ArraySpeciesGetCtor": 1.0,
+      "js_array_constructor": 1.0,
+      "JS_GetPropertyInternal": 4.0,
+      "JS_HasProperty": 10.0,
+      "JS_GetPropertyValue": 10.0,
+      "JS_CallInternal": 12.01,
+      "JS_DefinePropertyValueValue": 10.0,
+      "expand_fast_array": 7.01,
+      "convert_fast_array_to_array": 0.0,
+      "js_closure": 0.02,
+      "js_call_c_function": 2.0,
+      "js_realloc2": 7.17,
+      "js_def_malloc": 0.08
+     },
+     "count_foreach": {
+      "js_array_every": 1.0,
+      "JS_ArraySpeciesCreate": 0.0,
+      "JS_ArraySpeciesGetCtor": 0.0,
+      "js_array_constructor": 0.0,
+      "JS_GetPropertyInternal": 2.0,
+      "JS_HasProperty": 10.0,
+      "JS_GetPropertyValue": 10.0,
+      "JS_CallInternal": 11.01,
+      "JS_DefinePropertyValueValue": 0.0,
+      "expand_fast_array": 0.01,
+      "convert_fast_array_to_array": 0.0,
+      "js_closure": 0.02,
+      "js_call_c_function": 1.0,
+      "js_realloc2": 0.16,
+      "js_def_malloc": 0.08
+     }
+    }
+   },
+   "zjs": {
+    "binary": "/home/aneryu/worktrees/zjs-p7-pareto/zig-out/bin/zjs",
+    "raw": {
+     "count_baseline": {
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85051": 0,
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85047": 0,
+      "exec.array_ops.arraySpeciesCreate": 0,
+      "exec.array_ops.arrayHasDefaultSpecies": 0,
+      "core.object.Object.getOwnProperty": 1,
+      "core.object.Object.createArray": 0,
+      "exec.object_ops.hasValueProperty": 0,
+      "core.object.Object.getDenseArrayElementValue": 0,
+      "exec.call_runtime.SyncInternalCallSite.call": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_68561": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_68568": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_87519": 0,
+      "core.object.Object.defineDenseArrayDataPropertyUnchecked": 0,
+      "core.object.Object.appendUninitializedFastArraySlot": 0,
+      "exec.zjs_vm.runActiveInvocationUntilNativeBoundary": 0,
+      "exec.call_runtime.runSyncInlineRouteOwnedCopy": 0,
+      "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll": 1,
+      "exec.frame.FrameSlab.carve": 1,
+      "exec.frame.FrameSlab.allocHeap": 0,
+      "core.memory.SmallObjectSlab.addArena": 32,
+      "malloc": 221
+     },
+     "count_map": {
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85051": 100,
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85047": 0,
+      "exec.array_ops.arraySpeciesCreate": 100,
+      "exec.array_ops.arrayHasDefaultSpecies": 100,
+      "core.object.Object.getOwnProperty": 304,
+      "core.object.Object.createArray": 100,
+      "exec.object_ops.hasValueProperty": 0,
+      "core.object.Object.getDenseArrayElementValue": 1000,
+      "exec.call_runtime.SyncInternalCallSite.call": 1000,
+      "exec.inline_calls.Machine.pushFrame__anon_68561": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_68568": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_87519": 0,
+      "core.object.Object.defineDenseArrayDataPropertyUnchecked": 1000,
+      "core.object.Object.appendUninitializedFastArraySlot": 0,
+      "exec.zjs_vm.runActiveInvocationUntilNativeBoundary": 1000,
+      "exec.call_runtime.runSyncInlineRouteOwnedCopy": 0,
+      "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll": 1,
+      "exec.frame.FrameSlab.carve": 1,
+      "exec.frame.FrameSlab.allocHeap": 0,
+      "core.memory.SmallObjectSlab.addArena": 39,
+      "malloc": 244
+     },
+     "count_foreach": {
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85051": 100,
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85047": 0,
+      "exec.array_ops.arraySpeciesCreate": 0,
+      "exec.array_ops.arrayHasDefaultSpecies": 0,
+      "core.object.Object.getOwnProperty": 4,
+      "core.object.Object.createArray": 0,
+      "exec.object_ops.hasValueProperty": 0,
+      "core.object.Object.getDenseArrayElementValue": 1000,
+      "exec.call_runtime.SyncInternalCallSite.call": 1000,
+      "exec.inline_calls.Machine.pushFrame__anon_68561": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_68568": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_87519": 0,
+      "core.object.Object.defineDenseArrayDataPropertyUnchecked": 0,
+      "core.object.Object.appendUninitializedFastArraySlot": 0,
+      "exec.zjs_vm.runActiveInvocationUntilNativeBoundary": 1000,
+      "exec.call_runtime.runSyncInlineRouteOwnedCopy": 0,
+      "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll": 1,
+      "exec.frame.FrameSlab.carve": 1,
+      "exec.frame.FrameSlab.allocHeap": 0,
+      "core.memory.SmallObjectSlab.addArena": 36,
+      "malloc": 241
+     }
+    },
+    "net": {
+     "count_map": {
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85051": 100,
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85047": 0,
+      "exec.array_ops.arraySpeciesCreate": 100,
+      "exec.array_ops.arrayHasDefaultSpecies": 100,
+      "core.object.Object.getOwnProperty": 303,
+      "core.object.Object.createArray": 100,
+      "exec.object_ops.hasValueProperty": 0,
+      "core.object.Object.getDenseArrayElementValue": 1000,
+      "exec.call_runtime.SyncInternalCallSite.call": 1000,
+      "exec.inline_calls.Machine.pushFrame__anon_68561": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_68568": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_87519": 0,
+      "core.object.Object.defineDenseArrayDataPropertyUnchecked": 1000,
+      "core.object.Object.appendUninitializedFastArraySlot": 0,
+      "exec.zjs_vm.runActiveInvocationUntilNativeBoundary": 1000,
+      "exec.call_runtime.runSyncInlineRouteOwnedCopy": 0,
+      "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll": 0,
+      "exec.frame.FrameSlab.carve": 0,
+      "exec.frame.FrameSlab.allocHeap": 0,
+      "core.memory.SmallObjectSlab.addArena": 7,
+      "malloc": 23
+     },
+     "count_foreach": {
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85051": 100,
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85047": 0,
+      "exec.array_ops.arraySpeciesCreate": 0,
+      "exec.array_ops.arrayHasDefaultSpecies": 0,
+      "core.object.Object.getOwnProperty": 3,
+      "core.object.Object.createArray": 0,
+      "exec.object_ops.hasValueProperty": 0,
+      "core.object.Object.getDenseArrayElementValue": 1000,
+      "exec.call_runtime.SyncInternalCallSite.call": 1000,
+      "exec.inline_calls.Machine.pushFrame__anon_68561": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_68568": 0,
+      "exec.inline_calls.Machine.pushFrame__anon_87519": 0,
+      "core.object.Object.defineDenseArrayDataPropertyUnchecked": 0,
+      "core.object.Object.appendUninitializedFastArraySlot": 0,
+      "exec.zjs_vm.runActiveInvocationUntilNativeBoundary": 1000,
+      "exec.call_runtime.runSyncInlineRouteOwnedCopy": 0,
+      "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll": 0,
+      "exec.frame.FrameSlab.carve": 0,
+      "exec.frame.FrameSlab.allocHeap": 0,
+      "core.memory.SmallObjectSlab.addArena": 4,
+      "malloc": 20
+     }
+    },
+    "per_map_or_foreach_call": {
+     "count_map": {
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85051": 1.0,
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85047": 0.0,
+      "exec.array_ops.arraySpeciesCreate": 1.0,
+      "exec.array_ops.arrayHasDefaultSpecies": 1.0,
+      "core.object.Object.getOwnProperty": 3.03,
+      "core.object.Object.createArray": 1.0,
+      "exec.object_ops.hasValueProperty": 0.0,
+      "core.object.Object.getDenseArrayElementValue": 10.0,
+      "exec.call_runtime.SyncInternalCallSite.call": 10.0,
+      "exec.inline_calls.Machine.pushFrame__anon_68561": 0.0,
+      "exec.inline_calls.Machine.pushFrame__anon_68568": 0.0,
+      "exec.inline_calls.Machine.pushFrame__anon_87519": 0.0,
+      "core.object.Object.defineDenseArrayDataPropertyUnchecked": 10.0,
+      "core.object.Object.appendUninitializedFastArraySlot": 0.0,
+      "exec.zjs_vm.runActiveInvocationUntilNativeBoundary": 10.0,
+      "exec.call_runtime.runSyncInlineRouteOwnedCopy": 0.0,
+      "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll": 0.0,
+      "exec.frame.FrameSlab.carve": 0.0,
+      "exec.frame.FrameSlab.allocHeap": 0.0,
+      "core.memory.SmallObjectSlab.addArena": 0.07,
+      "malloc": 0.23
+     },
+     "count_foreach": {
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85051": 1.0,
+      "exec.array_ops.qjsArrayIterationModeCall__anon_85047": 0.0,
+      "exec.array_ops.arraySpeciesCreate": 0.0,
+      "exec.array_ops.arrayHasDefaultSpecies": 0.0,
+      "core.object.Object.getOwnProperty": 0.03,
+      "core.object.Object.createArray": 0.0,
+      "exec.object_ops.hasValueProperty": 0.0,
+      "core.object.Object.getDenseArrayElementValue": 10.0,
+      "exec.call_runtime.SyncInternalCallSite.call": 10.0,
+      "exec.inline_calls.Machine.pushFrame__anon_68561": 0.0,
+      "exec.inline_calls.Machine.pushFrame__anon_68568": 0.0,
+      "exec.inline_calls.Machine.pushFrame__anon_87519": 0.0,
+      "core.object.Object.defineDenseArrayDataPropertyUnchecked": 0.0,
+      "core.object.Object.appendUninitializedFastArraySlot": 0.0,
+      "exec.zjs_vm.runActiveInvocationUntilNativeBoundary": 10.0,
+      "exec.call_runtime.runSyncInlineRouteOwnedCopy": 0.0,
+      "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll": 0.0,
+      "exec.frame.FrameSlab.carve": 0.0,
+      "exec.frame.FrameSlab.allocHeap": 0.0,
+      "core.memory.SmallObjectSlab.addArena": 0.04,
+      "malloc": 0.2
+     }
+    }
+   }
+  }
+ },
+ "repeat_run": {
+  "provenance": {
+   "samples_per_case_per_engine": 6,
+   "first_position_counts": {
+    "qjs": 33,
+    "zjs": 33
+   },
+   "zjs_binary": "/home/aneryu/worktrees/zjs-p7-pareto/.tmp/zjs-buildA"
+  },
+  "cases": {
+   "baseline": {
+    "instruction_ratio": 1.6648178020278093,
+    "cycle_ratio": 1.489036148893976
+   },
+   "map_len0": {
+    "instruction_ratio": 1.2560714738677248,
+    "cycle_ratio": 1.3710460492206045
+   },
+   "map_len1": {
+    "instruction_ratio": 1.1760649573194788,
+    "cycle_ratio": 1.281411731164305
+   },
+   "map_pre_arrow": {
+    "instruction_ratio": 1.0217618080549384,
+    "cycle_ratio": 1.2163624943725682
+   },
+   "map_len100": {
+    "instruction_ratio": 0.9512850619438664,
+    "cycle_ratio": 1.2834113094244448
+   },
+   "foreach_len0": {
+    "instruction_ratio": 1.468802483135063,
+    "cycle_ratio": 1.6041608296361138
+   },
+   "foreach_len1": {
+    "instruction_ratio": 1.3727261990661535,
+    "cycle_ratio": 1.6466646524298052
+   },
+   "foreach_pre_arrow": {
+    "instruction_ratio": 1.2312892206963024,
+    "cycle_ratio": 1.7216594382210826
+   },
+   "foreach_len100": {
+    "instruction_ratio": 1.192557390886764,
+    "cycle_ratio": 1.7365669322985673
+   },
+   "map_inline_arrow": {
+    "instruction_ratio": 1.1171202761114811,
+    "cycle_ratio": 1.347955454393678
+   },
+   "map_original_toplevel": {
+    "instruction_ratio": 1.1321440702895211,
+    "cycle_ratio": 1.3645805231556747
+   }
+  }
+ },
+ "build_instances": {
+  "why": "rule: an A/B claim needs multiple build instances per side; two independent builds of the same tree were measured",
+  "build_a": "/home/aneryu/worktrees/zjs-p7-pareto/.tmp/zjs-buildA",
+  "build_b": "/home/aneryu/worktrees/zjs-p7-pareto/.tmp/zjs-buildB",
+  "cases": {
+   "map_len0": {
+    "instruction_ratio_build_a": 1.2560714738677248,
+    "instruction_ratio_build_b": 1.2562424890808521,
+    "cycle_ratio_build_a": 1.3710460492206045,
+    "cycle_ratio_build_b": 1.3721934635235025,
+    "cycle_ratio_spread_pct": 0.08368896898469647
+   },
+   "map_len1": {
+    "instruction_ratio_build_a": 1.1760649573194788,
+    "instruction_ratio_build_b": 1.176145216098554,
+    "cycle_ratio_build_a": 1.281411731164305,
+    "cycle_ratio_build_b": 1.2910992463871795,
+    "cycle_ratio_spread_pct": 0.7560033194071281
+   },
+   "map_pre_arrow": {
+    "instruction_ratio_build_a": 1.0217618080549384,
+    "instruction_ratio_build_b": 1.0216978767868907,
+    "cycle_ratio_build_a": 1.2163624943725682,
+    "cycle_ratio_build_b": 1.210802677329503,
+    "cycle_ratio_spread_pct": -0.4570855373120519
+   },
+   "map_len100": {
+    "instruction_ratio_build_a": 0.9512850619438664,
+    "instruction_ratio_build_b": 0.9511661828043322,
+    "cycle_ratio_build_a": 1.2834113094244448,
+    "cycle_ratio_build_b": 1.279872858588923,
+    "cycle_ratio_spread_pct": -0.2757066896277194
+   },
+   "foreach_len0": {
+    "instruction_ratio_build_a": 1.468802483135063,
+    "instruction_ratio_build_b": 1.4696618347040853,
+    "cycle_ratio_build_a": 1.6041608296361138,
+    "cycle_ratio_build_b": 1.6075545890305847,
+    "cycle_ratio_spread_pct": 0.21155979698372906
+   },
+   "foreach_len1": {
+    "instruction_ratio_build_a": 1.3727261990661535,
+    "instruction_ratio_build_b": 1.3737146093334547,
+    "cycle_ratio_build_a": 1.6466646524298052,
+    "cycle_ratio_build_b": 1.6571811370127976,
+    "cycle_ratio_spread_pct": 0.6386536911127783
+   },
+   "foreach_pre_arrow": {
+    "instruction_ratio_build_a": 1.2312892206963024,
+    "instruction_ratio_build_b": 1.231156768143364,
+    "cycle_ratio_build_a": 1.7216594382210826,
+    "cycle_ratio_build_b": 1.7266156049936159,
+    "cycle_ratio_spread_pct": 0.2878714955179662
+   },
+   "foreach_len100": {
+    "instruction_ratio_build_a": 1.192557390886764,
+    "instruction_ratio_build_b": 1.1925813290213922,
+    "cycle_ratio_build_a": 1.7365669322985673,
+    "cycle_ratio_build_b": 1.7342598506768132,
+    "cycle_ratio_spread_pct": -0.13285302045342728
+   },
+   "map_inline_arrow": {
+    "instruction_ratio_build_a": 1.1171202761114811,
+    "instruction_ratio_build_b": 1.116835801544428,
+    "cycle_ratio_build_a": 1.347955454393678,
+    "cycle_ratio_build_b": 1.3501405751257838,
+    "cycle_ratio_spread_pct": 0.16210630143476124
+   },
+   "map_original_toplevel": {
+    "instruction_ratio_build_a": 1.1321440702895211,
+    "instruction_ratio_build_b": 1.1324523222757839,
+    "cycle_ratio_build_a": 1.3645805231556747,
+    "cycle_ratio_build_b": 1.366597526769964,
+    "cycle_ratio_spread_pct": 0.1478112562844469
+   }
+  }
+ },
+ "pareto_cross_check": {
+  "note": "P7-20 top cases re-measured pinned on CPU 19 with payload net of the process baseline; P7-20's own numbers are unpinned wall time including startup",
+  "cases": {
+   "baseline": {
+    "instruction_ratio": 1.67066226456873,
+    "cycle_ratio": 1.4742642658248857,
+    "qjs_task_clock_ms": 0.384392,
+    "zjs_task_clock_ms": 0.5656
+   },
+   "arrow_call_loop": {
+    "instruction_ratio": 1.1677584777384136,
+    "cycle_ratio": 1.2572454680726353,
+    "qjs_task_clock_ms": 13.484096000000001,
+    "zjs_task_clock_ms": 16.952208
+   },
+   "call2_loop": {
+    "instruction_ratio": 1.167435063791673,
+    "cycle_ratio": 1.2529375292727158,
+    "qjs_task_clock_ms": 13.521072,
+    "zjs_task_clock_ms": 16.940640000000002
+   },
+   "closure_call_loop": {
+    "instruction_ratio": 1.1779551481486368,
+    "cycle_ratio": 1.2409992547292508,
+    "qjs_task_clock_ms": 13.627952,
+    "zjs_task_clock_ms": 16.911472
+   },
+   "uri_decode_4byte": {
+    "instruction_ratio": 1.0396340829523385,
+    "cycle_ratio": 1.2943737715956214,
+    "qjs_task_clock_ms": 13.990256,
+    "zjs_task_clock_ms": 18.108312
+   },
+   "prop_read_mono": {
+    "instruction_ratio": 1.079268708198914,
+    "cycle_ratio": 1.0404442103026617,
+    "qjs_task_clock_ms": 16.002088,
+    "zjs_task_clock_ms": 16.648232
+   },
+   "vm_int_sum_large": {
+    "instruction_ratio": 1.1042929810427626,
+    "cycle_ratio": 1.104459629173995,
+    "qjs_task_clock_ms": 12.157544,
+    "zjs_task_clock_ms": 13.427904
+   },
+   "global_read_loop": {
+    "instruction_ratio": 1.0716317899692036,
+    "cycle_ratio": 1.0959849796949597,
+    "qjs_task_clock_ms": 12.041952,
+    "zjs_task_clock_ms": 13.198104
+   },
+   "dense_array_write_read": {
+    "instruction_ratio": 1.1793133477092934,
+    "cycle_ratio": 1.2327191215274491,
+    "qjs_task_clock_ms": 4.429688,
+    "zjs_task_clock_ms": 5.459671999999999
+   },
+   "array_write": {
+    "instruction_ratio": 1.7565038698624766,
+    "cycle_ratio": 1.5256945032288975,
+    "qjs_task_clock_ms": 0.38508,
+    "zjs_task_clock_ms": 0.5864480000000001
+   },
+   "typed_array_write": {
+    "instruction_ratio": 1.7653786009698047,
+    "cycle_ratio": 1.6818546497206175,
+    "qjs_task_clock_ms": 0.38994399999999996,
+    "zjs_task_clock_ms": 0.654768
+   }
+  }
+ },
+ "wall_clock_original_case": {
+  "qjs": {
+   "samples_ms": [
+    6.7771009635180235,
+    6.425519939512014,
+    6.296444917097688,
+    6.332093849778175,
+    6.006419891491532,
+    5.987489828839898
+   ],
+   "median_ms": 6.3142693834379315,
+   "min_ms": 5.987489828839898
+  },
+  "zjs": {
+   "samples_ms": [
+    8.334383135661483,
+    8.144423831254244,
+    8.335631107911468,
+    7.976179011166096,
+    7.946145953610539,
+    8.080102968961
+   ],
+   "median_ms": 8.112263400107622,
+   "min_ms": 7.946145953610539
+  },
+  "wall_ratio_median": 1.284750920096275,
+  "note": "wall clock of the full pinned process, directly comparable to the P7-20 snapshot's wall samples"
+ },
+ "p7_20_snapshot": {
+  "source": "reports/perf/qjs-align/2026-07-30/phase-6-closeout/process-microbench.json",
+  "affinity": "unpinned",
+  "affinity_mask": "0-19",
+  "cpu_model": "Cortex-X925 / Cortex-A725",
+  "zjs_binary_sha256": "df03ae4919b571f227af2da3af490680b28a7daad67e340856e0c3360eb3d14c",
+  "zjs_commit": "0f726fc00a60ad98040b10fdebf38cd04ddd3c76",
+  "zjs_dirty": true,
+  "qjs_binary_sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+  "paired_geomean": 2.617622439384097,
+  "paired_ratio_min": 1.3014174605986226,
+  "paired_ratio_max": 4.570895272907114,
+  "avg_ratio": 2.6069052415099994,
+  "bimodality": {
+   "qjs_fast_n": 18,
+   "qjs_fast_median_ms": 5.730265000000145,
+   "qjs_slow_n": 12,
+   "qjs_slow_median_ms": 10.808176499998808,
+   "zjs_fast_n": 15,
+   "zjs_fast_median_ms": 14.167046000002301,
+   "zjs_slow_n": 15,
+   "zjs_slow_median_ms": 26.125607999998465,
+   "qjs_slow_over_fast": 1.8861564866543754,
+   "zjs_slow_over_fast": 1.8441111859165433,
+   "mode_matched_ratio_fast": 2.4723195175095642,
+   "mode_matched_ratio_slow": 2.417207750077115
+  }
+ },
+ "perf_record_profiles": {
+  "qjs-perf_foreach_long": [
+   {
+    "percent": 68.16,
+    "symbol": "JS_CallInternal"
+   },
+   {
+    "percent": 7.94,
+    "symbol": "js_array_every"
+   },
+   {
+    "percent": 6.97,
+    "symbol": "JS_HasProperty"
+   },
+   {
+    "percent": 4.19,
+    "symbol": "JS_GetOwnPropertyInternal"
+   },
+   {
+    "percent": 3.69,
+    "symbol": "JS_GetPropertyValue"
+   },
+   {
+    "percent": 3.41,
+    "symbol": "JS_GetPropertyInternal"
+   },
+   {
+    "percent": 3.09,
+    "symbol": "JS_TryGetPropertyInt64"
+   }
+  ],
+  "qjs-perf_map_inline_long": [
+   {
+    "percent": 31.04,
+    "symbol": "JS_CallInternal"
+   },
+   {
+    "percent": 7.94,
+    "symbol": "__js_malloc"
+   },
+   {
+    "percent": 5.8,
+    "symbol": "JS_CreateProperty"
+   },
+   {
+    "percent": 5.52,
+    "symbol": "JS_DefineProperty"
+   },
+   {
+    "percent": 4.19,
+    "symbol": "JS_GetPropertyInternal"
+   },
+   {
+    "percent": 4.14,
+    "symbol": "__js_free"
+   },
+   {
+    "percent": 3.64,
+    "symbol": "add_property"
+   },
+   {
+    "percent": 3.64,
+    "symbol": "free_gc_object"
+   },
+   {
+    "percent": 3.57,
+    "symbol": "JS_GetOwnPropertyInternal"
+   },
+   {
+    "percent": 3.33,
+    "symbol": "JS_HasProperty"
+   },
+   {
+    "percent": 3.13,
+    "symbol": "js_array_every"
+   },
+   {
+    "percent": 2.92,
+    "symbol": "__js_realloc"
+   },
+   {
+    "percent": 1.99,
+    "symbol": "JS_TryGetPropertyInt64"
+   },
+   {
+    "percent": 1.96,
+    "symbol": "JS_GetPropertyValue"
+   },
+   {
+    "percent": 1.7,
+    "symbol": "JS_DefinePropertyValueValue"
+   },
+   {
+    "percent": 1.22,
+    "symbol": "expand_fast_array"
+   },
+   {
+    "percent": 1.18,
+    "symbol": "JS_SetPropertyInternal"
+   },
+   {
+    "percent": 1.02,
+    "symbol": "__JS_FreeValueRT"
+   }
+  ],
+  "qjs-perf_map_long": [
+   {
+    "percent": 36.47,
+    "symbol": "JS_CallInternal"
+   },
+   {
+    "percent": 9.25,
+    "symbol": "__js_malloc"
+   },
+   {
+    "percent": 5.74,
+    "symbol": "JS_DefineProperty"
+   },
+   {
+    "percent": 5.01,
+    "symbol": "JS_GetPropertyInternal"
+   },
+   {
+    "percent": 4.07,
+    "symbol": "js_array_every"
+   },
+   {
+    "percent": 3.7,
+    "symbol": "JS_GetOwnPropertyInternal"
+   },
+   {
+    "percent": 3.56,
+    "symbol": "JS_CreateProperty"
+   },
+   {
+    "percent": 3.45,
+    "symbol": "JS_HasProperty"
+   },
+   {
+    "percent": 3.16,
+    "symbol": "__js_free"
+   },
+   {
+    "percent": 2.96,
+    "symbol": "JS_GetPropertyValue"
+   },
+   {
+    "percent": 2.49,
+    "symbol": "__js_realloc"
+   },
+   {
+    "percent": 1.99,
+    "symbol": "JS_DefinePropertyValueValue"
+   },
+   {
+    "percent": 1.85,
+    "symbol": "expand_fast_array"
+   },
+   {
+    "percent": 1.62,
+    "symbol": "JS_TryGetPropertyInt64"
+   },
+   {
+    "percent": 1.43,
+    "symbol": "add_property"
+   },
+   {
+    "percent": 1.39,
+    "symbol": "JS_DefinePropertyValue"
+   },
+   {
+    "percent": 1.39,
+    "symbol": "free_gc_object"
+   }
+  ],
+  "zjs-perf_foreach_long": [
+   {
+    "percent": 31.29,
+    "symbol": "exec.call_runtime.SyncInternalCallSite.call"
+   },
+   {
+    "percent": 20.57,
+    "symbol": "exec.zjs_vm.runTC"
+   },
+   {
+    "percent": 12.27,
+    "symbol": "exec.array_ops.qjsArrayIterationModeCall__anon_85051"
+   },
+   {
+    "percent": 11.44,
+    "symbol": "exec.tailcall_dispatch.op_return"
+   },
+   {
+    "percent": 4.91,
+    "symbol": "exec.tailcall_dispatch.opBinary__struct_71615.hnd"
+   },
+   {
+    "percent": 4.41,
+    "symbol": "exec.tailcall_dispatch.op_get_arg_short"
+   },
+   {
+    "percent": 3.51,
+    "symbol": "exec.vm_call.callMethod"
+   },
+   {
+    "percent": 2.65,
+    "symbol": "exec.vm_property_field.field"
+   },
+   {
+    "percent": 1.5,
+    "symbol": "exec.property_ic.fastImmediatePrototypeDataPropertyLookupForObject"
+   },
+   {
+    "percent": 1.04,
+    "symbol": "exec.tailcall_dispatch.opLocCheckWithInt32SlotMove__struct_71572.h"
+   }
+  ],
+  "zjs-perf_map_inline_long": [
+   {
+    "percent": 18.9,
+    "symbol": "exec.call_runtime.SyncInternalCallSite.call"
+   },
+   {
+    "percent": 10.31,
+    "symbol": "exec.array_ops.qjsArrayIterationModeCall__anon_85051"
+   },
+   {
+    "percent": 9.97,
+    "symbol": "exec.zjs_vm.runTC"
+   },
+   {
+    "percent": 7.18,
+    "symbol": "exec.tailcall_dispatch.op_return"
+   },
+   {
+    "percent": 3.3,
+    "symbol": "core.object.Object.ensureArrayBufferCapacity"
+   },
+   {
+    "percent": 3.18,
+    "symbol": "core.object.Object.getOwnProperty"
+   },
+   {
+    "percent": 2.77,
+    "symbol": "exec.tailcall_dispatch.opBinary__struct_71615.hnd"
+   },
+   {
+    "percent": 2.67,
+    "symbol": "core.object.Object.destroyFromHeader"
+   },
+   {
+    "percent": 2.37,
+    "symbol": "exec.vm_call.callMethod"
+   },
+   {
+    "percent": 2.06,
+    "symbol": "core.memory.MemoryAccount.free__anon_129220"
+   },
+   {
+    "percent": 1.95,
+    "symbol": "exec.tailcall_dispatch.op_get_arg_short"
+   },
+   {
+    "percent": 1.71,
+    "symbol": "core.object.Object.defineDenseArrayDataPropertyUnchecked"
+   },
+   {
+    "percent": 1.71,
+    "symbol": "exec.array_ops.arrayConstructorFromGlobal"
+   },
+   {
+    "percent": 1.47,
+    "symbol": "core.memory.MemoryAccount.allocInternal__anon_72074"
+   },
+   {
+    "percent": 1.39,
+    "symbol": "exec.vm_property_field.field"
+   },
+   {
+    "percent": 1.37,
+    "symbol": "core.object.Object.appendPreparedPropertyEntry"
+   },
+   {
+    "percent": 1.29,
+    "symbol": "exec.object_ops.createBytecodeFunctionObjectInternal"
+   },
+   {
+    "percent": 1.29,
+    "symbol": "core.object.Object.createInternal"
+   },
+   {
+    "percent": 1.19,
+    "symbol": "exec.array_ops.arrayHasDefaultSpecies"
+   },
+   {
+    "percent": 1.17,
+    "symbol": "core.object.Object.defineOwnProperty"
+   },
+   {
+    "percent": 1.12,
+    "symbol": "core.object.Object.defineOrdinaryOwnProperty"
+   },
+   {
+    "percent": 1.08,
+    "symbol": "core.object.Object.arrayBuiltinMarker"
+   },
+   {
+    "percent": 1.02,
+    "symbol": "exec.tailcall_dispatch.op_call_method"
+   }
+  ],
+  "zjs-perf_map_long": [
+   {
+    "percent": 21.75,
+    "symbol": "exec.call_runtime.SyncInternalCallSite.call"
+   },
+   {
+    "percent": 12.52,
+    "symbol": "exec.zjs_vm.runTC"
+   },
+   {
+    "percent": 10.89,
+    "symbol": "exec.array_ops.qjsArrayIterationModeCall__anon_85051"
+   },
+   {
+    "percent": 9.61,
+    "symbol": "exec.tailcall_dispatch.op_return"
+   },
+   {
+    "percent": 4.48,
+    "symbol": "exec.tailcall_dispatch.opBinary__struct_71615.hnd"
+   },
+   {
+    "percent": 4.11,
+    "symbol": "core.object.Object.ensureArrayBufferCapacity"
+   },
+   {
+    "percent": 3.58,
+    "symbol": "core.object.Object.getOwnProperty"
+   },
+   {
+    "percent": 3.12,
+    "symbol": "exec.tailcall_dispatch.op_get_arg_short"
+   },
+   {
+    "percent": 2.51,
+    "symbol": "core.object.Object.defineDenseArrayDataPropertyUnchecked"
+   },
+   {
+    "percent": 2.23,
+    "symbol": "exec.array_ops.arrayConstructorFromGlobal"
+   },
+   {
+    "percent": 2.07,
+    "symbol": "core.memory.MemoryAccount.free__anon_129220"
+   },
+   {
+    "percent": 1.96,
+    "symbol": "exec.vm_call.callMethod"
+   },
+   {
+    "percent": 1.88,
+    "symbol": "exec.array_ops.arrayHasDefaultSpecies"
+   },
+   {
+    "percent": 1.84,
+    "symbol": "exec.vm_property_field.field"
+   },
+   {
+    "percent": 1.84,
+    "symbol": "core.memory.MemoryAccount.allocInternal__anon_72074"
+   },
+   {
+    "percent": 1.46,
+    "symbol": "core.object.Object.destroyFromHeader"
+   },
+   {
+    "percent": 1.27,
+    "symbol": "exec.property_ic.fastImmediatePrototypeDataPropertyLookupForObject"
+   }
+  ]
+ }
+}
