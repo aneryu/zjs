@@ -3118,5 +3118,29 @@
    }
   ],
   "top10_cumulative_share": 0.8975728068966194
+ },
+ "corrections": {
+  "date": "2026-07-30",
+  "source": "P7-40-array-map-decomposition",
+  "defect_1_unpinned_sampling": {
+   "meta_host_affinitySource": "unpinned",
+   "meta_host_affinityMask": "0-19",
+   "snapshot_warning": "--cpu 19 does not match runner Cpus_allowed_list=0-19; timed children will inherit the measured runner affinity",
+   "consequence": "big.LITTLE host, so every case is sampled across a mix of core types and its 30 samples are bimodal; per-case levels in this report are unreliable",
+   "what_survives": "structural conclusions are within-snapshot relatives and are not materially affected: 52/75 startup-dominated, the three orderings disagreeing, startupAdjusted being unusable, and the aggregate masking real progress"
+  },
+  "defect_2_stale_binary": {
+   "snapshot_zjs_commit": "0f726fc00a60ad98040b10fdebf38cd04ddd3c76",
+   "missing_commit": "63c409c0 perf: reuse active Machine for array callbacks",
+   "ancestry_verified": "63c409c0 is not an ancestor of 0f726fc0 and is an ancestor of main (entered via merge 222df098)",
+   "array_map_callback_reported": 2.618,
+   "array_map_callback_repinned": {
+    "cycles": 1.364,
+    "instructions": 1.121
+   },
+   "other_top_cases_moved_by_at_most": 0.194,
+   "verdict": "the rank-1 Pareto item and its 17.2% share are void; the rest of the Pareto broadly stands"
+  },
+  "method_lesson": "this report validated the numeric structure of the input JSON but not its meta.host sampling conditions, nor the ancestry of the snapshot binary relative to the current branch. Future analyses of archived snapshots must read the affinity fields and confirm binary currency first."
  }
 }

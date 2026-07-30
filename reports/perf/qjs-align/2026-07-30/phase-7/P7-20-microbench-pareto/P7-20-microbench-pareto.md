@@ -1,5 +1,34 @@
 # P7-20：Phase 6 收口 75-case microbench 的 Pareto 分解
 
+> **更正（2026-07-30，依据 `P7-40-array-map-decomposition/`）**
+>
+> 本报告有两处缺陷，都来自输入快照本身，本报告在写作时没有察觉：
+>
+> **一、快照是非绑核采样的。** `meta.host.affinitySource = "unpinned"`，
+> `affinityMask = "0-19"`，且快照自带一条警告：
+> `"--cpu 19 does not match runner Cpus_allowed_list=0-19; timed children will
+> inherit the measured runner affinity"`。本机是 big.LITTLE，因此每个 case 的 30 个样本
+> 在大小核之间双峰分布（`array_map_callback` qjs 5.73/10.81、zjs 14.17/26.13，
+> paired ratio 跨度 1.30–4.57）。**本报告第 4 节引用的每 case 绝对值与比值都继承了这个缺陷。**
+> 结构性结论（启动主导 52/75、三个排序互不一致、`startupAdjusted` 不可用、
+> 聚合掩盖真实进展）是同一快照内部的相对量，基本不受影响；**但任何单 case 的水平值不可靠。**
+>
+> **二、第 1 名 `array_map_callback = 2.618` 相对当前 `main` 已经过期。**
+> 快照的 zjs 二进制建于 `0f726fc0`，该提交**不含** `63c409c0
+> "perf: reuse active Machine for array callbacks"`（已核验非祖先关系；该提交经合并
+> `222df098` 进入 `main`）。P7-40 在绑核条件下用逐字相同的源码重测，得到
+> **1.364x cycles / 1.121x instructions**，而非 2.618。P7-40 另重测了本报告 top 中的
+> 其他 8 个 case，绑核后位移 ≤0.194，**只有这一个移动了 1.25**，所以 Pareto 的其余部分
+> 大体成立，但**第 1 名及其 17.2% 的占比份额应视为已作废**。
+>
+> 相应地，本报告第 5 节把 `array_map_callback` 称为「唯一比值超过 2 的可分辨 case」
+> 与「最大单点」的判断不再成立，第 7 节据此交给 P7-00 的假设也已被 P7-00 独立推翻
+> （该 case 几乎不发生 arena churn）。
+>
+> **方法教训**：本报告只校验了输入 JSON 的数值结构，没有校验其 `meta.host` 采样条件，
+> 也没有核对快照二进制与当前 `main` 的祖先关系。此后任何基于归档快照的分析，
+> **必须先读 `meta` 的绑核字段与二进制 commit，并确认其相对当前分支的时效性。**
+
 - 日期：2026-07-30
 - 性质：纯分析，不改生产代码，不占用性能测量锁
 - 输入：`reports/perf/qjs-align/2026-07-30/phase-6-closeout/process-microbench.json`（收口快照，75 case，iters=30，warmup=5）
