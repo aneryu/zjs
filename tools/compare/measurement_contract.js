@@ -671,6 +671,45 @@ export function assertNoSelfSuppliedPolicy(artifact, policy) {
 }
 
 // ---------------------------------------------------------------------------
+// A5: session schema. Session mode is opt-in and never headline eligible.
+// ---------------------------------------------------------------------------
+
+export function validateSessionSchema(sessionBlock, policy) {
+    const violations = [];
+    const rules = policy.sessions;
+    if (sessionBlock == null) {
+        return { ok: true, errorClass: null, exitCode: CONTRACT_EXIT_CODES.ok, violations };
+    }
+    if (sessionBlock.schemaVersion !== rules.schemaVersion) {
+        violations.push({
+            rule: 'session-schema-version',
+            detail: `session schemaVersion=${sessionBlock.schemaVersion}, policy requires ${rules.schemaVersion}`,
+        });
+    }
+    if (sessionBlock.enabled && sessionBlock.headlineEligible !== false) {
+        violations.push({
+            rule: 'session-headline-eligible',
+            detail: 'session-mode results may not be headline eligible',
+        });
+    }
+    if (sessionBlock.enabled && !Number.isInteger(sessionBlock.sessions)) {
+        violations.push({ rule: 'session-count-invalid', detail: `sessions=${sessionBlock.sessions} must be an integer` });
+    }
+    if (sessionBlock.enabled && sessionBlock.mixedWithLegacySamples) {
+        violations.push({
+            rule: 'session-legacy-sample-mixing',
+            detail: 'session-mode raw samples were mixed into the legacy one-process-per-case sample pool',
+        });
+    }
+    return {
+        ok: violations.length === 0,
+        errorClass: violations.length === 0 ? null : 'SessionSchemaError',
+        exitCode: violations.length === 0 ? CONTRACT_EXIT_CODES.ok : CONTRACT_EXIT_CODES.sessionSchema,
+        violations,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // A6: P7-42 contracts made automatically checkable.
 // ---------------------------------------------------------------------------
 

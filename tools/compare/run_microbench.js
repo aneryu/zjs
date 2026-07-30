@@ -8,6 +8,7 @@ import process from 'node:process';
 import { performance } from 'node:perf_hooks';
 import { cases as microbenchCases, categories as microbenchCategories } from './microbench_cases.js';
 import { cases as hotpathCases, categories as hotpathCategories } from './hotpath_cases.js';
+import { cases as nativeCallbackCases, categories as nativeCallbackCategories } from './native_callback_cases.js';
 import {
     CONTRACT_EXIT_CODES,
     aggregateVerdict,
@@ -21,6 +22,7 @@ import {
     validateGenerationCoherence,
     validateProvenance,
     validateSampleContract,
+    validateSessionSchema,
     validateWarmupContract,
 } from './measurement_contract.js';
 
@@ -37,6 +39,10 @@ let zjsBin = process.env.QJS_ZIG || defaultZjs;
 let qjsBin = process.env.QJS || defaultQjs;
 let iters = parseInteger(process.env.BENCH_ITERS, 10);
 let warmup = parseInteger(process.env.BENCH_WARMUP, 3);
+// Session mode is restored but default-off: BENCH_SESSIONS=1 and --interleaved
+// unset keep the legacy one-process-per-case path byte-for-byte.
+let sessions = parseInteger(process.env.BENCH_SESSIONS, policy.sessions.defaultSessions);
+let interleaved = policy.sessions.defaultInterleaved;
 let formalMode = false;
 let diagnosticMode = false;
 let includeUnsupported = false;
@@ -75,7 +81,25 @@ const suites = {
         categories: hotpathCategories,
         description: 'focused hotpath calibration suite',
     },
+    'native-callback': {
+        cases: nativeCallbackCases,
+        categories: nativeCallbackCategories,
+        description: 'synchronous native callback and execution-root control suite',
+    },
 };
+
+// The amplified diagnostics corpus is optional: it is a P7-70 side product and
+// the runner must keep working in trees that do not carry it.
+try {
+    const amplified = await import('./amplified_cases.js');
+    suites.amplified = {
+        cases: amplified.cases,
+        categories: amplified.categories,
+        description: 'P7-70 amplified diagnostics; diagnostic-only, never part of the 75-case compatibility geomean',
+    };
+} catch {
+    // no amplified corpus in this tree
+}
 
 const measurementLock = {
     path: process.env.ZJS_MEASUREMENT_LOCK ?? null,
@@ -98,13 +122,15 @@ Use --zjs-only for self-baseline reports that compare zjs to a checked-in zjs re
 Options:
   --iters N                 Timed iterations per case and binary (default: ${iters})
   --warmup N                Warmup runs per case and binary (default: ${warmup})
+  --sessions N              Independent timing sessions; opt-in, never headline (default: ${sessions})
+  --interleaved             Run each session in ABBA quads; requires --sessions and an even --iters
   --formal                  Formal sampling: fail closed on sample imbalance, unpinned
                             affinity, escaping children and incomplete provenance
   --diagnostic              Explicitly diagnostic run: contract violations are recorded,
                             complete=false and every headline is nulled
   --case NAME               Run one case; repeatable
   --category NAME           Run one category; repeatable
-  --suite NAME              Case suite: microbench or hotpath (default: ${suiteName})
+  --suite NAME              Case suite: ${Object.keys(suites).join(', ')} (default: ${suiteName})
   --include-unsupported     Show unsupported cases in the terminal table
   --zjs-only                Use zjs for the reference column; does not require C qjs
   --json                    Print the JSON report to stdout instead of the table
@@ -126,6 +152,7 @@ Environment:
   QJS                       Path to C qjs
   BENCH_ITERS               Default iteration count
   BENCH_WARMUP              Default warmup count
+  BENCH_SESSIONS            Default independent session count (default 1 = legacy path)
   ZJS_MEASUREMENT_LOCK      Path of the exclusive measurement lock held by the caller
   ZJS_MEASUREMENT_LOCK_MODE Lock mode recorded into the artifact (exclusive/shared)
   ZJS_BUILD_MODE            Explicit build-mode metadata when the binary does not export it
@@ -463,6 +490,124 @@ function benchPair(qjsBinary, zjsBinary, script) {
         pairs,
         warmupOrders,
         executedOrders,
+    };
+}
+
+// Restored session mode (schema v2). Opt-in only: `sessions === 1 &&
+// !interleaved` never reaches this function, so the legacy one-process-per-case
+// path above is untouched. Session samples are kept in their own pool and are
+// never merged into the legacy pool -- the two are different sampling designs.
+function benchInterleaved(qjsBinary, zjsBinary, script) {
+    const binaries = { qjs: qjsBinary, zjs: zjsBinary };
+    const sessionRows = [];
+    const qjsSamples = [];
+    const zjsSamples = [];
+    const pairs = [];
+    const warmupOrders = [];
+    const executedOrders = [];
+    let globalIndex = 0;
+
+    for (let session = 0; session < sessions; session += 1) {
+        for (let i = 0; i < warmup; i += 1) {
+            const order = pairOrder(i);
+            warmupOrders.push(order.join('->'));
+            for (const engine of order) {
+                const result = runBinary(engine, binaries[engine], script, false);
+                if (result.exitCode !== 0) {
+                    return {
+                        status: 'failed',
+                        failure: { phase: 'warmup', index: i, session, engine, exitCode: result.exitCode, spawnError: result.spawnError },
+                        qjsSamples,
+                        zjsSamples,
+                        pairs,
+                        warmupOrders,
+                        executedOrders,
+                        sessions: sessionRows,
+                    };
+                }
+            }
+        }
+
+        const sessionQjs = [];
+        const sessionZjs = [];
+        for (let i = 0; i < iters; i += 1) {
+            const order = pairOrder(i);
+            const executed = [];
+            executedOrders.push(executed);
+            const elapsed = {};
+            for (const engine of order) {
+                const start = performance.now();
+                const result = runBinary(engine, binaries[engine], script, false);
+                elapsed[engine] = performance.now() - start;
+                if (result.exitCode !== 0) {
+                    return {
+                        status: 'failed',
+                        failure: { phase: 'timed', index: i, session, engine, exitCode: result.exitCode, spawnError: result.spawnError },
+                        qjsSamples,
+                        zjsSamples,
+                        pairs,
+                        warmupOrders,
+                        executedOrders,
+                        sessions: sessionRows,
+                    };
+                }
+                executed.push(engine);
+            }
+            sessionQjs.push(elapsed.qjs);
+            sessionZjs.push(elapsed.zjs);
+            pairs.push({
+                index: globalIndex,
+                session,
+                order: order.join('->'),
+                executedOrder: executed.join('->'),
+                qjsMs: elapsed.qjs,
+                zjsMs: elapsed.zjs,
+            });
+            globalIndex += 1;
+        }
+        qjsSamples.push(...sessionQjs);
+        zjsSamples.push(...sessionZjs);
+        sessionRows.push({
+            session,
+            qjs: stats(sessionQjs),
+            zjs: stats(sessionZjs),
+        });
+    }
+
+    return {
+        status: 'ok',
+        failure: null,
+        qjsSamples,
+        zjsSamples,
+        pairs,
+        warmupOrders,
+        executedOrders,
+        sessions: sessionRows,
+    };
+}
+
+function runBenchPair(qjsBinary, zjsBinary, script) {
+    return sessionModeEnabled() ? benchInterleaved(qjsBinary, zjsBinary, script) : benchPair(qjsBinary, zjsBinary, script);
+}
+
+function sessionModeEnabled() {
+    return interleaved || sessions !== policy.sessions.defaultSessions;
+}
+
+function sessionBlock() {
+    const enabled = sessionModeEnabled();
+    return {
+        schemaVersion: policy.sessions.schemaVersion,
+        enabled,
+        sessions: enabled ? sessions : policy.sessions.defaultSessions,
+        interleaved,
+        headlineEligible: false,
+        legacyPathUnchanged: !enabled,
+        mixedWithLegacySamples: false,
+        samplePool: enabled ? 'session' : 'legacy',
+        description: enabled
+            ? 'ABBA rounds grouped into independent sessions, each preceded by its own warmup'
+            : 'legacy one-process-per-case ABBA path; session mode is off',
     };
 }
 
@@ -1332,10 +1477,11 @@ function collectMetadata(extra = {}) {
         caseSources: extra.caseSources ?? null,
         startupBaselineIdentity: extra.startupBaselineIdentity ?? null,
         attestation: extra.attestation ?? null,
+        sessions: sessionBlock(),
         sampling: {
             warmup,
             iters,
-            samples: iters,
+            samples: sessionModeEnabled() ? sessions * iters : iters,
             order: 'ABBA per-sample interleaved',
             orderDescription:
                 'Warmup and timed rounds both alternate: zero-based even rounds run qjs then zjs; odd rounds run zjs then qjs. The two engines in each round are adjacent processes.',
@@ -1564,7 +1710,9 @@ function buildContractVerdict(report) {
         validateSampleContract(
             {
                 samples: report.meta.sampling.samples,
-                declaredOrders,
+                declaredOrders: sessionModeEnabled()
+                    ? row.executedOrders.map(() => null).map((_, index) => declaredOrders[index % declaredOrders.length])
+                    : declaredOrders,
                 executedOrders: row.executedOrders.map((order) => (Array.isArray(order) ? order : String(order).split('->'))),
             },
             policy,
@@ -1599,6 +1747,8 @@ function buildContractVerdict(report) {
     // state), the validator decides whether that evidence may be published.
     const generation = formalMode ? validateGenerationCoherence(report) : { ok: true, violations: [], skipped: 'not formal mode' };
     const artifactPolicy = assertNoSelfSuppliedPolicy(report, policy);
+    const sessionSchema = validateSessionSchema(report.meta.sessions, policy);
+
     const verdict = aggregateVerdict([
         sampleContract,
         warmupContract,
@@ -1606,6 +1756,7 @@ function buildContractVerdict(report) {
         provenance,
         generation,
         artifactPolicy,
+        sessionSchema,
     ]);
     return {
         policyRef: policyReference(policy),
@@ -1617,6 +1768,7 @@ function buildContractVerdict(report) {
         provenance,
         generation,
         artifactPolicy,
+        sessionSchema,
         ...verdict,
     };
 }
@@ -1688,7 +1840,7 @@ function measureStartupBaseline(scriptDir, generation) {
         scriptPath: script,
         scriptSha256: crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex'),
         scriptBytes: fs.statSync(script).size,
-        samples: iters,
+        samples: sessionModeEnabled() ? sessions * iters : iters,
         warmup,
     };
     const expected = runBinary('qjs', qjsBin, script, true);
@@ -1704,7 +1856,7 @@ function measureStartupBaseline(scriptDir, generation) {
             note,
         };
     }
-    const result = benchPair(qjsBin, zjsBin, script);
+    const result = runBenchPair(qjsBin, zjsBin, script);
     if (result.status !== 'ok') {
         const failure = result.failure;
         return {
@@ -1867,6 +2019,16 @@ for (let i = 0; i < args.length; i += 1) {
             if (!Number.isFinite(warmup) || warmup < 0) fail('error: warmup must be >= 0');
             break;
         }
+        case '--sessions': {
+            const value = args[++i];
+            if (value == null) fail('error: --sessions requires a value');
+            sessions = parseInteger(value, Number.NaN);
+            if (!Number.isFinite(sessions) || sessions <= 0) fail('error: sessions must be > 0');
+            break;
+        }
+        case '--interleaved':
+            interleaved = true;
+            break;
         case '--formal':
             formalMode = true;
             break;
@@ -1964,13 +2126,14 @@ if (shouldList) {
     listCases();
     process.exit(0);
 }
+if (interleaved && !sessionModeEnabled()) fail('error: --interleaved requires --sessions N with N > 1');
 initializeAffinity();
 
 // P7-70 A1: fail closed *before* any process is spawned when the requested
 // sampling design cannot be balanced at all. An odd sample count has voided a
 // headline twice already (`run_direct.py --samples 5`, Phase 6 same-runtime
 // 3 qjs-first / 2 zjs-first), each time behind a warning that was ignored.
-const preflightSamples = iters;
+const preflightSamples = sessionModeEnabled() ? sessions * iters : iters;
 const preflightSampleContract = validateSampleContract(
     {
         samples: preflightSamples,
@@ -2095,7 +2258,7 @@ try {
             continue;
         }
 
-        const result = benchPair(qjsBin, zjsBin, script);
+        const result = runBenchPair(qjsBin, zjsBin, script);
         if (result.status !== 'ok') {
             const failure = result.failure;
             const reason =
@@ -2147,6 +2310,7 @@ try {
             paired: pairedStats(result.pairs),
             warmupOrders: result.warmupOrders,
             executedOrders: result.executedOrders,
+            ...(result.sessions ? { sessions: result.sessions } : {}),
             pmu,
             peakRssKb,
             allocations: unavailableAllocationMetric('allocation count'),

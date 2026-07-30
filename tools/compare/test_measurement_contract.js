@@ -17,6 +17,7 @@ import {
     validatePhaseSampling,
     validateProvenance,
     validateSampleContract,
+    validateSessionSchema,
     validateStageAttribution,
     validateWarmupContract,
     validateWorktreeCleanliness,
@@ -565,6 +566,53 @@ record('A4-09', 'provenance', 'a coherent generation passes', 'ok=true when case
     artifact.cases[0].generation = 'gen-1';
     const result = validateGenerationCoherence(artifact);
     return { pass: result.ok === true, violations: result.violations };
+});
+
+// ---------------------------------------------------------------------------
+// A5 - session schema
+// ---------------------------------------------------------------------------
+
+record('A5-01', 'sessions', 'session mode is off by default and the legacy path is unchanged', 'enabled=false, legacyPathUnchanged=true, schemaVersion=2', () => {
+    const block = { schemaVersion: policy.sessions.schemaVersion, enabled: false, sessions: 1, interleaved: false, headlineEligible: false, legacyPathUnchanged: true, mixedWithLegacySamples: false };
+    const result = validateSessionSchema(block, policy);
+    return {
+        pass: result.ok === true && policy.sessions.defaultSessions === 1 && policy.sessions.defaultInterleaved === false,
+        defaults: { sessions: policy.sessions.defaultSessions, interleaved: policy.sessions.defaultInterleaved },
+        schemaVersion: policy.sessions.schemaVersion,
+    };
+});
+
+record('A5-02', 'sessions', 'an unversioned session block is rejected', 'SessionSchemaError, rule session-schema-version, exit 8', () => {
+    const result = validateSessionSchema({ schemaVersion: 1, enabled: true, sessions: 3, headlineEligible: false }, policy);
+    return {
+        pass:
+            result.ok === false &&
+            result.errorClass === 'SessionSchemaError' &&
+            result.exitCode === CONTRACT_EXIT_CODES.sessionSchema &&
+            rules(result).includes('session-schema-version'),
+        errorClass: result.errorClass,
+        exitCode: result.exitCode,
+        message: detailFor(result, 'session-schema-version'),
+    };
+});
+
+record('A5-03', 'sessions', 'session results may not be headline eligible', 'rule session-headline-eligible', () => {
+    const result = validateSessionSchema({ schemaVersion: 2, enabled: true, sessions: 3, headlineEligible: true }, policy);
+    return {
+        pass: result.ok === false && rules(result).includes('session-headline-eligible'),
+        message: detailFor(result, 'session-headline-eligible'),
+    };
+});
+
+record('A5-04', 'sessions', 'session samples may not be mixed into the legacy pool', 'rule session-legacy-sample-mixing', () => {
+    const result = validateSessionSchema(
+        { schemaVersion: 2, enabled: true, sessions: 3, headlineEligible: false, mixedWithLegacySamples: true },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('session-legacy-sample-mixing'),
+        message: detailFor(result, 'session-legacy-sample-mixing'),
+    };
 });
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import {
     validateProvenance,
     validateGenerationCoherence,
     validateSampleContract,
+    validateSessionSchema,
     validateWarmupContract,
     validateWorktreeCleanliness,
 } from './measurement_contract.js';
@@ -103,6 +104,7 @@ export function validateArtifact(subject, options = {}) {
         checks.push(validateGenerationCoherence(subject));
     }
     checks.push(assertNoSelfSuppliedPolicy(subject, policy));
+    checks.push(validateSessionSchema(subject?.meta?.sessions, policy));
 
     const verdict = aggregateVerdict(checks);
     return {

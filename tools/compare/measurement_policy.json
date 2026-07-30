@@ -3,10 +3,7 @@
   "policy_version": 1,
   "description": "Authoritative whole-process measurement contract. The validator reads thresholds from this file only; an artifact that ships its own thresholds is rejected.",
   "sampling": {
-    "treatments": [
-      "qjs",
-      "zjs"
-    ],
+    "treatments": ["qjs", "zjs"],
     "minimumSamples": 2,
     "recommendedSamples": 8,
     "requireEvenSampleCount": true,
@@ -63,29 +60,23 @@
       "meta.environment.ZJS_REPO_ROOT",
       "meta.caseSources"
     ],
-    "requiredPerCaseFields": [
-      "sourceSha256",
-      "sourcePath"
-    ]
+    "requiredPerCaseFields": ["sourceSha256", "sourcePath"]
   },
   "artifact": {
     "forbidSelfSuppliedPolicy": true,
-    "allowedPolicyReferenceKeys": [
-      "policy_id",
-      "policy_version",
-      "sha256",
-      "path"
-    ]
+    "allowedPolicyReferenceKeys": ["policy_id", "policy_version", "sha256", "path"]
   },
   "attribution": {
-    "allowedStageScopes": [
-      "symbol",
-      "callChain",
-      "addressRange"
-    ],
+    "allowedStageScopes": ["symbol", "callChain", "addressRange"],
     "forbidBareFileLineScope": true,
     "forbidFrequencySamplingForPhaseAttribution": true,
     "requireRecordedPeriod": true,
     "requirePeriodCoprimeWithInnerLoop": true
+  },
+  "sessions": {
+    "schemaVersion": 2,
+    "defaultSessions": 1,
+    "defaultInterleaved": false,
+    "headlineEligible": false
   }
 }
