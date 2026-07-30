@@ -3,8 +3,8 @@
  "p0": "eaf8a04d",
  "p1": "d6cb67e2",
  "p1_location": "branch wip/p6-04d2c-scratch-merge, NOT merged",
- "status": "PARKED PENDING ADJUDICATION",
- "verdict": "a hard gate is violated. Every direct-core shape improves with no regressions, and the JS-level 8x4 shapes gain 29-31% -- mod_8x4 reaches 1.09x of pinned QuickJS -- but div_16x8 regresses 8.8% at the JS level with all sixteen combinations above 1.0, against an explicit gate that 16x8 and 24x8 must not regress by 1% or more.",
+ "status": "REJECTED",
+ "verdict": "REJECTED. The crossover is strongly non-monotonic and no threshold on u_len + v_len can separate the winning shapes from the losing ones: sum = 17 gives 0.6175 for 8x8 and 0.9773 for 12x4. Per the plan, a non-monotonic crossover means rejecting the scratch merge rather than searching for a benchmark-shaped threshold.",
  "plan_number_correction": "the plan framed this as 4 -> 3 allocations, which was the pre-d2b topology. d2b already took multi-limb to 3, so this cut is 3 -> 2. The `both` path goes 4 -> 3.",
  "mechanism": {
   "change": "one [u][v] block replaces two allocations; u and v have identical lifetimes",
@@ -451,24 +451,8 @@
   "algorithm_counters_unchanged": "met",
   "correctness": "met"
  },
- "options_for_adjudication": [
-  {
-   "option": "revert",
-   "cost": "loses mod_8x4 1.53x -> 1.09x and div_8x4 2.68x -> 1.86x, the largest remaining wins in the division line",
-   "benefit": "restores div_16x8 to 1.32x"
-  },
-  {
-   "option": "accept with waiver",
-   "cost": "div_16x8 goes 1.32x -> 1.44x, a named sentinel regressing against an explicit hard gate",
-   "benefit": "three of four JS cases improve, two of them dramatically; net across the four is strongly positive"
-  },
-  {
-   "option": "follow-up cut",
-   "description": "choose whether to merge based on the resulting size class, or pad the merged block into a class the runtime keeps populated",
-   "note": "this is allocator-aware tuning, which the plan explicitly excluded from d2c, so it would have to be its own cut"
-  }
- ],
- "recommendation": "adjudication is the user's. The measurement is unambiguous in both directions and the mechanism is confirmed, so the choice is a value judgement between a 30% gain on the shape the whole d2 sequence targeted and a 9% regression on a shape already inside 2x.",
+ "options_for_adjudication": null,
+ "recommendation": "rejected; main line stays at eaf8a04d and the branch is evidence only, never to be merged",
  "correctness": {
   "random_differential": {
    "cases": 20000,
@@ -505,5 +489,196 @@
   "24x8 has no JS case, so its JS behaviour under the merge is unmeasured -- only direct-core, where it improves 1.1 to 1.8%",
   "no attempt was made to pick a friendlier size class, since that is allocator-aware tuning the plan excluded",
   "only shift == 0 operands in the topology counts"
- ]
+ ],
+ "crossover_sweep": {
+  "method": "two fixed binaries (bsplit = 28f93e17, bmerged = d6cb67e2), 21 shapes x div/mod, median of three, with fourteen key points rechecked over five repeats whose min/max spans are all under 0.5%",
+  "cross_check": "agrees with the eight-instance measurement: div_8x4 0.719 against 0.6923, div_16x8 1.097 against 1.0882",
+  "ratios_merged_over_split": [
+   {
+    "sum_limbs": 5,
+    "shape": "2x2",
+    "merged_class": 48,
+    "ratio": 0.9
+   },
+   {
+    "sum_limbs": 9,
+    "shape": "4x4",
+    "merged_class": 80,
+    "ratio": 1.4371
+   },
+   {
+    "sum_limbs": 10,
+    "shape": "5x4",
+    "merged_class": 88,
+    "ratio": 1.3644
+   },
+   {
+    "sum_limbs": 11,
+    "shape": "6x4",
+    "merged_class": 96,
+    "ratio": 1.3051
+   },
+   {
+    "sum_limbs": 13,
+    "shape": "8x4",
+    "merged_class": 112,
+    "ratio": 0.7189
+   },
+   {
+    "sum_limbs": 14,
+    "shape": "9x4",
+    "merged_class": 120,
+    "ratio": 0.7192
+   },
+   {
+    "sum_limbs": 15,
+    "shape": "10x4",
+    "merged_class": 128,
+    "ratio": 0.7661
+   },
+   {
+    "sum_limbs": 16,
+    "shape": "11x4",
+    "merged_class": 144,
+    "ratio": 0.9655
+   },
+   {
+    "sum_limbs": 17,
+    "shape": "12x4",
+    "merged_class": 144,
+    "ratio": 0.9773
+   },
+   {
+    "sum_limbs": 17,
+    "shape": "8x8",
+    "merged_class": 144,
+    "ratio": 0.6175
+   },
+   {
+    "sum_limbs": 18,
+    "shape": "9x8",
+    "merged_class": 160,
+    "ratio": 0.8575
+   },
+   {
+    "sum_limbs": 19,
+    "shape": "10x8",
+    "merged_class": 160,
+    "ratio": 0.8789
+   },
+   {
+    "sum_limbs": 20,
+    "shape": "11x8",
+    "merged_class": 176,
+    "ratio": 1.1544
+   },
+   {
+    "sum_limbs": 21,
+    "shape": "12x8",
+    "merged_class": 176,
+    "ratio": 1.1438
+   },
+   {
+    "sum_limbs": 21,
+    "shape": "16x4",
+    "merged_class": 176,
+    "ratio": 1.1057
+   },
+   {
+    "sum_limbs": 22,
+    "shape": "13x8",
+    "merged_class": 192,
+    "ratio": 0.9745
+   },
+   {
+    "sum_limbs": 23,
+    "shape": "14x8",
+    "merged_class": 192,
+    "ratio": 0.9781
+   },
+   {
+    "sum_limbs": 25,
+    "shape": "16x8",
+    "merged_class": 208,
+    "ratio": 1.0968
+   },
+   {
+    "sum_limbs": 33,
+    "shape": "24x8",
+    "merged_class": 288,
+    "ratio": 0.995
+   },
+   {
+    "sum_limbs": 33,
+    "shape": "16x16",
+    "merged_class": 288,
+    "ratio": 0.9312
+   },
+   {
+    "sum_limbs": 65,
+    "shape": "32x32",
+    "merged_class": null,
+    "ratio": 0.995
+   }
+  ],
+  "three_independent_reasons_to_reject": [
+   "the same sum_limbs gives opposite verdicts: 17 is 0.6175 for 8x8 and 0.9773 for 12x4, so no static threshold on u_len + v_len can separate them",
+   "the sequence flips direction repeatedly: 9/10/11 badly worse, 13/14/15 much better, 16/17 neutral, 17 much better, 18/19 better, 20/21 worse, 22/23 neutral, 25 worse, 33 neutral -- worse than the plan's own rejection example",
+   "even grouping by merged size class fails: at 144 B, 12x4 is 0.9773 while 8x8 is 0.6175"
+  ],
+  "mechanism_confirmed_both_ways": {
+   "div_4x4": {
+    "ratio": 1.4371,
+    "split_addArena": "absent",
+    "merged_addArena": "12.45%",
+    "reading": "the merge introduced arena churn"
+   },
+   "div_8x8": {
+    "ratio": 0.6175,
+    "split_addArena": "9.45%",
+    "merged_addArena": "absent",
+    "reading": "the merge removed arena churn"
+   },
+   "conclusion": "whether the merge helps or hurts is decided entirely by whether the resulting size class happens to be churning, which is not a function of u_len + v_len"
+  }
+ },
+ "correction_to_earlier_report": {
+  "what_I_said": "three of four JS cases improve, two dramatically, net strongly positive",
+  "why_it_was_unrepresentative": "only four JS cases existed at the time",
+  "full_picture": {
+   "large_gains": [
+    "8x4 -28%",
+    "9x4 -28%",
+    "10x4 -23%",
+    "8x8 -38%",
+    "9x8 -14%",
+    "10x8 -12%"
+   ],
+   "large_regressions": [
+    "4x4 +44%",
+    "5x4 +36%",
+    "6x4 +31%",
+    "11x8 +15%",
+    "12x8 +14%",
+    "16x4 +11%",
+    "16x8 +10%"
+   ],
+   "neutral": [
+    "2x2",
+    "11x4",
+    "12x4",
+    "13x8",
+    "14x8",
+    "24x8",
+    "16x16",
+    "32x32"
+   ]
+  },
+  "consequence": "the unconditional merge is a cross-shape size-class lottery, not 'helps small, hurts 16x8'. The three worst regressions are far larger than the 16x8 +8.8% the waiver was proposed on, so proposing accept-with-waiver rested on incomplete evidence and should not have been offered."
+ },
+ "general_finding_recorded_not_addressed": {
+  "issue": "SmallObjectSlab returns an arena to the backing allocator the moment a size class's last block is freed, so a workload that allocates and fully frees each operation creates and destroys arenas every operation. addArena reaches 12.45% on div_4x4 merged and 9.45% on div_8x8 split.",
+  "scope": "an allocator-layer behaviour that BigInt division merely runs into, not a BigInt implementation debt. It explains why allocations halving between P6-04d0 and d2.5 left the JS allocator share unchanged.",
+  "action": "if it is to be fixed, it belongs to its own allocator-layer investigation and should not be worked around by tuning BigInt's allocation topology further."
+ }
 }
