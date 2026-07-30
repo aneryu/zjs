@@ -1,0 +1,152 @@
+{
+ "note": "P3-13 Phase 3 closing profile. Profiling only, no code changes.",
+ "head": "203fd2c0",
+ "absolute": {
+  "fib_rec": 1.2989,
+  "method_call_loop": 1.1424,
+  "call_body_loop": 1.1332,
+  "call_empty_0": 1.2129,
+  "call_identity_1": 1.2052,
+  "recursive_countdown_1": 1.0483
+ },
+ "ns_per_call": {
+  "fib_rec": {
+   "qjs": 21.58,
+   "zjs": 28.03,
+   "delta": 6.45
+  },
+  "call_body_loop": {
+   "qjs": 34.94,
+   "zjs": 39.59,
+   "delta": 4.65
+  },
+  "method_call_loop": {
+   "qjs": 44.64,
+   "zjs": 50.99,
+   "delta": 6.36
+  },
+  "call_empty_0": {
+   "qjs": 19.58,
+   "zjs": 23.75,
+   "delta": 4.17
+  },
+  "call_identity_1": {
+   "qjs": 20.72,
+   "zjs": 24.97,
+   "delta": 4.25
+  },
+  "recursive_countdown_1": {
+   "qjs": 20.41,
+   "zjs": 21.39,
+   "delta": 0.99
+  }
+ },
+ "fib_rec_coarse_stages_percent": {
+  "P3-09": {
+   "opCall": 32.69,
+   "op_return": 25.03,
+   "body": 42.22,
+   "total_ns": 28.95
+  },
+  "after_P3-10": {
+   "opCall": 34.1,
+   "op_return": 21.87,
+   "body": 44.03,
+   "total_ns": 28.39
+  },
+  "now": {
+   "opCall": 34.07,
+   "op_return": 21.09,
+   "body": 44.84,
+   "total_ns": 28.03
+  }
+ },
+ "fib_rec_stage_ns": {
+  "P3-09": {
+   "call_in": 9.46,
+   "return": 7.25,
+   "body": 12.22
+  },
+  "now": {
+   "call_in": 9.55,
+   "return": 5.91,
+   "body": 12.57
+  },
+  "return_reduction_percent": 18
+ },
+ "op_return_internal_percent_of_op_return": {
+  "no line info": 32.08,
+  "live-value release + RC decref": 31.53,
+  "own native frame + 11 register saves": 12.72,
+  "handler prologue line": 10.02,
+  "mode classification (new)": 5.4,
+  "frame/top restore": 5.47,
+  "depth/byte accounting": 4.42,
+  "arena restore": 3.44
+ },
+ "op_return_static": {
+  "size_bytes": 6440,
+  "native_frame_bytes": 208,
+  "saved_registers": 11
+ },
+ "delta_vs_qjs_ns": {
+  "call_in": {
+   "zjs": 9.55,
+   "qjs": 7.45,
+   "delta": 2.1,
+   "share_of_gap": 0.33
+  },
+  "return": {
+   "zjs": 5.91,
+   "qjs": 1.54,
+   "delta": 4.37,
+   "share_of_gap": 0.68
+  },
+  "body": {
+   "zjs": 12.57,
+   "qjs": 11.47,
+   "delta": 1.1,
+   "share_of_gap": 0.17
+  },
+  "caveat": "the three deltas sum to 7.57 against a measured 6.45; the ~17% gap is unattributed buckets and stage-boundary classification"
+ },
+ "decision": {
+  "rule_setup_plus_return_gt_40": {
+   "measured": 55.16,
+   "triggered": true
+  },
+  "rule_body_gt_50": {
+   "measured": 44.84,
+   "triggered": false
+  },
+  "rule_rc_release_gt_10": {
+   "measured": 6.65,
+   "triggered": false
+  },
+  "verdict": "P4 PlainEntry prototype"
+ },
+ "phase3_delivered": {
+  "fib_rec": "1.3489 -> 1.2989",
+  "return_absolute_cost": "-18%",
+  "ordinary_return_discrimination": "12+ tests -> 1 masked test",
+  "entry_size": "unchanged",
+  "argv": "audited canonical, P3-07 closed with no change"
+ },
+ "negative_results": [
+  "P3-08 inline .operand exact setup: reverted; removing a bl proven present on every call recovered 0.68ns of a 4.18ns step",
+  "ReturnMode as an Entry field: +600 bytes in align(64) call handlers cost call_body_loop 1.53% and fib_rec 0.63% at 4/4; derived instead of stored, call_body_loop improves 0.79%",
+  "cold == null is not a discriminator for extended completion: four of six extended forms leave it null and `arguments` sets it on plainly-completing frames",
+  "ownership.storage cannot be classified statically: a calibration assert caught a frame published borrowed and retired owned"
+ ],
+ "followups": [
+  {
+   "item": "outline extended return tail",
+   "gain": "op_return 6440 bytes and its 208-byte frame, currently 0.75 ns/call",
+   "risk": "takes the leaf arms cold, and they are currently improving (call_empty_0 -0.57% at 4/4)"
+  },
+  {
+   "item": "BigInt mul-multilimb ~1.77x",
+   "status": "real hotspot, deliberately not jumping the queue"
+  }
+ ]
+}

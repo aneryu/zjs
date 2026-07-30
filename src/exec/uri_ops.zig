@@ -822,7 +822,7 @@ fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.value.cloneWithAllocator(rt.memory.allocator);
+        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
     }
     return error.TypeError;
 }

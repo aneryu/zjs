@@ -1,0 +1,118 @@
+{
+ "note": "P3-11F consumer audit for forwarded_leaf / has_native_caller / native_caller. Location only, no code changes.",
+ "head": "dd2e4096",
+ "verdict": "case 1 - both are live production mechanisms with real consumers; neither is dead state",
+ "p3_11_gap_explained": {
+  "forwarded_leaf": "the probe used f.call(null,i,1): argc=3 and thisArg=null, while the producer gates on argc<=1 AND thisArg undefined AND a published zero-arg sloppy empty leaf",
+  "has_native_caller": "instrumentation gap, not a mechanism gap: the P3-11 counter table had no pushForwardedCall or releaseNativeCaller column, and the native probe was setting the bit every call"
+ },
+ "forwarded_leaf": {
+  "producers": [
+   "Machine.finishForwardedEmptyLeafFrame (inline_calls.zig:3136)"
+  ],
+  "reached_via": [
+   "Machine.tryPushForwardedEmptyLeafCallFast",
+   "op_call_method .call arm (tailcall_dispatch.zig:1599-1606)"
+  ],
+  "gate": "argc <= 1 && this_arg.isUndefined() && target.call_facts.execution.simple_inline_empty_leaf",
+  "storage": "Entry.teardown bit4 (Entry+252)",
+  "consumers": [
+   "popAndResume forwarded-leaf return arm (tailcall_dispatch.zig:1169)",
+   "Entry.deinitForwardedLeafInline (inline_calls.zig:586)",
+   "Machine.popReturnedForwardedLeaf (inline_calls.zig:3460)",
+   "Entry.deinit routing (inline_calls.zig:474)",
+   "Entry.deinitReturned routing (inline_calls.zig:655)"
+  ]
+ },
+ "has_native_caller": {
+  "producers": [
+   "Machine.finishForwardedEmptyLeafFrame (inline_calls.zig:3135)",
+   "Machine.pushForwardedCall (inline_calls.zig:3214)"
+  ],
+  "gate": "any Function.prototype.call forwarding into a bytecode target",
+  "storage": "Entry.teardown bit1 + Entry.native_caller (Entry+224, owned reference)",
+  "consumers": [
+   "Entry.releaseNativeCaller via deinitReturned:624 / deinit:643 (ownership)",
+   "resolveMachineBacktrace (inline_calls.zig:717) - observable Error().stack frame order",
+   "assertions on the overlaid storage"
+  ],
+  "not_tested_by_canUseSimpleTeardown": true,
+  "observable_semantics": "the 'at call (native)' frame appears only in the forwarded shape and matches pinned qjs line for line"
+ },
+ "probe_counts_per_200_calls": {
+  "note": "generic=1 rows are the top-level run() invocation",
+  "fwd_leaf     (z.call(), zero-arg leaf)": {
+   "leaf_forwarded": 200,
+   "generic": 1,
+   "pushForwardedCall": 0,
+   "releaseNativeCaller": 0
+  },
+  "fwd_leaf_u   (z.call(undefined))": {
+   "leaf_forwarded": 200,
+   "generic": 1,
+   "pushForwardedCall": 0,
+   "releaseNativeCaller": 0
+  },
+  "fwd_leaf_this(z.call(o))": {
+   "leaf_forwarded": 0,
+   "generic": 201,
+   "pushForwardedCall": 200,
+   "releaseNativeCaller": 200
+  },
+  "fwd_generic  (g.call(undefined,i,1))": {
+   "leaf_forwarded": 0,
+   "generic": 201,
+   "pushForwardedCall": 200,
+   "releaseNativeCaller": 200
+  },
+  "fwd_gen_null (g.call(null,i,1))": {
+   "leaf_forwarded": 0,
+   "generic": 201,
+   "pushForwardedCall": 200,
+   "releaseNativeCaller": 200
+  },
+  "native       (P3-11 probe)": {
+   "leaf_forwarded": 0,
+   "generic": 201,
+   "pushForwardedCall": 200,
+   "releaseNativeCaller": 200
+  },
+  "fwd_apply    (g.apply(null,[i,1]))": {
+   "leaf_forwarded": 0,
+   "generic": 1,
+   "pushForwardedCall": 0,
+   "releaseNativeCaller": 0
+  }
+ },
+ "side_finding": "Function.prototype.apply does not take the forwarding path at all (pushForwardedCall=0); apply and call are separate routes in zjs. Recorded, not attributed.",
+ "p3_12_constraints": {
+  "extended_mode_members": [
+   "forwarded_leaf",
+   "has_native_caller",
+   "constructor_completion",
+   "tail_chain",
+   "return_action != .next",
+   "non-simple teardown (cold != null / owned storage / non-arena stack)"
+  ],
+  "ordinary_mode_implies": [
+   "return_action == .next",
+   "continuation_payload == 0",
+   "none of the extended members"
+  ],
+  "no_dead_branch_to_delete": true,
+  "attribution_note": "since nothing is dead, all P3-12 gain comes from collapsing real special completions into one mode test",
+  "ceiling_unchanged": {
+   "removable_percent_of_fib_rec": 2.68,
+   "projected": 1.281,
+   "exit_line": 1.2
+  }
+ },
+ "new_semantic_gates_for_p3_12": [
+  "fwd_leaf",
+  "fwd_leaf_u",
+  "fwd_leaf_this",
+  "fwd_generic",
+  "fwd_apply",
+  "backtrace probe: inner.call(undefined) must keep the 'at call (native)' frame"
+ ]
+}

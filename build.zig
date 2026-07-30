@@ -26,11 +26,31 @@ pub fn build(b: *std.Build) void {
     // `zig build test-oom -Dzjs_oom_coverage=true` prints the count.
     const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;
     const zjs_force_gc = b.option(bool, "zjs_force_gc", "Force a full GC before each runtime heap allocation") orelse false;
+    const zjs_dossier_simple_ctor = b.option([]const u8, "zjs_dossier_simple_ctor", "Dossier-only simple-constructor variant: a, b, or c") orelse "a";
+    if (!std.mem.eql(u8, zjs_dossier_simple_ctor, "a") and
+        !std.mem.eql(u8, zjs_dossier_simple_ctor, "b") and
+        !std.mem.eql(u8, zjs_dossier_simple_ctor, "c"))
+    {
+        std.debug.print(
+            "error: invalid -Dzjs_dossier_simple_ctor value '{s}': expected a, b, or c\n",
+            .{zjs_dossier_simple_ctor},
+        );
+        std.process.exit(1);
+    }
+    // Separate options object for the dossier harnesses. Reusing engine_options
+    // here would register the same generated file under two module names
+    // (the harnesses already receive it transitively via internal_fast_mod).
+    const zjs_dossier_layout_pad = b.option(usize, "zjs_dossier_layout_pad", "Dossier-only layout-lineage pad slot count (0 = no effect)") orelse 0;
+    const dossier_options = b.addOptions();
+    dossier_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    dossier_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    engine_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    engine_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/root.zig"),
@@ -45,6 +65,8 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     plugin_fixture_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    plugin_fixture_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    plugin_fixture_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     const plugin_fixture_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -123,17 +145,18 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     internal_dev_mod.addOptions("build_options", engine_options);
+    const zjs_dev_cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/zjs.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = internal_dev_mod },
+        },
+    });
     const zjs_dev_exe = b.addExecutable(.{
         .name = "zjs-dev",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli/zjs.zig"),
-            .target = target,
-            .optimize = .Debug,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zjs", .module = internal_dev_mod },
-            },
-        }),
+        .root_module = zjs_dev_cli_mod,
     });
     const install_zjs_dev = b.addInstallArtifact(zjs_dev_exe, .{});
     const zjs_dev_step = b.step("zjs-dev", "Build and install the Debug zjs used by inner-loop checks");
@@ -561,6 +584,8 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    test_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    test_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
     test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
     unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
@@ -758,4 +783,71 @@ pub fn build(b: *std.Build) void {
     engine_production_gate_step.dependOn(smoke_step);
     engine_production_gate_step.dependOn(architecture_check_step);
     engine_production_gate_step.dependOn(test262_gate_step);
+
+    // Same-runtime benchmark harness: reuse the production engine module so
+    // compile-once/execute-many measurements use the exact ReleaseFast engine
+    // configuration and build options as the zjs CLI.
+    const same_runtime_mod = b.createModule(.{
+        .root_source_file = b.path("tools/perf/same_runtime/zjs_same_runtime.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .omit_frame_pointer = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = internal_fast_mod },
+        },
+    });
+    same_runtime_mod.addOptions("dossier_options", dossier_options);
+    const same_runtime_exe = b.addExecutable(.{
+        .name = "zjs-same-runtime",
+        .root_module = same_runtime_mod,
+    });
+    const install_same_runtime = b.addInstallArtifact(same_runtime_exe, .{});
+    const same_runtime_step = b.step("perf-same-runtime", "Build and install the ReleaseFast same-runtime benchmark harness");
+    same_runtime_step.dependOn(&install_same_runtime.step);
+    const build_qjs_same_runtime = b.addSystemCommand(&.{
+        "bash",
+        "tools/perf/same_runtime/build_qjs_harness.sh",
+    });
+    const same_runtime_all_step = b.step(
+        "perf-same-runtime-all",
+        "Build and install both zjs and QuickJS same-runtime benchmark harnesses",
+    );
+    same_runtime_all_step.dependOn(&install_same_runtime.step);
+    same_runtime_all_step.dependOn(&build_qjs_same_runtime.step);
+
+    // Direct/core performance scaffold. This is intentionally isolated from
+    // every validation gate: the build-only step installs the Zig harness,
+    // while perf-direct lets the driver compile the pinned QuickJS C harness
+    // and run ABBA-interleaved paired samples.
+    const perf_direct_zjs_mod = b.createModule(.{
+        .root_source_file = b.path("tools/perf/direct/zjs_direct_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = internal_fast_mod },
+        },
+    });
+    perf_direct_zjs_mod.addOptions("dossier_options", dossier_options);
+    const perf_direct_zjs_exe = b.addExecutable(.{
+        .name = "zjs-direct-bench",
+        .root_module = perf_direct_zjs_mod,
+    });
+    const install_perf_direct_zjs = b.addInstallArtifact(perf_direct_zjs_exe, .{});
+    const perf_direct_build_step = b.step("perf-direct-build", "Build and install the zjs direct/core benchmark harness");
+    perf_direct_build_step.dependOn(&install_perf_direct_zjs.step);
+
+    const run_perf_direct = b.addSystemCommand(&.{
+        "bash",
+        "tools/perf/direct/run_direct.sh",
+        "--zig",
+        b.graph.zig_exe,
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-direct-bench"),
+    });
+    run_perf_direct.step.dependOn(&install_perf_direct_zjs.step);
+    if (b.args) |args| run_perf_direct.addArgs(args);
+    const perf_direct_step = b.step("perf-direct", "Run zjs versus pinned QuickJS direct/core benchmarks");
+    perf_direct_step.dependOn(&run_perf_direct.step);
 }

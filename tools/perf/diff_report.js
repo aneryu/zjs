@@ -116,6 +116,21 @@ function statusText(row) {
     return row.status || 'unknown';
 }
 
+function statusSeverity(status) {
+    switch (status) {
+        case 'ok':
+            return 0;
+        case 'unsupported':
+        case 'skipped':
+            return 1;
+        case 'invalid':
+        case 'failed':
+            return 2;
+        default:
+            return 2;
+    }
+}
+
 function sampleConfig(report) {
     const iters = report && report.iters;
     const warmup = report && report.warmup;
@@ -158,6 +173,8 @@ function compareReports(oldReport, newReport) {
     const newUnsupported = summaryCount(newReport, 'unsupported');
     const oldSkipped = summaryCount(oldReport, 'skipped');
     const newSkipped = summaryCount(newReport, 'skipped');
+    const oldInvalid = summaryCount(oldReport, 'invalid');
+    const newInvalid = summaryCount(newReport, 'invalid');
     const oldGeomean = reportGeomean(oldReport);
     const newGeomean = reportGeomean(newReport);
     const oldSampleConfig = sampleConfig(oldReport);
@@ -177,6 +194,9 @@ function compareReports(oldReport, newReport) {
     }
     if (newSkipped > oldSkipped) {
         failures.push(`skipped case count increased: ${oldSkipped} -> ${newSkipped}`);
+    }
+    if (newInvalid > oldInvalid) {
+        failures.push(`invalid case count increased: ${oldInvalid} -> ${newInvalid}`);
     }
     if (failOnGeomeanRegression && oldGeomean != null && newGeomean != null && newGeomean > oldGeomean * geomeanRegressionRatio) {
         failures.push(`geometric mean regressed: ${oldGeomean.toFixed(4)} -> ${newGeomean.toFixed(4)}`);
@@ -209,7 +229,14 @@ function compareReports(oldReport, newReport) {
                 newStatus: statusText(newRow),
                 reason: newRow.reason || '',
             });
-            if (oldRow.status === 'ok' || newRow.status === 'unsupported' || newRow.status === 'skipped') {
+            const severityIncreased = statusSeverity(newRow.status) > statusSeverity(oldRow.status);
+            if (
+                oldRow.status === 'ok' ||
+                newRow.status === 'unsupported' ||
+                newRow.status === 'skipped' ||
+                newRow.status === 'invalid' ||
+                severityIncreased
+            ) {
                 failures.push(`case status changed: ${name} ${statusText(oldRow)} -> ${statusText(newRow)}`);
             }
         }
@@ -304,6 +331,8 @@ function compareReports(oldReport, newReport) {
             newUnsupported,
             oldSkipped,
             newSkipped,
+            oldInvalid,
+            newInvalid,
             oldSampleConfig,
             newSampleConfig,
         },
@@ -348,6 +377,7 @@ function formatText(result) {
         `  compatible:   ${result.summary.oldCompatible} -> ${result.summary.newCompatible}`,
         `  unsupported:  ${result.summary.oldUnsupported} -> ${result.summary.newUnsupported}`,
         `  skipped:      ${result.summary.oldSkipped} -> ${result.summary.newSkipped}`,
+        `  invalid:      ${result.summary.oldInvalid} -> ${result.summary.newInvalid}`,
         `  sample cfg:   ${sampleConfigText(result.summary.oldSampleConfig)} -> ${sampleConfigText(result.summary.newSampleConfig)}`,
         '',
     ];

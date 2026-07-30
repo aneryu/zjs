@@ -516,6 +516,64 @@ pub const Entry = struct {
         continuation.payload = 0;
     }
 
+    /// Teardown bits whose presence means this frame's completion is not the
+    /// plain one. Listed by name rather than as a literal mask so that adding a
+    /// completion kind forces a decision here instead of silently classifying
+    /// as ordinary; the comptime check below fails if any bit goes unclassified.
+    ///
+    /// Two bits are deliberately absent. `simple` is a teardown-shape fact an
+    /// ordinary return requires rather than one it excludes, and `copy_argv`
+    /// only prices the frame's bytecode-stack charge and has no completion
+    /// effect at all.
+    const extended_completion_flags: TeardownFlags = .{
+        .has_native_caller = true,
+        .empty_leaf = true,
+        .exact_args_leaf = true,
+        // Merge resolution: main generalized the phase branch's
+        // `forwarded_leaf` into `special_return` at the same bit position,
+        // widening it from Function.call's forwarded leaf to that plus a
+        // synchronous native fence. Both are returns that must leave the
+        // ordinary `.next` resume path, so the classification is unchanged and
+        // the wider meaning only makes including it more correct.
+        .special_return = true,
+        .tail_chain = true,
+        .constructor_completion = true,
+    };
+
+    comptime {
+        const ordinary_compatible: TeardownFlags = .{ .simple = true, .copy_argv = true };
+        const covered = @as(u8, @bitCast(extended_completion_flags)) |
+            @as(u8, @bitCast(ordinary_compatible));
+        if (covered != std.math.maxInt(u8))
+            @compileError("a TeardownFlags bit is unclassified for return-mode purposes");
+    }
+
+    /// Whether this frame retires through the plain completion: push the
+    /// result, resume the caller, nothing else.
+    ///
+    /// The generic return path establishes this today by interrogating the same
+    /// state one bit at a time -- three leaf arms, the constructor arm, the
+    /// tail-chain arm, the native-caller release, the continuation tag -- on
+    /// every return, although the answer is fixed the moment the frame is
+    /// published. This derives it from the already-loaded `teardown` byte with
+    /// one masked compare, so nothing is stored and Entry does not grow.
+    ///
+    /// Reads ONLY completion-type facts. `frame.cold`, storage ownership, and
+    /// whether the operand stack still owns its arena window are all decided
+    /// while the body runs -- a callee can materialize `arguments`, fall back to
+    /// heap storage, or grow its stack -- so they stay out of the
+    /// classification and the ordinary epilogue keeps testing them dynamically.
+    /// `frame.cold` in particular is NOT a proxy for extended completion: a
+    /// forwarded leaf, a native-caller frame, a Proxy or for-of continuation
+    /// and a tail-chain frame all leave it null, while `arguments` sets it on
+    /// frames that complete plainly.
+    pub inline fn isOrdinaryReturn(self: *const Entry) bool {
+        const bits: u8 = @bitCast(self.teardown);
+        if (bits & @as(u8, @bitCast(extended_completion_flags)) != 0) return false;
+        if (!self.teardown.simple) return false;
+        return self.return_action == .next;
+    }
+
     inline fn canUseSimpleTeardown(self: *const Entry) bool {
         return self.teardown.simple and self.frame.cold == null and
             self.frame.ownership.storage == .borrowed and self.stack.isArenaWindow();
@@ -708,6 +766,43 @@ pub const Entry = struct {
         for (live_values) |v| v.free(rt);
         for (frame.args) |v| v.free(rt);
         if (self.teardown.constructor_completion) self.releaseConstructorFallback(rt);
+    }
+
+    /// `deinitSimpleResources` for a frame `isOrdinaryReturn` already cleared.
+    /// Same sequence and same order; the native-caller release and the
+    /// constructor-fallback release are gone because the classification proved
+    /// both bits clear. The first of those two tests alone was 6.22% of
+    /// op_return in fib_rec.
+    inline fn deinitOrdinarySimpleResources(self: *Entry, ctx: *core.JSContext) void {
+        const rt = ctx.runtime;
+        const frame = &self.frame;
+        std.debug.assert(self.isOrdinaryReturn());
+        std.debug.assert(self.canUseSimpleTeardown());
+        std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
+        std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+        if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
+        if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+        // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
+        const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
+        for (live_values) |v| v.free(rt);
+        for (frame.args) |v| v.free(rt);
+    }
+
+    /// `deinitReturned` for a plain completion. The leaf routing is gone -- the
+    /// classification proved all three leaf bits clear -- so the only decision
+    /// left is the one that genuinely cannot be made before the body runs:
+    /// whether the frame still has the arena-backed shape simple teardown
+    /// needs. A frame that grew its stack or materialized `arguments` keeps the
+    /// unchanged general body.
+    inline fn deinitOrdinaryReturned(self: *Entry, ctx: *core.JSContext) void {
+        if (self.canUseSimpleTeardown()) {
+            self.deinitOrdinarySimpleResources(ctx);
+            ctx.runtime.vm_stack.restore(self.arena_mark);
+            self.profile_guard.deinit();
+            return;
+        }
+        self.deinitGeneral(ctx);
     }
 
     /// General teardown for frames whose stack, cold state, or storage escaped
@@ -4198,14 +4293,49 @@ pub const Machine = struct {
     /// transferred to a tail-call replacement, or explicitly deinitialized.
     inline fn popFrameMode(self: *Machine, comptime returned: bool) ReturnContinuation {
         const dying = self.topEntry();
-        // Read the overlay before teardown. The final replacement releases
-        // its own unit and every retired tail caller it represents.
-        const chain_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
-            dying.tailChainBudgetSlot().*
-        else
-            .{ .extra_depth = 0, .planned_stack_bytes = 0 };
+        // A frame that carries retired tail callers releases their accumulated
+        // budget too, which means reading an overlay before teardown and a
+        // second pass over the runtime's depth and byte counters. An ordinary
+        // frame's budget is statically {0, 0}, so it used to build that struct,
+        // hold it live across teardown, and subtract zero from two hot runtime
+        // fields on every single return. The whole shape now lives in the
+        // outlined twin below and this path never mentions it again; the bit
+        // tested here is in the same `teardown` byte deinitReturned already
+        // loads for its own flags.
+        if (dying.teardown.tail_chain) return self.popTailChainFrameMode(returned);
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        ));
+        const continuation = dying.takeContinuation();
+        if (returned)
+            dying.deinitReturned(self.ctx)
+        else
+            dying.deinit(self.ctx);
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        self.depth -= 1;
+        // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
+        // done: epilogue (quickjs.c:20709).
+        self.top = dying.prev;
+        return continuation;
+    }
+
+    /// `popFrameMode` for a frame that inherited the logical depth and planned
+    /// bytecode-stack cost of tail callers whose Entry storage was reused. Same
+    /// sequence as the ordinary twin plus the inherited-budget release, kept out
+    /// of line so an ordinary return neither materializes the overlay nor pays
+    /// the second counter pass. `returned` is runtime here rather than comptime:
+    /// this path is entered once per tail chain, not once per call.
+    noinline fn popTailChainFrameMode(self: *Machine, returned: bool) ReturnContinuation {
+        const dying = self.topEntry();
+        std.debug.assert(dying.teardown.tail_chain);
+        // Read the overlay before teardown. The final replacement releases
+        // its own unit and every retired tail caller it represents.
+        const chain_budget: Entry.TailChainBudget = dying.tailChainBudgetSlot().*;
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
         std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
             dying.frame.function,
@@ -4223,10 +4353,36 @@ pub const Machine = struct {
         self.ctx.runtime.hot.call_depth -= chain_budget.extra_depth;
         self.ctx.runtime.hot.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
+        self.top = dying.prev;
+        return continuation;
+    }
+
+    /// `popFrameMode` for a frame `isOrdinaryReturn` already cleared. No
+    /// tail-chain budget to release, no continuation to move out, no special
+    /// completion to discriminate -- so none of that is re-asked. Returns
+    /// nothing because a plain completion carries no payload for the caller.
+    pub inline fn popOrdinaryFrame(self: *Machine) void {
+        const dying = self.topEntry();
+        std.debug.assert(dying.isOrdinaryReturn());
+        // The classification never reads the payload, so this is the one check
+        // on this path that is not circular: it catches a producer that
+        // installed a continuation payload without the tag that goes with it,
+        // which is exactly the frame this path would drop on the floor.
+        std.debug.assert(dying.continuation_payload == 0);
+        // Committed charge persisted at construction; the recompute is the
+        // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        ));
+        dying.deinitOrdinaryReturned(self.ctx);
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).
         self.top = dying.prev;
-        return continuation;
     }
 
     /// Retire an abruptly-completed or tail-replaced frame.

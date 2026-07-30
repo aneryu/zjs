@@ -1,0 +1,519 @@
+{
+ "note": "P6-04d2b: materialize only the requested division result. P0 = 23610910, P1 = 5f255952.",
+ "p0": "23610910",
+ "p1": "5f255952",
+ "verdict": "allocation target met exactly (4 -> 3 for both div and mod, single-limb untouched, lhs<rhs div 1 -> 0); every multi-limb and one-digit shape improves with all sixteen combinations same-direction. The 5% bar is met on div_8x4 and mod_8x4 at direct-core and mod_8x4 at the JS level; div_16x8 falls short.",
+ "mechanism": {
+  "selector": "DivOutput { quotient, remainder, both } threaded from div/rem through divRemAbsAlloc into divRemAbsNormalizedLong",
+  "algorithm_untouched": "quotient digits are still computed because the division needs them, and the numerator scratch is still consumed in place; only the final construction differs",
+  "no_branch_in_the_digit_loop": "the 'was a quotient requested' question folds into the j < quotient_writes bound the loop already tested to skip its provably-zero top digit",
+  "single_limb_deliberately_untouched": "already at two allocations and the fastest shape in the matrix",
+  "early_return_included": "the lhs < rhs arm's only allocation is the dividend clone, which div discards"
+ },
+ "topology": {
+  "multi_limb": {
+   "p0": 4,
+   "p1": 3,
+   "applies_to": "both div and mod"
+  },
+  "single_limb": {
+   "p0": 2,
+   "p1": 2
+  },
+  "lhs_less_than_rhs": {
+   "div": {
+    "p0": 1,
+    "p1": 0
+   },
+   "mod": {
+    "p0": 1,
+    "p1": 1
+   }
+  },
+  "memcpy_per_op": {
+   "p0": 1,
+   "p1": 2,
+   "note": "the source still has exactly two copies; d2a's build inlined one and this one does not. Copy work unchanged. Recorded, not chased."
+  }
+ },
+ "purity": {
+  "method": "identical counters compiled into P0 and P1, identical corpora",
+  "random_sweep_40k": "digits 320754, corrections 95009, addbacks 0, clamps 0, submul limbs 2241550, direct 15611, reciprocal 305143, inits 31999 -- identical",
+  "frozen_vectors_plus_all_64_shifts": "digits 10192, corrections 2939, addbacks 24, clamps 8, submul limbs 35512, direct 88, reciprocal 10096, inits 1560 -- identical"
+ },
+ "direct_core": {
+  "harness": "four build instances per side, all sixteen combinations, three interleaved rounds",
+  "cases": {
+   "div-size-8x4": {
+    "group": "primary",
+    "p0_ns": 116.08,
+    "p1_ns": 108.26,
+    "geomean": 0.9334,
+    "min": 0.9215,
+    "max": 0.9471,
+    "all_same_direction": true
+   },
+   "mod-size-8x4": {
+    "group": "primary",
+    "p0_ns": 116.0,
+    "p1_ns": 109.08,
+    "geomean": 0.9398,
+    "min": 0.9263,
+    "max": 0.9522,
+    "all_same_direction": true
+   },
+   "div-size-16x8": {
+    "group": "primary",
+    "p0_ns": 217.94,
+    "p1_ns": 208.33,
+    "geomean": 0.9567,
+    "min": 0.9525,
+    "max": 0.9624,
+    "all_same_direction": true
+   },
+   "mod-size-16x8": {
+    "group": "primary",
+    "p0_ns": 218.02,
+    "p1_ns": 211.34,
+    "geomean": 0.9699,
+    "min": 0.9687,
+    "max": 0.972,
+    "all_same_direction": true
+   },
+   "div-size-12x4": {
+    "group": "primary",
+    "p0_ns": 162.43,
+    "p1_ns": 154.35,
+    "geomean": 0.9505,
+    "min": 0.9406,
+    "max": 0.9608,
+    "all_same_direction": true
+   },
+   "mod-size-12x4": {
+    "group": "primary",
+    "p0_ns": 162.27,
+    "p1_ns": 154.48,
+    "geomean": 0.9525,
+    "min": 0.9456,
+    "max": 0.9605,
+    "all_same_direction": true
+   },
+   "div-size-16x4": {
+    "group": "primary",
+    "p0_ns": 208.48,
+    "p1_ns": 201.34,
+    "geomean": 0.9663,
+    "min": 0.9576,
+    "max": 0.9759,
+    "all_same_direction": true
+   },
+   "mod-size-16x4": {
+    "group": "primary",
+    "p0_ns": 208.24,
+    "p1_ns": 201.57,
+    "geomean": 0.9684,
+    "min": 0.9599,
+    "max": 0.9778,
+    "all_same_direction": true
+   },
+   "div-size-24x8": {
+    "group": "primary",
+    "p0_ns": 352.05,
+    "p1_ns": 342.95,
+    "geomean": 0.9741,
+    "min": 0.972,
+    "max": 0.9759,
+    "all_same_direction": true
+   },
+   "mod-size-24x8": {
+    "group": "primary",
+    "p0_ns": 351.69,
+    "p1_ns": 344.92,
+    "geomean": 0.9808,
+    "min": 0.9792,
+    "max": 0.9826,
+    "all_same_direction": true
+   },
+   "div-size-2x2": {
+    "group": "one_digit",
+    "p0_ns": 58.31,
+    "p1_ns": 49.71,
+    "geomean": 0.8527,
+    "min": 0.8445,
+    "max": 0.8614,
+    "all_same_direction": true
+   },
+   "mod-size-2x2": {
+    "group": "one_digit",
+    "p0_ns": 58.24,
+    "p1_ns": 50.49,
+    "geomean": 0.8688,
+    "min": 0.8609,
+    "max": 0.8806,
+    "all_same_direction": true
+   },
+   "div-size-8x8": {
+    "group": "one_digit",
+    "p0_ns": 68.29,
+    "p1_ns": 59.21,
+    "geomean": 0.8663,
+    "min": 0.8575,
+    "max": 0.8738,
+    "all_same_direction": true
+   },
+   "mod-size-8x8": {
+    "group": "one_digit",
+    "p0_ns": 68.11,
+    "p1_ns": 61.2,
+    "geomean": 0.8983,
+    "min": 0.8863,
+    "max": 0.9097,
+    "all_same_direction": true
+   },
+   "div-size-16x16": {
+    "group": "one_digit",
+    "p0_ns": 81.28,
+    "p1_ns": 69.97,
+    "geomean": 0.8594,
+    "min": 0.8507,
+    "max": 0.8651,
+    "all_same_direction": true
+   },
+   "mod-size-16x16": {
+    "group": "one_digit",
+    "p0_ns": 80.96,
+    "p1_ns": 73.52,
+    "geomean": 0.9088,
+    "min": 0.9024,
+    "max": 0.9166,
+    "all_same_direction": true
+   },
+   "div-size-32x32": {
+    "group": "one_digit",
+    "p0_ns": 108.24,
+    "p1_ns": 94.22,
+    "geomean": 0.8714,
+    "min": 0.8641,
+    "max": 0.8807,
+    "all_same_direction": true
+   },
+   "mod-size-32x32": {
+    "group": "one_digit",
+    "p0_ns": 108.19,
+    "p1_ns": 100.68,
+    "geomean": 0.9309,
+    "min": 0.9231,
+    "max": 0.9396,
+    "all_same_direction": true
+   },
+   "div-size-5x4": {
+    "group": "below",
+    "p0_ns": 78.95,
+    "p1_ns": 70.06,
+    "geomean": 0.888,
+    "min": 0.8725,
+    "max": 0.9051,
+    "all_same_direction": true
+   },
+   "mod-size-5x4": {
+    "group": "below",
+    "p0_ns": 78.75,
+    "p1_ns": 71.08,
+    "geomean": 0.9018,
+    "min": 0.8873,
+    "max": 0.9151,
+    "all_same_direction": true
+   },
+   "div-size-6x4": {
+    "group": "below",
+    "p0_ns": 97.34,
+    "p1_ns": 88.13,
+    "geomean": 0.9066,
+    "min": 0.8949,
+    "max": 0.9209,
+    "all_same_direction": true
+   },
+   "mod-size-6x4": {
+    "group": "below",
+    "p0_ns": 97.02,
+    "p1_ns": 89.15,
+    "geomean": 0.9185,
+    "min": 0.9088,
+    "max": 0.9273,
+    "all_same_direction": true
+   },
+   "div-size-9x8": {
+    "group": "below",
+    "p0_ns": 91.64,
+    "p1_ns": 83.42,
+    "geomean": 0.9081,
+    "min": 0.8941,
+    "max": 0.9176,
+    "all_same_direction": true
+   },
+   "mod-size-9x8": {
+    "group": "below",
+    "p0_ns": 91.6,
+    "p1_ns": 84.11,
+    "geomean": 0.9207,
+    "min": 0.9129,
+    "max": 0.9336,
+    "all_same_direction": true
+   },
+   "div-size-1x1": {
+    "group": "single",
+    "p0_ns": 34.8,
+    "p1_ns": 34.82,
+    "geomean": 1.0013,
+    "min": 0.9905,
+    "max": 1.0134,
+    "all_same_direction": false
+   },
+   "mod-size-1x1": {
+    "group": "single",
+    "p0_ns": 34.61,
+    "p1_ns": 34.83,
+    "geomean": 1.0061,
+    "min": 0.9936,
+    "max": 1.0181,
+    "all_same_direction": false
+   },
+   "div-size-2x1": {
+    "group": "single",
+    "p0_ns": 38.63,
+    "p1_ns": 38.91,
+    "geomean": 1.0004,
+    "min": 0.9675,
+    "max": 1.0205,
+    "all_same_direction": false
+   },
+   "mod-size-2x1": {
+    "group": "single",
+    "p0_ns": 39.01,
+    "p1_ns": 38.77,
+    "geomean": 0.9952,
+    "min": 0.9713,
+    "max": 1.0229,
+    "all_same_direction": false
+   },
+   "div-size-8x1": {
+    "group": "single",
+    "p0_ns": 101.66,
+    "p1_ns": 101.5,
+    "geomean": 0.9998,
+    "min": 0.9934,
+    "max": 1.0091,
+    "all_same_direction": false
+   },
+   "mod-size-8x1": {
+    "group": "single",
+    "p0_ns": 101.95,
+    "p1_ns": 101.5,
+    "geomean": 0.9965,
+    "min": 0.9914,
+    "max": 1.0034,
+    "all_same_direction": false
+   },
+   "div-size-16x1": {
+    "group": "single",
+    "p0_ns": 188.09,
+    "p1_ns": 187.94,
+    "geomean": 0.9993,
+    "min": 0.9957,
+    "max": 1.0031,
+    "all_same_direction": false
+   },
+   "mod-size-16x1": {
+    "group": "single",
+    "p0_ns": 187.89,
+    "p1_ns": 187.91,
+    "geomean": 0.9999,
+    "min": 0.9963,
+    "max": 1.0031,
+    "all_same_direction": false
+   },
+   "div-rel-lt": {
+    "group": "rel",
+    "p0_ns": 11.16,
+    "p1_ns": 7.65,
+    "geomean": 0.6849,
+    "min": 0.6817,
+    "max": 0.6874,
+    "all_same_direction": true
+   },
+   "div-rel-eq": {
+    "group": "rel",
+    "p0_ns": 55.15,
+    "p1_ns": 54.11,
+    "geomean": 0.9842,
+    "min": 0.9707,
+    "max": 1.004,
+    "all_same_direction": false
+   },
+   "div-rel-q1": {
+    "group": "rel",
+    "p0_ns": 63.33,
+    "p1_ns": 54.5,
+    "geomean": 0.8599,
+    "min": 0.8523,
+    "max": 0.8662,
+    "all_same_direction": true
+   },
+   "div-rel-exact": {
+    "group": "rel",
+    "p0_ns": 105.37,
+    "p1_ns": 104.62,
+    "geomean": 0.9967,
+    "min": 0.9837,
+    "max": 1.0173,
+    "all_same_direction": false
+   }
+  },
+  "shape_of_the_gain": "fixed-cost-dominated shapes gain about three times as much as per-digit-dominated ones: 2x2 -14.7% and rel-lt -31.5% against 24x8 -2.6%",
+  "div_gains_more_than_mod_on_one_digit_shapes": "div skips the remainder's unshift copy and allocation while mod only skips the quotient allocation, usually the smaller of the two: 16x16 is -14.1% for div and -9.1% for mod"
+ },
+ "js_level": {
+  "cases": {
+   "bigint_div_8x1": {
+    "p0_ms": 0.0245,
+    "p1_ms": 0.0238,
+    "geomean": 0.9694,
+    "min": 0.967,
+    "max": 0.9711,
+    "all_same_direction": true,
+    "p1_over_qjs": 1.93,
+    "p0_over_qjs": 1.99
+   },
+   "bigint_div_8x4": {
+    "p0_ms": 0.0399,
+    "p1_ms": 0.0379,
+    "geomean": 0.9519,
+    "min": 0.9492,
+    "max": 0.9589,
+    "all_same_direction": true,
+    "p1_over_qjs": 2.68,
+    "p0_over_qjs": 2.82
+   },
+   "bigint_div_16x8": {
+    "p0_ms": 0.0247,
+    "p1_ms": 0.0238,
+    "geomean": 0.9672,
+    "min": 0.9663,
+    "max": 0.969,
+    "all_same_direction": true,
+    "p1_over_qjs": 1.33,
+    "p0_over_qjs": 1.37
+   },
+   "bigint_mod_8x4": {
+    "p0_ms": 0.0358,
+    "p1_ms": 0.0337,
+    "geomean": 0.944,
+    "min": 0.9412,
+    "max": 0.9497,
+    "all_same_direction": true,
+    "p1_over_qjs": 1.53,
+    "p0_over_qjs": 1.62
+   },
+   "local_arith_loop": {
+    "p0_ms": 6.0002,
+    "p1_ms": 5.9987,
+    "geomean": 0.9999,
+    "min": 0.9991,
+    "max": 1.0012,
+    "all_same_direction": false,
+    "p1_over_qjs": 0.93,
+    "p0_over_qjs": 0.93
+   }
+  },
+  "control_clean": "local_arith_loop geomean 0.9999 with a 0.9991 to 1.0012 range, no outlier this time"
+ },
+ "gates": {
+  "allocations_4_to_3": "met for both div and mod",
+  "single_limb_not_complicated": "met: unchanged at two allocations, direct-core 0.9993 to 1.0061 all straddling 1.0",
+  "div_8x4_at_least_5_percent": "met at direct-core (6.7%); JS is 4.8%",
+  "div_16x8_at_least_5_percent": "MISSED: 4.3% direct-core, 3.3% JS",
+  "mod_8x4_at_least_5_percent": "met at both (6.0% direct-core, 5.6% JS)",
+  "purity": "met",
+  "correctness": "met"
+ },
+ "sentinels": {
+  "mod-size-2x1": {
+   "p0_ns": 39.01,
+   "p1_ns": 38.77,
+   "geomean": 0.9952,
+   "status": "unchanged, still far below its 59.53 pre-regression baseline"
+  },
+  "div-size-6x4": {
+   "p0_ns": 97.34,
+   "p1_ns": 88.13,
+   "geomean": 0.9066,
+   "status": "improved a further 9.3%, now 88.13 against its 109.58 pre-regression baseline"
+  }
+ },
+ "correctness": {
+  "random_differential": {
+   "cases": 20000,
+   "limbs": "1-64",
+   "result": "byte-identical to pinned QuickJS"
+  },
+  "targeted_probe": {
+   "lines": 487,
+   "result": "byte-identical to pinned QuickJS"
+  },
+  "test262": {
+   "errors": 0,
+   "prepared": 49775,
+   "passed": 44541,
+   "known": 25
+  },
+  "focused_suites": {
+   "core": 312,
+   "parser": 463,
+   "bytecode": 188,
+   "exec": 389,
+   "builtins": 193,
+   "runtime": 72,
+   "runner": 43
+  },
+  "oom": 14,
+  "altrepr": 2002,
+  "release_safe_core": 312,
+  "force_gc_core": 312,
+  "force_gc_cross_engine": "the 20000-case differential is byte-identical to qjs under force-GC"
+ },
+ "limits": [
+  "div_16x8 misses the 5% bar at 4.3% direct-core and 3.3% JS; it has the largest per-digit share in the matrix so a fixed-cost cut helps it least",
+  "the single-limb path still materializes both results, a deliberate exclusion rather than an oversight; at most one small allocation is left there",
+  "memcpy per op went 1 back to 2 as an inlining-decision change; the copy work is unchanged and this was not chased",
+  "the JS layer still has only three division cases plus the single-limb sentinel"
+ ],
+ "next_denominator": {
+  "direct_core_ns_per_op": {
+   "8x4": 108.3,
+   "12x4": 154.4,
+   "16x4": 201.3,
+   "16x8": 208.3,
+   "24x8": 343.0,
+   "2x2": 49.7,
+   "8x8": 59.2,
+   "16x16": 70.0,
+   "32x32": 94.2,
+   "5x4": 70.1,
+   "6x4": 88.1,
+   "9x8": 83.4,
+   "1x1": 34.8,
+   "2x1": 38.9,
+   "8x1": 101.5,
+   "16x1": 187.9,
+   "rel-lt": 7.7
+  },
+  "js_over_qjs": {
+   "div_8x1": 1.93,
+   "div_8x4": 2.68,
+   "div_16x8": 1.33,
+   "mod_8x4": 1.53
+  },
+  "topology": "multi-limb 3 allocations (u, v, and the one requested result), single-limb 2, 2 memcpys",
+  "next_cut": "P6-04d2c merges the u and v scratch; with allocations already at 3 and the remaining cost increasingly per-digit, its expected value is lower than when the sequence was planned"
+ }
+}

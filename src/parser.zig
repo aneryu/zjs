@@ -6072,10 +6072,7 @@ pub const parser_core = struct {
             if (negate and !parsed.isZero()) parsed.negative = !parsed.negative;
 
             const big = self.function.memory.create(core_bigint.BigInt) catch return Error.OutOfMemory;
-            big.* = .{
-                .header = .{},
-                .value = parsed,
-            };
+            big.initExternalFromOwned(parsed);
             parsed = .{ .allocator = self.function.memory.persistent_allocator };
             try self.emitPushConstOwned(big.valueRef());
         }

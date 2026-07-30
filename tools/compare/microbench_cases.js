@@ -375,11 +375,15 @@ export const cases = [
     supported('string_to_float', 'string_to_float', 'conversion', 'String to float observable result.', [
         'print(Number.parseFloat("12.5"));',
     ]),
+    // `print` renders a BigInt through each CLI's inspector: qjs appends the
+    // `n` suffix, zjs does not. That is a host formatting difference, not an
+    // arithmetic one, so printing the raw value made these cases compare
+    // unequal across engines. `String()` is specified and identical on both.
     supported('bigint64_arith', 'bigint64_arith', 'bigint', '64-bit BigInt arithmetic observable result.', [
-        'print(1n + 2n);',
+        'print(String(1n + 2n));',
     ]),
     supported('bigint256_arith', 'bigint256_arith', 'bigint', 'Large BigInt arithmetic observable result.', [
-        'print(340282366920938463463374607431768211456n + 1n);',
+        'print(String(340282366920938463463374607431768211456n + 1n));',
     ]),
     supported('vm_int_sum_large', 'vm_int_sum_large', 'control', 'Targeted VM dispatch integer loop from the performance plan.', [
         'let s = 0;',

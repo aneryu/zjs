@@ -593,14 +593,19 @@ pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     return error.TypeError;
 }
 
+/// The heap BigInt behind a value, or null for short BigInts and non-BigInts.
+inline fn heapBigInt(value: core.JSValue) ?*core.bigint.BigInt {
+    if (!value.isBigInt()) return null;
+    const header = value.refHeader() orelse return null;
+    return @alignCast(@fieldParentPtr("header", header));
+}
+
 pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        var val = big.value;
-        val.allocator = rt.memory.allocator;
-        return val;
+        return big.borrowedValue(rt.memory.allocator);
     }
     return error.TypeError;
 }
@@ -610,7 +615,7 @@ pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.value.cloneWithAllocator(rt.memory.allocator);
+        return big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
     }
     return error.TypeError;
 }
@@ -797,8 +802,25 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
             var owned = rhs;
             owned.deinit();
         };
-        try big.value.addInPlace(rhs);
+        try big.addInPlaceExternal(rhs);
         return a.dup();
+    }
+
+    // Single-allocation multiplication: the wrapper and the product's limbs
+    // come from one createWithFam instead of mulAlloc's limb block plus
+    // createFromOwned's wrapper. This is qjs's topology (js_bigint_new is one
+    // js_malloc of header + limbs, quickjs.c:11860). Only heap x heap is
+    // routed, and either operand may already be in inline storage so a chain of
+    // multiplies does not fall back after the first one.
+    if (op == bytecode.opcode.op.mul) {
+        if (heapBigInt(a)) |lhs_big| {
+            if (heapBigInt(b)) |rhs_big| {
+                if (core.bigint.BigInt.mulResultCannotCompactToShort(lhs_big, rhs_big)) {
+                    const product = try core.bigint.BigInt.createMulInline(rt, lhs_big, rhs_big);
+                    return product.valueRef();
+                }
+            }
+        }
     }
 
     const lhs = try bigIntFromValueBorrowed(rt, a);
@@ -848,9 +870,9 @@ fn addPositiveShortToBigInt(rt: *core.JSRuntime, value: core.JSValue, addend: bi
     if (!value.isBigInt()) return null;
     const header = value.refHeader() orelse return null;
     const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-    if (big.value.negative) return null;
+    if (big.negative()) return null;
 
-    var out = try big.value.cloneWithAllocator(rt.memory.allocator);
+    var out = try big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
     errdefer out.deinit();
     try out.addPositiveSmallInPlace(addend);
     return try createBigIntOwned(rt, out);
@@ -1410,7 +1432,7 @@ fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return .{ .negative = big.value.negative, .limbs = big.value.limbs };
+        return .{ .negative = big.negative(), .limbs = big.limbs() };
     }
     return null;
 }

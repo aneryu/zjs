@@ -74,7 +74,9 @@ pub const BigInt = struct {
 
     pub fn div(self: BigInt, other: BigInt) !BigInt {
         if (other.isZero()) return error.DivisionByZero;
-        const out = try divRemAlloc(self.allocator, self, other);
+        const out = try divRemAllocOutput(self.allocator, self, other, .quotient);
+        // Empty unless the single-limb path produced one anyway; deinit on an
+        // empty value is a no-op.
         var remainder = out[1];
         remainder.deinit();
         return out[0];
@@ -82,7 +84,7 @@ pub const BigInt = struct {
 
     pub fn rem(self: BigInt, other: BigInt) !BigInt {
         if (other.isZero()) return error.DivisionByZero;
-        const out = try divRemAlloc(self.allocator, self, other);
+        const out = try divRemAllocOutput(self.allocator, self, other, .remainder);
         var quotient = out[0];
         quotient.deinit();
         return out[1];
@@ -253,7 +255,7 @@ pub const BigInt = struct {
         defer abs_value.deinit();
         var divisor = try pow2(allocator, shift);
         defer divisor.deinit();
-        const div_rem = try divRemAbsAlloc(allocator, abs_value, divisor);
+        const div_rem = try divRemAbsAlloc(allocator, abs_value, divisor, .both);
         var quotient = div_rem[0];
         var remainder = div_rem[1];
         defer remainder.deinit();
@@ -415,7 +417,12 @@ pub const BigInt = struct {
             }
             a.* = @intCast(diff);
         }
-        self.* = try normalize(self.*);
+        // Hand the limbs to `normalize` before calling: it frees them if it
+        // fails, and leaving `self` aliasing the same slice would make the
+        // caller's `deinit` a second free.
+        const owned = self.*;
+        self.* = .{ .allocator = owned.allocator };
+        self.* = try normalize(owned);
     }
 
     fn absCloneWithAllocator(self: BigInt, allocator: std.mem.Allocator) !BigInt {
@@ -433,7 +440,9 @@ pub const BigInt = struct {
             self.limbs[index] = @intCast(current / divisor);
             remainder = current % divisor;
         }
-        self.* = try normalize(self.*);
+        const owned = self.*;
+        self.* = .{ .allocator = owned.allocator };
+        self.* = try normalize(owned);
         return @intCast(remainder);
     }
 
@@ -476,12 +485,30 @@ pub const BigInt = struct {
 };
 
 pub fn divRemAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
+    return divRemAllocOutput(allocator, lhs, rhs, .both);
+}
+
+fn divRemAllocOutput(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    rhs: BigInt,
+    want: DivOutput,
+) !struct { BigInt, BigInt } {
     if (rhs.isZero()) return error.DivisionByZero;
-    var lhs_abs = try lhs.absCloneWithAllocator(allocator);
-    defer lhs_abs.deinit();
-    var rhs_abs = try rhs.absCloneWithAllocator(allocator);
-    defer rhs_abs.deinit();
-    const div_rem = try divRemAbsAlloc(allocator, lhs_abs, rhs_abs);
+    // Borrowed magnitudes rather than cloned ones. `divRemAbsAlloc` never
+    // writes through either operand: the `lhs < rhs` arm clones, the
+    // single-limb arm only reads, and the long division copies both into its
+    // own `u` and `v` scratch before touching anything. So the only thing the
+    // clones ever produced was a sign-cleared copy, which a borrowed view gives
+    // for free.
+    //
+    // The OOM sweep is what keeps this honest: it asserts the caller's operand
+    // limbs are byte-for-byte unchanged after every injected failure, so a
+    // future write through one of these would fail there rather than silently
+    // corrupt a caller's BigInt.
+    const lhs_abs = BigInt{ .negative = false, .limbs = lhs.limbs, .allocator = allocator };
+    const rhs_abs = BigInt{ .negative = false, .limbs = rhs.limbs, .allocator = allocator };
+    const div_rem = try divRemAbsAlloc(allocator, lhs_abs, rhs_abs, want);
     var quotient = div_rem[0];
     var remainder = div_rem[1];
     quotient.negative = (lhs.negative != rhs.negative) and !quotient.isZero();
@@ -530,30 +557,380 @@ pub fn compareParts(lhs_negative: bool, lhs_limbs: []const Limb, rhs_negative: b
     return if (lhs_negative) invertOrder(abs_order) else abs_order;
 }
 
-fn divRemAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
-    if (rhs.isZero()) return error.DivisionByZero;
-    if (compareAbs(lhs, rhs) == .lt) {
-        return .{ .{ .allocator = allocator }, try lhs.cloneWithAllocator(allocator) };
-    }
-    var quotient = BigInt{ .allocator = allocator };
-    errdefer quotient.deinit();
+/// Single-limb divisor: one high-to-low pass over the numerator instead of the
+/// bit loop. This is qjs's shape for the same case -- `mp_div1norm`
+/// (quickjs.c:11332) walks limbs, not bits -- and it is the same kernel
+/// `divRemSmallInPlace` already uses for base conversion, lifted to an
+/// allocating caller.
+///
+/// The caller has already returned for `lhs < rhs`, so the quotient has at
+/// least one limb. Its exact length is known up front -- the top quotient digit
+/// is `lhs_top / divisor`, which is non-zero exactly when `lhs_top >= divisor`
+/// -- so the buffer is allocated at its final size and no normalization pass,
+/// and therefore no shrinking realloc, is needed. Cost is two allocations at
+/// most: the quotient, and the remainder when it is non-zero.
+///
+/// `noinline` because inlining it into `divRemAbsAlloc` costs the multi-limb
+/// bit loop, which shares that function, about 2% at the JS level -- measured,
+/// all sixteen build combinations above 1.0. The single-limb path is already a
+/// hundred times cheaper than what it replaces, so a call boundary on it is
+/// free by comparison, while the loop it sits next to is untouched.
+noinline fn divRemAbsByLimbAlloc(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    divisor: Limb,
+) !struct { BigInt, BigInt } {
+    std.debug.assert(divisor != 0);
+    std.debug.assert(lhs.limbs.len != 0);
+    const lhs_top = lhs.limbs[lhs.limbs.len - 1];
+    const quotient_len = if (lhs_top >= divisor) lhs.limbs.len else lhs.limbs.len - 1;
+    std.debug.assert(quotient_len >= 1);
+
+    const quotient_limbs = try allocator.alloc(Limb, quotient_len);
+    errdefer allocator.free(quotient_limbs);
+    const remainder_limb = divRemAbsByLimb(lhs.limbs, divisor, quotient_limbs);
+
     var remainder = BigInt{ .allocator = allocator };
-    errdefer remainder.deinit();
-    var bit = lhs.bitLengthAbs();
-    while (bit > 0) {
-        bit -= 1;
-        const shifted = try remainder.shl(allocator, 1);
-        remainder.deinit();
-        remainder = shifted;
-        if (lhs.testBit(bit)) try addSmallInPlace(&remainder, 1);
-        if (compareAbs(remainder, rhs) != .lt) {
-            const next_remainder = try subAbsAlloc(allocator, remainder, rhs);
-            remainder.deinit();
-            remainder = next_remainder;
-            try setBit(&quotient, bit);
+    if (remainder_limb != 0) {
+        const remainder_limbs = try allocator.alloc(Limb, 1);
+        remainder_limbs[0] = remainder_limb;
+        remainder = .{ .limbs = remainder_limbs, .allocator = allocator };
+    }
+    return .{ BigInt{ .limbs = quotient_limbs, .allocator = allocator }, remainder };
+}
+
+/// `quotient.len` must be `lhs.len` or `lhs.len - 1`, matching whether the top
+/// quotient digit is non-zero. Returns the remainder.
+fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
+    std.debug.assert(divisor != 0);
+    std.debug.assert(lhs.len != 0);
+    std.debug.assert(quotient.len == lhs.len or quotient.len + 1 == lhs.len);
+    var remainder: DoubleLimb = 0;
+    var index = lhs.len;
+    if (quotient.len + 1 == lhs.len) {
+        // The top quotient digit is zero by construction, so fold the top limb
+        // into the running remainder and leave the loop writing exactly one
+        // digit per slot.
+        index -= 1;
+        std.debug.assert(lhs[index] < divisor);
+        remainder = lhs[index];
+    }
+    while (index > 0) {
+        index -= 1;
+        const current = (remainder << limb_bits) | lhs[index];
+        quotient[index] = @intCast(current / divisor);
+        remainder = current % divisor;
+    }
+    return @intCast(remainder);
+}
+
+/// Which halves of a division the caller will use. `div` and `rem` each keep
+/// exactly one, and materializing the other means an allocation and a copy that
+/// are thrown away immediately.
+///
+/// The division itself is identical in all three modes -- the quotient digits
+/// are still computed, because the algorithm needs them, and the numerator
+/// scratch is still consumed in place. Only the final construction differs, so
+/// the estimate loop carries no extra branch: the "was a quotient requested"
+/// question is folded into the `j < quotient_writes` bound that loop already
+/// tested.
+pub const DivOutput = enum { quotient, remainder, both };
+
+/// Reciprocal of a normalized limb, mirroring qjs `udiv1norm_init`
+/// (quickjs.c:11433). `divisor` must have its high bit set.
+///
+/// The value is `floor((2^128 - 1) / divisor) - 2^64`, built as qjs builds it
+/// -- numerator `((-divisor - 1) : -1)` -- so no 129-bit intermediate is
+/// needed. It is never zero (the smallest case, `divisor = 2^64 - 1`, gives
+/// 1), which is what lets `0` serve as the "no reciprocal" sentinel in the
+/// division loop, exactly as qjs uses `b1_inv`.
+///
+/// This is the one wide division that remains: a reciprocal-eligible division
+/// pays it once instead of once per quotient limb.
+pub fn normalizedReciprocalInit(divisor: Limb) Limb {
+    std.debug.assert(divisor >> (limb_bits - 1) == 1);
+    const a1: Limb = (0 -% divisor) -% 1;
+    const a0: Limb = std.math.maxInt(Limb);
+    const reciprocal: Limb = @intCast(((@as(DoubleLimb, a1) << limb_bits) | a0) / divisor);
+    std.debug.assert(reciprocal != 0);
+    return reciprocal;
+}
+
+/// Exact `(high:low) / divisor` and its remainder, from the precomputed
+/// reciprocal. Mirrors qjs `udiv1norm` (quickjs.c:11444).
+///
+/// **Not an approximation.** The result is identical to what
+/// `((high:low)) / divisor` and `% divisor` produce, which is what lets the
+/// second-limb correction, multiply-subtract and add-back below stay exactly
+/// as they were -- their counts must not move.
+///
+/// Every step is wrapping on purpose: the middle term deliberately goes
+/// negative and is recovered through the all-ones high half.
+pub inline fn divTwoByOneReciprocal(
+    high: Limb,
+    low: Limb,
+    divisor: Limb,
+    reciprocal: Limb,
+) struct { quotient: Limb, remainder: Limb } {
+    std.debug.assert(divisor >> (limb_bits - 1) == 1);
+    std.debug.assert(high < divisor);
+    // 0 or all-ones, depending on `low`'s top bit.
+    const n1m: Limb = @bitCast(@as(i64, @bitCast(low)) >> (limb_bits - 1));
+    const n_adj: Limb = low +% (n1m & divisor);
+    const estimate: DoubleLimb = @as(DoubleLimb, reciprocal) * (high -% n1m) + n_adj;
+    var quotient: Limb = @as(Limb, @truncate(estimate >> limb_bits)) +% high;
+    // Recover the exact quotient and remainder: subtract one divisor too many
+    // so the sign of the result selects the final correction without a branch.
+    var value: DoubleLimb = (@as(DoubleLimb, high) << limb_bits) | low;
+    value = value -% @as(DoubleLimb, quotient) *% divisor -% divisor;
+    const high_half: Limb = @truncate(value >> limb_bits);
+    quotient = quotient +% 1 +% high_half;
+    const remainder: Limb = @as(Limb, @truncate(value)) +% (high_half & divisor);
+    return .{ .quotient = quotient, .remainder = remainder };
+}
+
+/// Quotient-position count at which precomputing the reciprocal pays for
+/// itself, matching qjs `UDIV1NORM_THRESHOLD` (quickjs.c:11463). Below it the
+/// loop keeps the direct `u128 / u64` estimate, so short quotients pay neither
+/// the initialization nor the extra code.
+const reciprocal_threshold: usize = 3;
+
+/// Multi-limb divisor: normalized schoolbook long division, one quotient limb
+/// per step. This is qjs's mechanism (`js_bigint_divrem` normalizes and then
+/// runs `mp_divnorm`, quickjs.c:11893-11976): normalize so the divisor's top
+/// limb has its high bit set, estimate one quotient digit from the leading
+/// numerator limbs, multiply-subtract, and add back on the rare overshoot.
+///
+/// Not a line-for-line port. qjs's `JSBigInt` is two's complement with sign
+/// extension, so its top quotient limb can only be 0 or 1 and it special-cases
+/// that; zjs is normalized sign-magnitude, where the top quotient limb is any
+/// `u64`. What is mirrored is the normalized limb-division mechanism, not the
+/// consequences of a different representation.
+///
+/// Everything is sized exactly up front, so there is no normalization pass and
+/// no shrinking realloc anywhere: at most four allocations, three of which are
+/// unconditional.
+///
+/// `noinline` for the reason P6-04b measured: a wide algorithm sharing a
+/// function with another branch pollutes it.
+noinline fn divRemAbsNormalizedLong(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    rhs: BigInt,
+    want: DivOutput,
+) !struct { BigInt, BigInt } {
+    const na = lhs.limbs.len;
+    const nb = rhs.limbs.len;
+    std.debug.assert(nb >= 2);
+    std.debug.assert(na >= nb);
+    std.debug.assert(rhs.limbs[nb - 1] != 0);
+    const m = na - nb;
+    const shift: u6 = @intCast(@clz(rhs.limbs[nb - 1]));
+
+    // The quotient's exact length, decided before allocating: the top digit is
+    // non-zero exactly when the numerator's top `nb` limbs are at least the
+    // divisor. `lhs < rhs` was handled by the caller, so this is at least 1.
+    const quotient_len = if (compareAbsParts(lhs.limbs[m..na], rhs.limbs) != .lt) m + 1 else m;
+    std.debug.assert(quotient_len >= 1);
+    const want_quotient = want != .remainder;
+    const want_remainder = want != .quotient;
+
+    // `u` and `v` are pure scratch and are always released. Keeping them as two
+    // allocations rather than one shared block is deliberate for this cut: it
+    // keeps the allocation topology readable and the OOM sweep able to fail
+    // each one separately.
+    const u = try allocator.alloc(Limb, na + 1);
+    defer allocator.free(u);
+    const v = try allocator.alloc(Limb, nb);
+    defer allocator.free(v);
+    // Empty when the caller only wants the remainder. The digits are still
+    // computed -- the algorithm needs them -- they are simply not stored.
+    const q: []Limb = if (want_quotient) try allocator.alloc(Limb, quotient_len) else &.{};
+    errdefer allocator.free(q);
+    // The loop already tested `j < quotient_len` to skip the provably-zero top
+    // digit, so folding "no buffer" into that same bound adds no branch to the
+    // hot path.
+    const quotient_writes = q.len;
+
+    if (shift == 0) {
+        @memcpy(v, rhs.limbs);
+        @memcpy(u[0..na], lhs.limbs);
+        u[na] = 0;
+    } else {
+        const divisor_carry = shiftLeftInto(v, rhs.limbs, shift);
+        // `shift` is the divisor top limb's leading-zero count, so shifting it
+        // left by that much cannot carry out.
+        std.debug.assert(divisor_carry == 0);
+        u[na] = shiftLeftInto(u[0..na], lhs.limbs, shift);
+    }
+    std.debug.assert(v[nb - 1] >> (limb_bits - 1) == 1);
+
+    const v1 = v[nb - 1];
+    const v0 = v[nb - 2];
+    // One wide division for the whole operation instead of one per quotient
+    // limb. Zero means "not eligible", which the reciprocal itself can never
+    // be; qjs uses `b1_inv` the same way.
+    const reciprocal: Limb = if (m >= reciprocal_threshold) normalizedReciprocalInit(v1) else 0;
+    var j = m + 1;
+    while (j > 0) {
+        j -= 1;
+        const window = u[j .. j + nb + 1];
+        const top = window[nb];
+        const high = window[nb - 1];
+        const next = window[nb - 2];
+        // Normalization keeps the running window below `v * b`, so its top limb
+        // never exceeds the divisor's.
+        std.debug.assert(top <= v1);
+
+        var qhat: Limb = undefined;
+        var rhat: DoubleLimb = undefined;
+        if (top == v1) {
+            // The true digit would be the base itself; clamp and let the
+            // correction below walk it down. The reciprocal helper requires
+            // `high < divisor`, so this case never reaches it.
+            qhat = std.math.maxInt(Limb);
+            rhat = @as(DoubleLimb, high) + v1;
+        } else if (reciprocal != 0) {
+            const estimate = divTwoByOneReciprocal(top, high, v1, reciprocal);
+            qhat = estimate.quotient;
+            rhat = estimate.remainder;
+        } else {
+            const numerator = (@as(DoubleLimb, top) << limb_bits) | high;
+            qhat = @intCast(numerator / v1);
+            rhat = numerator % v1;
+        }
+        // Second-divisor-limb correction. `rhat` reaching the base means the
+        // estimate is already exact, and shifting it would overflow the u128.
+        while (rhat < (@as(DoubleLimb, 1) << limb_bits) and
+            @as(DoubleLimb, qhat) * v0 > ((rhat << limb_bits) | next))
+        {
+            qhat -= 1;
+            rhat += v1;
+        }
+
+        if (subMulAt(window, v, qhat)) {
+            // With the two-limb correction above this happens with probability
+            // about 2/b, and never twice: one add-back restores the window.
+            qhat -= 1;
+            addBackAt(window, v);
+        }
+
+        if (j < quotient_writes) {
+            q[j] = qhat;
+        } else {
+            // Either the top digit is provably zero, or no quotient was asked
+            // for and there is nowhere to put it.
+            std.debug.assert(!want_quotient or qhat == 0);
         }
     }
-    return .{ try normalize(quotient), try normalize(remainder) };
+    if (want_quotient) std.debug.assert(q[quotient_len - 1] != 0);
+    // The remainder is below the divisor, so it fits in `nb` limbs.
+    std.debug.assert(u[nb] == 0);
+
+    // The remainder still carries the normalization shift. Measure its
+    // unshifted length first so it can be allocated at exactly that size --
+    // building `nb` limbs and normalizing afterwards would mean a shrinking
+    // realloc, which is the one thing this function avoids everywhere.
+    var remainder = BigInt{ .allocator = allocator };
+    if (want_remainder) {
+        var remainder_len = nb;
+        while (remainder_len > 0 and unshiftedLimbAt(u, remainder_len - 1, shift) == 0) : (remainder_len -= 1) {}
+        if (remainder_len != 0) {
+            const r = try allocator.alloc(Limb, remainder_len);
+            for (r, 0..) |*limb, i| limb.* = unshiftedLimbAt(u, i, shift);
+            remainder = .{ .limbs = r, .allocator = allocator };
+        }
+    }
+    return .{ BigInt{ .limbs = q, .allocator = allocator }, remainder };
+}
+
+/// `dst = src << shift`, returning the bits carried out of the top limb.
+/// `shift` must be 1..63; the zero case is a plain copy at the call sites so
+/// that `limb_bits - shift` is never an out-of-range shift.
+fn shiftLeftInto(dst: []Limb, src: []const Limb, shift: u6) Limb {
+    std.debug.assert(shift != 0);
+    std.debug.assert(dst.len == src.len);
+    const back: u6 = @intCast(@as(u7, limb_bits) - @as(u7, shift));
+    var carry: Limb = 0;
+    for (src, 0..) |limb, i| {
+        dst[i] = (limb << shift) | carry;
+        carry = limb >> back;
+    }
+    return carry;
+}
+
+/// One limb of the remainder with the normalization shift removed. Reads
+/// `normalized[index + 1]`, so the slice must extend one limb past `index`.
+fn unshiftedLimbAt(normalized: []const Limb, index: usize, shift: u6) Limb {
+    if (shift == 0) return normalized[index];
+    const back: u6 = @intCast(@as(u7, limb_bits) - @as(u7, shift));
+    return (normalized[index] >> shift) | (normalized[index + 1] << back);
+}
+
+/// `numerator -= divisor * qhat` across `divisor.len + 1` limbs. Returns true
+/// when the result went negative, meaning `qhat` was one too large.
+///
+/// One fused wrapping `u128` chain per limb, mirroring qjs `mp_sub_mul1`
+/// (quickjs.c:11419). The previous shape split the same computation into a
+/// product carry plus two `@subWithOverflow` results, and LLVM materialized
+/// each of those overflow bits into a register, spilled it to the stack, then
+/// re-narrowed and masked it -- six instructions per limb of pure overhead plus
+/// two dead stores, visible in the disassembly as `cset` / `strb [sp]` /
+/// `and #0xff` / `and #0x1` pairs.
+///
+/// Here the negated high half of the wide value *is* the next borrow, so no
+/// overflow flag ever has to become a value. Note the borrow is a full limb
+/// rather than 0 or 1, exactly as in qjs, which is why the top limb is handled
+/// with a wrapping subtract and an unsigned-greater test.
+pub fn subMulAt(numerator: []Limb, divisor: []const Limb, qhat: Limb) bool {
+    std.debug.assert(numerator.len == divisor.len + 1);
+    var borrow: Limb = 0;
+    for (divisor, 0..) |limb, i| {
+        const wide: DoubleLimb = @as(DoubleLimb, numerator[i]) -%
+            @as(DoubleLimb, limb) *% @as(DoubleLimb, qhat) -%
+            @as(DoubleLimb, borrow);
+        numerator[i] = @truncate(wide);
+        borrow = 0 -% @as(Limb, @truncate(wide >> limb_bits));
+    }
+    const top = numerator[divisor.len];
+    const updated = top -% borrow;
+    numerator[divisor.len] = updated;
+    return updated > top;
+}
+
+/// `numerator += divisor` across `divisor.len + 1` limbs. The final carry is
+/// dropped on purpose: it cancels the borrow left by the failed subtraction.
+fn addBackAt(numerator: []Limb, divisor: []const Limb) void {
+    std.debug.assert(numerator.len == divisor.len + 1);
+    var carry: Limb = 0;
+    for (divisor, 0..) |limb, i| {
+        const first = @addWithOverflow(numerator[i], limb);
+        const second = @addWithOverflow(first[0], carry);
+        numerator[i] = second[0];
+        carry = @as(Limb, first[1]) + @as(Limb, second[1]);
+    }
+    numerator[divisor.len] +%= carry;
+}
+
+fn divRemAbsAlloc(
+    allocator: std.mem.Allocator,
+    lhs: BigInt,
+    rhs: BigInt,
+    want: DivOutput,
+) !struct { BigInt, BigInt } {
+    if (rhs.isZero()) return error.DivisionByZero;
+    if (compareAbs(lhs, rhs) == .lt) {
+        // Quotient zero, remainder the dividend. Cloning the dividend is the
+        // only allocation here, so skip it when the caller wants the quotient.
+        if (want == .quotient) return .{ .{ .allocator = allocator }, .{ .allocator = allocator } };
+        return .{ .{ .allocator = allocator }, try lhs.cloneWithAllocator(allocator) };
+    }
+    // The single-limb path is left alone on purpose: it is already down to two
+    // allocations and is the fastest shape in the matrix, so threading the
+    // output selection through it would risk a well-behaved path to save at
+    // most one small allocation.
+    if (rhs.limbs.len == 1) return divRemAbsByLimbAlloc(allocator, lhs, rhs.limbs[0]);
+    return divRemAbsNormalizedLong(allocator, lhs, rhs, want);
 }
 
 pub fn addAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
@@ -590,16 +967,52 @@ pub fn mulAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt 
     // squaring (quickjs.c:12169/12175) the same way qjs does.
     try checkLimbCount(lhs.limbs.len + rhs.limbs.len);
     const limbs = try allocator.alloc(Limb, lhs.limbs.len + rhs.limbs.len);
-    @memset(limbs, 0);
-    for (lhs.limbs, 0..) |a, i| {
+    errdefer allocator.free(limbs);
+    // qjs mp_mul_basecase (quickjs.c:11401-11413) writes its first pass with
+    // mp_mul1 and only accumulates from the second, so js_bigint_new hands back
+    // uninitialized memory and no pre-zeroing pass exists at all. Mirror that:
+    // the first row overwrites, later rows accumulate.
+    //
+    // Every result limb is written before it is read. Row 0 overwrites
+    // `limbs[0..inner.len]` and then its carry slot at `inner.len`, so the
+    // initialized prefix is `limbs[0..inner.len + 1]`. Row `i` reads
+    // `limbs[i..i + inner.len]`, whose highest index is `i + inner.len - 1`,
+    // and rows `0..i-1` have already initialized through exactly that index; it
+    // then overwrites one new slot at `i + inner.len`. After the final row the
+    // prefix covers the whole buffer (`outer.len + inner.len` limbs), and the
+    // top limb is written even when its carry is zero, which `normalize` then
+    // strips.
+    //
+    // Row count follows the OUTER operand, and only row 0 is a pure write, so
+    // the number of accumulating rows is `outer.len - 1`. That makes the loop
+    // asymmetric in operand order: measured on the ordered matrix, the same
+    // multiply costs 21.8ns as 1x8 and 26.9ns as 8x1. A fixed flip to qjs's
+    // outer-over-rhs nesting does not fix this, it only moves the win -- it was
+    // measured at -19.0% on 8x1 and +23.6% on 1x8, a clean trade.
+    //
+    // Take the shorter operand as the outer one instead. Multiplication is
+    // commutative, the result length `lhs.len + rhs.len` is order-independent,
+    // and the sign below is computed from both operands, so the swap is
+    // invisible to the caller.
+    const outer = if (lhs.limbs.len <= rhs.limbs.len) lhs.limbs else rhs.limbs;
+    const inner = if (lhs.limbs.len <= rhs.limbs.len) rhs.limbs else lhs.limbs;
+    for (outer, 0..) |a, i| {
         var carry: DoubleLimb = 0;
-        for (rhs.limbs, 0..) |b, j| {
-            const index = i + j;
-            const current: DoubleLimb = @as(DoubleLimb, a) * b + limbs[index] + carry;
-            limbs[index] = @truncate(current);
-            carry = current >> limb_bits;
+        if (i == 0) {
+            for (inner, 0..) |b, j| {
+                const current: DoubleLimb = @as(DoubleLimb, a) * b + carry;
+                limbs[j] = @truncate(current);
+                carry = current >> limb_bits;
+            }
+        } else {
+            for (inner, 0..) |b, j| {
+                const index = i + j;
+                const current: DoubleLimb = @as(DoubleLimb, a) * b + limbs[index] + carry;
+                limbs[index] = @truncate(current);
+                carry = current >> limb_bits;
+            }
         }
-        limbs[i + rhs.limbs.len] = @intCast(carry);
+        limbs[i + inner.len] = @intCast(carry);
     }
     return normalize(.{ .negative = lhs.negative != rhs.negative, .limbs = limbs, .allocator = allocator });
 }
@@ -762,6 +1175,11 @@ fn compareAbsParts(lhs_limbs: []const Limb, rhs_limbs: []const Limb) std.math.Or
     return .eq;
 }
 
+/// Consuming: takes ownership of `value.limbs` and frees them on its own error
+/// path, so a caller must transfer ownership before calling and must not keep
+/// an `errdefer` or a live copy aliasing the same slice. Callers below use the
+/// `const owned = x; x = .{ .allocator = ... };` handoff for exactly that
+/// reason.
 fn normalize(value: BigInt) !BigInt {
     var owned = value;
     errdefer if (owned.limbs.len != 0) owned.allocator.free(owned.limbs);

@@ -1071,6 +1071,26 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
+    // One masked test on the teardown byte decides the whole completion shape.
+    // A frame that clears it retires straight through the linear epilogue: no
+    // leaf arm, no constructor arm, no tail-chain budget, no native-caller or
+    // constructor-fallback release, no continuation tag or payload. Every one
+    // of those was asked on this path before, on every ordinary return, about
+    // state fixed when the frame was published.
+    //
+    // Placed ahead of the special arms rather than after them, so the plain
+    // case pays one test instead of four. A leaf or constructor frame fails it
+    // and reaches the arms below completely unchanged, one predicted test
+    // later.
+    if (machine.topEntry().isOrdinaryReturn()) {
+        machine.popOrdinaryFrame();
+        reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+        // AssumeCapacity never reallocs, so the sp reloadAfterPop captured
+        // stays valid; it just advances past the pushed slot.
+        vm.stack.pushOwnedAssumeCapacity(value);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    }
     if (machine.topEntry().isEmptyLeaf()) {
         // No operand-window guard on this arm: zero-arg empty-leaf
         // publication requires the static return-balance proof
@@ -1227,6 +1247,8 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
+    // Reaching here means the frame is not a plain completion, so the
+    // continuation genuinely has to be read.
     var continuation = machine.popReturnedFrame();
     // popFrame just installed qjs's `sf->prev_frame` in Machine.top. Its null
     // state already distinguishes L0, so do not reload and test depth as well.
@@ -4006,6 +4028,58 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     // definition/mutation time.
     sp[0] = v.dup();
     return cont(pc + 3, sp + 1, var_buf, vm);
+}
+
+/// Global var write (2-byte var-ref index) — the resident twin of `op_get_var`.
+/// qjs keeps OP_put_var's write-through arm inside JS_CallInternal
+/// (quickjs.c:18490-18525) and only the exceptional arms reach out; zjs used to
+/// run the whole opcode from the cold shell, so every steady-state global write
+/// built a 128-byte native frame and saved seven registers to execute a load,
+/// four guards and a store. That wrapper is what this handler removes.
+///
+/// Every arm other than the plain cell write-through — lexical TDZ, const
+/// violation, indirect cell, function-name slot, out-of-range operand, and the
+/// undeclared/deleted-binding fall-through to the global OBJECT — tail-calls the
+/// unchanged `cold_table` shell. Nothing is consumed before that hand-off: the
+/// operand is read through `pc` without touching `frame.pc`, the value is left on
+/// the stack, and no state is published, so the shell observes exactly the entry
+/// state it saw when it owned the opcode outright.
+pub fn op_put_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const idx = readInt(u16, pc + 1);
+    // Unlike op_get_var this keeps the operand bounds test: putVar's own
+    // `ref_idx < frame.var_refs.len` branch is a live semantic arm (it routes an
+    // unbound name to the global object), not a redundant guard, so the resident
+    // handler declines rather than asserting.
+    if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    const current = cell.pvalue.*;
+    // Same predicate as putVar's write-through arm, in the same order: not
+    // uninitialized (TDZ / deleted binding), not const, not an indirect var-ref,
+    // not a function-name slot. A shadowing global lexical did cell surgery at
+    // definition time, so the bound cell IS the binding and no per-write lexical
+    // test is needed (see the qjs note in vm_property_globals.putVar).
+    if (current.isUninitialized() or cell.varRefIsConstSlot().*) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (core.VarRef.fromValue(current) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (cell.varRefIsFunctionNameSlot().*) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Ownership moves from the stack slot into the cell — no dup, matching the
+    // `stack.pop()` the cold arm did. `setVarRefValue` releases the displaced
+    // value, which can run a native finalizer but cannot throw, allocate, or
+    // re-enter the VM, so this arm stays publish-free like op_get_var's hit leg.
+    // The dead slot below `sp - 1` is never re-read: the only consumer of a
+    // stale top_ptr is the catch unwinder, and this arm has no throwing edge.
+    //
+    // Forced inline: left to itself the backend outlines the whole store+release
+    // as a call and shrink-wraps a 64-byte frame with five saved registers onto
+    // the hit leg, which is most of the wrapper this cut exists to remove.
+    // Inlined it is a 16-byte store plus a refcount decrement, with a call only
+    // on the rare drop-to-zero. A 48-byte frame still survives on the hit leg
+    // because that call site is there at all -- the resident put_loc handler
+    // reaches the frameless form with the same source shape, so this is a
+    // register-allocation outcome, not a structural floor. Recorded as the
+    // residual rather than chased here: this cut is the mechanical move.
+    @call(.always_inline, core.VarRef.setVarRefValue, .{ cell, vm.ctx.runtime, (sp - 1)[0] });
+    return cont(pc + 3, sp - 1, var_buf, vm);
 }
 
 // ---- COLD handlers (the migration table, transcribed). dispatch_table assembled

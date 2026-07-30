@@ -1,0 +1,52 @@
+{
+  "policy_id": "qjs-align-p0-same-runtime",
+  "policy_version": 1,
+  "sentinels": [
+    {
+      "name": "global_write_loop",
+      "checksum_required": true,
+      "case_shape": "retained-global-with-callable-run",
+      "provenance": "Adapted from tools/compare/hotpath_cases.js global_write_loop: the strict global write loop is retained, while run() makes repeated same-runtime invocation possible."
+    },
+    {
+      "name": "prop_read_mono_loop",
+      "checksum_required": true,
+      "case_shape": "function-local",
+      "provenance": "Adapted from tools/compare/hotpath_cases.js prop_read_mono_loop: object and accumulator move from top-level lexical bindings into each run() invocation."
+    },
+    {
+      "name": "fib_rec",
+      "checksum_required": true,
+      "case_shape": "function-local-inner-closure",
+      "provenance": "Adapted from tools/compare/hotpath_cases.js fib_rec: fib moves from a top-level function declaration to an inner closure created by each run() invocation."
+    },
+    {
+      "name": "call_body_loop",
+      "checksum_required": true,
+      "case_shape": "function-local-inner-closure",
+      "provenance": "Adapted from tools/compare/hotpath_cases.js call_body_loop: f and the accumulator move into run(), recreating f once per retained run() call."
+    },
+    {
+      "name": "method_call_loop",
+      "checksum_required": true,
+      "case_shape": "function-local",
+      "provenance": "Adapted from tools/compare/hotpath_cases.js method_call_loop: the receiver object and accumulator are created inside each run() invocation."
+    },
+    {
+      "name": "typed_array_read",
+      "checksum_required": true,
+      "case_shape": "function-local-loop",
+      "provenance": "Distinct same-name workload from tools/compare/microbench_cases.js typed_array_read: this case performs initialization plus 250000 indexed reads instead of a zero-loop length observation."
+    },
+    {
+      "name": "typed_array_write",
+      "checksum_required": true,
+      "case_shape": "function-local-loop",
+      "provenance": "Distinct same-name workload from tools/compare/microbench_cases.js typed_array_write: this case performs 250000 indexed writes plus a checksum loop instead of one indexed write."
+    }
+  ],
+  "exit_line": {
+    "geomean_limit": 1.10,
+    "per_case_limit": 1.20
+  }
+}
