@@ -897,10 +897,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.goto8] = td.op_goto8;
     t[op.if_false8] = td.op_if_false8;
     t[op.if_true8] = td.op_if_true8;
-    // qjs CASE(OP_lnot):19092 answers int/bool/null/undefined inline with the same
-    // tag comparison OP_if_* uses; every other tag stays on the cold logicalNot
-    // assigned above (no object arm — qjs has none for lnot either).
-    t[op.lnot] = td.op_lnot;
     t[op.inc_loc] = td.op_update_loc;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field

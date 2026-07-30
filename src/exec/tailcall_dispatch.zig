@@ -3815,43 +3815,6 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
-// qjs CASE(OP_lnot) (quickjs.c:19092-19105) classifies the operand with the same
-// single unsigned tag comparison OP_if_{true,false} uses — `(uint32_t)tag <=
-// JS_TAG_UNDEFINED` — and answers the immediate case with `JS_VALUE_GET_INT(op1)
-// != 0` inline; only the remaining tags reach the shared JS_ToBoolFree. zjs had no
-// hot handler at all for this opcode: BOTH tables held the coldStd shell, so every
-// `!x` paid publish -> noinline logicalNot (Stack.pop/push + an operand round-trip
-// through memory to pass JSValue by pointer) -> coldNext re-derivation. That
-// protocol, not ToBoolean, is the cost: this engine's own op_if_false8 does the
-// identical truthiness work in 4.29 cyc inline and 22.59 cyc when routed through
-// cold_table (P7-60 §5), an 18.30 cyc cold-route surcharge against a ~20 cyc lnot
-// whose ToBoolean stage measures 1.58 cyc.
-//
-// Deliberately NARROWER than op_if_false8: no plain-object arm. qjs's lnot fast leg
-// covers only tag <= JS_TAG_UNDEFINED, so object/string/float/BigInt/symbol all keep
-// falling to the canonical cold logicalNot with pc/sp untouched, re-executing from
-// the original state. lnot is stack-neutral (n_pop 1 / n_push 1), so the immediate
-// arm overwrites the top slot in place and leaves sp alone; none of the four
-// immediate tags is reference-counted, so there is no operand free to perform.
-//
-// No interrupt poll here, unlike op_if_false8: OP_lnot is not a back edge. qjs polls
-// only in OP_goto/OP_if_* (18822-18919) and its CASE(OP_lnot) has no js_poll_interrupts;
-// zjs's cold route is coldStd -> logicalNot -> coldNext, and coldNext polls nothing
-// either. Adding a tick would be a new semantic, not a preserved one. coldNext's other
-// duty, maybeStop, is likewise unreachable for this opcode: stop_before_pc is only ever
-// 0 (call_runtime.zig:5730) and publish leaves frame.pc = offset(pc)+1 >= 1.
-// The complex fallback keeps taking the INDIRECT cold_table[pc[0]] hop for the reason
-// op_if_false8 documents: a direct tail call gets re-inlined and drags the cold shell's
-// frame onto this hot body.
-pub fn op_lnot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const value = (sp - 1)[0];
-    if (value.asBranchImmediateBool()) |truthy| {
-        (sp - 1)[0] = JSValue.boolean(!truthy);
-        return cont(pc + 1, sp, var_buf, vm);
-    }
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-}
-
 // Fused local-update ops (1-byte local index). qjs OP_inc_loc/OP_add_loc — the
 // hottest loop ops (`i++`, `s += i`), so a cold miss here dominates loop regression.
 // int32-only; non-int / generator-boundary cases fall back to the cold op.
