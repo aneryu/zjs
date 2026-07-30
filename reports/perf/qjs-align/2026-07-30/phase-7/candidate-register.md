@@ -117,6 +117,16 @@ Shape。qjs 的 `js_update_property_flags`（`quickjs.c:10332`）把 shape prepa
 
 ## 已从候选转为结论或关闭的条目
 
+- **P7-60 `logicalNot` 热路由** → **永久关闭**（P7-61 回退 + P7-62 回退）。
+  机制归因成立（冷路由协议而非 `ToBoolean`，后者仅约 7%），immediate 侧收益确凿
+  （边际 −86% ~ −92% cycles、−74 ~ −78 指令/op），但**两种路由方式各伤一端**：
+  间接路由让每个复杂操作数多付 +8.00 指令（P7-61，14/14 类型回退 1.9–3.9%）；
+  直连尾跳把它减半到 +4.00 却仍有 10/14 类型四组合全回退 ≥1%（最差 +5.33%），
+  并触发 `op_compare_cold` 式 codegen 反噬 —— `earley-boyer` 从 P7-61 的 **+1.39% 改善**
+  翻转为 P7-62 的 **−2.37% 回退**。这是实测的两难而非待调参数。
+  **不再尝试** register-resident complex ToBoolean、object-only 第二快路、调整 tag 集合、
+  或拿 complex 合成回退换产品收益。**没有 P7-63。**
+
 - **SmallObjectSlab empty-arena retention** → P7-00 裁决 `does not generalise → permanently close`，
   机制与 qjs 逐项相同，不开 P7-01。
 - **进程内存快照固定税** → 已由 P7-31 落地（`e94649c9`），gbemu +8.49%～+8.97%。
