@@ -499,6 +499,18 @@ pub fn build(b: *std.Build) void {
     const perf_hotpath_step = b.step("perf-hotpath", "Record independent hotpath calibration benchmark report");
     perf_hotpath_step.dependOn(&run_perf_hotpath.step);
 
+    const run_measurement_contract_tests = b.addSystemCommand(&.{
+        "bun",
+        "tools/compare/test_measurement_contract.js",
+        "--output",
+        ".zig-cache/perf/measurement-contract-tests.json",
+    });
+    const measurement_contract_test_step = b.step(
+        "perf-measurement-contract",
+        "Run the whole-process measurement contract tests (no binaries, no measurement lock)",
+    );
+    measurement_contract_test_step.dependOn(&run_measurement_contract_tests.step);
+
     const run_perf_native_callback = b.addSystemCommand(&.{
         "bun",
         "tools/compare/run_microbench.js",

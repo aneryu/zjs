@@ -8,9 +8,18 @@ import process from 'node:process';
 import { performance } from 'node:perf_hooks';
 import { cases as microbenchCases, categories as microbenchCategories } from './microbench_cases.js';
 import { cases as hotpathCases, categories as hotpathCategories } from './hotpath_cases.js';
+import {
+    CONTRACT_EXIT_CODES,
+    aggregateVerdict,
+    loadPolicy,
+    policyReference,
+    validateSampleContract,
+    validateWarmupContract,
+} from './measurement_contract.js';
 
 const toolDir = import.meta.dir;
 const root = path.resolve(toolDir, '../..');
+const policy = loadPolicy();
 
 const defaultZjs = path.join(root, 'zig-out', 'bin', 'zjs');
 const defaultQjs = fs.existsSync(path.join(root, 'build', 'qjs'))
@@ -21,6 +30,8 @@ let zjsBin = process.env.QJS_ZIG || defaultZjs;
 let qjsBin = process.env.QJS || defaultQjs;
 let iters = parseInteger(process.env.BENCH_ITERS, 10);
 let warmup = parseInteger(process.env.BENCH_WARMUP, 3);
+let formalMode = false;
+let diagnosticMode = false;
 let includeUnsupported = false;
 let zjsOnly = false;
 let emitJson = false;
@@ -75,6 +86,9 @@ Use --zjs-only for self-baseline reports that compare zjs to a checked-in zjs re
 Options:
   --iters N                 Timed iterations per case and binary (default: ${iters})
   --warmup N                Warmup runs per case and binary (default: ${warmup})
+  --formal                  Formal sampling: fail closed on an unbalanced sampling design
+  --diagnostic              Explicitly diagnostic run: contract violations are recorded,
+                            complete=false and every headline is nulled
   --case NAME               Run one case; repeatable
   --category NAME           Run one category; repeatable
   --suite NAME              Case suite: microbench or hotpath (default: ${suiteName})
@@ -260,6 +274,10 @@ function benchPair(qjsBinary, zjsBinary, script) {
     const zjsSamples = [];
     const pairs = [];
     const warmupOrders = [];
+    // `executedOrders` is written as each engine actually completes, so the
+    // contract validator compares the artifact's declared order against a
+    // record of the run rather than against the same generator that produced it.
+    const executedOrders = [];
 
     for (let i = 0; i < warmup; i += 1) {
         const order = pairOrder(i);
@@ -280,6 +298,7 @@ function benchPair(qjsBinary, zjsBinary, script) {
                     zjsSamples,
                     pairs,
                     warmupOrders,
+                    executedOrders,
                 };
             }
         }
@@ -287,6 +306,8 @@ function benchPair(qjsBinary, zjsBinary, script) {
 
     for (let i = 0; i < iters; i += 1) {
         const order = pairOrder(i);
+        const executed = [];
+        executedOrders.push(executed);
         const elapsed = {};
         for (const engine of order) {
             const start = performance.now();
@@ -306,14 +327,17 @@ function benchPair(qjsBinary, zjsBinary, script) {
                     zjsSamples,
                     pairs,
                     warmupOrders,
+                    executedOrders,
                 };
             }
+            executed.push(engine);
         }
         qjsSamples.push(elapsed.qjs);
         zjsSamples.push(elapsed.zjs);
         pairs.push({
             index: i,
             order: order.join('->'),
+            executedOrder: executed.join('->'),
             qjsMs: elapsed.qjs,
             zjsMs: elapsed.zjs,
         });
@@ -325,6 +349,7 @@ function benchPair(qjsBinary, zjsBinary, script) {
         zjsSamples,
         pairs,
         warmupOrders,
+        executedOrders,
     };
 }
 
@@ -1396,6 +1421,40 @@ function makeUnsupportedRow(item, reason) {
     };
 }
 
+function buildContractVerdict(report) {
+    const declaredOrders = report.meta.sampling.timed.sampleOrders.map((order) => order.split('->'));
+    const executedRows = report.cases.filter((row) => row.status === 'ok' && Array.isArray(row.executedOrders));
+    // The sample contract is evaluated against every compatible case: one bad
+    // case is enough to invalidate the headline.
+    const perCase = executedRows.map((row) =>
+        validateSampleContract(
+            {
+                samples: report.iters,
+                declaredOrders,
+                executedOrders: row.executedOrders.map((order) => (Array.isArray(order) ? order : String(order).split('->'))),
+            },
+            policy,
+        ),
+    );
+    const sampleFailures = perCase.filter((result) => !result.ok);
+    const sampleContract = sampleFailures.length === 0
+        ? (perCase[0] ?? validateSampleContract({ samples: report.iters, declaredOrders, executedOrders: declaredOrders }, policy))
+        : {
+            ...sampleFailures[0],
+            failingCases: executedRows.map((row, index) => (perCase[index].ok ? null : row.name)).filter(Boolean),
+        };
+    const warmupContract = formalMode ? validateWarmupContract(warmup, policy) : { ok: true, violations: [] };
+    const verdict = aggregateVerdict([sampleContract, warmupContract]);
+    return {
+        policyRef: policyReference(policy),
+        formalMode,
+        diagnosticMode,
+        sampleContract,
+        warmupContract,
+        ...verdict,
+    };
+}
+
 function makeReport(rows, selected, meta) {
     const compatible = rows.filter((row) => row.status === 'ok');
     const validationFailures = rows.filter((row) => row.expectedStatus === 'supported' && row.status !== 'ok');
@@ -1407,7 +1466,7 @@ function makeReport(rows, selected, meta) {
         .map((row) => row.startupAdjusted?.ratio)
         .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
     const pairedGeomean = pairedRatios.length === 0 ? null : geometricMean(pairedRatios);
-    return {
+    const report = {
         tool: 'zjs-microbench',
         suite: suiteName,
         timestamp: new Date().toISOString(),
@@ -1433,9 +1492,28 @@ function makeReport(rows, selected, meta) {
             primaryRatio: pairedGeomean,
             startupAdjustedGeometricMean: startupAdjustedRatios.length === 0 ? null : geometricMean(startupAdjustedRatios),
             startupAdjustedGeometricMeanIsArbitration: false,
+            compatibilityMetric: true,
+            routePriorityMetric: false,
         },
         cases: rows,
     };
+
+    report.contract = buildContractVerdict(report);
+    report.complete = report.contract.complete && !diagnosticMode;
+    report.headline = report.complete ? pairedGeomean : null;
+    if (!report.complete) {
+        // Fail closed: the aggregate is removed, not annotated. A warning next
+        // to a published headline is the exact failure mode P7-70 removes.
+        report.summary.pairedGeomean = null;
+        report.summary.primaryRatio = null;
+        report.summary.geometricMean = null;
+        report.summary.startupAdjustedGeometricMean = null;
+        report.summary.headlineVoidReason = diagnosticMode
+            ? 'diagnostic run: headlines are nulled by construction'
+            : `measurement contract violated (${report.contract.errorClass}): ` +
+              report.contract.violations.map((v) => v.rule).join(', ');
+    }
+    return report;
 }
 
 function measureStartupBaseline(scriptDir) {
@@ -1583,6 +1661,12 @@ for (let i = 0; i < args.length; i += 1) {
             if (!Number.isFinite(warmup) || warmup < 0) fail('error: warmup must be >= 0');
             break;
         }
+        case '--formal':
+            formalMode = true;
+            break;
+        case '--diagnostic':
+            diagnosticMode = true;
+            break;
         case '--case': {
             const value = args[++i];
             if (value == null) fail('error: --case requires a value');
@@ -1675,11 +1759,35 @@ if (shouldList) {
     process.exit(0);
 }
 initializeAffinity();
-if (iters % 2 !== 0) {
-    console.error(
-        `warning: --iters ${iters} produces an unbalanced first-position count; ` +
-        'the artifact records orderBalanced=false',
-    );
+
+// P7-70 A1: fail closed *before* any process is spawned when the requested
+// sampling design cannot be balanced at all. An odd sample count has voided a
+// headline twice already (`run_direct.py --samples 5`, Phase 6 same-runtime
+// 3 qjs-first / 2 zjs-first), each time behind a warning that was ignored.
+const preflightSampleContract = validateSampleContract(
+    {
+        samples: iters,
+        declaredOrders: orderAudit(iters).sampleOrders.map((order) => order.split('->')),
+        executedOrders: orderAudit(iters).sampleOrders.map((order) => order.split('->')),
+    },
+    policy,
+);
+if (!preflightSampleContract.ok && !diagnosticMode) {
+    for (const violation of preflightSampleContract.violations) {
+        console.error(`error: ${violation.rule}: ${violation.detail}`);
+    }
+    console.error('error: SampleBalanceError: complete=false, headline=null, pairedGeomean=null');
+    process.exit(CONTRACT_EXIT_CODES.sampleBalance);
+}
+if (formalMode) {
+    const warmupContract = validateWarmupContract(warmup, policy);
+    if (!warmupContract.ok && !diagnosticMode) {
+        for (const violation of warmupContract.violations) {
+            console.error(`error: ${violation.rule}: ${violation.detail}`);
+        }
+        console.error('error: SampleBalanceError: complete=false, headline=null, pairedGeomean=null');
+        process.exit(CONTRACT_EXIT_CODES.sampleBalance);
+    }
 }
 if (collectPmu && pmuRuns % 2 !== 0) {
     console.error(
@@ -1764,6 +1872,7 @@ try {
                 zjs: { samples: result.zjsSamples },
                 pairs: result.pairs,
                 warmupOrders: result.warmupOrders,
+                executedOrders: result.executedOrders,
                 ...unavailableCaseMeasurements(reason),
             });
             continue;
@@ -1789,6 +1898,7 @@ try {
             pairs: result.pairs,
             paired: pairedStats(result.pairs),
             warmupOrders: result.warmupOrders,
+            executedOrders: result.executedOrders,
             pmu,
             peakRssKb,
             allocations: unavailableAllocationMetric('allocation count'),
@@ -1812,7 +1922,14 @@ try {
     } else {
         printTable(report);
     }
-    if (hasValidationFailures(report)) process.exit(1);
+    if (hasValidationFailures(report)) process.exit(CONTRACT_EXIT_CODES.validationFailure);
+    if (!report.contract.complete) {
+        for (const violation of report.contract.violations) {
+            console.error(`error: ${violation.rule}: ${violation.detail}`);
+        }
+        console.error(`error: ${report.contract.errorClass}: complete=false, headline=null, pairedGeomean=null`);
+        process.exit(report.contract.exitCode);
+    }
 } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
 }

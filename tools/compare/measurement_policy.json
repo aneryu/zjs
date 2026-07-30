@@ -1,0 +1,18 @@
+{
+  "policy_id": "qjs-align-p7-70-whole-process-measurement",
+  "policy_version": 1,
+  "description": "Authoritative whole-process measurement contract. The validator reads thresholds from this file only; an artifact that ships its own thresholds is rejected.",
+  "sampling": {
+    "treatments": [
+      "qjs",
+      "zjs"
+    ],
+    "minimumSamples": 2,
+    "recommendedSamples": 8,
+    "requireEvenSampleCount": true,
+    "requireBalancedFirstPosition": true,
+    "requireDeclaredOrderMatchesExecution": true,
+    "requireEveryTreatmentInEveryPosition": true,
+    "requireEvenWarmupInFormalMode": true
+  }
+}
