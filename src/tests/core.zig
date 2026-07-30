@@ -10322,7 +10322,10 @@ test "multi-limb division survives a failure at every allocation point" {
         r.deinit();
     }
     try std.testing.expectEqual(@as(isize, 0), counter.live);
-    try std.testing.expect(counter.alloc_attempts > 3);
+    // Exact, so this doubles as a topology lock: a `both` division allocates
+    // the merged u/v scratch, the quotient and the remainder. `div` and `rem`
+    // each allocate two, having dropped the half they discard.
+    try std.testing.expectEqual(@as(usize, 3), counter.alloc_attempts);
 
     for (0..counter.alloc_attempts) |fail_index| {
         inline for (.{ false, true }) |lhs_negative| {

@@ -735,14 +735,24 @@ noinline fn divRemAbsNormalizedLong(
     const want_quotient = want != .remainder;
     const want_remainder = want != .quotient;
 
-    // `u` and `v` are pure scratch and are always released. Keeping them as two
-    // allocations rather than one shared block is deliberate for this cut: it
-    // keeps the allocation topology readable and the OOM sweep able to fail
-    // each one separately.
-    const u = try allocator.alloc(Limb, na + 1);
-    defer allocator.free(u);
-    const v = try allocator.alloc(Limb, nb);
-    defer allocator.free(v);
+    // One scratch block for both working buffers. They have identical lifetimes
+    // -- created before the loop, dead after the remainder is read -- so two
+    // allocations were only ever two allocations.
+    //
+    // Order is `[u][v]`, matching what the two separate allocations produced
+    // logically, so the multiply-subtract window, the copies and the unshift
+    // all see the same relative layout they did before.
+    const u_len = na + 1;
+    const scratch = try allocator.alloc(Limb, u_len + nb);
+    defer allocator.free(scratch);
+    const u = scratch[0..u_len];
+    const v = scratch[u_len..];
+    // Adjacent but disjoint. This is the one invariant the merge introduces:
+    // every helper below takes `u`'s window and `v` as separate slices and none
+    // of them may see a partial overlap, in particular not at the `u` end /
+    // `v` start seam.
+    std.debug.assert(v.len == nb);
+    std.debug.assert(@intFromPtr(u.ptr) + u.len * @sizeOf(Limb) == @intFromPtr(v.ptr));
     // Empty when the caller only wants the remainder. The digits are still
     // computed -- the algorithm needs them -- they are simply not stored.
     const q: []Limb = if (want_quotient) try allocator.alloc(Limb, quotient_len) else &.{};
