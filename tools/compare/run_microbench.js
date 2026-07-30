@@ -11,8 +11,13 @@ import { cases as hotpathCases, categories as hotpathCategories } from './hotpat
 import {
     CONTRACT_EXIT_CODES,
     aggregateVerdict,
+    assertNoSelfSuppliedPolicy,
     loadPolicy,
+    parseCpuList,
     policyReference,
+    validateAffinityAttestation,
+    validateGenerationCoherence,
+    validateProvenance,
     validateSampleContract,
     validateWarmupContract,
 } from './measurement_contract.js';
@@ -70,6 +75,11 @@ const suites = {
     },
 };
 
+const measurementLock = {
+    path: process.env.ZJS_MEASUREMENT_LOCK ?? null,
+    mode: process.env.ZJS_MEASUREMENT_LOCK_MODE ?? null,
+};
+
 function parseInteger(value, fallback) {
     if (value == null || value === '') return fallback;
     const parsed = Number.parseInt(value, 10);
@@ -86,7 +96,8 @@ Use --zjs-only for self-baseline reports that compare zjs to a checked-in zjs re
 Options:
   --iters N                 Timed iterations per case and binary (default: ${iters})
   --warmup N                Warmup runs per case and binary (default: ${warmup})
-  --formal                  Formal sampling: fail closed on an unbalanced sampling design
+  --formal                  Formal sampling: fail closed on sample imbalance, unpinned
+                            affinity, escaping children and incomplete provenance
   --diagnostic              Explicitly diagnostic run: contract violations are recorded,
                             complete=false and every headline is nulled
   --case NAME               Run one case; repeatable
@@ -97,8 +108,8 @@ Options:
   --json                    Print the JSON report to stdout instead of the table
   --output PATH             Write the JSON report to PATH
   --emit-scripts DIR        Write generated benchmark scripts to DIR for profiling
-  --cpu N                   Assert that the runner inherited affinity to CPU N;
-                            warns and records a mismatch, but never wraps timed children
+  --cpu N                   Require that the runner and every measured child are pinned
+                            to exactly {N}; in --formal mode a mismatch fails closed
   --pmu                     Collect the PRD 3.2 instructions-first arbitration metrics;
                             opt in explicitly and pin the outer runner with taskset
   --pmu-runs K              Repetitions per perf stat collection (default: ${pmuRuns})
@@ -113,6 +124,8 @@ Environment:
   QJS                       Path to C qjs
   BENCH_ITERS               Default iteration count
   BENCH_WARMUP              Default warmup count
+  ZJS_MEASUREMENT_LOCK      Path of the exclusive measurement lock held by the caller
+  ZJS_MEASUREMENT_LOCK_MODE Lock mode recorded into the artifact (exclusive/shared)
   ZJS_BUILD_MODE            Explicit build-mode metadata when the binary does not export it
   ZJS_JSVALUE_REPRESENTATION
                             Explicit JSValue representation metadata`);
@@ -162,23 +175,119 @@ function runCommand(cmd, captureOutput, cwd = undefined) {
     }
 }
 
-function parseCpuList(mask) {
-    const cpus = [];
-    for (const segment of mask.split(',')) {
-        const trimmed = segment.trim();
-        if (!trimmed) continue;
-        const range = trimmed.match(/^(\d+)-(\d+)$/);
-        if (range) {
-            const first = Number(range[1]);
-            const last = Number(range[2]);
-            if (last < first) return null;
-            for (let cpu = first; cpu <= last; cpu += 1) cpus.push(cpu);
+function readAffinityOfPid(pid) {
+    const statusPath = pid === 'self' ? '/proc/self/status' : `/proc/${pid}/status`;
+    try {
+        const status = fs.readFileSync(statusPath, 'utf8');
+        const mask = status.match(/^Cpus_allowed_list:\s*(.+?)\s*$/m)?.[1] ?? null;
+        return { mask, cpus: mask == null ? null : parseCpuList(mask), unavailableReason: null };
+    } catch (err) {
+        return { mask: null, cpus: null, unavailableReason: err instanceof Error ? err.message : String(err) };
+    }
+}
+
+function detectPmuIdentity(cpu) {
+    if (!Number.isInteger(cpu)) {
+        return { name: null, cpus: null, source: null, unavailableReason: 'no CPU was requested' };
+    }
+    let entries = [];
+    try {
+        entries = fs.readdirSync('/sys/devices').filter((name) => /pmu|cpu/i.test(name));
+    } catch (err) {
+        return { name: null, cpus: null, source: null, unavailableReason: err instanceof Error ? err.message : String(err) };
+    }
+    for (const entry of entries) {
+        const cpusPath = `/sys/devices/${entry}/cpus`;
+        let raw = null;
+        try {
+            raw = fs.readFileSync(cpusPath, 'utf8').trim();
+        } catch {
             continue;
         }
-        if (!/^\d+$/.test(trimmed)) return null;
-        cpus.push(Number(trimmed));
+        const cpus = parseCpuList(raw);
+        if (cpus && cpus.includes(cpu)) {
+            let type = null;
+            try {
+                type = Number(fs.readFileSync(`/sys/devices/${entry}/type`, 'utf8').trim());
+            } catch {
+                type = null;
+            }
+            return { name: entry, cpus, mask: raw, type, source: cpusPath, unavailableReason: null };
+        }
     }
-    return [...new Set(cpus)];
+    return {
+        name: null,
+        cpus: null,
+        source: '/sys/devices/*/cpus',
+        unavailableReason: `no PMU device declares CPU ${cpu} in its cpus mask`,
+    };
+}
+
+// Attest the affinity of a *real measured child*. The probe spawns the very
+// binary under test through `engineCommand`, so the affinity it reports is the
+// one the timed children inherit. `Bun.spawn` (not spawnSync) is used only
+// because the PID must be readable while the child is alive.
+async function attestChildAffinity(engine, binary, probeScript) {
+    const command = engineCommand(engine, binary, probeScript);
+    let child;
+    try {
+        child = Bun.spawn({ cmd: command, stdout: 'ignore', stderr: 'pipe' });
+    } catch (err) {
+        return {
+            treatment: engine,
+            pid: null,
+            mask: null,
+            cpus: null,
+            command,
+            unavailableReason: err instanceof Error ? err.message : String(err),
+        };
+    }
+    const pid = child.pid ?? null;
+    let observed = { mask: null, cpus: null, unavailableReason: 'child exited before its affinity could be read' };
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+        const read = readAffinityOfPid(pid);
+        if (read.mask != null) {
+            observed = read;
+            break;
+        }
+        await Bun.sleep(1);
+    }
+    const exitCode = await child.exited;
+    return {
+        treatment: engine,
+        pid,
+        mask: observed.mask,
+        cpus: observed.cpus,
+        command,
+        exitCode,
+        probeScript,
+        ...(observed.unavailableReason ? { unavailableReason: observed.unavailableReason } : {}),
+    };
+}
+
+const affinityProbeSource = [
+    '// affinity attestation probe: spin long enough for /proc/<pid>/status to be read',
+    'const deadline = Date.now() + 250;',
+    'let sink = 0;',
+    'while (Date.now() < deadline) sink += 1;',
+    'if (sink < 0) print(sink);',
+].join('\n');
+
+async function attestAffinity(phase, probeScript) {
+    const treatments = zjsOnly ? ['zjs'] : ['qjs', 'zjs'];
+    const binaries = { qjs: qjsBin, zjs: zjsBin };
+    const records = [];
+    for (const treatment of treatments) {
+        const record = await attestChildAffinity(treatment, binaries[treatment], probeScript);
+        records.push({ ...record, phase });
+    }
+    if (zjsOnly) {
+        // The reference column is the same zjs binary; mirror the record so the
+        // contract still sees an attestation for both declared treatments.
+        const zjs = records.find((record) => record.treatment === 'zjs');
+        records.push({ ...zjs, treatment: 'qjs', mirroredFrom: 'zjs', note: '--zjs-only: the qjs column is the zjs binary' });
+    }
+    return records;
 }
 
 function readCurrentAffinity() {
@@ -225,6 +334,8 @@ function initializeAffinity() {
             `--cpu ${requestedCpu} does not match runner Cpus_allowed_list=${measured}; ` +
             'timed children will inherit the measured runner affinity';
         currentAffinity.warning = warning;
+        // In formal mode this is an error, not a warning; the fail-closed check
+        // runs after argument parsing so the artifact can still record the state.
         console.error(`warning: ${warning}`);
     }
 }
@@ -1065,7 +1176,7 @@ function detectCpuModel() {
     };
 }
 
-function collectMetadata() {
+function collectMetadata(extra = {}) {
     const resolvedZjs = realpathOrResolved(zjsBin);
     const resolvedQjs = zjsOnly ? null : realpathOrResolved(qjsBin);
     const zjsIdentity = gitIdentityForBinary(resolvedZjs);
@@ -1201,10 +1312,28 @@ function collectMetadata() {
             requestedCpuMatches: currentAffinity.requestedCpuMatches,
             kernel: firstLine(kernel.value) || os.release(),
             arch: os.arch(),
+            pmuIdentity: extra.pmuIdentity ?? detectPmuIdentity(requestedCpu ?? currentAffinity.pinnedCpu),
         },
+        lock: {
+            path: measurementLock.path,
+            mode: measurementLock.mode,
+            heldBy: 'caller',
+            ...(measurementLock.path
+                ? {}
+                : { unavailableReason: 'ZJS_MEASUREMENT_LOCK was not set by the caller' }),
+        },
+        environment: {
+            ZIG_GLOBAL_CACHE_DIR: process.env.ZIG_GLOBAL_CACHE_DIR ?? null,
+            TMPDIR: process.env.TMPDIR ?? null,
+            ZJS_REPO_ROOT: process.env.ZJS_REPO_ROOT ?? null,
+        },
+        caseSources: extra.caseSources ?? null,
+        startupBaselineIdentity: extra.startupBaselineIdentity ?? null,
+        attestation: extra.attestation ?? null,
         sampling: {
             warmup,
             iters,
+            samples: iters,
             order: 'ABBA per-sample interleaved',
             orderDescription:
                 'Warmup and timed rounds both alternate: zero-based even rounds run qjs then zjs; odd rounds run zjs then qjs. The two engines in each round are adjacent processes.',
@@ -1332,6 +1461,9 @@ function collectMetadata() {
         meta.host.affinityUnavailableReason = currentAffinity.unavailableReason;
     }
     if (currentAffinity.warning) meta.host.affinityWarning = currentAffinity.warning;
+    if (meta.host.pmuIdentity?.unavailableReason) {
+        meta.host.pmuIdentityUnavailableReason = meta.host.pmuIdentity.unavailableReason;
+    }
     if (kernel.unavailableReason) meta.host.kernelProbeUnavailableReason = kernel.unavailableReason;
     if (perfVersion.unavailableReason) meta.pmu.perfVersionUnavailableReason = perfVersion.unavailableReason;
     if (!collectPmu) {
@@ -1429,7 +1561,7 @@ function buildContractVerdict(report) {
     const perCase = executedRows.map((row) =>
         validateSampleContract(
             {
-                samples: report.iters,
+                samples: report.meta.sampling.samples,
                 declaredOrders,
                 executedOrders: row.executedOrders.map((order) => (Array.isArray(order) ? order : String(order).split('->'))),
             },
@@ -1438,19 +1570,51 @@ function buildContractVerdict(report) {
     );
     const sampleFailures = perCase.filter((result) => !result.ok);
     const sampleContract = sampleFailures.length === 0
-        ? (perCase[0] ?? validateSampleContract({ samples: report.iters, declaredOrders, executedOrders: declaredOrders }, policy))
+        ? (perCase[0] ?? validateSampleContract({ samples: report.meta.sampling.samples, declaredOrders, executedOrders: declaredOrders }, policy))
         : {
             ...sampleFailures[0],
-            failingCases: executedRows.map((row, index) => (perCase[index].ok ? null : row.name)).filter(Boolean),
+            failingCases: executedRows
+                .map((row, index) => (perCase[index].ok ? null : row.name))
+                .filter(Boolean),
         };
+
     const warmupContract = formalMode ? validateWarmupContract(warmup, policy) : { ok: true, violations: [] };
-    const verdict = aggregateVerdict([sampleContract, warmupContract]);
+    const affinity = formalMode
+        ? validateAffinityAttestation(
+            {
+                requestedCpu,
+                collectorStart: report.meta.attestation?.collectorStart,
+                collectorEnd: report.meta.attestation?.collectorEnd,
+                children: report.meta.attestation?.children ?? [],
+                pmu: report.meta.host.pmuIdentity,
+            },
+            policy,
+        )
+        : { ok: true, violations: [], skipped: 'not formal mode' };
+    const provenance = formalMode ? validateProvenance(report, policy) : { ok: true, violations: [], skipped: 'not formal mode' };
+    // Worktree cleanliness is adjudicated by validate_measurement_artifact.js,
+    // not here: the runner produces evidence (including the recorded dirty
+    // state), the validator decides whether that evidence may be published.
+    const generation = formalMode ? validateGenerationCoherence(report) : { ok: true, violations: [], skipped: 'not formal mode' };
+    const artifactPolicy = assertNoSelfSuppliedPolicy(report, policy);
+    const verdict = aggregateVerdict([
+        sampleContract,
+        warmupContract,
+        affinity,
+        provenance,
+        generation,
+        artifactPolicy,
+    ]);
     return {
         policyRef: policyReference(policy),
         formalMode,
         diagnosticMode,
         sampleContract,
         warmupContract,
+        affinityAttestation: affinity,
+        provenance,
+        generation,
+        artifactPolicy,
         ...verdict,
     };
 }
@@ -1516,9 +1680,20 @@ function makeReport(rows, selected, meta) {
     return report;
 }
 
-function measureStartupBaseline(scriptDir) {
+function measureStartupBaseline(scriptDir, generation) {
     const script = path.join(scriptDir, '__startup_empty.js');
     fs.writeFileSync(script, '');
+    const identity = {
+        // The startup baseline must be re-collected in the same measurement
+        // generation as the cases; the generation id is what makes that
+        // checkable after the fact.
+        generation,
+        scriptPath: script,
+        scriptSha256: crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex'),
+        scriptBytes: fs.statSync(script).size,
+        samples: iters,
+        warmup,
+    };
     const expected = runBinary('qjs', qjsBin, script, true);
     const actual = runBinary('zjs', zjsBin, script, true);
     const validation = validationResult(expected, actual);
@@ -1527,6 +1702,7 @@ function measureStartupBaseline(scriptDir) {
         return {
             status: 'invalid',
             reason: summarizeMismatch(expected, actual),
+            identity,
             validation,
             note,
         };
@@ -1543,6 +1719,8 @@ function measureStartupBaseline(scriptDir) {
             zjs: { samples: result.zjsSamples },
             pairs: result.pairs,
             warmupOrders: result.warmupOrders,
+            executedOrders: result.executedOrders,
+            identity,
             validation,
             note,
         };
@@ -1559,6 +1737,8 @@ function measureStartupBaseline(scriptDir) {
         pairs: result.pairs,
         paired: pairedStats(result.pairs),
         warmupOrders: result.warmupOrders,
+        executedOrders: result.executedOrders,
+        identity,
         validation,
         note,
     };
@@ -1764,11 +1944,12 @@ initializeAffinity();
 // sampling design cannot be balanced at all. An odd sample count has voided a
 // headline twice already (`run_direct.py --samples 5`, Phase 6 same-runtime
 // 3 qjs-first / 2 zjs-first), each time behind a warning that was ignored.
+const preflightSamples = iters;
 const preflightSampleContract = validateSampleContract(
     {
-        samples: iters,
-        declaredOrders: orderAudit(iters).sampleOrders.map((order) => order.split('->')),
-        executedOrders: orderAudit(iters).sampleOrders.map((order) => order.split('->')),
+        samples: preflightSamples,
+        declaredOrders: orderAudit(preflightSamples).sampleOrders.map((order) => order.split('->')),
+        executedOrders: orderAudit(preflightSamples).sampleOrders.map((order) => order.split('->')),
     },
     policy,
 );
@@ -1787,6 +1968,24 @@ if (formalMode) {
         }
         console.error('error: SampleBalanceError: complete=false, headline=null, pairedGeomean=null');
         process.exit(CONTRACT_EXIT_CODES.sampleBalance);
+    }
+    // A2: the historical snapshot asked for CPU 19 and ran on `0-19`. That must
+    // not be a warning any more, and an allowed-list that merely *contains* 19
+    // is not pinning.
+    const preflightAffinity = validateAffinityAttestation(
+        {
+            requestedCpu,
+            collectorStart: { mask: currentAffinity.mask, cpus: currentAffinity.cpus },
+            collectorEnd: { mask: currentAffinity.mask, cpus: currentAffinity.cpus },
+            children: [],
+            pmu: detectPmuIdentity(requestedCpu),
+        },
+        policy,
+    ).violations.filter((violation) => !violation.rule.startsWith('child-'));
+    if (preflightAffinity.length !== 0 && !diagnosticMode) {
+        for (const violation of preflightAffinity) console.error(`error: ${violation.rule}: ${violation.detail}`);
+        console.error('error: AffinityAttestationError: complete=false, headline=null, pairedGeomean=null');
+        process.exit(CONTRACT_EXIT_CODES.affinityAttestation);
     }
 }
 if (collectPmu && pmuRuns % 2 !== 0) {
@@ -1820,7 +2019,21 @@ if (zjsOnly) {
 const selected = selectedCaseList();
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zjs-microbench-'));
 if (emitScriptsDir) fs.mkdirSync(emitScriptsDir, { recursive: true });
+// One generation id ties the cases, the startup baseline and the attestation
+// records together: reusing a startup baseline from another generation is the
+// exact defect that voided the Phase 6 numbers.
+const measurementGeneration = `${new Date().toISOString()}#${process.pid}`;
+const caseSources = {};
+const attestation = { generation: measurementGeneration, children: [], collectorStart: null, collectorEnd: null };
 try {
+    if (formalMode) {
+        const probeScript = path.join(tempDir, '__affinity_probe.js');
+        fs.writeFileSync(probeScript, `${affinityProbeSource}\n`);
+        attestation.probeScript = probeScript;
+        attestation.probeSha256 = crypto.createHash('sha256').update(fs.readFileSync(probeScript)).digest('hex');
+        attestation.collectorStart = readAffinityOfPid('self');
+        attestation.children.push(...(await attestAffinity('pre', probeScript)));
+    }
     const rows = [];
     for (const item of selected) {
         if (!item.source) {
@@ -1829,7 +2042,10 @@ try {
         }
 
         const script = path.join(emitScriptsDir || tempDir, `${item.name}.js`);
-        fs.writeFileSync(script, `${item.source}\n`);
+        const scriptBody = `${item.source}\n`;
+        fs.writeFileSync(script, scriptBody);
+        const sourceSha256 = crypto.createHash('sha256').update(scriptBody).digest('hex');
+        caseSources[item.name] = { sourcePath: script, sourceSha256, sourceBytes: Buffer.byteLength(scriptBody) };
 
         const expected = runBinary('qjs', qjsBin, script, true);
         const actual = runBinary('zjs', zjsBin, script, true);
@@ -1867,6 +2083,8 @@ try {
                 status: 'skipped',
                 reason,
                 notes: item.notes,
+                sourcePath: script,
+                sourceSha256,
                 validation,
                 qjs: { samples: result.qjsSamples },
                 zjs: { samples: result.zjsSamples },
@@ -1890,10 +2108,14 @@ try {
             expectedStatus: item.expectedStatus,
             status: 'ok',
             notes: item.notes,
+            sourcePath: script,
+            sourceSha256,
+            generation: measurementGeneration,
             validation,
             qjs: qjsStats,
             zjs: zjsStats,
             ratio,
+            absoluteDeltaMs: zjsStats.median - qjsStats.median,
             winner: winnerForRatio(ratio),
             pairs: result.pairs,
             paired: pairedStats(result.pairs),
@@ -1906,9 +2128,23 @@ try {
         });
     }
 
-    const startupBaseline = measureStartupBaseline(tempDir);
+    // Same measurement generation as the cases: the startup baseline is
+    // re-collected here, never reused from an archived snapshot.
+    const startupBaseline = measureStartupBaseline(tempDir, measurementGeneration);
     addStartupAdjustedRows(rows, startupBaseline);
-    const report = makeReport(rows, selected, collectMetadata());
+    if (formalMode) {
+        attestation.collectorEnd = readAffinityOfPid('self');
+        attestation.children.push(...(await attestAffinity('post', attestation.probeScript)));
+    }
+    const report = makeReport(
+        rows,
+        selected,
+        collectMetadata({
+            caseSources,
+            startupBaselineIdentity: startupBaseline.identity ?? null,
+            attestation: formalMode ? attestation : null,
+        }),
+    );
     if (zjsOnly) report.baseline = 'zjs-only';
     report.startupBaseline = startupBaseline;
     const json = `${JSON.stringify(report, null, 2)}\n`;
@@ -1927,7 +2163,9 @@ try {
         for (const violation of report.contract.violations) {
             console.error(`error: ${violation.rule}: ${violation.detail}`);
         }
-        console.error(`error: ${report.contract.errorClass}: complete=false, headline=null, pairedGeomean=null`);
+        console.error(
+            `error: ${report.contract.errorClass}: complete=false, headline=null, pairedGeomean=null`,
+        );
         process.exit(report.contract.exitCode);
     }
 } finally {

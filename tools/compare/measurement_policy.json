@@ -14,5 +14,68 @@
     "requireDeclaredOrderMatchesExecution": true,
     "requireEveryTreatmentInEveryPosition": true,
     "requireEvenWarmupInFormalMode": true
+  },
+  "affinity": {
+    "formalCpu": 19,
+    "requireExactCpuSet": true,
+    "requireCollectorAttestation": true,
+    "requireChildAttestation": true,
+    "requireChildAttestationAtEnd": true,
+    "requirePmuIdentity": true
+  },
+  "provenance": {
+    "requiredFields": [
+      "meta.zjs.commit",
+      "meta.zjs.sha256",
+      "meta.zjs.binary",
+      "meta.toolRepoCommit.commit",
+      "meta.toolRepoCommit.dirty",
+      "meta.zjs.dirty",
+      "meta.qjs.commit",
+      "meta.qjs.version",
+      "meta.qjs.sha256",
+      "meta.qjs.binary",
+      "meta.qjs.dirty",
+      "meta.host.kernel",
+      "meta.host.cpuModel",
+      "meta.host.pinnedCpu",
+      "meta.host.affinityMask",
+      "meta.host.pmuIdentity.name",
+      "meta.sampling.iters",
+      "meta.sampling.warmup",
+      "meta.sampling.timed.sampleOrders",
+      "meta.startupBaselineIdentity.scriptSha256",
+      "meta.startupBaselineIdentity.generation",
+      "meta.lock.path",
+      "meta.lock.mode",
+      "meta.environment.ZIG_GLOBAL_CACHE_DIR",
+      "meta.environment.TMPDIR",
+      "meta.environment.ZJS_REPO_ROOT",
+      "meta.caseSources"
+    ],
+    "requiredPerCaseFields": [
+      "sourceSha256",
+      "sourcePath"
+    ]
+  },
+  "artifact": {
+    "forbidSelfSuppliedPolicy": true,
+    "allowedPolicyReferenceKeys": [
+      "policy_id",
+      "policy_version",
+      "sha256",
+      "path"
+    ]
+  },
+  "attribution": {
+    "allowedStageScopes": [
+      "symbol",
+      "callChain",
+      "addressRange"
+    ],
+    "forbidBareFileLineScope": true,
+    "forbidFrequencySamplingForPhaseAttribution": true,
+    "requireRecordedPeriod": true,
+    "requirePeriodCoprimeWithInnerLoop": true
   }
 }

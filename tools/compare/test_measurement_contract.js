@@ -11,8 +11,15 @@ import process from 'node:process';
 import {
     CONTRACT_EXIT_CODES,
     loadPolicy,
+    validateAffinityAttestation,
+    validatePhaseSampling,
+    validateProvenance,
     validateSampleContract,
+    validateStageAttribution,
     validateWarmupContract,
+    validateWorktreeCleanliness,
+    validateGenerationCoherence,
+    assertNoSelfSuppliedPolicy,
 } from './measurement_contract.js';
 
 const policy = loadPolicy();
@@ -162,6 +169,366 @@ record('A1-06', 'sampling', 'odd warmup fails closed in formal mode', 'SampleBal
 record('A1-07', 'sampling', 'even warmup passes', 'ok=true', () => {
     const result = validateWarmupContract(4, policy);
     return { pass: result.ok === true, violations: result.violations };
+});
+
+// ---------------------------------------------------------------------------
+// A2 - affinity attestation
+// ---------------------------------------------------------------------------
+
+const pinned = { mask: '19', cpus: [19] };
+const unpinned = { mask: '0-19', cpus: Array.from({ length: 20 }, (_, i) => i) };
+const pmu19 = { name: 'armv8_pmuv3_1', cpus: [5, 6, 7, 8, 9, 15, 16, 17, 18, 19] };
+const goodChildren = [
+    { treatment: 'qjs', phase: 'pre', pid: 1001, mask: '19', cpus: [19] },
+    { treatment: 'zjs', phase: 'pre', pid: 1002, mask: '19', cpus: [19] },
+    { treatment: 'qjs', phase: 'post', pid: 1003, mask: '19', cpus: [19] },
+    { treatment: 'zjs', phase: 'post', pid: 1004, mask: '19', cpus: [19] },
+];
+
+record('A2-01', 'affinity', 'fully pinned collector and children pass', 'ok=true, exit 0', () => {
+    const result = validateAffinityAttestation(
+        { requestedCpu: 19, collectorStart: pinned, collectorEnd: pinned, children: goodChildren, pmu: pmu19 },
+        policy,
+    );
+    return { pass: result.ok === true, violations: result.violations };
+});
+
+record(
+    'A2-02',
+    'affinity',
+    'runner allowed-list 0-19 is not pinning even though it contains 19',
+    'AffinityAttestationError, rule collector-not-pinned, exit 4',
+    () => {
+        const result = validateAffinityAttestation(
+            { requestedCpu: 19, collectorStart: unpinned, collectorEnd: unpinned, children: goodChildren, pmu: pmu19 },
+            policy,
+        );
+        return {
+            pass:
+                result.ok === false &&
+                result.errorClass === 'AffinityAttestationError' &&
+                result.exitCode === CONTRACT_EXIT_CODES.affinityAttestation &&
+                rules(result).includes('collector-not-pinned'),
+            errorClass: result.errorClass,
+            exitCode: result.exitCode,
+            rules: rules(result),
+            message: detailFor(result, 'collector-not-pinned'),
+        };
+    },
+);
+
+record('A2-03', 'affinity', 'a measured child escapes the pin', 'AffinityAttestationError, rule child-not-pinned', () => {
+    const children = goodChildren.map((child) =>
+        child.treatment === 'zjs' && child.phase === 'pre' ? { ...child, mask: '0-19', cpus: unpinned.cpus } : child,
+    );
+    const result = validateAffinityAttestation(
+        { requestedCpu: 19, collectorStart: pinned, collectorEnd: pinned, children, pmu: pmu19 },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('child-not-pinned'),
+        errorClass: result.errorClass,
+        exitCode: result.exitCode,
+        rules: rules(result),
+        message: detailFor(result, 'child-not-pinned'),
+    };
+});
+
+record('A2-04', 'affinity', 'a child is re-pinned between pre and post', 'AffinityAttestationError, rules child-escaped + child-affinity-changed', () => {
+    const children = goodChildren.map((child) =>
+        child.treatment === 'qjs' && child.phase === 'post' ? { ...child, mask: '18', cpus: [18] } : child,
+    );
+    const result = validateAffinityAttestation(
+        { requestedCpu: 19, collectorStart: pinned, collectorEnd: pinned, children, pmu: pmu19 },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('child-escaped') && rules(result).includes('child-affinity-changed'),
+        errorClass: result.errorClass,
+        rules: rules(result),
+        message: detailFor(result, 'child-affinity-changed'),
+    };
+});
+
+record('A2-05', 'affinity', 'requested CPU is outside the allowed set', 'AffinityAttestationError, rule requested-cpu-not-in-allowed-set', () => {
+    const result = validateAffinityAttestation(
+        { requestedCpu: 19, collectorStart: { mask: '0-3', cpus: [0, 1, 2, 3] }, collectorEnd: { mask: '0-3', cpus: [0, 1, 2, 3] }, children: goodChildren, pmu: pmu19 },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('requested-cpu-not-in-allowed-set'),
+        rules: rules(result),
+        message: detailFor(result, 'requested-cpu-not-in-allowed-set'),
+    };
+});
+
+record('A2-06', 'affinity', 'collector affinity changes during the run', 'AffinityAttestationError, rule collector-affinity-changed', () => {
+    const result = validateAffinityAttestation(
+        { requestedCpu: 19, collectorStart: pinned, collectorEnd: { mask: '18-19', cpus: [18, 19] }, children: goodChildren, pmu: pmu19 },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('collector-affinity-changed'),
+        rules: rules(result),
+        message: detailFor(result, 'collector-affinity-changed'),
+    };
+});
+
+record('A2-07', 'affinity', 'PMU identity cannot be confirmed', 'AffinityAttestationError, rule pmu-identity-unconfirmed', () => {
+    const result = validateAffinityAttestation(
+        { requestedCpu: 19, collectorStart: pinned, collectorEnd: pinned, children: goodChildren, pmu: { name: null, cpus: null } },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('pmu-identity-unconfirmed'),
+        rules: rules(result),
+        message: detailFor(result, 'pmu-identity-unconfirmed'),
+    };
+});
+
+record('A2-08', 'affinity', 'missing child attestation', 'AffinityAttestationError, rule child-attestation-missing', () => {
+    const result = validateAffinityAttestation(
+        { requestedCpu: 19, collectorStart: pinned, collectorEnd: pinned, children: goodChildren.slice(0, 2), pmu: pmu19 },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('child-attestation-missing'),
+        rules: rules(result),
+        message: detailFor(result, 'child-attestation-missing'),
+    };
+});
+
+// ---------------------------------------------------------------------------
+// A4 - provenance completeness and the artifact-policy ban
+// ---------------------------------------------------------------------------
+
+function completeArtifact() {
+    return {
+        meta: {
+            zjs: { commit: 'a'.repeat(40), sha256: 'b'.repeat(64), binary: '/tmp/zjs', dirty: false },
+            qjs: { commit: '04be246001599f5995fa2f2d8c91a0f198d3f34c', version: '2026-06-04', sha256: 'c'.repeat(64), binary: '/tmp/qjs', dirty: false },
+            toolRepoCommit: { commit: 'd'.repeat(40), dirty: false },
+            host: {
+                kernel: '6.17.0-1014-nvidia',
+                cpuModel: 'Cortex-X925 / Cortex-A725',
+                pinnedCpu: 19,
+                affinityMask: '19',
+                pmuIdentity: { name: 'armv8_pmuv3_1', cpus: [19] },
+            },
+            sampling: { iters: 8, warmup: 4, samples: 8, timed: { sampleOrders: abba(8).map((o) => o.join('->')) } },
+            startupBaselineIdentity: { scriptSha256: 'e'.repeat(64), generation: 'gen-1' },
+            lock: { path: '/tmp/zjs-host-heavy.lock', mode: 'exclusive' },
+            environment: { ZIG_GLOBAL_CACHE_DIR: '/x', TMPDIR: '/y', ZJS_REPO_ROOT: '/z' },
+            caseSources: { int_sum: { sourcePath: '/tmp/int_sum.js', sourceSha256: 'f'.repeat(64) } },
+        },
+        cases: [{ name: 'int_sum', status: 'ok', sourceSha256: 'f'.repeat(64), sourcePath: '/tmp/int_sum.js' }],
+    };
+}
+
+record('A4-01', 'provenance', 'a complete artifact passes', 'ok=true, no missing fields', () => {
+    const result = validateProvenance(completeArtifact(), policy);
+    return { pass: result.ok === true, missing: result.missing, caseMissing: result.caseMissing };
+});
+
+record('A4-02', 'provenance', 'a missing binary SHA-256 fails closed', 'ProvenanceIncompleteError, exit 5, meta.zjs.sha256 listed', () => {
+    const artifact = completeArtifact();
+    delete artifact.meta.zjs.sha256;
+    const result = validateProvenance(artifact, policy);
+    return {
+        pass:
+            result.ok === false &&
+            result.errorClass === 'ProvenanceIncompleteError' &&
+            result.exitCode === CONTRACT_EXIT_CODES.provenanceIncomplete &&
+            result.missing.includes('meta.zjs.sha256'),
+        errorClass: result.errorClass,
+        exitCode: result.exitCode,
+        missing: result.missing,
+        message: detailFor(result, 'provenance-field-missing'),
+    };
+});
+
+record('A4-03', 'provenance', 'a missing per-case source SHA fails closed', 'rule case-provenance-field-missing', () => {
+    const artifact = completeArtifact();
+    delete artifact.cases[0].sourceSha256;
+    const result = validateProvenance(artifact, policy);
+    return {
+        pass: result.ok === false && rules(result).includes('case-provenance-field-missing'),
+        caseMissing: result.caseMissing,
+        message: detailFor(result, 'case-provenance-field-missing'),
+    };
+});
+
+record('A4-04', 'provenance', 'missing lock and environment provenance fails closed', 'meta.lock.mode and TMPDIR listed', () => {
+    const artifact = completeArtifact();
+    delete artifact.meta.lock.mode;
+    delete artifact.meta.environment.TMPDIR;
+    const result = validateProvenance(artifact, policy);
+    return {
+        pass:
+            result.ok === false &&
+            result.missing.includes('meta.lock.mode') &&
+            result.missing.includes('meta.environment.TMPDIR'),
+        missing: result.missing,
+    };
+});
+
+record('A4-05', 'provenance', 'an artifact that supplies its own thresholds is rejected', 'ArtifactPolicyOverrideError, exit 6', () => {
+    const artifact = completeArtifact();
+    artifact.startup = { minTimeResolutionMs: 0.0 };
+    const result = assertNoSelfSuppliedPolicy(artifact, policy);
+    return {
+        pass:
+            result.ok === false &&
+            result.errorClass === 'ArtifactPolicyOverrideError' &&
+            result.exitCode === CONTRACT_EXIT_CODES.artifactPolicyOverride &&
+            rules(result).includes('artifact-supplied-policy'),
+        errorClass: result.errorClass,
+        exitCode: result.exitCode,
+        message: detailFor(result, 'artifact-supplied-policy'),
+    };
+});
+
+record('A4-06', 'provenance', 'an artifact may reference the policy but not restate it', 'policyRef with id/version/sha passes; extra keys rejected', () => {
+    const ok = completeArtifact();
+    ok.policyRef = { policy_id: policy.policy_id, policy_version: policy.policy_version, sha256: 'a'.repeat(64) };
+    const okResult = assertNoSelfSuppliedPolicy(ok, policy);
+    const bad = completeArtifact();
+    bad.policyRef = { policy_id: policy.policy_id, minimumSamples: 1 };
+    const badResult = assertNoSelfSuppliedPolicy(bad, policy);
+    return {
+        pass: okResult.ok === true && badResult.ok === false && rules(badResult).includes('artifact-supplied-policy'),
+        okViolations: okResult.violations,
+        badMessage: detailFor(badResult, 'artifact-supplied-policy'),
+    };
+});
+
+record('A4-06b', 'provenance', 'a case source SHA that disagrees with the suite table fails closed', 'rule case-source-sha-mismatch', () => {
+    const artifact = completeArtifact();
+    artifact.cases[0].sourceSha256 = '0'.repeat(64);
+    const result = validateProvenance(artifact, policy);
+    return {
+        pass: result.ok === false && rules(result).includes('case-source-sha-mismatch'),
+        message: detailFor(result, 'case-source-sha-mismatch'),
+    };
+});
+
+record('A4-07', 'provenance', 'a dirty worktree fails closed in formal mode', 'ProvenanceIncompleteError, rule dirty-worktree', () => {
+    const artifact = completeArtifact();
+    artifact.meta.toolRepoCommit.dirty = true;
+    const result = validateWorktreeCleanliness(artifact);
+    return {
+        pass:
+            result.ok === false &&
+            result.errorClass === 'ProvenanceIncompleteError' &&
+            result.exitCode === CONTRACT_EXIT_CODES.provenanceIncomplete &&
+            rules(result).includes('dirty-worktree'),
+        errorClass: result.errorClass,
+        exitCode: result.exitCode,
+        message: detailFor(result, 'dirty-worktree'),
+    };
+});
+
+record('A4-08', 'provenance', 'a startup baseline from another generation fails closed', 'rule generation-mismatch', () => {
+    const artifact = completeArtifact();
+    artifact.meta.startupBaselineIdentity.generation = 'phase-6-closeout';
+    artifact.cases[0].generation = 'gen-1';
+    const result = validateGenerationCoherence(artifact);
+    return {
+        pass: result.ok === false && rules(result).includes('generation-mismatch'),
+        message: detailFor(result, 'generation-mismatch'),
+    };
+});
+
+record('A4-09', 'provenance', 'a coherent generation passes', 'ok=true when case and baseline share a generation', () => {
+    const artifact = completeArtifact();
+    artifact.cases[0].generation = 'gen-1';
+    const result = validateGenerationCoherence(artifact);
+    return { pass: result.ok === true, violations: result.violations };
+});
+
+// ---------------------------------------------------------------------------
+// A6 - P7-42 contracts, made automatically checkable
+// ---------------------------------------------------------------------------
+
+record('A6-01', 'attribution', 'bare file:line stage attribution is rejected', 'AttributionScopeError, rule bare-file-line-attribution, exit 9', () => {
+    const result = validateStageAttribution([{ stage: 'callback-return', scope: 'symbol', key: 'quickjs.c:9840' }], policy);
+    return {
+        pass:
+            result.ok === false &&
+            result.errorClass === 'AttributionScopeError' &&
+            result.exitCode === CONTRACT_EXIT_CODES.attributionScope &&
+            rules(result).includes('bare-file-line-attribution'),
+        errorClass: result.errorClass,
+        exitCode: result.exitCode,
+        message: detailFor(result, 'bare-file-line-attribution'),
+    };
+});
+
+record('A6-02', 'attribution', 'a scoped stage attribution passes', 'ok=true for symbol/callChain/addressRange scopes', () => {
+    const result = validateStageAttribution(
+        [
+            { stage: 'driver-reentry', scope: 'symbol', key: 'vm.zig:1180', symbol: 'Vm.next' },
+            { stage: 'callback-return', scope: 'callChain', key: 'callback', callChain: ['js_array_map', 'JS_CallInternal', 'Vm.next'] },
+            { stage: 'return-path', scope: 'addressRange', key: 'op_return', addressRange: { start: '0x4a1200', end: '0x4a1290' } },
+        ],
+        policy,
+    );
+    return { pass: result.ok === true, violations: result.violations };
+});
+
+record('A6-03', 'attribution', 'an unscoped stage is rejected', 'rule stage-scope-not-allowed', () => {
+    const result = validateStageAttribution([{ stage: 'x', scope: 'fileLine', key: 'vm.zig:12' }], policy);
+    return {
+        pass: result.ok === false && rules(result).includes('stage-scope-not-allowed'),
+        message: detailFor(result, 'stage-scope-not-allowed'),
+    };
+});
+
+record('A6-04', 'attribution', 'perf -F is rejected for phase attribution', 'PhaseSamplingError, rule frequency-sampling-for-phase-attribution, exit 10', () => {
+    const result = validatePhaseSampling(
+        { argv: ['perf', 'record', '-F', '20000', '--', './zjs', 'case.js'], recordedPeriod: null, innerLoopPeriod: 100 },
+        policy,
+    );
+    return {
+        pass:
+            result.ok === false &&
+            result.errorClass === 'PhaseSamplingError' &&
+            result.exitCode === CONTRACT_EXIT_CODES.phaseSampling &&
+            rules(result).includes('frequency-sampling-for-phase-attribution'),
+        errorClass: result.errorClass,
+        exitCode: result.exitCode,
+        message: detailFor(result, 'frequency-sampling-for-phase-attribution'),
+    };
+});
+
+record('A6-05', 'attribution', 'a fixed co-prime recorded period passes', 'ok=true for period 100003 against inner loop 100', () => {
+    const result = validatePhaseSampling(
+        { argv: ['perf', 'record', '-e', 'cycles', '-c', '100003', '--', './zjs', 'case.js'], recordedPeriod: 100003, innerLoopPeriod: 100 },
+        policy,
+    );
+    return { pass: result.ok === true, violations: result.violations };
+});
+
+record('A6-06', 'attribution', 'a period that shares a factor with the inner loop is rejected', 'rule phase-period-not-coprime', () => {
+    const result = validatePhaseSampling(
+        { argv: ['perf', 'record', '-c', '100000', '--', './zjs', 'case.js'], recordedPeriod: 100000, innerLoopPeriod: 100 },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('phase-period-not-coprime'),
+        message: detailFor(result, 'phase-period-not-coprime'),
+    };
+});
+
+record('A6-07', 'attribution', 'an unrecorded period is rejected', 'rule phase-period-not-recorded', () => {
+    const result = validatePhaseSampling(
+        { argv: ['perf', 'record', '-c', '100003', '--', './zjs', 'case.js'], recordedPeriod: null, innerLoopPeriod: 100 },
+        policy,
+    );
+    return {
+        pass: result.ok === false && rules(result).includes('phase-period-not-recorded'),
+        message: detailFor(result, 'phase-period-not-recorded'),
+    };
 });
 
 // ---------------------------------------------------------------------------
