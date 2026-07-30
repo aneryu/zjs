@@ -10,6 +10,54 @@
 
 ## 1. 结论
 
+### 1.0 正式裁决（2026-07-30 关闭为 attribution success）
+
+```text
+Decision:
+    shared builtin-to-bytecode callback bridge tax confirmed
+
+Canonical estimate:
+    27.43 cycles/callback on dense, no-result-write Array builtins
+
+Mechanism boundary:
+    SyncInternalCallSite.call / native_fence_run path,
+    one hit per callback and zero hits in mirrored direct-loop controls
+
+Production action:
+    deferred pending phase-level attribution and P7-50 priority comparison
+```
+
+结论的正确读法是：
+
+```text
+共享固定桥接税 ≈ 27 cycles/callback
++ 各 builtin 自身独立的元素读取 / 写入成本
+```
+
+**适用范围（本条线实际证明的边界）**：dense Array builtin、same-runtime 层、同步 bytecode
+callback、当前 active-Machine reuse 路径、无 hole / sparse 特殊语义。
+
+**以下均不可外推，本条线没有证明**：
+
+- 并非所有 native→JS 调用都有相同成本；
+- TypedArray callback、`find` / `findIndex` 族、跨 realm 未覆盖；
+- 那 27 cycles **尚未**精确定位到 native fence 中的某几条指令；
+- `SyncInternalCallSite.call + runTC` 占 builtin cycles 的 54.4% **不等于**这 54.4% 都是可删除成本。
+
+目前确认的只是**桥接路径是成本载体**，尚未确认其中哪个阶段构成下一笔 one-cut。因此本条线
+**不进入生产改动**，并明确不做：删除 native fence、绕过 `SyncInternalCallSite.call`、
+为 Array builtin 加专用 bytecode callback bypass、把 callback 直接塞进当前 VM dispatch、
+或按 builtin 名字做 fast path。这些都会重复本战役已多次出现的失误 ——
+**热点符号已定，但符号内可消除的机制未定就下刀**。
+
+**下一步（条件性）**：若 P7-50 最终没有更集中的目标，则开 **P7-42：builtin→JS bridge
+phase attribution**，只拆这约 27 cycles，用同一个 callback、同样三个实参、相同调用次数，
+对比 `direct JS→JS call` 与 `builtin native→JS callback`，逐阶段归因：native fence
+enter/exit、active Machine 获取与恢复、root/fence publication、callback argument staging、
+bytecode frame admission/setup、`special_return` / native caller publication、
+callback result handoff、返回 builtin 的恢复。停止条件同本线：找到每 callback 必经、
+解释桥接差距约 ≥40%、可单机制隔离的阶段；否则记为**分散控制税**，不靠猜测下刀。
+
 ### 1.1 裁决
 
 **是共用税，不是 `map` 专属。** 六个 Array builtin 全部同向，四个干净量级一致，且**动态调用链逐项完全相同**。
