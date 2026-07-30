@@ -1,5 +1,6 @@
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
+const build_options = @import("build_options");
 const bytecode = @import("../bytecode.zig");
 const bignum = @import("../libs/bigint.zig");
 const core = @import("../core/root.zig");
@@ -32,6 +33,10 @@ const runWithArgs = zjs_vm.runWithArgs;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
 const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
 const exceptions = @import("exceptions.zig");
+
+const dossier_simple_ctor = build_options.zjs_dossier_simple_ctor;
+const simple_ctor_bypass_enabled = !std.mem.eql(u8, dossier_simple_ctor, "c");
+const simple_ctor_memo_enabled = std.mem.eql(u8, dossier_simple_ctor, "a");
 
 const string_ops = @import("string_ops.zig");
 
@@ -115,7 +120,7 @@ pub fn execCall(
     // OP_call is never a constructor call. Legal super() is emitted as
     // call_constructor (or apply(1)); superclass identity alone cannot grant a
     // normal call permission to invoke a class constructor.
-    const result = callValueOrBytecodePreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
+    const result = callValueOrBytecodeRootPreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
         try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
@@ -242,7 +247,7 @@ pub fn tryCatchInFrame(
     return true;
 }
 
-pub fn callValueOrBytecode(
+pub fn callValueOrBytecodeRoot(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -340,8 +345,8 @@ pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, er
 /// Variant for callers whose `this_value`, `func`, and `args` are already
 /// rooted (e.g. borrowed directly from a frame-rooted operand stack).
 /// Skips the defensive copy and extra value-root frame of
-/// `callValueOrBytecode`.
-pub fn callValueOrBytecodePreRooted(
+/// `callValueOrBytecodeRoot`.
+pub fn callValueOrBytecodeRootPreRooted(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -357,7 +362,7 @@ pub fn callValueOrBytecodePreRooted(
 /// Bytecode-opcode call whose argument window is already rooted. Unlike the
 /// C-API/JS_Call-shaped helper above, OP_call and shadowed OP_eval pass
 /// flags=0 and may borrow argv when the actual arity already covers formals.
-pub fn callValueOrBytecodePreRootedInternal(
+pub fn callValueOrBytecodeRootPreRootedInternal(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -372,7 +377,7 @@ pub fn callValueOrBytecodePreRootedInternal(
 
 /// VM fast-call fallback after the opcode path has already performed the
 /// caller-Realm call-entry poll.
-pub fn callValueOrBytecodePreRootedAfterInterruptPoll(
+pub fn callValueOrBytecodeRootPreRootedAfterInterruptPoll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -383,6 +388,483 @@ pub fn callValueOrBytecodePreRootedAfterInterruptPoll(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame, false);
+}
+
+/// Transactional owned staging for a synchronous native -> bytecode call.
+/// The first two slots are `[receiver, callable]`, followed by arguments.
+/// Construction publishes only the initialized prefix to the Runtime root
+/// chain; successful frame setup replaces every transferred slot with
+/// undefined, while any failure releases exactly the remaining owners.
+const OwnedArgList = struct {
+    const inline_capacity = 10;
+
+    rt: ?*core.JSRuntime = null,
+    inline_values: [inline_capacity]core.JSValue = undefined,
+    values: []core.JSValue = &.{},
+    rooted_prefix: []core.JSValue = &.{},
+    root: array_ops.ValueSliceRoot = .{},
+    heap_backed: bool = false,
+
+    fn init(
+        self: *OwnedArgList,
+        rt: *core.JSRuntime,
+        receiver: core.JSValue,
+        callable: core.JSValue,
+        args: []const core.JSValue,
+    ) HostError!void {
+        std.debug.assert(self.rt == null);
+        const total = try std.math.add(usize, args.len, 2);
+        self.rt = rt;
+        self.values = if (total <= self.inline_values.len)
+            self.inline_values[0..total]
+        else blk: {
+            self.heap_backed = true;
+            break :blk try rt.memory.alloc(core.JSValue, total);
+        };
+        self.rooted_prefix = self.values[0..0];
+        self.root.init(rt, &self.rooted_prefix);
+        errdefer self.deinit();
+
+        self.values[0] = receiver.dup();
+        self.rooted_prefix = self.values[0..1];
+        self.values[1] = callable.dup();
+        self.rooted_prefix = self.values[0..2];
+        for (args, 0..) |arg, index| {
+            self.values[index + 2] = arg.dup();
+            self.rooted_prefix = self.values[0 .. index + 3];
+        }
+    }
+
+    fn initTakeArgs(
+        self: *OwnedArgList,
+        rt: *core.JSRuntime,
+        receiver: core.JSValue,
+        callable: core.JSValue,
+        args: []core.JSValue,
+    ) HostError!void {
+        std.debug.assert(self.rt == null);
+        const total = try std.math.add(usize, args.len, 2);
+        self.rt = rt;
+        self.values = if (total <= self.inline_values.len)
+            self.inline_values[0..total]
+        else blk: {
+            self.heap_backed = true;
+            break :blk try rt.memory.alloc(core.JSValue, total);
+        };
+        self.rooted_prefix = self.values[0..0];
+        self.root.init(rt, &self.rooted_prefix);
+        errdefer self.deinit();
+
+        self.values[0] = receiver.dup();
+        self.rooted_prefix = self.values[0..1];
+        self.values[1] = callable.dup();
+        self.rooted_prefix = self.values[0..2];
+        @memcpy(self.values[2..], args);
+        @memset(args, core.JSValue.undefinedValue());
+        self.rooted_prefix = self.values;
+    }
+
+    fn deinit(self: *OwnedArgList) void {
+        const rt = self.rt orelse return;
+        var index = self.rooted_prefix.len;
+        while (index > 0) {
+            index -= 1;
+            const value = self.values[index];
+            self.values[index] = core.JSValue.undefinedValue();
+            value.free(rt);
+        }
+        self.rooted_prefix = self.values[0..0];
+        self.root.deinit();
+        if (self.heap_backed) rt.memory.free(core.JSValue, self.values);
+        self.values = &.{};
+        self.rt = null;
+        self.heap_backed = false;
+    }
+};
+
+const SyncInlineRoute = struct {
+    invocation: *inline_calls.ActiveInvocation,
+    target: inline_calls.InlineTarget,
+};
+
+inline fn resolveSyncInlineRoute(
+    route: *SyncInlineRoute,
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+) bool {
+    const invocation = inline_calls.activeInvocation(ctx.runtime) orelse return false;
+    const machine = invocation.machine;
+    if (machine.ctx != ctx or
+        machine.global != global or
+        machine.output != output)
+    {
+        return false;
+    }
+    route.invocation = invocation;
+    return inline_calls.resolveInlineTargetInto(
+        &route.target,
+        ctx,
+        global,
+        this_value,
+        func,
+    );
+}
+
+noinline fn runSyncInlineRouteMoved(
+    route: *SyncInlineRoute,
+    global: *core.Object,
+    moved_values: []core.JSValue,
+) HostError!core.JSValue {
+    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    boundary.push();
+    errdefer boundary.deinit();
+
+    _ = try route.invocation.machine.pushMovedCall(
+        global,
+        &route.target,
+        moved_values,
+        .method,
+        .native_boundary,
+        0,
+    );
+    inline_calls.recordSameMachineSyncCall();
+    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    boundary.finish();
+    return result;
+}
+
+inline fn runSyncInlineRouteCopiedArgs(
+    route: *SyncInlineRoute,
+    global: *core.Object,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
+    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    boundary.push();
+    errdefer boundary.deinit();
+
+    const machine = route.invocation.machine;
+    if (machine.tryPushNativeBoundaryCopiedArgsFast(
+        machine.ctx.runtime,
+        &route.target,
+        args,
+    ) == null) {
+        _ = (try machine.pushNativeBoundaryCopiedArgs(
+            global,
+            &route.target,
+            args,
+        )).?;
+    }
+    inline_calls.recordSameMachineSyncCall();
+    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    boundary.finish();
+    return result;
+}
+
+noinline fn runSyncInlineRouteMovedArgs(
+    route: *SyncInlineRoute,
+    global: *core.Object,
+    args: []core.JSValue,
+) HostError!core.JSValue {
+    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
+    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    boundary.push();
+    errdefer boundary.deinit();
+
+    const machine = route.invocation.machine;
+    if (machine.tryPushNativeBoundaryMovedArgsFast(
+        machine.ctx.runtime,
+        &route.target,
+        args,
+    ) == null) {
+        _ = (try machine.pushNativeBoundaryMovedArgs(
+            global,
+            &route.target,
+            args,
+        )).?;
+    }
+    inline_calls.recordSameMachineSyncCall();
+    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    boundary.finish();
+    return result;
+}
+
+noinline fn runSyncInlineRouteOwnedCopy(
+    route: *SyncInlineRoute,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    var owned_args = OwnedArgList{};
+    try owned_args.init(ctx.runtime, this_value, func, args);
+    defer owned_args.deinit();
+    return runSyncInlineRouteMoved(route, global, owned_args.values);
+}
+
+noinline fn runSyncInlineRouteOwnedArgsGeneral(
+    route: *SyncInlineRoute,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []core.JSValue,
+) HostError!core.JSValue {
+    std.debug.assert(!inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
+    var owned_args = OwnedArgList{};
+    try owned_args.initTakeArgs(ctx.runtime, this_value, func, args);
+    defer owned_args.deinit();
+    return runSyncInlineRouteMoved(route, global, owned_args.values);
+}
+
+/// Explicit synchronous internal call boundary for native algorithms that
+/// must receive a bytecode callback result before they can finish. Inputs must
+/// remain rooted for this call (native invocation arguments and algorithm
+/// OwnedArgList values already satisfy that contract).
+///
+/// Eligible same-context, same-Realm normal bytecode targets push an Entry on
+/// the active Machine and stop at `.native_boundary`. Every other target
+/// unconditionally retains the authoritative JS_Call-shaped root path.
+pub inline fn callValueOrBytecodeSyncInternal(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    // One call-entry poll regardless of whether routing selects the resident
+    // Machine or the authoritative fallback.
+    try exception_ops.pollInterrupt(ctx, global);
+
+    var route: SyncInlineRoute = undefined;
+    if (!resolveSyncInlineRoute(&route, ctx, output, global, this_value, func))
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            ctx,
+            output,
+            global,
+            this_value,
+            func,
+            args,
+            caller_function,
+            caller_frame,
+            true,
+        );
+
+    if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+        return runSyncInlineRouteCopiedArgs(&route, global, args);
+    }
+    return runSyncInlineRouteOwnedCopy(
+        &route,
+        ctx,
+        global,
+        this_value,
+        func,
+        args,
+    );
+}
+
+/// Loop-callback adapter for the same explicit synchronous contract. Keeping
+/// target resolution and the fallback union out of the surrounding native
+/// algorithm prevents one callback call site from extending its spill set
+/// across the algorithm's whole iteration body. Apply's single terminal call
+/// retains the inline adapter above; callback cohorts deliberately use this
+/// outlined seam.
+pub noinline fn callValueOrBytecodeSyncInternalOutlined(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    return callValueOrBytecodeSyncInternal(
+        ctx,
+        output,
+        global,
+        this_value,
+        func,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+/// A stack-local adapter for native algorithms that invoke one immutable
+/// callback repeatedly. QuickJS resolves the JSFunction record once from the
+/// callback value held by the native algorithm; mirror that lifetime here
+/// instead of rebuilding the wider InlineTarget on every iteration.
+///
+/// Call entry remains fully observable: every `call` polls interrupts and
+/// verifies that the invocation which prepared the route is still active.
+/// A site prepared outside bytecode execution, or used after an execution-root
+/// change, takes the authoritative root-call fallback unconditionally.
+pub const SyncInternalCallSite = struct {
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    route: ?SyncInlineRoute,
+
+    pub inline fn init(
+        ctx: *core.JSContext,
+        output: ?*std.Io.Writer,
+        global: *core.Object,
+        this_value: core.JSValue,
+        func: core.JSValue,
+        caller_function: ?*const bytecode.FunctionBytecode,
+        caller_frame: ?*frame_mod.Frame,
+    ) SyncInternalCallSite {
+        var route: SyncInlineRoute = undefined;
+        return .{
+            .ctx = ctx,
+            .output = output,
+            .global = global,
+            .this_value = this_value,
+            .func = func,
+            .caller_function = caller_function,
+            .caller_frame = caller_frame,
+            .route = if (resolveSyncInlineRoute(
+                &route,
+                ctx,
+                output,
+                global,
+                this_value,
+                func,
+            )) route else null,
+        };
+    }
+
+    pub noinline fn call(
+        self: *SyncInternalCallSite,
+        args: []const core.JSValue,
+    ) HostError!core.JSValue {
+        try exception_ops.pollInterrupt(self.ctx, self.global);
+
+        if (self.route) |*route| {
+            if (inline_calls.activeInvocation(self.ctx.runtime) == route.invocation) {
+                if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+                    return runSyncInlineRouteCopiedArgs(route, self.global, args);
+                }
+                return runSyncInlineRouteOwnedCopy(
+                    route,
+                    self.ctx,
+                    self.global,
+                    self.this_value,
+                    self.func,
+                    args,
+                );
+            }
+        }
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            self.ctx,
+            self.output,
+            self.global,
+            self.this_value,
+            self.func,
+            args,
+            self.caller_function,
+            self.caller_frame,
+            true,
+        );
+    }
+
+    /// Reuse the prepared callable route while supplying the receiver for this
+    /// invocation. Recursive native algorithms such as JSON reviver/replacer
+    /// walks keep one callback but change the holder used as `this` at every
+    /// step. The copied route is stack-local so nested/reentrant calls cannot
+    /// mutate the site's immutable template.
+    pub noinline fn callWithThis(
+        self: *SyncInternalCallSite,
+        this_value: core.JSValue,
+        args: []const core.JSValue,
+    ) HostError!core.JSValue {
+        try exception_ops.pollInterrupt(self.ctx, self.global);
+
+        if (self.route) |template| {
+            if (inline_calls.activeInvocation(self.ctx.runtime) == template.invocation) {
+                var route = template;
+                route.target.this_value = this_value;
+                if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+                    return runSyncInlineRouteCopiedArgs(&route, self.global, args);
+                }
+                return runSyncInlineRouteOwnedCopy(
+                    &route,
+                    self.ctx,
+                    self.global,
+                    this_value,
+                    self.func,
+                    args,
+                );
+            }
+        }
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            self.ctx,
+            self.output,
+            self.global,
+            this_value,
+            self.func,
+            args,
+            self.caller_function,
+            self.caller_frame,
+            true,
+        );
+    }
+};
+
+/// Same synchronous routing contract as `callValueOrBytecodeSyncInternal`,
+/// but the caller supplies a rooted, owned argument list. Simple eligible
+/// targets move the arguments directly into the writable frame while
+/// receiver/callable remain borrowed from the still-live native algorithm.
+/// Other eligible bytecode layouts build the full owned transaction on their
+/// cold path. Fallback leaves every argument owned by the caller.
+pub inline fn callOwnedArgsValueOrBytecodeSyncInternal(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    try exception_ops.pollInterrupt(ctx, global);
+
+    var route: SyncInlineRoute = undefined;
+    if (!resolveSyncInlineRoute(&route, ctx, output, global, this_value, func))
+        return callValueOrBytecodeDispatchAfterInterruptPoll(
+            ctx,
+            output,
+            global,
+            this_value,
+            func,
+            args,
+            caller_function,
+            caller_frame,
+            true,
+        );
+    if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+        return runSyncInlineRouteMovedArgs(&route, global, args);
+    }
+    return runSyncInlineRouteOwnedArgsGeneral(
+        &route,
+        ctx,
+        global,
+        this_value,
+        func,
+        args,
+    );
 }
 
 /// Slow-path collection prototype methods reached by name without a baked
@@ -1058,7 +1540,7 @@ noinline fn callNativeCallableByName(
     return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
 }
 
-test "callValueOrBytecode roots inline args before bytecode frame allocation" {
+test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
@@ -1119,7 +1601,7 @@ test "callValueOrBytecode roots inline args before bytecode frame allocation" {
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    const result = try callValueOrBytecode(
+    const result = try callValueOrBytecodeRoot(
         ctx,
         null,
         global,
@@ -1300,7 +1782,7 @@ pub fn qjsErrorStackSetter(
     switch (own_desc.kind) {
         .accessor => {
             if (own_desc.setter.isUndefined()) return error.TypeError;
-            const result = try callValueOrBytecode(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
+            const result = try callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
             result.free(ctx.runtime);
             return core.JSValue.undefinedValue();
         },
@@ -1341,7 +1823,7 @@ pub fn qjsFunctionCallCall(
     // outer native call keeps `this_value` and `args` rooted for this complete
     // synchronous invocation, so rebuilding the defensive eight-slot argument
     // copy/root frame here is redundant.
-    return callValueOrBytecodePreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
+    return callValueOrBytecodeRootPreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
 }
 
 /// Function.prototype.apply body. `argsFromArrayLike` is the shared
@@ -1357,23 +1839,148 @@ pub fn qjsFunctionApplyCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
+    if (!this_value.isFunctionBytecode()) {
+        const target_object = object_ops.objectFromValue(this_value) orelse
+            return qjsFunctionApplyUncommonCallable(
+                ctx,
+                output,
+                global,
+                this_value,
+                function_object,
+                args,
+                caller_function,
+                caller_frame,
+            );
+        if (target_object.class_id != core.class.ids.bytecode_function and
+            !isFunctionLikeClass(target_object.class_id))
+        {
+            return qjsFunctionApplyUncommonCallable(
+                ctx,
+                output,
+                global,
+                this_value,
+                function_object,
+                args,
+                caller_function,
+                caller_frame,
+            );
+        }
+    }
+    return qjsFunctionApplyCallable(
+        ctx,
+        output,
+        global,
+        this_value,
+        function_object,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+inline fn qjsFunctionApplyCallable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const arg_array = if (args.len >= 2 and !args[1].isNull() and !args[1].isUndefined()) args[1] else {
-        return callValueOrBytecode(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
-    };
+    const arg_array = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    if (arg_array.isNull() or arg_array.isUndefined()) {
+        return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
+    }
+    return qjsFunctionApplyArrayLike(
+        ctx,
+        output,
+        global,
+        this_arg,
+        this_value,
+        function_object,
+        arg_array,
+        caller_function,
+        caller_frame,
+    );
+}
+
+noinline fn qjsFunctionApplyUncommonCallable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    if (!isCallableValue(this_value)) {
+        return throwFunctionRealmTypeError(ctx, global, function_object);
+    }
+    return qjsFunctionApplyCallable(
+        ctx,
+        output,
+        global,
+        this_value,
+        function_object,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+/// Observable CreateListFromArrayLike materialization and its owned argument
+/// transaction are needed only when apply receives a non-null list. Keep that
+/// large cold state out of the zero-list native-fence caller frame.
+noinline fn qjsFunctionApplyArrayLike(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_arg: core.JSValue,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    arg_array: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
     if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
     if (object_ops.callableObjectFromValue(this_value)) |target_object| {
-        const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target_object);
-        defer ctx.runtime.memory.allocator.free(target_name);
-        if (std.mem.eql(u8, target_name, "fromCodePoint")) return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
+        if (core.function.decodeNativeBuiltinId(target_object.nativeFunctionId())) |native_ref| {
+            if (native_ref.domain == .string and
+                native_ref.id == @intFromEnum(method_ids.string.StaticMethod.from_code_point))
+            {
+                return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
+            }
+        }
     }
-    var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, arg_array, caller_function, caller_frame);
-    defer freeArgs(ctx.runtime, apply_args);
+    var owned_args = try array_ops.ownedArgsFromArrayLike(
+        ctx,
+        output,
+        global,
+        arg_array,
+        caller_function,
+        caller_frame,
+    );
+    defer owned_args.deinit();
+    var apply_args = owned_args.values;
+    if (apply_args.len == 0) {
+        return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
+    }
     var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
-    return callValueOrBytecode(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
+    return callOwnedArgsValueOrBytecodeSyncInternal(
+        ctx,
+        output,
+        global,
+        this_arg,
+        this_value,
+        apply_args,
+        caller_function,
+        caller_frame,
+    );
 }
 
 pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, _: *core.Object, message: []const u8) !core.JSValue {
@@ -1531,6 +2138,34 @@ fn constructDateBuiltinNativeVm(
     };
 }
 
+/// Promise remains on the legacy constructor-name dispatcher rather than the
+/// internal record table. Give it the same C-function preflight, native
+/// backtrace scope, and error materialization boundary as record-dispatched
+/// constructors before it synchronously invokes the executor.
+fn constructPromiseNativeVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    // Promise.length is 1; this is the JSCFunctionListEntry length analogue
+    // used by QuickJS's native-stack preflight, not the observable argument
+    // count or mutable `length` property.
+    try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, 1);
+    var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+    native_scope.push();
+    defer native_scope.deinit();
+
+    return promise_ops.qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+        return err;
+    };
+}
+
 fn constructDateBuiltinNativeInScope(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1662,6 +2297,34 @@ pub fn resolveSameMachineConstructor(
     };
 }
 
+/// OP_apply(1) admission. Spread construction has an owned new-target operand,
+/// so same-Realm `super(...args)` may preserve a differing new.target without
+/// borrowing it from the caller frame. Cross-Realm targets remain execution
+/// roots until Entry carries an explicit Realm/global binding.
+pub fn resolveSameMachineSpreadConstructor(
+    global: *core.Object,
+    func: core.JSValue,
+    new_target: core.JSValue,
+) ?SameMachineConstructorTarget {
+    const resolved = inline_calls.resolveInlineSpreadConstructorFunction(global, func) orelse return null;
+    if (!resolved.fb.hasPrototype()) return null;
+    const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
+    if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
+    if (!new_target.sameValue(func)) {
+        // `callableObjectFromValue` is the native/bound-call adapter and
+        // deliberately excludes the bytecode-function class. A super-call's
+        // differing new.target is normally precisely that class, so inspect
+        // the general object and use its authoritative FunctionRealm instead.
+        const new_target_object = object_ops.objectFromValue(new_target) orelse return null;
+        const new_target_global = object_ops.objectRealmGlobal(new_target_object) orelse return null;
+        if (new_target_global != global) return null;
+    }
+    return .{
+        .resolved = resolved,
+        .function_object = function_object,
+    };
+}
+
 pub const SameMachineConstructorPreparation = union(enum) {
     /// The QuickJS-style simple-field writer completed construction without
     /// entering the bytecode body.
@@ -1682,23 +2345,30 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     output: ?*std.Io.Writer,
     global: *core.Object,
     func: core.JSValue,
+    new_target: core.JSValue,
     target: *const SameMachineConstructorTarget,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!SameMachineConstructorPreparation {
     std.debug.assert(!target.resolved.fb.isDerivedClassConstructor());
-    if (try constructSimpleFieldConstructor(
-        ctx,
-        global,
-        func,
-        target.function_object,
-        target.resolved.fb,
-        args,
-        func,
-        false,
-    )) |constructed| {
-        return .{ .completed = constructed };
+    // Merge resolution: the dossier-only comptime gate comes from the phase
+    // branch, the `new_target` argument from main's execution-root refactor.
+    // The other `simple_ctor_bypass_enabled` site merged cleanly into exactly
+    // this shape, so this one matches it.
+    if (comptime simple_ctor_bypass_enabled) {
+        if (try constructSimpleFieldConstructor(
+            ctx,
+            global,
+            func,
+            target.function_object,
+            target.resolved.fb,
+            args,
+            new_target,
+            false,
+        )) |constructed| {
+            return .{ .completed = constructed };
+        }
     }
 
     const instance = try createBytecodeConstructorInstance(
@@ -1707,7 +2377,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
         global,
         func,
         target.function_object,
-        func,
+        new_target,
         caller_function,
         caller_frame,
     );
@@ -1742,7 +2412,9 @@ fn constructOrdinaryBytecodeFunctionObject(
     if (fb.isDerivedClassConstructor()) {
         return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     }
-    if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
+    if (comptime simple_ctor_bypass_enabled) {
+        if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
+    }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     errdefer instance.free(ctx.runtime);
     const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
@@ -1903,7 +2575,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             defer prototype.deinit(ctx.runtime);
             return constructArrayNativeRecordVm(ctx, output, global, function_object, prototype.object(), args, caller_function, caller_frame);
         }
-        if (std.mem.eql(u8, name, "Promise")) return promise_ops.qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "Promise")) return constructPromiseNativeVm(ctx, output, global, function_object, new_target, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "DisposableStack")) {
             var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "DisposableStack", new_target, caller_function, caller_frame);
             defer prototype.deinit(ctx.runtime);
@@ -2268,19 +2940,36 @@ fn constructSimpleFieldConstructor(
 ) !?core.JSValue {
     if (!new_target.sameValue(func)) return null;
     const rt = ctx.runtime;
-    // Memoize the (immutable) bytecode pattern per FB — the scan was the top
-    // self-cost of the fast-path construct, re-run on every `new F()`. The memo
-    // is invalidated in the FB destructor, so keying on the FB pointer is safe.
-    ensureSimpleCtorMemo(rt, fb);
-    if (!rt.simple_ctor_memo.is_simple) return null;
+    const scanned_pattern: ?SimpleFieldConstructorPattern = if (comptime simple_ctor_memo_enabled)
+        null
+    else
+        simpleFieldConstructorPattern(fb) orelse return null;
+    if (comptime simple_ctor_memo_enabled) {
+        // Memoize the (immutable) bytecode pattern per FB — the scan was the top
+        // self-cost of the fast-path construct, re-run on every `new F()`. The
+        // memo is invalidated in the FB destructor, so keying on the FB pointer
+        // is safe.
+        ensureSimpleCtorMemo(rt, fb);
+        if (!rt.simple_ctor_memo.is_simple) return null;
+    }
     const prototype = (function_object.getOwnConstructorPrototypeObject(rt) catch return null) orelse return null;
-    // The prototype materialization above can allocate/GC on the FIRST construct
-    // only, and never re-enters construction, so the memo stays valid for this
-    // (live) FB — read the field arrays after it. Slices borrow the rt memo.
-    const memo_len = rt.simple_ctor_memo.len;
-    const memo_atoms = rt.simple_ctor_memo.atoms[0..memo_len];
-    const memo_args = rt.simple_ctor_memo.args[0..memo_len];
-    if (prototypeChainBlocksSimpleFieldStore(prototype, memo_atoms)) return null;
+    // The prototype materialization above can allocate/GC on the FIRST
+    // construct only and never re-enters construction. Select the field slices
+    // afterwards: A borrows the still-valid runtime memo, while B borrows its
+    // per-call stack scan.
+    const field_len = if (comptime simple_ctor_memo_enabled)
+        @as(usize, rt.simple_ctor_memo.len)
+    else
+        scanned_pattern.?.len;
+    const field_atoms = if (comptime simple_ctor_memo_enabled)
+        rt.simple_ctor_memo.atoms[0..field_len]
+    else
+        scanned_pattern.?.atoms[0..field_len];
+    const field_args = if (comptime simple_ctor_memo_enabled)
+        rt.simple_ctor_memo.args[0..field_len]
+    else
+        scanned_pattern.?.arg_indices[0..field_len];
+    if (prototypeChainBlocksSimpleFieldStore(prototype, field_atoms)) return null;
 
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -2294,7 +2983,7 @@ fn constructSimpleFieldConstructor(
         call_vm.qjsBytecodeFrameAllocaSize(fb, args.len, copy_argv),
     );
     defer call_depth_guard.deinit();
-    for (memo_atoms, memo_args) |atom_id, arg_index| {
+    for (field_atoms, field_args) |atom_id, arg_index| {
         const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
         try instance.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, true, true, true));
     }
@@ -2674,7 +3363,7 @@ pub fn callAssertThrowsCallback(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, caller_function, caller_frame);
+    return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, caller_function, caller_frame);
 }
 
 pub fn qjsCollectIteratorValues(
@@ -2697,7 +3386,7 @@ pub fn qjsCollectIteratorValues(
 
     var index: u32 = 0;
     while (true) : (index += 1) {
-        const next = callValueOrBytecode(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
+        const next = callValueOrBytecodeRoot(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame) catch |err| {
             try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
@@ -2740,7 +3429,7 @@ pub fn qjsIteratorClose(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
     result.free(ctx.runtime);
 }
 
@@ -2776,7 +3465,7 @@ pub fn iteratorForValue(
     const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
     defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-    const iterator_value = try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
+    const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
     errdefer iterator_value.free(ctx.runtime);
     _ = property_ops.expectObject(iterator_value) catch return error.TypeError;
     try cacheIteratorNextMethod(ctx, output, global, iterator_value);
@@ -2824,7 +3513,7 @@ pub fn appendIteratorValues(
             _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
             return error.TypeError;
         }
-        break :blk try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, null, null);
+        break :blk try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
     };
     defer iterator_value.free(ctx.runtime);
     if (!iterator_value.isObject()) return error.TypeError;
@@ -2885,7 +3574,7 @@ pub fn appendSpreadValuesEnumerate(
     }
 
     // enumobj = src[@@iterator]()  (qjs GetIterator, quickjs.c:16843)
-    const iterator_value = try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, null, null);
+    const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
     defer iterator_value.free(rt);
     const iterator = property_ops.expectObject(iterator_value) catch return error.TypeError;
 
@@ -2960,7 +3649,7 @@ pub fn iteratorStepValue(
     };
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
-    var next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, null, null);
+    var next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, null, null);
     defer next_result_value.free(ctx.runtime);
     if (object_ops.objectFromValue(next_result_value)) |promise| {
         if (promise.class_id == core.class.ids.promise) {
@@ -3001,7 +3690,7 @@ pub fn iteratorStepResult(
     };
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
-    const next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{next_arg}, null, null);
+    const next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{next_arg}, null, null);
     errdefer next_result_value.free(ctx.runtime);
     const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
     const done_key = core.atom.predefinedId("done", .string).?;
@@ -3017,7 +3706,10 @@ pub fn iteratorStepResult(
 }
 
 pub fn isCallableValue(value: core.JSValue) bool {
-    return value.isFunctionBytecode() or object_ops.functionObjectFromValue(value) != null or object_ops.callableObjectFromValue(value) != null or object_ops.proxyTargetIsCallable(value);
+    if (value.isFunctionBytecode()) return true;
+    const object = object_ops.objectFromValue(value) orelse return false;
+    return isFunctionLikeClass(object.class_id) or
+        object_ops.proxyTargetIsCallableObject(object);
 }
 
 pub fn qjsReflectCallForNativeRecord(
@@ -5424,7 +6116,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     }
     if (!isCallableValue(return_method)) return error.TypeError;
 
-    const result_value = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{return_arg}, null, null);
+    const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{return_arg}, null, null);
     errdefer result_value.free(ctx.runtime);
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
@@ -5467,7 +6159,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
     }
     if (!isCallableValue(throw_method)) return error.TypeError;
 
-    const result_value = try callValueOrBytecode(ctx, output, global, iterator_value, throw_method, &.{thrown}, null, null);
+    const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, throw_method, &.{thrown}, null, null);
     errdefer result_value.free(ctx.runtime);
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
@@ -5501,7 +6193,7 @@ pub fn qjsGeneratorYieldStarCloseForMissingThrow(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
     defer result.free(ctx.runtime);
     _ = property_ops.expectObject(result) catch return error.TypeError;
 }
@@ -5913,7 +6605,7 @@ pub fn iteratorFromSourceForIteratorFrom(
     if (source.isString()) {
         const iterator_method = try getIteratorMethod(ctx, output, global, source);
         defer iterator_method.free(ctx.runtime);
-        const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         errdefer iterator.free(ctx.runtime);
         return .{ .iterator = iterator };
     }
@@ -5927,7 +6619,7 @@ pub fn iteratorFromSourceForIteratorFrom(
     defer iterator_method.free(ctx.runtime);
     if (!iterator_method.isUndefined() and !iterator_method.isNull()) {
         if (!isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         errdefer iterator.free(ctx.runtime);
         _ = object_ops.objectFromValue(iterator) orelse return error.TypeError;
         return .{ .iterator = iterator };
@@ -6057,7 +6749,7 @@ pub fn qjsIteratorWrapNext(
         break :blk method;
     };
     defer next_method.free(ctx.runtime);
-    const result = try callValueOrBytecode(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
     _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
@@ -6084,7 +6776,7 @@ pub fn qjsIteratorWrapReturn(
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
     if (!isCallableValue(return_method)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame);
+    const result = try callValueOrBytecodeRoot(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
     _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
@@ -6423,7 +7115,7 @@ pub fn callBoundFunction(
     const bound_this = object.boundThis() orelse return error.TypeError;
     const combined = try boundFunctionArgs(ctx.runtime, object, args);
     defer freeArgs(ctx.runtime, combined);
-    return callValueOrBytecode(ctx, output, global, bound_this, target, combined, caller_function, caller_frame);
+    return callValueOrBytecodeRoot(ctx, output, global, bound_this, target, combined, caller_function, caller_frame);
 }
 
 pub fn boundFunctionArgs(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) ![]core.JSValue {
@@ -6795,12 +7487,32 @@ pub fn qjsReflectApplyCall(
 ) !core.JSValue {
     if (args.len < 1 or !isCallableValue(args[0])) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     if (args.len < 3) return error.TypeError;
-    var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, args[2], caller_function, caller_frame);
-    defer freeArgs(ctx.runtime, apply_args);
+    var owned_args = try array_ops.ownedArgsFromArrayLike(
+        ctx,
+        output,
+        global,
+        args[2],
+        caller_function,
+        caller_frame,
+    );
+    defer owned_args.deinit();
+    var apply_args = owned_args.values;
+    if (apply_args.len == 0) {
+        return callValueOrBytecodeSyncInternal(ctx, output, global, args[1], args[0], &.{}, caller_function, caller_frame);
+    }
     var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
-    return callValueOrBytecode(ctx, output, global, args[1], args[0], apply_args, caller_function, caller_frame);
+    return callOwnedArgsValueOrBytecodeSyncInternal(
+        ctx,
+        output,
+        global,
+        args[1],
+        args[0],
+        apply_args,
+        caller_function,
+        caller_frame,
+    );
 }
 
 pub fn closeIteratorForFromEntriesAbrupt(
@@ -6815,7 +7527,7 @@ pub fn closeIteratorForFromEntriesAbrupt(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
-    const out = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    const out = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
     out.free(ctx.runtime);
 }
 
@@ -6933,7 +7645,7 @@ pub fn callAccessorSetter(
         defer desc.destroy(ctx.runtime);
         if (desc.kind != .accessor) return false;
         if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
-        const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
+        const result = try callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
         result.free(ctx.runtime);
         return true;
     }
@@ -6985,7 +7697,7 @@ pub fn instanceofOp(
     const has_instance = try object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
     defer has_instance.free(ctx.runtime);
     if (!has_instance.isUndefined() and !has_instance.isNull()) {
-        const result = try callValueOrBytecode(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
+        const result = try callValueOrBytecodeRoot(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
         defer result.free(ctx.runtime);
         stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
         return;

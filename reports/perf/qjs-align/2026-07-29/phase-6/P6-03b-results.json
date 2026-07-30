@@ -1,0 +1,356 @@
+{
+ "note": "P6-03b dual-storage heap BigInt carrier. Representation refactor only: every production creation path still produces external storage, allocation topology and multiplication algorithm unchanged.",
+ "p0": "958307e3",
+ "p1": "42077357",
+ "verdict": "pass - instruction-neutral (-0.88%) with a reproducible non-instruction JS-level gain (cycles -7.0 to -9.2%)",
+ "commits": {
+  "3ef9730d": "route heap bigint consumers through storage accessors (no representation change)",
+  "42077357": "introduce external and inline heap storage (core/bigint.zig only)",
+  "order_note": "committed in the reverse of the PRD's two titles: removing .value breaks 11 files at once, so accessors had to land first for each commit to build and gate independently"
+ },
+ "static_gates": {
+  "sizeof_bytes": 56,
+  "sizeof_unchanged_from_old_representation": true,
+  "alignof": 8,
+  "offsetof_header": 0,
+  "fam_tail_limb_aligned": true,
+  "slab_class_unchanged": "payload 56 -> totalBlockSize 64 -> same block_sizes class",
+  "all_comptime_locked": true
+ },
+ "allocation_topology": {
+  "method": "gdb silent breakpoints, N=0/1/200, 2x2 limbs, same as P6-02",
+  "createFromOwned": {
+   "N0": 0,
+   "N1": 1,
+   "N200": 200,
+   "per_op": 1
+  },
+  "mulAlloc": {
+   "N0": 0,
+   "N1": 1,
+   "N200": 200,
+   "per_op": 1
+  },
+  "createWithFam_for_BigInt": {
+   "per_op": 0,
+   "evidence": "symbol-level: neither createInlineUninitialized nor a BigInt createWithFam instantiation exists in nm zig-out/bin/zjs, because Zig emits no code for unreferenced functions"
+  },
+  "total_allocations_per_op": 2,
+  "unchanged_from_P6_02": true,
+  "baseline_note": "createFromOwned N=0 is 0 here vs 4 in P6-02 because the probe scripts differ at N=0; the slope is the gate"
+ },
+ "inline_storage_destroy_tests": {
+  "capacities": [
+   0,
+   1,
+   2,
+   4,
+   55,
+   56,
+   57,
+   64
+  ],
+  "slab_boundary": {
+   "slab_backed_up_to_capacity": 56,
+   "standalone_from_capacity": 57,
+   "asserted_not_assumed": "test calls SmallObjectSlab.canUse directly",
+   "slab_payload_ceiling_bytes": 504
+  },
+  "published_len": "capacity - 1 on every shape (the normalized-inline-product shape)",
+  "checks": [
+   "capacitySliceMut stays at capacity",
+   "FAM base == self + sizeof(BigInt) and limb-aligned",
+   "allocated_bytes returns to baseline after each destroy",
+   "capacity 0 null-limbs_ptr shape",
+   "len == capacity shape",
+   "max_limbs+1 rejected with BigIntTooLarge"
+  ],
+  "fault_injection": {
+   "mutation": "destroyFromHeader inline arm uses len*8 instead of capacity*8",
+   "result": "test aborts with reached unreachable code"
+  }
+ },
+ "js_four_combination": {
+  "harness": "tools/perf/same_runtime, 2 build instances per side, 4 interleaved rounds, 3 samples each, steady_execute median_ns",
+  "cases": {
+   "bigint_mul_2x2": {
+    "p0_ms": 1.1856,
+    "p1_ms": 1.0889,
+    "p1_over_p0": 0.9184,
+    "four_combinations": {
+     "p0a/p1a": 0.9283,
+     "p0a/p1b": 0.9287,
+     "p0b/p1a": 0.9084,
+     "p0b/p1b": 0.9088
+    },
+    "combo_min": 0.9084,
+    "combo_max": 0.9287,
+    "qjs_ms": 0.7027,
+    "p1_over_qjs": 1.5496,
+    "p0_over_qjs": 1.6872
+   },
+   "bigint_mul_1x8": {
+    "p0_ms": 1.1968,
+    "p1_ms": 1.099,
+    "p1_over_p0": 0.9183,
+    "four_combinations": {
+     "p0a/p1a": 0.9289,
+     "p0a/p1b": 0.929,
+     "p0b/p1a": 0.9079,
+     "p0b/p1b": 0.908
+    },
+    "combo_min": 0.9079,
+    "combo_max": 0.929,
+    "qjs_ms": 0.9229,
+    "p1_over_qjs": 1.1909,
+    "p0_over_qjs": 1.2968
+   },
+   "bigint_mul_8x1": {
+    "p0_ms": 1.1969,
+    "p1_ms": 1.0989,
+    "p1_over_p0": 0.9181,
+    "four_combinations": {
+     "p0a/p1a": 0.9291,
+     "p0a/p1b": 0.9294,
+     "p0b/p1a": 0.907,
+     "p0b/p1b": 0.9073
+    },
+    "combo_min": 0.907,
+    "combo_max": 0.9294,
+    "qjs_ms": 0.7563,
+    "p1_over_qjs": 1.4529,
+    "p0_over_qjs": 1.5825
+   },
+   "bigint_mul_8x8": {
+    "p0_ms": 1.8094,
+    "p1_ms": 1.763,
+    "p1_over_p0": 0.9744,
+    "four_combinations": {
+     "p0a/p1a": 0.9848,
+     "p0a/p1b": 0.9845,
+     "p0b/p1a": 0.9644,
+     "p0b/p1b": 0.9641
+    },
+    "combo_min": 0.9641,
+    "combo_max": 0.9848,
+    "qjs_ms": 1.5198,
+    "p1_over_qjs": 1.16,
+    "p0_over_qjs": 1.1906
+   },
+   "bigint_mul_16x16": {
+    "p0_ms": 3.9797,
+    "p1_ms": 3.9234,
+    "p1_over_p0": 0.9859,
+    "four_combinations": {
+     "p0a/p1a": 0.9898,
+     "p0a/p1b": 0.9899,
+     "p0b/p1a": 0.9819,
+     "p0b/p1b": 0.982
+    },
+    "combo_min": 0.9819,
+    "combo_max": 0.9899,
+    "qjs_ms": 3.8549,
+    "p1_over_qjs": 1.0178,
+    "p0_over_qjs": 1.0324
+   },
+   "local_arith_loop": {
+    "p0_ms": 5.9991,
+    "p1_ms": 5.9981,
+    "p1_over_p0": 0.9998,
+    "four_combinations": {
+     "p0a/p1a": 0.9998,
+     "p0a/p1b": 1.0001,
+     "p0b/p1a": 0.9996,
+     "p0b/p1b": 0.9999
+    },
+    "combo_min": 0.9996,
+    "combo_max": 1.0001,
+    "qjs_ms": 6.4814,
+    "p1_over_qjs": 0.9254,
+    "p0_over_qjs": 0.9256
+   }
+  },
+  "control": "local_arith_loop 0.9998 with combos [0.9996, 1.0001] - not a global build-luck effect",
+  "order_symmetry": {
+   "p1_1x8_ms": 1.099,
+   "p1_8x1_ms": 1.0989,
+   "difference_percent": 0.01,
+   "gate_percent": 1.0
+  }
+ },
+ "eight_instance_lineage_2x2": {
+  "per_instance": {
+   "p0a": {
+    "instructions": 10579867477,
+    "cycles": 1929685718
+   },
+   "p0b": {
+    "instructions": 10571353206,
+    "cycles": 1966474626
+   },
+   "p0c": {
+    "instructions": 10571464836,
+    "cycles": 1967331331
+   },
+   "p0d": {
+    "instructions": 10579808172,
+    "cycles": 1927574422
+   },
+   "p1a": {
+    "instructions": 10487115868,
+    "cycles": 1789713466
+   },
+   "p1b": {
+    "instructions": 10487138769,
+    "cycles": 1785823108
+   },
+   "p1c": {
+    "instructions": 10487167865,
+    "cycles": 1793044858
+   },
+   "p1d": {
+    "instructions": 10487201138,
+    "cycles": 1792603373
+   }
+  },
+  "p0_codegen_states": 2,
+  "p1_codegen_states_observed": 1,
+  "instructions_worst_p1_over_p0": 0.992,
+  "instructions_best_p1_over_p0": 0.9912,
+  "cycles_worst_p1_over_p0": 0.9302,
+  "cycles_best_p1_over_p0": 0.9077,
+  "caveat": "only one P1 codegen state was observed across 4 independent builds; a slower second P1 state is not excluded, but the worst of the 8 observed instances is still 0.9302"
+ },
+ "attribution_2x2_p0a_to_p1a": {
+  "multiplies": 8000000,
+  "instructions": {
+   "p0a": 10579712782,
+   "p1a": 10487113378,
+   "delta_percent": -0.88
+  },
+  "cycles": {
+   "p0a": 1924243328,
+   "p1a": 1785870479,
+   "delta_percent": -7.19
+  },
+  "l1_dcache_loads": {
+   "p0a": 4669743568,
+   "p1a": 4414567371,
+   "delta_percent": -5.46
+  },
+  "branches": {
+   "p0a": 1808280147,
+   "p1a": 1825041720,
+   "delta_percent": 0.93
+  },
+  "branch_misses": {
+   "p0a": 527755,
+   "p1a": 257595,
+   "note": "miss rate 0.029%, worth about 0.14% of cycles - negligible"
+  },
+  "stalled_cycles_frontend": {
+   "p0a": 34997123,
+   "p1a": 14392295,
+   "note": "1.8% of cycles"
+  },
+  "stalled_cycles_backend": {
+   "p0a": 599832027,
+   "p1a": 597018883,
+   "note": "flat"
+  },
+  "per_multiply": {
+   "fewer_loads": 32,
+   "fewer_cycles": 17,
+   "fewer_instructions": 11.6
+  },
+  "mechanism": "removal of per-access redundant loads: the old representation materialized the embedded 40-byte libs.bigint.BigInt (slice ptr+len plus Allocator ptr+vtable plus sign) at every read site; the accessors load only the fields each site needs. Branches went up 0.93% while loads fell 5.46%.",
+  "positioning": "a memory-traffic gain, not an allocation gain and not an instruction gain. It is an observed side effect of P6-03b, not delivery of the P6-03 goal (fusing two allocations into one FAM), which is still entirely ahead in P6-03c.",
+  "symbol_shares_not_comparable": "createFromOwned 18.58%->7.83% and value_ops.binary 20.27%->8.64% while mulAlloc 8.98%->15.29%: inlining boundaries moved, so per-symbol shares cannot be differenced"
+ },
+ "direct_core_four_combination": {
+  "case": "bigint/mul-multilimb",
+  "iterations": 2000000,
+  "warmup": 20000,
+  "instructions_p1_over_p0": 1.0001,
+  "cycles_p1_over_p0_range": [
+   0.9939,
+   0.9948
+  ],
+  "libs_bigint_zig_diff": "byte-identical between 958307e3 and 42077357",
+  "reading": "instruction-neutral as expected; the 0.5-0.6% cycles change marginally exceeds the +-0.5% band in the favourable direction and is attributable to binary layout, since the measured source is unchanged"
+ },
+ "mutable_consumer": {
+  "site": "src/exec/value_ops.zig:789-799, binaryBigInt op==add && rc==1 in-place add",
+  "design": "addInPlaceExternal asserts external storage, takes the owning library value, and re-adopts it in a defer so realloc, length change, sign change, cancel-to-empty and the failure path are all covered",
+  "reachability": {
+   "method": "gdb breakpoints on the source line, three probe scripts, both P0 and P1",
+   "binaryBigInt_hits": {
+    "bi_inplace": 511,
+    "bi_inplace2": 609,
+    "bi_smoke": 1006
+   },
+   "in_place_arm_hits_p1": 0,
+   "in_place_arm_hits_p0": 0,
+   "cause": "vm_arith.binaryVm routes op.add through toPrimitiveForAddition, whose owned return is held by a defer .free alongside the caller stack slot, so rc==1 never holds",
+   "verdict": "pre-existing dormant arm, not caused by P6-03b; left unfixed because it is unrelated to the storage carrier and touching it changes the + ownership protocol",
+   "coverage_gap": "no JS-level coverage; correctness rests on the assert plus the defer re-adopt"
+  }
+ },
+ "correctness_gates": {
+  "test262": {
+   "errors": 0,
+   "prepared": 49775,
+   "passed": 44541,
+   "known": 25
+  },
+  "focused_suites": {
+   "core": 300,
+   "parser": 463,
+   "bytecode": 188,
+   "exec": 388,
+   "builtins": 193,
+   "runtime": 72,
+   "runner": 43
+  },
+  "oom": 14,
+  "altrepr": 1989,
+  "release_safe_core": 300,
+  "force_gc_core": 300,
+  "force_gc_smoke": "byte-identical to the normal build",
+  "cross_engine_differential": {
+   "lines": 3702,
+   "seed": 60329,
+   "result": "byte-identical to pinned qjs",
+   "coverage": "mul add sub div mod pow bitand bitor bitxor shl shr unary compare toString(2,8,10,16,36) asIntN Number"
+  },
+  "in_place_probes": "byte-identical to qjs (cancel-to-zero, sign flip, limb-boundary carry, mutate-then-read)",
+  "poison_basecase_test": "pass",
+  "carrier_unit_tests_and_fault_injection": "pass; injection aborts"
+ },
+ "preexisting_divergence": {
+  "BigInt.asUintN": "pinned qjs 04be2460 returns a signed value (asUintN(64,-1n) gives -1); zjs returns the spec-correct 18446744073709551615. Intentional per docs/qjs-align/FIX-PLAN-2026-07-02.md D10, present on P0 too, excluded from the differential as a known divergence rather than counted as a regression."
+ },
+ "gates": {
+  "wrapper_size_and_slab_class_unchanged": true,
+  "allocation_topology_unchanged": true,
+  "js_bigint_no_stable_regression_ge_1_percent": true,
+  "direct_core_no_stable_change_ge_0_5_percent": "marginal: insn +0.01%, cycles -0.5 to -0.6% (layout)",
+  "order_symmetry_le_1_percent": true,
+  "correctness": true,
+  "overall": "pass - proceed to P6-03c"
+ },
+ "limits": [
+  "only one P1 codegen state observed across four independent builds; a slower second state is not excluded",
+  "the per-access-load mechanism is supported by PMU load counts but not confirmed by an instruction-level diff; per-symbol shares are not comparable because inlining boundaries moved",
+  "inline storage has zero production reachability and is exercised only by tests",
+  "only mul measured; add/sub/div/pow allocation topology still unverified (carried over from P6-02)",
+  "the in-place add arm has no JS-level coverage"
+ ],
+ "p6_03c_boundary": {
+  "implement": "createHeapMulInline with its own duplicated basecase loop writing directly into the FAM tail",
+  "route": "canonical heap x heap only",
+  "keep": "sign-magnitude, 64-bit limb, P6-01 first-row overwrite, P6-01c shorter operand as outer row, normalization semantics, JS-observable behaviour",
+  "do_not_touch": "libs/bigint.zig mulAlloc stays byte-identical and serves as the lockstep differential reference",
+  "baseline_warning": "P6-03b already took JS-level -8.2% at 2x2; P6-03c must be measured against 42077357 and never differenced against the P6-02 baseline"
+ }
+}

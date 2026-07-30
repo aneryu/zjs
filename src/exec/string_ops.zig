@@ -48,7 +48,8 @@ const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
 const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
 const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
+const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
 const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
@@ -403,7 +404,7 @@ pub fn toPrimitiveForString(
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "string");
         defer hint.free(ctx.runtime);
-        const primitive = try callValueOrBytecode(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
+        const primitive = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
         if (primitive.isObject()) {
             primitive.free(ctx.runtime);
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
@@ -688,6 +689,18 @@ noinline fn qjsStringReplaceCore(
     const search_value = try toStringForAnnexB(ctx, output, global, search_input, caller_function, caller_frame);
     defer search_value.free(ctx.runtime);
     const functional_replace = isCallableValue(replacement_input);
+    var replacement_call: ?SyncInternalCallSite = if (functional_replace)
+        SyncInternalCallSite.init(
+            ctx,
+            output,
+            global,
+            core.JSValue.undefinedValue(),
+            replacement_input,
+            caller_function,
+            caller_frame,
+        )
+    else
+        null;
     const replacement_text = if (functional_replace)
         core.JSValue.undefinedValue()
     else
@@ -726,7 +739,7 @@ noinline fn qjsStringReplaceCore(
         try b.appendUnits(sp_data, end_of_last_match, pos - end_of_last_match);
 
         if (functional_replace) {
-            const call_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), replacement_input, &.{ search_value, core.JSValue.int32(@intCast(pos)), source_value }, caller_function, caller_frame);
+            const call_result = try replacement_call.?.call(&.{ search_value, core.JSValue.int32(@intCast(pos)), source_value });
             defer call_result.free(ctx.runtime);
             const repl_str = try toStringForAnnexB(ctx, output, global, call_result, caller_function, caller_frame);
             defer repl_str.free(ctx.runtime);
@@ -844,7 +857,16 @@ pub fn callStringReplaceMethod(
     if (replacer.isUndefined() or replacer.isNull()) return null;
     if (!isCallableValue(replacer)) return error.TypeError;
     const replace_args = [_]core.JSValue{ this_value, replace_value };
-    return try callValueOrBytecode(ctx, output, global, search_value, replacer, &replace_args, caller_function, caller_frame);
+    return try call_runtime.callValueOrBytecodeSyncInternalOutlined(
+        ctx,
+        output,
+        global,
+        search_value,
+        replacer,
+        &replace_args,
+        caller_function,
+        caller_frame,
+    );
 }
 
 pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
@@ -1340,7 +1362,7 @@ pub fn qjsStringMatchAll(
                 return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
         }
         if (!matcher.isUndefined() and !matcher.isNull()) {
-            return callValueOrBytecode(ctx, output, global, regexp, matcher, &.{string_value}, caller_function, caller_frame);
+            return callValueOrBytecodeRoot(ctx, output, global, regexp, matcher, &.{string_value}, caller_function, caller_frame);
         }
     }
 
@@ -1352,7 +1374,7 @@ pub fn qjsStringMatchAll(
     const match_all = try getValueProperty(ctx, output, global, matcher, match_all_atom, caller_function, caller_frame);
     defer match_all.free(ctx.runtime);
     if (match_all.isUndefined() or match_all.isNull()) return error.TypeError;
-    return callValueOrBytecode(ctx, output, global, matcher, match_all, &.{string_value}, caller_function, caller_frame);
+    return callValueOrBytecodeRoot(ctx, output, global, matcher, match_all, &.{string_value}, caller_function, caller_frame);
 }
 
 pub fn qjsRegExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
@@ -1647,6 +1669,19 @@ pub fn qjsRegExpSymbolReplaceGeneric(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const functional_replace = isCallableValue(replace_value);
+    var replacer_call_storage: SyncInternalCallSite = undefined;
+    const replacer_call: ?*SyncInternalCallSite = if (functional_replace) blk: {
+        replacer_call_storage = SyncInternalCallSite.init(
+            ctx,
+            output,
+            global,
+            core.JSValue.undefinedValue(),
+            replace_value,
+            caller_function,
+            caller_frame,
+        );
+        break :blk &replacer_call_storage;
+    } else null;
     const replacement_string = if (functional_replace)
         core.JSValue.undefinedValue()
     else
@@ -1722,7 +1757,7 @@ pub fn qjsRegExpSymbolReplaceGeneric(
         try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..position]);
 
         const replacement = if (functional_replace)
-            try callReplaceFunction(ctx, output, global, replace_value, match, string_value, caller_function, caller_frame)
+            try callReplaceFunction(ctx, output, global, replacer_call.?, match, string_value, caller_function, caller_frame)
         else if (replacement_is_empty and match.groups.isUndefined())
             core.JSValue.undefinedValue()
         else if (replacement_is_literal and match.groups.isUndefined())
@@ -2092,7 +2127,7 @@ pub fn callReplaceFunction(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    replacer: core.JSValue,
+    replacer_call: *SyncInternalCallSite,
     match: ReplaceMatch,
     string_value: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
@@ -2107,7 +2142,7 @@ pub fn callReplaceFunction(
     args[1 + match.captures.len] = core.JSValue.int32(@intCast(match.index));
     args[2 + match.captures.len] = string_value;
     if (!match.groups.isUndefined()) args[3 + match.captures.len] = match.groups;
-    const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), replacer, args, caller_function, caller_frame);
+    const result = try replacer_call.call(args);
     defer result.free(ctx.runtime);
     return toStringForAnnexB(ctx, output, global, result, caller_function, caller_frame);
 }
@@ -2765,7 +2800,7 @@ pub fn callStringWellKnownMethod(
     if (method.isUndefined() or method.isNull()) return null;
     if (!isCallableValue(method)) return error.TypeError;
     const method_args = [_]core.JSValue{this_value};
-    return try callValueOrBytecode(ctx, output, global, candidate, method, &method_args, caller_function, caller_frame);
+    return try callValueOrBytecodeRoot(ctx, output, global, candidate, method, &method_args, caller_function, caller_frame);
 }
 
 pub fn qjsStringSplit(
@@ -2788,7 +2823,7 @@ pub fn qjsStringSplit(
             if (!isCallableValue(splitter)) return error.TypeError;
             const split_limit = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             const split_args = [_]core.JSValue{ this_value, split_limit };
-            return callValueOrBytecode(ctx, output, global, separator, splitter, &split_args, caller_function, caller_frame);
+            return callValueOrBytecodeRoot(ctx, output, global, separator, splitter, &split_args, caller_function, caller_frame);
         }
     }
 
@@ -4387,7 +4422,7 @@ pub fn qjsArrayToStringCall(
     const join_value = try getValueProperty(ctx, output, global, object_value, join_atom, caller_function, caller_frame);
     defer join_value.free(ctx.runtime);
     if (isCallableValue(join_value)) {
-        return try callValueOrBytecode(ctx, output, global, object_value, join_value, &.{}, caller_function, caller_frame);
+        return try callValueOrBytecodeRoot(ctx, output, global, object_value, join_value, &.{}, caller_function, caller_frame);
     }
     return try qjsObjectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
 }
@@ -4438,7 +4473,7 @@ pub fn qjsArrayToLocaleStringCall(
         if (!item.isUndefined() and !item.isNull()) {
             const method = try getValueProperty(ctx, output, global, item, to_locale_key, caller_function, caller_frame);
             defer method.free(ctx.runtime);
-            const locale_value = try callValueOrBytecode(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
+            const locale_value = try callValueOrBytecodeRoot(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
             defer locale_value.free(ctx.runtime);
             const locale_string = try toStringForAnnexB(ctx, output, global, locale_value, caller_function, caller_frame);
             defer locale_string.free(ctx.runtime);
@@ -4460,7 +4495,7 @@ pub fn qjsObjectToLocaleStringCall(
     defer ctx.runtime.atoms.free(to_string_key);
     const method = try getValueProperty(ctx, output, global, this_value, to_string_key, caller_function, caller_frame);
     defer method.free(ctx.runtime);
-    return try callValueOrBytecode(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
+    return try callValueOrBytecodeRoot(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
 
 pub fn qjsObjectToStringCall(

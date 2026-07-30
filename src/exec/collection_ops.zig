@@ -1733,6 +1733,15 @@ pub fn qjsCollectionForEachCall(
     if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
     const callback = args[0];
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    var callback_call = call_runtime.SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        this_arg,
+        callback,
+        caller_function,
+        caller_frame,
+    );
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
@@ -1741,7 +1750,7 @@ pub fn qjsCollectionForEachCall(
             [_]core.JSValue{ entry.key, entry.key, receiver.value() }
         else
             [_]core.JSValue{ entry.value, entry.key, receiver.value() };
-        const result = try call_runtime.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
+        const result = try callback_call.call(&callback_args);
         result.free(ctx.runtime);
     }
     return core.JSValue.undefinedValue();
@@ -1885,6 +1894,15 @@ fn qjsCollectionForEachRecord(
     if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
     const callback = args[0];
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    var callback_call = call_runtime.SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        this_arg,
+        callback,
+        caller_function,
+        caller_frame,
+    );
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
@@ -1893,7 +1911,7 @@ fn qjsCollectionForEachRecord(
             [_]core.JSValue{ entry.key, entry.key, this_value }
         else
             [_]core.JSValue{ entry.value, entry.key, this_value };
-        const result = try call_runtime.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
+        const result = try callback_call.call(&callback_args);
         result.free(ctx.runtime);
     }
     return core.JSValue.undefinedValue();
@@ -2070,7 +2088,16 @@ fn qjsSetLikeHas(
     // Mirrors js_set_isSubsetOf and friends (quickjs.c:52813): the record's
     // retrieved `has` is JS_Call'ed for every argument kind, native Sets
     // included.
-    const out = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.has, &.{key}, caller_function, caller_frame);
+    const out = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
+        ctx,
+        output,
+        global,
+        record.object_value,
+        record.has,
+        &.{key},
+        caller_function,
+        caller_frame,
+    );
     defer out.free(ctx.runtime);
     return coercion_ops.valueTruthy(out);
 }
@@ -2085,7 +2112,16 @@ fn qjsSetLikeKeysIterator(
 ) !core.JSValue {
     // Mirrors js_set_union (quickjs.c:53144): the record's retrieved `keys` is
     // JS_Call'ed for every argument kind, native Sets/Maps included.
-    const source = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
+    const source = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
+        ctx,
+        output,
+        global,
+        record.object_value,
+        record.keys,
+        &.{},
+        caller_function,
+        caller_frame,
+    );
     errdefer source.free(ctx.runtime);
     const iterator_object = object_ops.objectFromValue(source) orelse return error.TypeError;
     const next_key = try ctx.runtime.internAtom("next");
@@ -2424,6 +2460,15 @@ pub fn qjsMapGroupByRecord(
 
     const iterator_value = try call_runtime.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
+    var callback_call = call_runtime.SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        args[1],
+        caller_function,
+        caller_frame,
+    );
 
     var index: usize = 0;
     while (true) {
@@ -2438,16 +2483,7 @@ pub fn qjsMapGroupByRecord(
         if (step.done) return map_value;
 
         const index_value = value_ops.numberToValue(@floatFromInt(index));
-        const key = call_runtime.callValueOrBytecode(
-            ctx,
-            output,
-            global,
-            core.JSValue.undefinedValue(),
-            args[1],
-            &.{ step.value, index_value },
-            caller_function,
-            caller_frame,
-        ) catch |err| {
+        const key = callback_call.call(&.{ step.value, index_value }) catch |err| {
             try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
@@ -2494,7 +2530,7 @@ pub fn qjsMapGetOrInsertComputed(
         return try methodCall(ctx.runtime, receiver_value, 2, &.{key});
     }
 
-    const computed = try call_runtime.callValueOrBytecode(
+    const computed = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
         ctx,
         output,
         global,

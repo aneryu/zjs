@@ -86,6 +86,35 @@ const InterruptOomArm = struct {
     }
 };
 
+const NativeFenceProbe = struct {
+    cleanup_ran: bool = false,
+    invoke_calls: usize = 0,
+
+    fn invoke(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.invoke_calls += 1;
+        self.cleanup_ran = false;
+        defer self.cleanup_ran = true;
+        if (invocation.args.len == 0) return error.TypeError;
+        const global = invocation.realm.global orelse return error.InvalidBuiltinRegistry;
+        return engine.exec.call_runtime.callValueOrBytecodeSyncInternal(
+            invocation.realm,
+            invocation.output,
+            global,
+            core.JSValue.undefinedValue(),
+            invocation.args[0],
+            invocation.args[1..],
+            null,
+            null,
+        );
+    }
+
+    fn cleanupObserved(ptr: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        return core.JSValue.boolean(self.cleanup_ran);
+    }
+};
+
 test "eval lazily materializes a bare core context global before root closure construction" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -204,7 +233,7 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
 
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -234,7 +263,7 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
     js.runtime.setInterruptHandler(null, null);
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -301,7 +330,7 @@ test "uncatchable interrupt skips outer inline for-of close and catch" {
 
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
@@ -325,6 +354,1960 @@ test "uncatchable interrupt skips outer inline for-of close and catch" {
     const exception = js.context.takeException();
     exception.free(js.runtime);
     try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
+test "synchronous native fence reuses one Machine and restores native cleanup order" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    var probe = NativeFenceProbe{};
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceInvoke",
+        1,
+        &probe,
+        NativeFenceProbe.invoke,
+        null,
+    );
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceCleanupObserved",
+        0,
+        &probe,
+        NativeFenceProbe.cleanupObserved,
+        null,
+    );
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    inline_calls.resetMachineTestMetrics();
+
+    const result = try js.eval(
+        \\var fenceOrder = [];
+        \\function fenceHelper(value) {
+        \\    if (value < 0) throw new Error("negative");
+        \\    return value + 1;
+        \\}
+        \\function catchesInsideCallback() {
+        \\    try {
+        \\        fenceHelper(-1);
+        \\    } catch (error) {
+        \\        fenceOrder.push("inner:" + error.message);
+        \\    }
+        \\    return 7;
+        \\}
+        \\assert.sameValue(__nativeFenceInvoke(catchesInsideCallback), 7);
+        \\
+        \\function throwsThroughFence() {
+        \\    fenceOrder.push("callback");
+        \\    throw new RangeError("through-fence");
+        \\}
+        \\try {
+        \\    __nativeFenceInvoke(throwsThroughFence);
+        \\} catch (error) {
+        \\    fenceOrder.push("outer:" + __nativeFenceCleanupObserved());
+        \\    assert.sameValue(error instanceof RangeError, true);
+        \\    assert.sameValue(error.message, "through-fence");
+        \\}
+        \\
+        \\function tailTarget(value) {
+        \\    return value + 1;
+        \\}
+        \\function tailCallback(value) {
+        \\    return tailTarget(value);
+        \\}
+        \\assert.sameValue(__nativeFenceInvoke(tailCallback, 40), 41);
+        \\
+        \\function nestedTarget(value) {
+        \\    return fenceHelper(value);
+        \\}
+        \\function reentrantCallback(value) {
+        \\    return __nativeFenceInvoke(nestedTarget, value);
+        \\}
+        \\assert.sameValue(__nativeFenceInvoke(reentrantCallback, 40), 41);
+        \\assert.sameValue(
+        \\    fenceOrder.join(","),
+        \\    "inner:negative,callback,outer:true"
+        \\);
+    );
+    defer result.free(js.runtime);
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 5), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(metrics.max_depth >= 2);
+    try std.testing.expectEqual(@as(usize, 5), probe.invoke_calls);
+    try std.testing.expect(probe.cleanup_ran);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
+test "synchronous native reentry crosses Entry chunk boundaries exactly" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    var probe = NativeFenceProbe{};
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceInvoke",
+        1,
+        &probe,
+        NativeFenceProbe.invoke,
+        null,
+    );
+
+    const setup = try js.eval(
+        \\globalThis.__nativeFenceDepth = function nativeFenceDepth(depth) {
+        \\    if (depth === 0) return 0;
+        \\    return __nativeFenceInvoke(__nativeFenceDepth, depth - 1) + 1;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const function_key = try js.runtime.internAtom("__nativeFenceDepth");
+    defer js.runtime.atoms.free(function_key);
+    const function = try global.getProperty(function_key);
+    defer function.free(js.runtime);
+    const depths = [_]usize{ 15, 16, 17, 31, 32, 33 };
+
+    for (depths) |depth| {
+        const baseline_call_depth = js.runtime.hot.call_depth;
+        const baseline_native_depth = js.runtime.hot.native_call_depth;
+        const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+        const baseline_arena_mark = js.runtime.vm_stack.mark();
+        inline_calls.resetMachineTestMetrics();
+
+        const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            function,
+            &.{core.JSValue.int32(@intCast(depth))},
+            null,
+            null,
+        );
+        defer result.free(js.runtime);
+        try std.testing.expectEqual(@as(?i32, @intCast(depth)), result.asInt32());
+
+        const metrics = inline_calls.machineTestMetrics();
+        try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+        try std.testing.expectEqual(depth, metrics.same_machine_sync_calls);
+        try std.testing.expectEqual(depth, metrics.max_depth);
+        try std.testing.expectEqual(
+            std.math.divCeil(usize, depth, 16) catch unreachable,
+            metrics.entry_chunk_allocations,
+        );
+        try std.testing.expect(js.runtime.active_invocation == null);
+        try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+        try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+        try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+        try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    }
+}
+
+test "synchronous native fence restores every budget after interrupt" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    var probe = NativeFenceProbe{};
+    try js.defineGlobalExternalHostFunction(
+        "__nativeFenceInvoke",
+        1,
+        &probe,
+        NativeFenceProbe.invoke,
+        null,
+    );
+    const setup = try js.eval(
+        \\globalThis.__nativeFenceInterruptCaught = false;
+        \\function nativeFenceInterruptCallback(spin) {
+        \\    while (spin) {}
+        \\}
+        \\globalThis.__nativeFenceInterruptOuter = function () {
+        \\    try {
+        \\        return __nativeFenceInvoke(nativeFenceInterruptCallback, true);
+        \\    } catch (_) {
+        \\        globalThis.__nativeFenceInterruptCaught = true;
+        \\        return -1;
+        \\    }
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__nativeFenceInterruptOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const caught_key = try js.runtime.internAtom("__nativeFenceInterruptCaught");
+    defer js.runtime.atoms.free(caught_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+
+    // Root call, native call, and sync-callback entry consume the first three
+    // ticks. The callback loop consumes the fourth after its fence is live.
+    js.context.interrupt_counter = 4;
+    inline_calls.resetMachineTestMetrics();
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            outer,
+            &.{},
+            null,
+            null,
+        ),
+    );
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expectEqual(@as(usize, 1), probe.invoke_calls);
+    try std.testing.expect(probe.cleanup_ran);
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
+    try std.testing.expect(js.context.exceptionIsUncatchable());
+    const caught = try global.getProperty(caught_key);
+    defer caught.free(js.runtime);
+    try std.testing.expectEqual(false, caught.asBool().?);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+
+    const exception = js.context.takeException();
+    exception.free(js.runtime);
+    try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
+test "Function and Reflect apply opt into the active Machine explicitly" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function nativeApplyHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function nativeApplyCallback(value) {
+        \\    return nativeApplyHelper(value);
+        \\}
+        \\function nativeApplyRecursive(depth) {
+        \\    if (depth === 0) return 10;
+        \\    return nativeApplyRecursive.apply(null, [depth - 1]) + 1;
+        \\}
+        \\globalThis.__nativeApplyOuter = function () {
+        \\    return nativeApplyCallback.apply(null, [1])
+        \\        + Reflect.apply(nativeApplyCallback, null, [2])
+        \\        + nativeApplyRecursive(3);
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__nativeApplyOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 18), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 5), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+}
+
+test "synchronous apply fallbacks restore the outer active invocation" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\var nativeApplyOther = $262.createRealm().global;
+        \\var nativeApplyForeign = nativeApplyOther.eval(
+        \\    "(function nativeApplyForeign(value) { return value + 1; })"
+        \\);
+        \\function nativeApplyLocal(value) {
+        \\    return value;
+        \\}
+        \\globalThis.__nativeApplyFallbackOuter = function () {
+        \\    return nativeApplyForeign.apply(null, [20])
+        \\        + nativeApplyLocal.apply(null, [21]);
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__nativeApplyFallbackOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+}
+
+test "ordinary spread calls enter eligible bytecode targets on the current Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\var spreadOther = $262.createRealm().global;
+        \\var spreadForeign = spreadOther.eval(
+        \\    "(function spreadForeign(value) { return value + 18; })"
+        \\);
+        \\function spreadPlain(value) {
+        \\    return value + 1;
+        \\}
+        \\var spreadReceiver = {
+        \\    base: 20,
+        \\    add(value) {
+        \\        return this.base + value;
+        \\    }
+        \\};
+        \\function spreadTrace() {
+        \\    return new Error("spread").stack;
+        \\}
+        \\globalThis.__spreadCallOuter = function () {
+        \\    var trace = spreadTrace(...[]);
+        \\    assert.sameValue(trace.indexOf("    at spreadTrace"), 0);
+        \\    assert.sameValue(trace.indexOf("apply (native)"), -1);
+        \\    return spreadPlain(...[1])
+        \\        + spreadReceiver.add(...[1])
+        \\        + spreadForeign(...[1]);
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__spreadCallOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+}
+
+test "constructor spread preserves new target on the current Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\let spreadConstructorNewTarget;
+        \\function SpreadOrdinary(value) {
+        \\    this.value = value;
+        \\    this.trace = new Error("ordinary spread constructor").stack;
+        \\}
+        \\class SpreadBase {
+        \\    constructor(value) {
+        \\        spreadConstructorNewTarget = new.target;
+        \\        this.value = value;
+        \\    }
+        \\}
+        \\class SpreadDerived extends SpreadBase {
+        \\    constructor(...args) {
+        \\        super(...args);
+        \\        this.derived = true;
+        \\    }
+        \\}
+        \\globalThis.__spreadBaseConstructor = SpreadBase;
+        \\globalThis.__spreadDerivedConstructor = SpreadDerived;
+        \\globalThis.__spreadOrdinaryConstructorOuter = function () {
+        \\    const ordinary = new SpreadOrdinary(...[20]);
+        \\    assert.sameValue(ordinary.trace.indexOf("apply (native)"), -1);
+        \\    return ordinary.value;
+        \\};
+        \\globalThis.__spreadDerivedConstructorOuter = function () {
+        \\    const derived = new SpreadDerived(...[21]);
+        \\    assert.sameValue(spreadConstructorNewTarget, SpreadDerived);
+        \\    assert.sameValue(derived.derived, true);
+        \\    return derived.value;
+        \\};
+        \\
+        \\var spreadConstructorOther = $262.createRealm().global;
+        \\var spreadConstructorForeign = spreadConstructorOther.eval(
+        \\    "(function SpreadConstructorForeign(value) {" +
+        \\        "var adjusted = value + 1; this.value = adjusted - 1;" +
+        \\    "})"
+        \\);
+        \\globalThis.__spreadConstructorForeignOuter = function () {
+        \\    return new spreadConstructorForeign(...[42]).value;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const base_key = try js.runtime.internAtom("__spreadBaseConstructor");
+    defer js.runtime.atoms.free(base_key);
+    const base_constructor = try global.getProperty(base_key);
+    defer base_constructor.free(js.runtime);
+    const derived_key = try js.runtime.internAtom("__spreadDerivedConstructor");
+    defer js.runtime.atoms.free(derived_key);
+    const derived_constructor = try global.getProperty(derived_key);
+    defer derived_constructor.free(js.runtime);
+    try std.testing.expect(engine.exec.call_runtime.resolveSameMachineSpreadConstructor(
+        global,
+        derived_constructor,
+        derived_constructor,
+    ) != null);
+    try std.testing.expect(engine.exec.call_runtime.resolveSameMachineSpreadConstructor(
+        global,
+        base_constructor,
+        derived_constructor,
+    ) != null);
+
+    const ordinary_outer_key = try js.runtime.internAtom("__spreadOrdinaryConstructorOuter");
+    defer js.runtime.atoms.free(ordinary_outer_key);
+    const ordinary_outer = try global.getProperty(ordinary_outer_key);
+    defer ordinary_outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const ordinary_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        ordinary_outer,
+        &.{},
+        null,
+        null,
+    );
+    defer ordinary_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 20), ordinary_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), inline_calls.machineTestMetrics().machine_inits);
+
+    const derived_outer_key = try js.runtime.internAtom("__spreadDerivedConstructorOuter");
+    defer js.runtime.atoms.free(derived_outer_key);
+    const derived_outer = try global.getProperty(derived_outer_key);
+    defer derived_outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const derived_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        derived_outer,
+        &.{},
+        null,
+        null,
+    );
+    defer derived_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 21), derived_result.asInt32());
+    const derived_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), derived_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), derived_metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_outer_key = try js.runtime.internAtom("__spreadConstructorForeignOuter");
+    defer js.runtime.atoms.free(foreign_outer_key);
+    const foreign_outer = try global.getProperty(foreign_outer_key);
+    defer foreign_outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign_outer,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 2), inline_calls.machineTestMetrics().machine_inits);
+}
+
+test "Array and TypedArray synchronous callback cohort stays on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function arrayCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function arrayCohortCallback(value) {
+        \\    if (value === 2) {
+        \\        try {
+        \\            throw new Error("local");
+        \\        } catch (error) {
+        \\            assert.sameValue(error.message, "local");
+        \\        }
+        \\    }
+        \\    return arrayCohortHelper(value);
+        \\}
+        \\var arrayCohortSeen = 0;
+        \\var arrayCohortTraceValue;
+        \\var arrayCohortOrder = [];
+        \\globalThis.__arrayCallbackCohortOuter = function __arrayCallbackCohortOuter() {
+        \\    assert.sameValue([1, 2, 3].map(arrayCohortCallback).join(","), "2,3,4");
+        \\    assert.sameValue([1].map(function (value, index, array, missing) {
+        \\        assert.sameValue(index, 0);
+        \\        assert.sameValue(array.length, 1);
+        \\        assert.sameValue(missing, undefined);
+        \\        return value;
+        \\    })[0], 1);
+        \\    assert.sameValue([7].map(function (value) {
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(arguments[0], 7);
+        \\        assert.sameValue(arguments[1], 0);
+        \\        assert.sameValue(arguments[2][0], 7);
+        \\        return value;
+        \\    })[0], 7);
+        \\    arrayCohortSeen = 0;
+        \\    [1, 2, 3].forEach(function (value) { arrayCohortSeen += arrayCohortCallback(value); });
+        \\    assert.sameValue(arrayCohortSeen, 9);
+        \\    assert.sameValue([1, 2, 3].filter(function (value) { return value > 1; }).join(","), "2,3");
+        \\    assert.sameValue([1, 2, 3].every(function (value) { return value < 4; }), true);
+        \\    assert.sameValue([1, 2, 3].some(function (value) { return value === 2; }), true);
+        \\    assert.sameValue([1, 2, 3].find(function (value) { return value === 2; }), 2);
+        \\    assert.sameValue([1, 2, 3].findIndex(function (value) { return value === 2; }), 1);
+        \\    assert.sameValue([1, 2, 3].reduce(function (sum, value) { return sum + value; }, 0), 6);
+        \\    assert.sameValue([1, 2, 3].reduceRight(function (sum, value) { return sum + value; }, 0), 6);
+        \\    assert.sameValue([1, 2].flatMap(function (value) { return [value, value + 1]; }).join(","), "1,2,2,3");
+        \\    assert.sameValue([3, 1, 2].sort(function (left, right) { return left - right; }).join(","), "1,2,3");
+        \\    assert.sameValue(Array.from([1, 2], arrayCohortCallback).join(","), "2,3");
+        \\
+        \\    assert.sameValue(
+        \\        new Uint8Array([1, 2]).map(arrayCohortCallback).join(","),
+        \\        "2,3"
+        \\    );
+        \\    assert.sameValue(
+        \\        new Uint8Array([1, 2, 3]).filter(function (value) { return value > 1; }).join(","),
+        \\        "2,3"
+        \\    );
+        \\
+        \\    var nested = [1].map(function (value) {
+        \\        return [value].map(arrayCohortCallback)[0];
+        \\    });
+        \\    assert.sameValue(nested[0], 2);
+        \\
+        \\    arrayCohortTraceValue = undefined;
+        \\    [1].map(function arrayCohortTrace(value) {
+        \\        arrayCohortTraceValue = new Error("array cohort").stack;
+        \\        return value;
+        \\    });
+        \\    var callbackIndex = arrayCohortTraceValue.indexOf("    at arrayCohortTrace");
+        \\    var nativeIndex = arrayCohortTraceValue.indexOf("map (native)");
+        \\    var outerIndex = arrayCohortTraceValue.indexOf("    at __arrayCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    arrayCohortOrder = [];
+        \\    try {
+        \\        [1].map(function arrayCohortThrow() {
+        \\            arrayCohortOrder.push("callback");
+        \\            throw new RangeError("array cohort throw");
+        \\        });
+        \\    } catch (error) {
+        \\        arrayCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(arrayCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__arrayCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 42), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+}
+
+test "Map and Set synchronous callback cohort stays on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function collectionCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function collectionCohortCallback(value) {
+        \\    "use strict";
+        \\    if (value === 2) {
+        \\        try {
+        \\            throw new Error("local");
+        \\        } catch (error) {
+        \\            assert.sameValue(error.message, "local");
+        \\        }
+        \\    }
+        \\    return collectionCohortHelper(value);
+        \\}
+        \\var collectionCohortTraceValue;
+        \\var collectionCohortOrder = [];
+        \\globalThis.__collectionCallbackCohortOuter = function __collectionCallbackCohortOuter() {
+        \\    var mapSum = 0;
+        \\    var map = new Map([["one", 1], ["two", 2]]);
+        \\    map.forEach(function (value, key, owner, missing) {
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(owner, map);
+        \\        assert.sameValue(missing, undefined);
+        \\        assert.sameValue(owner.get(key), value);
+        \\        mapSum += collectionCohortCallback(value);
+        \\    });
+        \\    assert.sameValue(mapSum, 5);
+        \\
+        \\    var setSum = 0;
+        \\    var set = new Set([1, 2]);
+        \\    set.forEach(function (value, key, owner) {
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(value, key);
+        \\        assert.sameValue(owner, set);
+        \\        setSum += collectionCohortCallback(value);
+        \\    });
+        \\    assert.sameValue(setSum, 5);
+        \\
+        \\    var objectGroups = Object.groupBy([1, 2, 3], function (value, index) {
+        \\        assert.sameValue(index, value - 1);
+        \\        return collectionCohortHelper(value) % 2 ? "odd" : "even";
+        \\    });
+        \\    assert.sameValue(objectGroups.even.join(","), "1,3");
+        \\    assert.sameValue(objectGroups.odd.join(","), "2");
+        \\
+        \\    var mapGroups = Map.groupBy([1, 2, 3], function (value, index) {
+        \\        assert.sameValue(index, value - 1);
+        \\        return collectionCohortHelper(value) % 2;
+        \\    });
+        \\    assert.sameValue(mapGroups.get(0).join(","), "1,3");
+        \\    assert.sameValue(mapGroups.get(1).join(","), "2");
+        \\
+        \\    var inserted = new Map();
+        \\    assert.sameValue(inserted.getOrInsertComputed("key", function (key) {
+        \\        return key + ":" + collectionCohortHelper(6);
+        \\    }), "key:7");
+        \\    assert.sameValue(inserted.get("key"), "key:7");
+        \\
+        \\    var setLike = {
+        \\        size: 2,
+        \\        has: function (key) {
+        \\            return collectionCohortHelper(key) > 0;
+        \\        },
+        \\        keys: function () {
+        \\            collectionCohortHelper(0);
+        \\            return [3, 4][Symbol.iterator]();
+        \\        }
+        \\    };
+        \\    assert.sameValue(new Set([1, 2]).isSubsetOf(setLike), true);
+        \\    assert.sameValue(
+        \\        [...new Set([1, 2]).union(setLike)].join(","),
+        \\        "1,2,3,4"
+        \\    );
+        \\
+        \\    var nested = 0;
+        \\    new Map([["outer", 1]]).forEach(function (value) {
+        \\        new Map([["inner", value]]).forEach(function (inner) {
+        \\            nested = collectionCohortHelper(inner);
+        \\        });
+        \\    });
+        \\    assert.sameValue(nested, 2);
+        \\
+        \\    collectionCohortTraceValue = undefined;
+        \\    new Map([["trace", 1]]).forEach(function collectionCohortTrace(value) {
+        \\        collectionCohortTraceValue = new Error("collection cohort").stack;
+        \\        return value;
+        \\    });
+        \\    var callbackIndex = collectionCohortTraceValue.indexOf("    at collectionCohortTrace");
+        \\    var nativeIndex = collectionCohortTraceValue.indexOf("forEach (native)");
+        \\    var outerIndex = collectionCohortTraceValue.indexOf("    at __collectionCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    collectionCohortOrder = [];
+        \\    try {
+        \\        new Map([["throw", 1]]).forEach(function collectionCohortThrow() {
+        \\            collectionCohortOrder.push("callback");
+        \\            throw new RangeError("collection cohort throw");
+        \\        });
+        \\    } catch (error) {
+        \\        collectionCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(collectionCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+        \\var collectionInterruptMap = new Map([["interrupt", 1]]);
+        \\function collectionInterruptHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\globalThis.__collectionCallbackInterrupt = function __collectionCallbackInterrupt() {
+        \\    collectionInterruptMap.forEach(function collectionInterruptCallback(value) {
+        \\        return collectionInterruptHelper(value);
+        \\    });
+        \\    return 42;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__collectionCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 18), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__collectionCallbackInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+}
+
+test "accessors Proxy traps and primitive coercion stay on the active Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function propertyCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\var propertyCohortStorage = 0;
+        \\var propertyCohortTrace;
+        \\var propertyCohortOrder = [];
+        \\var propertyCohortAccessor = {};
+        \\Object.defineProperty(propertyCohortAccessor, "value", {
+        \\    get: function propertyCohortGetter() {
+        \\        try {
+        \\            throw new Error("local");
+        \\        } catch (error) {
+        \\            assert.sameValue(error.message, "local");
+        \\        }
+        \\        return propertyCohortHelper(propertyCohortStorage);
+        \\    },
+        \\    set: function propertyCohortSetter(value) {
+        \\        propertyCohortStorage = propertyCohortHelper(value);
+        \\    }
+        \\});
+        \\var propertyCohortInherited = Object.create({
+        \\    get value() {
+        \\        return propertyCohortHelper(6);
+        \\    }
+        \\});
+        \\var propertyCohortDefaultPrimitive = {
+        \\    [Symbol.toPrimitive]: function propertyDefaultPrimitive(hint) {
+        \\        assert.sameValue(hint, "default");
+        \\        return propertyCohortHelper(40);
+        \\    }
+        \\};
+        \\var propertyCohortOrdinaryPrimitive = {
+        \\    valueOf: function propertyValueOf() {
+        \\        return propertyCohortHelper(8);
+        \\    }
+        \\};
+        \\var propertyCohortKey = {
+        \\    [Symbol.toPrimitive]: function propertyKeyPrimitive(hint) {
+        \\        assert.sameValue(hint, "string");
+        \\        return "cohort";
+        \\    }
+        \\};
+        \\globalThis.__propertyCallbackCohortOuter = function __propertyCallbackCohortOuter() {
+        \\    propertyCohortAccessor.value = 4;
+        \\    assert.sameValue(propertyCohortAccessor.value, 6);
+        \\    assert.sameValue(propertyCohortInherited.value, 7);
+        \\    assert.sameValue(propertyCohortDefaultPrimitive + 1, 42);
+        \\    assert.sameValue(+propertyCohortOrdinaryPrimitive, 9);
+        \\    var keyed = {};
+        \\    keyed[propertyCohortKey] = 10;
+        \\    assert.sameValue(keyed.cohort, 10);
+        \\
+        \\    var getProxy = new Proxy({ value: 1 }, {
+        \\        get: function propertyGetTrap(target, key, receiver) {
+        \\            assert.sameValue(receiver, getProxy);
+        \\            return propertyCohortHelper(target[key]);
+        \\        }
+        \\    });
+        \\    assert.sameValue(getProxy.value, 2);
+        \\
+        \\    var setTarget = { value: 1 };
+        \\    var setProxy = new Proxy(setTarget, {
+        \\        set: function propertySetTrap(target, key, value, receiver) {
+        \\            assert.sameValue(receiver, setProxy);
+        \\            target[key] = value;
+        \\            return true;
+        \\        }
+        \\    });
+        \\    setProxy.value = 2;
+        \\    assert.sameValue(setTarget.value, 2);
+        \\
+        \\    var hasProxy = new Proxy({ value: 1 }, {
+        \\        has: function propertyHasTrap(target, key) {
+        \\            return key in target;
+        \\        }
+        \\    });
+        \\    assert.sameValue("value" in hasProxy, true);
+        \\
+        \\    var deleteTarget = { value: 1 };
+        \\    var deleteProxy = new Proxy(deleteTarget, {
+        \\        deleteProperty: function propertyDeleteTrap(target, key) {
+        \\            return delete target[key];
+        \\        }
+        \\    });
+        \\    assert.sameValue(delete deleteProxy.value, true);
+        \\    assert.sameValue("value" in deleteTarget, false);
+        \\
+        \\    var proto = {};
+        \\    var protoTarget = Object.create(proto);
+        \\    var getPrototypeProxy = new Proxy(protoTarget, {
+        \\        getPrototypeOf: function propertyGetPrototypeTrap(target) {
+        \\            return Object.getPrototypeOf(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.getPrototypeOf(getPrototypeProxy), proto);
+        \\
+        \\    var newProto = {};
+        \\    var setPrototypeTarget = {};
+        \\    var setPrototypeProxy = new Proxy(setPrototypeTarget, {
+        \\        setPrototypeOf: function propertySetPrototypeTrap(target, value) {
+        \\            Object.setPrototypeOf(target, value);
+        \\            return true;
+        \\        }
+        \\    });
+        \\    Object.setPrototypeOf(setPrototypeProxy, newProto);
+        \\    assert.sameValue(Object.getPrototypeOf(setPrototypeTarget), newProto);
+        \\
+        \\    var extensibleProxy = new Proxy({}, {
+        \\        isExtensible: function propertyIsExtensibleTrap(target) {
+        \\            return Object.isExtensible(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.isExtensible(extensibleProxy), true);
+        \\
+        \\    var preventTarget = {};
+        \\    var preventProxy = new Proxy(preventTarget, {
+        \\        preventExtensions: function propertyPreventExtensionsTrap(target) {
+        \\            Object.preventExtensions(target);
+        \\            return true;
+        \\        }
+        \\    });
+        \\    Object.preventExtensions(preventProxy);
+        \\    assert.sameValue(Object.isExtensible(preventTarget), false);
+        \\
+        \\    var ownKeysProxy = new Proxy({ value: 1 }, {
+        \\        ownKeys: function propertyOwnKeysTrap(target) {
+        \\            return Reflect.ownKeys(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Reflect.ownKeys(ownKeysProxy).join(","), "value");
+        \\
+        \\    var descriptorProxy = new Proxy({ value: 1 }, {
+        \\        getOwnPropertyDescriptor: function propertyDescriptorTrap(target, key) {
+        \\            return Object.getOwnPropertyDescriptor(target, key);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.getOwnPropertyDescriptor(descriptorProxy, "value").value, 1);
+        \\
+        \\    var defineTarget = {};
+        \\    var defineProxy = new Proxy(defineTarget, {
+        \\        defineProperty: function propertyDefineTrap(target, key, descriptor) {
+        \\            Object.defineProperty(target, key, descriptor);
+        \\            return true;
+        \\        }
+        \\    });
+        \\    Object.defineProperty(defineProxy, "value", {
+        \\        value: 2,
+        \\        configurable: true
+        \\    });
+        \\    assert.sameValue(defineTarget.value, 2);
+        \\
+        \\    function propertyApplyTarget() {}
+        \\    var applyProxy = new Proxy(propertyApplyTarget, {
+        \\        apply: function propertyApplyTrap(target, receiver, args) {
+        \\            assert.sameValue(target, propertyApplyTarget);
+        \\            return propertyCohortHelper(args[0]);
+        \\        }
+        \\    });
+        \\    assert.sameValue(applyProxy(2), 3);
+        \\
+        \\    function propertyConstructTarget() {}
+        \\    var constructProxy = new Proxy(propertyConstructTarget, {
+        \\        construct: function propertyConstructTrap(target, args, newTarget) {
+        \\            assert.sameValue(target, propertyConstructTarget);
+        \\            assert.sameValue(newTarget, constructProxy);
+        \\            return { value: propertyCohortHelper(args[0]) };
+        \\        }
+        \\    });
+        \\    assert.sameValue(new constructProxy(3).value, 4);
+        \\
+        \\    function propertyForwardTarget(value) {
+        \\        return propertyCohortHelper(value);
+        \\    }
+        \\    assert.sameValue(new Proxy(propertyForwardTarget, {})(4), 5);
+        \\
+        \\    var nestedAccessor = {
+        \\        get value() {
+        \\            return new Proxy({ value: 5 }, {
+        \\                get: function propertyNestedGetTrap(target, key) {
+        \\                    return propertyCohortHelper(target[key]);
+        \\                }
+        \\            }).value;
+        \\        }
+        \\    };
+        \\    assert.sameValue(nestedAccessor.value, 6);
+        \\
+        \\    propertyCohortTrace = undefined;
+        \\    var traceProxy = new Proxy({ value: 1 }, {
+        \\        ownKeys: function propertyTraceOwnKeysTrap(target) {
+        \\            propertyCohortTrace = new Error("property cohort").stack;
+        \\            return Reflect.ownKeys(target);
+        \\        }
+        \\    });
+        \\    assert.sameValue(Object.keys(traceProxy).join(","), "value");
+        \\    var callbackIndex = propertyCohortTrace.indexOf("    at propertyTraceOwnKeysTrap");
+        \\    var nativeIndex = propertyCohortTrace.indexOf("keys (native)");
+        \\    var outerIndex = propertyCohortTrace.indexOf("    at __propertyCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    propertyCohortOrder = [];
+        \\    try {
+        \\        new Proxy({}, {
+        \\            get: function propertyThrowingGetTrap() {
+        \\                propertyCohortOrder.push("callback");
+        \\                throw new RangeError("property cohort throw");
+        \\            }
+        \\        }).value;
+        \\    } catch (error) {
+        \\        propertyCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(propertyCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+        \\
+        \\var propertyOther = $262.createRealm().global;
+        \\var propertyForeignObject = propertyOther.eval(
+        \\    "Object.defineProperty({}, 'value', {" +
+        \\    "get: function propertyForeignGetter() { return 20; }})"
+        \\);
+        \\var propertyLocalObject = Object.defineProperty({}, "value", {
+        \\    get: function propertyLocalGetter() {
+        \\        return 22;
+        \\    }
+        \\});
+        \\globalThis.__propertyCallbackForeignOuter = function () {
+        \\    return propertyForeignObject.value + propertyLocalObject.value;
+        \\};
+        \\var propertyInterruptObject = Object.defineProperty({}, "value", {
+        \\    get: function propertyInterruptGetter() {
+        \\        return propertyCohortHelper(41);
+        \\    }
+        \\});
+        \\globalThis.__propertyCallbackInterrupt = function () {
+        \\    return propertyInterruptObject.value;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__propertyCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 21), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_key = try js.runtime.internAtom("__propertyCallbackForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    // The local plain accessor is already emitted as a direct VM
+    // InlineCallRequest; only the foreign accessor needs a fresh root.
+    try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__propertyCallbackInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 3;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+}
+
+test "JSON synchronous callback cohort stays on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function jsonCohortHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\var jsonCohortTrace;
+        \\var jsonCohortOrder = [];
+        \\globalThis.__jsonCallbackCohortOuter = function __jsonCallbackCohortOuter() {
+        \\    var parsed = JSON.parse(
+        \\        '{"a":1,"nested":{"b":2},"array":[3]}',
+        \\        function jsonCohortReviver(key, value, context) {
+        \\            assert.sameValue(arguments.length, 3);
+        \\            assert.sameValue(typeof this, "object");
+        \\            if (key === "b") {
+        \\                try {
+        \\                    throw new Error("local");
+        \\                } catch (error) {
+        \\                    assert.sameValue(error.message, "local");
+        \\                }
+        \\            }
+        \\            if (typeof value === "number") {
+        \\                assert.sameValue(context.source, String(value));
+        \\                return jsonCohortHelper(value);
+        \\            }
+        \\            assert.sameValue(context.source, undefined);
+        \\            return value;
+        \\        }
+        \\    );
+        \\    assert.sameValue(parsed.a, 2);
+        \\    assert.sameValue(parsed.nested.b, 3);
+        \\    assert.sameValue(parsed.array[0], 4);
+        \\
+        \\    var serializable = {
+        \\        first: 1,
+        \\        nested: {
+        \\            value: 2,
+        \\            toJSON: function jsonCohortToJSON(key) {
+        \\                assert.sameValue(arguments.length, 1);
+        \\                assert.sameValue(key, "nested");
+        \\                return { converted: jsonCohortHelper(this.value) };
+        \\            }
+        \\        }
+        \\    };
+        \\    var text = JSON.stringify(serializable, function jsonCohortReplacer(key, value) {
+        \\        assert.sameValue(arguments.length, 2);
+        \\        assert.sameValue(typeof this, "object");
+        \\        return value;
+        \\    });
+        \\    assert.sameValue(text, '{"first":1,"nested":{"converted":3}}');
+        \\
+        \\    var nested = JSON.parse("1", function jsonOuterReviver(key, value) {
+        \\        if (key === "") {
+        \\            return JSON.parse("2", function jsonInnerReviver(innerKey, innerValue) {
+        \\                return innerKey === "" ? jsonCohortHelper(innerValue) : innerValue;
+        \\            });
+        \\        }
+        \\        return value;
+        \\    });
+        \\    assert.sameValue(nested, 3);
+        \\
+        \\    jsonCohortTrace = undefined;
+        \\    JSON.parse("1", function jsonCohortTraceReviver(key, value) {
+        \\        jsonCohortTrace = new Error("json cohort").stack;
+        \\        return value;
+        \\    });
+        \\    var callbackIndex = jsonCohortTrace.indexOf("    at jsonCohortTraceReviver");
+        \\    var nativeIndex = jsonCohortTrace.indexOf("parse (native)");
+        \\    var outerIndex = jsonCohortTrace.indexOf("    at __jsonCallbackCohortOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    jsonCohortOrder = [];
+        \\    try {
+        \\        JSON.parse("1", function jsonCohortThrowingReviver() {
+        \\            jsonCohortOrder.push("callback");
+        \\            throw new RangeError("json cohort throw");
+        \\        });
+        \\    } catch (error) {
+        \\        jsonCohortOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(jsonCohortOrder.join(","), "callback,outer");
+        \\    return 42;
+        \\};
+        \\
+        \\var jsonOther = $262.createRealm().global;
+        \\var jsonForeignReviver = jsonOther.eval(
+        \\    "(function jsonForeignReviver(key, value) { return value; })"
+        \\);
+        \\globalThis.__jsonCallbackForeignOuter = function () {
+        \\    return JSON.parse("20", jsonForeignReviver);
+        \\};
+        \\globalThis.__jsonCallbackInterrupt = function () {
+        \\    return JSON.parse("41", function jsonInterruptReviver(key, value) {
+        \\        return jsonCohortHelper(value);
+        \\    });
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__jsonCallbackCohortOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 15), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_key = try js.runtime.internAtom("__jsonCallbackForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 20), foreign_result.asInt32());
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__jsonCallbackInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+}
+
+test "string regexp iterator helpers and DisposableStack stay on one Machine" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function cohortFiveHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function cohortFiveIterator(values, closeOrder) {
+        \\    var index = 0;
+        \\    var iterator = values.values();
+        \\    iterator.next = function cohortFiveIteratorNext() {
+        \\        if (index >= values.length) return { value: undefined, done: true };
+        \\        return { value: values[index++], done: false };
+        \\    };
+        \\    iterator.return = function cohortFiveIteratorReturn() {
+        \\        if (closeOrder) closeOrder.push("close");
+        \\        return { value: undefined, done: true };
+        \\    };
+        \\    return iterator;
+        \\}
+        \\var cohortFiveTrace;
+        \\var cohortFiveOrder = [];
+        \\globalThis.__cohortFiveOuter = function __cohortFiveOuter() {
+        \\    var tailResult = "1".replace("1", function cohortFiveTailReplacer(value) {
+        \\        cohortFiveTrace = new Error("cohort five").stack;
+        \\        return cohortFiveHelper(Number(value));
+        \\    });
+        \\    assert.sameValue(tailResult, "2");
+        \\    var callbackIndex = cohortFiveTrace.indexOf("    at cohortFiveTailReplacer");
+        \\    var nativeIndex = cohortFiveTrace.indexOf("replace (native)");
+        \\    var outerIndex = cohortFiveTrace.indexOf("    at __cohortFiveOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    assert.sameValue("aa".replaceAll("a", function cohortFiveReplaceAll() {
+        \\        return "b";
+        \\    }), "bb");
+        \\    assert.sameValue("aa".replace(/a/g, function cohortFiveRegExpReplacer() {
+        \\        return "c";
+        \\    }), "cc");
+        \\
+        \\    var customReplace = {
+        \\        [Symbol.replace]: function cohortFiveSymbolReplace(value, replacer) {
+        \\            return replacer(value, 0, value);
+        \\        }
+        \\    };
+        \\    assert.sameValue("x".replace(customReplace, function cohortFiveDelegatedReplacer() {
+        \\        return "d";
+        \\    }), "d");
+        \\
+        \\    var execCalls = 0;
+        \\    var customRegExp = {
+        \\        flags: "",
+        \\        exec: function cohortFiveExec(value) {
+        \\            execCalls++;
+        \\            return { 0: value, index: 0, length: 1, groups: undefined };
+        \\        }
+        \\    };
+        \\    assert.sameValue(
+        \\        RegExp.prototype[Symbol.replace].call(
+        \\            customRegExp,
+        \\            "q",
+        \\            function cohortFiveCustomExecReplacer(value) {
+        \\                return cohortFiveHelper(value.charCodeAt(0)) === 114 ? "r" : "bad";
+        \\            }
+        \\        ),
+        \\        "r"
+        \\    );
+        \\    assert.sameValue(execCalls, 1);
+        \\
+        \\    assert.sameValue("x".replace("x", function cohortFiveOuterReplace(value) {
+        \\        return value.replace("x", function cohortFiveInnerReplace() {
+        \\            return "y";
+        \\        });
+        \\    }), "y");
+        \\
+        \\    cohortFiveOrder = [];
+        \\    try {
+        \\        "x".replace("x", function cohortFiveThrowingReplace() {
+        \\            cohortFiveOrder.push("callback");
+        \\            throw new RangeError("replace");
+        \\        });
+        \\    } catch (error) {
+        \\        cohortFiveOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(cohortFiveOrder.join(","), "callback,outer");
+        \\
+        \\    var mapped = cohortFiveIterator([1, 2], null).map(function cohortFiveMap(value) {
+        \\        return cohortFiveHelper(value);
+        \\    }).toArray();
+        \\    assert.compareArray(mapped, [2, 3]);
+        \\    var reduced = cohortFiveIterator([1, 2], null).reduce(function cohortFiveReduce(accumulator, value) {
+        \\        return accumulator + value;
+        \\    }, 0);
+        \\    assert.sameValue(reduced, 3);
+        \\
+        \\    cohortFiveOrder = [];
+        \\    try {
+        \\        cohortFiveIterator([1], cohortFiveOrder).forEach(function cohortFiveThrowingIteratorCallback() {
+        \\            cohortFiveOrder.push("callback");
+        \\            throw new RangeError("iterator");
+        \\        });
+        \\    } catch (error) {
+        \\        cohortFiveOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(cohortFiveOrder.join(","), "callback,close,outer");
+        \\
+        \\    cohortFiveOrder = [];
+        \\    var stack = new DisposableStack();
+        \\    stack.defer(function cohortFiveDeferredDispose() {
+        \\        cohortFiveOrder.push("defer");
+        \\    });
+        \\    stack.adopt(2, function cohortFiveAdoptDispose(value) {
+        \\        cohortFiveOrder.push("adopt:" + value);
+        \\    });
+        \\    stack.use({
+        \\        [Symbol.dispose]: function cohortFiveUseDispose() {
+        \\            cohortFiveOrder.push("use");
+        \\        }
+        \\    });
+        \\    stack.dispose();
+        \\    assert.sameValue(cohortFiveOrder.join(","), "use,adopt:2,defer");
+        \\
+        \\    cohortFiveOrder = [];
+        \\    var throwingStack = new DisposableStack();
+        \\    throwingStack.defer(function cohortFiveDisposeCleanup() {
+        \\        cohortFiveOrder.push("cleanup");
+        \\    });
+        \\    throwingStack.defer(function cohortFiveThrowingDispose() {
+        \\        cohortFiveOrder.push("callback");
+        \\        throw new RangeError("dispose");
+        \\    });
+        \\    try {
+        \\        throwingStack.dispose();
+        \\    } catch (error) {
+        \\        cohortFiveOrder.push("outer");
+        \\        assert.sameValue(error instanceof RangeError, true);
+        \\    }
+        \\    assert.sameValue(cohortFiveOrder.join(","), "callback,cleanup,outer");
+        \\    return 42;
+        \\};
+        \\
+        \\var cohortFiveOther = $262.createRealm().global;
+        \\var cohortFiveForeignReplacer = cohortFiveOther.eval(
+        \\    "(function cohortFiveForeignReplacer() { return 'a'; })"
+        \\);
+        \\globalThis.__cohortFiveForeignOuter = function () {
+        \\    return "x".replace("x", cohortFiveForeignReplacer)
+        \\        + "y".replace("y", function cohortFiveLocalReplacer() { return "b"; });
+        \\};
+        \\globalThis.__cohortFiveInterrupt = function () {
+        \\    return "41".replace("41", function cohortFiveInterruptReplacer(value) {
+        \\        return cohortFiveHelper(Number(value));
+        \\    });
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__cohortFiveOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 29), metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const foreign_key = try js.runtime.internAtom("__cohortFiveForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try helpers.expectStringValueBytes(foreign_result, "ab");
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__cohortFiveInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            interrupt_function,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    const interrupt_exception = js.context.takeException();
+    interrupt_exception.free(js.runtime);
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try helpers.expectStringValueBytes(recovered, "42");
+}
+
+test "Promise executor reuses the active Machine while reactions remain roots" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+
+    const setup = try js.eval(
+        \\function promiseExecutorHelper(value) {
+        \\    return value + 1;
+        \\}
+        \\function promiseExecutorResolveHelper(resolve, value) {
+        \\    return resolve(promiseExecutorHelper(value));
+        \\}
+        \\var promiseExecutorTrace;
+        \\var promiseExecutorSubclassTrace;
+        \\var promiseExecutorOrder = [];
+        \\var promiseExecutorJobCount = 0;
+        \\globalThis.__promiseExecutorReactionValue = 0;
+        \\globalThis.__promiseExecutorJobOrder = "";
+        \\function promiseExecutorRecordJob(label) {
+        \\    promiseExecutorOrder.push(label);
+        \\    promiseExecutorJobCount++;
+        \\    if (promiseExecutorJobCount === 2) {
+        \\        globalThis.__promiseExecutorJobOrder = promiseExecutorOrder.join(",");
+        \\    }
+        \\}
+        \\function promiseExecutorPrimary(resolve) {
+        \\    promiseExecutorTrace = new Error("promise executor").stack;
+        \\    return promiseExecutorResolveHelper(resolve, 41);
+        \\}
+        \\class PromiseExecutorSubclass extends Promise {}
+        \\globalThis.__promiseExecutorOuter = function __promiseExecutorOuter() {
+        \\    var caught = false;
+        \\    try {
+        \\        var fulfilled = new Promise(promiseExecutorPrimary);
+        \\        fulfilled.then(function promiseExecutorSuccessReaction(value) {
+        \\            globalThis.__promiseExecutorReactionValue = value;
+        \\            promiseExecutorRecordJob("success-job");
+        \\        });
+        \\
+        \\        new Promise(function promiseExecutorReentrant(resolve) {
+        \\            new Promise(function promiseExecutorNested(nestedResolve) {
+        \\                nestedResolve(1);
+        \\            });
+        \\            resolve(2);
+        \\        });
+        \\
+        \\        new Promise(function promiseExecutorThrowing() {
+        \\            promiseExecutorOrder.push("throw");
+        \\            throw new RangeError("executor");
+        \\        }).catch(function promiseExecutorRejectReaction(error) {
+        \\            assert.sameValue(error instanceof RangeError, true);
+        \\            promiseExecutorRecordJob("reject-job");
+        \\        });
+        \\
+        \\        new PromiseExecutorSubclass(function promiseExecutorSubclass(resolve) {
+        \\            promiseExecutorSubclassTrace = new Error("subclass executor").stack;
+        \\            resolve(3);
+        \\        });
+        \\
+        \\        var prototypeOrder = [];
+        \\        var customNewTarget = (function () {}).bind();
+        \\        Object.defineProperty(customNewTarget, "prototype", {
+        \\            get: function promisePrototypeGetter() {
+        \\                prototypeOrder.push("prototype");
+        \\                throw new RangeError("prototype");
+        \\            }
+        \\        });
+        \\        try {
+        \\            Reflect.construct(Promise, [function promiseExecutorMustNotRun() {
+        \\                prototypeOrder.push("executor");
+        \\            }], customNewTarget);
+        \\        } catch (error) {
+        \\            assert.sameValue(error instanceof RangeError, true);
+        \\            var getterAt = error.stack.indexOf("    at promisePrototypeGetter");
+        \\            var getterPromiseAt = error.stack.indexOf("Promise (native)", getterAt);
+        \\            var getterOuterAt = error.stack.indexOf("    at __promiseExecutorOuter");
+        \\            assert.sameValue(getterAt, 0);
+        \\            assert.sameValue(getterPromiseAt > getterAt, true);
+        \\            assert.sameValue(getterOuterAt > getterPromiseAt, true);
+        \\            prototypeOrder.push("outer");
+        \\        }
+        \\        assert.sameValue(prototypeOrder.join(","), "prototype,outer");
+        \\    } catch (error) {
+        \\        caught = true;
+        \\    }
+        \\    promiseExecutorOrder.push("outer");
+        \\    assert.sameValue(caught, false);
+        \\    assert.sameValue(promiseExecutorOrder.join(","), "throw,outer");
+        \\
+        \\    var callbackIndex = promiseExecutorTrace.indexOf("    at promiseExecutorPrimary");
+        \\    var nativeIndex = promiseExecutorTrace.indexOf("Promise (native)");
+        \\    var outerIndex = promiseExecutorTrace.indexOf("    at __promiseExecutorOuter");
+        \\    assert.sameValue(callbackIndex, 0);
+        \\    assert.sameValue(nativeIndex > callbackIndex, true);
+        \\    assert.sameValue(outerIndex > nativeIndex, true);
+        \\
+        \\    var subclassCallbackIndex = promiseExecutorSubclassTrace.indexOf(
+        \\        "    at promiseExecutorSubclass"
+        \\    );
+        \\    var subclassNativeIndex = promiseExecutorSubclassTrace.indexOf("Promise (native)");
+        \\    var subclassOuterIndex = promiseExecutorSubclassTrace.indexOf(
+        \\        "    at __promiseExecutorOuter"
+        \\    );
+        \\    assert.sameValue(subclassCallbackIndex, 0);
+        \\    assert.sameValue(subclassNativeIndex > subclassCallbackIndex, true);
+        \\    assert.sameValue(subclassOuterIndex > subclassNativeIndex, true);
+        \\    return 42;
+        \\};
+        \\
+        \\var promiseExecutorOther = $262.createRealm().global;
+        \\var promiseExecutorForeign = promiseExecutorOther.eval(
+        \\    "(function promiseExecutorForeign(resolve) { resolve(20); })"
+        \\);
+        \\globalThis.__promiseExecutorForeignOuter = function () {
+        \\    new Promise(promiseExecutorForeign);
+        \\    new Promise(function promiseExecutorLocal(resolve) {
+        \\        resolve(22);
+        \\    });
+        \\    return 42;
+        \\};
+        \\globalThis.__promiseExecutorInterrupt = function () {
+        \\    globalThis.__promiseExecutorInterruptReason = "";
+        \\    new Promise(function promiseExecutorInterruptCallback(resolve) {
+        \\        resolve(promiseExecutorHelper(41));
+        \\    }).catch(function promiseExecutorInterruptReaction(error) {
+        \\        globalThis.__promiseExecutorInterruptReason =
+        \\            error.name + ":" + error.message;
+        \\    });
+        \\    return 42;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__promiseExecutorOuter");
+    defer js.runtime.atoms.free(outer_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    inline_calls.resetMachineTestMetrics();
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+
+    const executor_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 1), executor_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 6), executor_metrics.same_machine_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), executor_metrics.entry_chunk_allocations);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    try js.runJobs();
+    const reaction_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 3), reaction_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 6), reaction_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const reaction_value_key = try js.runtime.internAtom("__promiseExecutorReactionValue");
+    defer js.runtime.atoms.free(reaction_value_key);
+    const reaction_value = try global.getProperty(reaction_value_key);
+    defer reaction_value.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), reaction_value.asInt32());
+    const order_key = try js.runtime.internAtom("__promiseExecutorJobOrder");
+    defer js.runtime.atoms.free(order_key);
+    const order = try global.getProperty(order_key);
+    defer order.free(js.runtime);
+    try helpers.expectStringValueBytes(order, "throw,outer,success-job,reject-job");
+
+    const foreign_key = try js.runtime.internAtom("__promiseExecutorForeignOuter");
+    defer js.runtime.atoms.free(foreign_key);
+    const foreign = try global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+    inline_calls.resetMachineTestMetrics();
+    const foreign_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        foreign,
+        &.{},
+        null,
+        null,
+    );
+    defer foreign_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    const foreign_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+
+    const interrupt_key = try js.runtime.internAtom("__promiseExecutorInterrupt");
+    defer js.runtime.atoms.free(interrupt_key);
+    const interrupt_function = try global.getProperty(interrupt_key);
+    defer interrupt_function.free(js.runtime);
+    var interrupt_state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
+    js.context.interrupt_counter = 4;
+    inline_calls.resetMachineTestMetrics();
+    const interrupted_executor_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer interrupted_executor_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), interrupted_executor_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    try std.testing.expect(js.runtime.active_invocation == null);
+    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(!js.context.hasException());
+
+    js.runtime.setInterruptHandler(null, null);
+    try js.runJobs();
+    const interrupt_metrics = inline_calls.machineTestMetrics();
+    try std.testing.expectEqual(@as(usize, 2), interrupt_metrics.machine_inits);
+    try std.testing.expectEqual(@as(usize, 1), interrupt_metrics.same_machine_sync_calls);
+    const interrupt_reason_key = try js.runtime.internAtom("__promiseExecutorInterruptReason");
+    defer js.runtime.atoms.free(interrupt_reason_key);
+    const interrupt_reason = try global.getProperty(interrupt_reason_key);
+    defer interrupt_reason.free(js.runtime);
+    try helpers.expectStringValueBytes(interrupt_reason, "InternalError:interrupted");
+
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        interrupt_function,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
 }
 
 test "nested calls and generator resumes share one Realm interrupt cadence" {
@@ -388,7 +2371,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
 
     // The host-to-outer entry leaves one poll; the nested/tail call consumes it.
     js.context.interrupt_counter = 2;
-    const nested_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const nested_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -406,7 +2389,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // A numeric condition takes the generic branch handler. It must not also
     // pay the boolean/plain-object hot-handler poll.
     js.context.interrupt_counter = 2;
-    const branch_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const branch_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -440,7 +2423,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // The same-Machine Function.prototype.call fast path fuses an outer native
     // call and an inner target call, but both entries still consume the budget.
     js.context.interrupt_counter = 3;
-    const forwarded_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const forwarded_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -460,7 +2443,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // its Promise. async_func_init only prepares the resident frame; charging
     // it as a fourth entry would fire this counter.
     js.context.interrupt_counter = 4;
-    const async_promise = try engine.exec.call_runtime.callValueOrBytecode(
+    const async_promise = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -477,7 +2460,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     // Generator.next has one native call entry and one bytecode-resume entry.
     // The second next creates another Machine but continues the same counter.
     js.context.interrupt_counter = 3;
-    const first = try engine.exec.call_runtime.callValueOrBytecode(
+    const first = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -491,7 +2474,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     try std.testing.expectEqual(@as(usize, 4), state.hits);
     try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
 
-    const second = try engine.exec.call_runtime.callValueOrBytecode(
+    const second = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -542,7 +2525,7 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     js.context.interrupt_counter = 2;
     child.interrupt_counter = 100;
 
-    const promise_value = try engine.exec.call_runtime.callValueOrBytecode(
+    const promise_value = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         parent_global,
@@ -638,7 +2621,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     child.interrupt_counter = 100;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -667,7 +2650,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     child.interrupt_counter = 1;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -698,7 +2681,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     defer js.runtime.setNativeStackSize(0);
     try std.testing.expectError(
         error.StackOverflow,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -724,7 +2707,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     child.interrupt_counter = 100;
     try std.testing.expectError(
         error.Interrupted,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             parent_global,
@@ -894,7 +2877,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     const driver = try global.getProperty(driver_key);
     defer driver.free(js.runtime);
 
-    const warm = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -922,7 +2905,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     // Keeping the forwarder live until setup commits lets ordinary unwind pop
     // that faulting frame and deliver the error to the driver's catch.
     arm.exhaust = true;
-    const caught = try engine.exec.call_runtime.callValueOrBytecode(
+    const caught = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -952,7 +2935,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     // creates headroom under the clamped limit. A second identical failure
     // must not grow either live allocation metric.
     arm.exhaust = true;
-    const caught_again = try engine.exec.call_runtime.callValueOrBytecode(
+    const caught_again = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -978,7 +2961,7 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
-    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+    const recovered = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -2425,6 +4408,36 @@ test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
         \\assert.sameValue(1n, 1n);
         \\assert.sameValue(-(1), -1);
         \\assert.sameValue(Object.is(-(0), -0), true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "heap bigint multiplication still compacts a short-representable product" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Heap representation does not imply a magnitude above the short-BigInt
+    // range: the parser only folds literals inside the i32 range while short
+    // BigInts cover all of i64, so both operands below are one-limb heap
+    // BigInts whose product still fits a short. qjs compacts every
+    // multiplication result (JS_CompactBigInt, quickjs.c:15054), so the
+    // single-allocation FAM path -- which does not collapse -- must decline
+    // this shape. This is the regression guard for that gate: if a future
+    // parser or literal-folding change makes the eligibility predicate
+    // unsound, the representation silently diverges from qjs, and only a
+    // direct check like this one catches it.
+    const result = try js.eval(
+        \\assert.sameValue(3000000000n * 3000000000n, 9000000000000000000n);
+        \\assert.sameValue(String(3000000000n * 3000000000n), "9000000000000000000");
+        \\assert.sameValue(typeof (3000000000n * 3000000000n), "bigint");
+        \\assert.sameValue((3000000000n * 3000000000n) === 9000000000000000000n, true);
+        \\// One limb short of the boundary on either side is still excluded.
+        \\assert.sameValue(2147483648n * 2147483648n, 4611686018427387904n);
+        \\assert.sameValue(-3000000000n * 3000000000n, -9000000000000000000n);
+        \\// Just past it the FAM path takes over and must agree.
+        \\assert.sameValue(4000000000n * 4000000000n, 16000000000000000000n);
+        \\assert.sameValue(String(4000000000n * 4000000000n), "16000000000000000000");
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -7390,6 +9403,24 @@ test "native builtin errors capture a native callsite" {
         \\assert.sameValue(crossMachineSites[1][1], true);
         \\assert.sameValue(crossMachineSites[2][0], "outerMapBacktrace");
         \\assert.sameValue(crossMachineSites[2][1], false);
+        \\function nativeFenceHelper() {
+        \\    return new Error("same-machine").stack;
+        \\}
+        \\function nativeFenceCallback() {
+        \\    return nativeFenceHelper();
+        \\}
+        \\function nativeFenceOuter() {
+        \\    return nativeFenceCallback.apply(null, []);
+        \\}
+        \\var sameMachineSites = nativeFenceOuter();
+        \\assert.sameValue(sameMachineSites[0][0], "nativeFenceHelper");
+        \\assert.sameValue(sameMachineSites[0][1], false);
+        \\assert.sameValue(sameMachineSites[1][0], "nativeFenceCallback");
+        \\assert.sameValue(sameMachineSites[1][1], false);
+        \\assert.sameValue(sameMachineSites[2][0], "apply");
+        \\assert.sameValue(sameMachineSites[2][1], true);
+        \\assert.sameValue(sameMachineSites[3][0], "nativeFenceOuter");
+        \\assert.sameValue(sameMachineSites[3][1], false);
         \\Error.prepareStackTrace = undefined;
         \\Error.prepareStackTrace = function(error, sites) {
         \\    assert.sameValue(sites[0].getFunctionName(), "map");
@@ -7526,7 +9557,7 @@ test "external C function preflight uses caller realm and callback errors use ca
     defer js.runtime.setNativeStackSize(0);
     try std.testing.expectError(
         error.StackOverflow,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             caller_global,
@@ -7559,7 +9590,7 @@ test "external C function preflight uses caller realm and callback errors use ca
     js.runtime.setNativeStackSize(0);
     try std.testing.expectError(
         error.JSException,
-        engine.exec.call_runtime.callValueOrBytecode(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             caller_global,
@@ -12208,6 +14239,44 @@ test "inline operand Stack keeps limit and ownership flags in one word" {
     }
 }
 
+test "ordinary root bytecode call carves one operand window" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    // Slightly more than half a chunk makes a duplicate stack-size carve
+    // cross the chunk boundary deterministically. Frame metadata is empty, so
+    // one operand window fits in one chunk while two require exactly two.
+    const stack_size = core.VmStackArena.chunk_slots / 2 + 1;
+    const code = [_]u8{op.return_undef};
+    const callable = try createTailOpcodeFixture(
+        &js,
+        "__singleOperandWindow",
+        &code,
+        @intCast(stack_size),
+    );
+    defer callable.free(js.runtime);
+
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.vm_stack.chunk_count);
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        callable,
+        &.{},
+        null,
+        null,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.vm_stack.chunk_count);
+    try std.testing.expectEqual(
+        core.VmStackArena.Mark{ .chunk = 0, .used = 0 },
+        js.runtime.vm_stack.mark(),
+    );
+}
+
 test "method calls preserve receiver arguments eval captures and abrupt ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -15481,7 +17550,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
     defer argument_generator.free(js.runtime);
     const argument_values = [_]core.JSValue{argument};
 
-    const warm_argument = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm_argument = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -15492,7 +17561,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
         null,
     );
     warm_argument.free(js.runtime);
-    const warm_no_argument = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm_no_argument = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -15510,7 +17579,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     var alloc_calls = js.runtime.memory.alloc_calls;
     var create_calls = js.runtime.memory.create_calls;
-    const no_argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const no_argument_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -15528,7 +17597,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     alloc_calls = js.runtime.memory.alloc_calls;
     create_calls = js.runtime.memory.create_calls;
-    const argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const argument_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -15553,7 +17622,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
     defer js.runtime.atoms.free(capture_key);
     const capture_generator = try global.getProperty(capture_key);
     defer capture_generator.free(js.runtime);
-    const warm_capture = try engine.exec.call_runtime.callValueOrBytecode(
+    const warm_capture = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -15567,7 +17636,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     alloc_calls = js.runtime.memory.alloc_calls;
     create_calls = js.runtime.memory.create_calls;
-    const no_capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const no_capture_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
@@ -15583,7 +17652,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
 
     alloc_calls = js.runtime.memory.alloc_calls;
     create_calls = js.runtime.memory.create_calls;
-    const capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+    const capture_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,

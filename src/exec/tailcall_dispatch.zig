@@ -78,6 +78,10 @@ pub const Outcome = enum(u32) {
     /// A cold callee (native / generator / class-ctor / cross-realm) needs the full
     /// prologue: the driver runs the cold call path and re-enters.
     reenter,
+    /// A synchronous bytecode callback reached the native fence that entered
+    /// it. The nested driver returns the owned result to the still-running
+    /// Zig builtin without resuming the suspended outer opcode.
+    native_returned,
 };
 
 // ===========================================================================
@@ -997,6 +1001,10 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
             completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err);
         },
         .constructor => unreachable,
+        .native_boundary => {
+            vm.return_value = result;
+            return .native_returned;
+        },
         .next => unreachable,
     }
     return coldNext(var_buf, vm);
@@ -1063,6 +1071,26 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
+    // One masked test on the teardown byte decides the whole completion shape.
+    // A frame that clears it retires straight through the linear epilogue: no
+    // leaf arm, no constructor arm, no tail-chain budget, no native-caller or
+    // constructor-fallback release, no continuation tag or payload. Every one
+    // of those was asked on this path before, on every ordinary return, about
+    // state fixed when the frame was published.
+    //
+    // Placed ahead of the special arms rather than after them, so the plain
+    // case pays one test instead of four. A leaf or constructor frame fails it
+    // and reaches the arms below completely unchanged, one predicted test
+    // later.
+    if (machine.topEntry().isOrdinaryReturn()) {
+        machine.popOrdinaryFrame();
+        reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+        // AssumeCapacity never reallocs, so the sp reloadAfterPop captured
+        // stays valid; it just advances past the pushed slot.
+        vm.stack.pushOwnedAssumeCapacity(value);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    }
     if (machine.topEntry().isEmptyLeaf()) {
         // No operand-window guard on this arm: zero-arg empty-leaf
         // publication requires the static return-balance proof
@@ -1166,43 +1194,51 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    if (machine.topEntry().isForwardedLeaf() and machine.topEntry().stack.len() == 0) {
-        // Forwarded-leaf return (O3): the zero-arg leaf epilogue plus the
-        // owned native `call` frame release inside `popReturnedForwardedLeaf`.
-        // No resume record exists for this shape (its default-repr storage
-        // holds `native_caller` for observable backtraces), so the caller
-        // resume {pc, sp} is re-derived through `prev` — the same chain
-        // `reloadAfterPop` walks — before the flat republication the leaf
-        // arms established. The len==0 guard routes parser-elided operand
-        // leftovers to the general return path below, whose teardown
-        // releases the remaining window (and the native frame) exactly once.
-        const dying = machine.topEntry();
-        const caller_opt = dying.prev;
-        machine.popReturnedForwardedLeaf(vm.rt);
-        if (caller_opt) |caller| {
-            std.debug.assert(caller == machine.top.?);
-            const caller_function = caller.frame.function;
-            const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
-            const resume_sp = caller.stack.topPtr();
-            vm.frame = &caller.frame;
-            vm.stack = &caller.stack;
-            vm.catch_target = &caller.catch_target;
-            vm.function = caller_function;
-            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
-            vb2 = caller.frame.locals.ptr;
-            // Deliver the result on the caller stack: the retired target slot
-            // at the caller's operand top is dead (its value transferred into
-            // the callee frame at push), exactly where the generic path would
-            // push.
-            resume_sp[0] = value;
-            caller.stack.setTopPtr(resume_sp + 1);
-            return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
+    if (machine.topEntry().hasSpecialReturn()) {
+        if (machine.topEntry().isNativeBoundaryReturn()) {
+            machine.popReturnedNativeBoundary(vm.rt);
+            vm.return_value = value;
+            return .native_returned;
         }
-        // L0 caller: keep the authoritative reload (stop-boundary republication).
-        reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
-        vm.stack.pushOwnedAssumeCapacity(value);
-        sp2 += 1;
-        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+        if (machine.topEntry().isForwardedLeaf() and machine.topEntry().stack.len() == 0) {
+            // Forwarded-leaf return (O3): the zero-arg leaf epilogue plus the
+            // owned native `call` frame release inside `popReturnedForwardedLeaf`.
+            // No resume record exists for this shape (its default-repr storage
+            // holds `native_caller` for observable backtraces), so the caller
+            // resume {pc, sp} is re-derived through `prev` — the same chain
+            // `reloadAfterPop` walks — before the flat republication the leaf
+            // arms established. The len==0 guard routes parser-elided operand
+            // leftovers to the general return path below, whose teardown
+            // releases the remaining window (and the native frame) exactly once.
+            const dying = machine.topEntry();
+            const caller_opt = dying.prev;
+            machine.popReturnedForwardedLeaf(vm.rt);
+            if (caller_opt) |caller| {
+                std.debug.assert(caller == machine.top.?);
+                const caller_function = caller.frame.function;
+                const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
+                const resume_sp = caller.stack.topPtr();
+                vm.frame = &caller.frame;
+                vm.stack = &caller.stack;
+                vm.catch_target = &caller.catch_target;
+                vm.function = caller_function;
+                vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
+                vb2 = caller.frame.locals.ptr;
+                // Deliver the result on the caller stack: the retired target
+                // slot at the caller's operand top is dead (its value
+                // transferred into the callee frame at push), exactly where
+                // the generic path would push.
+                resume_sp[0] = value;
+                caller.stack.setTopPtr(resume_sp + 1);
+                return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
+            }
+            // L0 caller: keep the authoritative reload (stop-boundary
+            // republication).
+            reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
+            vm.stack.pushOwnedAssumeCapacity(value);
+            sp2 += 1;
+            return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+        }
     }
     if (machine.topEntry().completesConstructor()) {
         const completed = machine.popConstructorReturn(value);
@@ -1211,6 +1247,8 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
+    // Reaching here means the frame is not a plain completion, so the
+    // continuation genuinely has to be read.
     var continuation = machine.popReturnedFrame();
     // popFrame just installed qjs's `sf->prev_frame` in Machine.top. Its null
     // state already distinguishes L0, so do not reload and test depth as well.
@@ -1484,6 +1522,73 @@ const op_call1 = opCall(.one);
 const op_call2 = opCall(.two);
 const op_call3 = opCall(.three);
 
+fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    switch (call_vm.apply(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        vm.stack,
+        vm.function,
+        vm.frame,
+        vm.catch_target,
+        &vm.tail_request,
+    ) catch |e| return vm.fail(e)) {
+        .done, .continue_loop => return coldNext(vb, vm),
+        .inline_call => {
+            vm.tail_is_reuse = false;
+            return .tail;
+        },
+        .inline_constructor => {
+            const req = &vm.tail_request;
+            const region_start = vm.stack.values + req.region_base;
+            const func = region_start[0];
+            const new_target = region_start[1];
+            if (call_runtime.resolveSameMachineSpreadConstructor(vm.global, func, new_target)) |candidate| {
+                const entered = enterSameMachineSpreadConstructor(
+                    vm,
+                    req.region_base,
+                    req.argc,
+                    &candidate,
+                );
+                return switch (entered) {
+                    .entry => |entry| enterEntry(
+                        vm,
+                        entry,
+                        candidate.resolved.fb.byteCodeAssumeMaterialized().ptr,
+                    ),
+                    .handled => coldNext(vb, vm),
+                    .threw => .threw,
+                };
+            }
+
+            // The admission witness is made from immutable callable/Realm
+            // facts before the operand transaction commits, so this arm is
+            // defensive. Keep it semantically complete: the materialized
+            // `[func, new_target, args...]` region can still enter the
+            // authoritative recursive constructor without reconstructing the
+            // original spread array.
+            const args = (region_start + 2)[0..req.argc];
+            const result = call_runtime.constructValueOrBytecodeWithNewTarget(
+                vm.ctx,
+                vm.output,
+                vm.global,
+                func,
+                args,
+                vm.function,
+                vm.frame,
+                new_target,
+            ) catch |err| {
+                if (!constructorRegionRecover(vm, req.region_base, err)) return .threw;
+                return coldNext(vb, vm);
+            };
+            call_runtime.popOwnedStackRegion(vm.rt, vm.stack, req.region_base);
+            vm.stack.pushOwnedAssumeCapacity(result);
+            return coldNext(vb, vm);
+        },
+    }
+}
+
 // Keep this high-frequency tail-dispatch target on an I-cache boundary so
 // unrelated source/layout changes cannot move its prologue across a cache line.
 fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
@@ -1618,6 +1723,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             vm.tail_is_reuse = false;
             return .tail;
         },
+        .inline_constructor => unreachable,
     }
 }
 
@@ -1674,6 +1780,126 @@ noinline fn pushDerivedConstructorEntry(
     return .{ .entry = entry };
 }
 
+/// Derived spread preserves an independently-owned new.target and has already
+/// advanced OP_apply's operand before reaching this adapter.
+noinline fn pushSpreadDerivedConstructorEntry(
+    vm: *Vm,
+    region_base: usize,
+    region_start: [*]JSValue,
+    func: JSValue,
+    candidate: *const call_runtime.SameMachineConstructorTarget,
+    argc: u16,
+) DerivedConstructorEntryResult {
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    const interrupt_global = vm.ctx.global orelse vm.global;
+    exception_ops.pollInterrupt(vm.ctx, interrupt_global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+
+    const constructor_func = region_start[0];
+    const owned_new_target = region_start[1];
+    const constructor_this = JSValue.uninitialized();
+    region_start[0] = constructor_this;
+    region_start[1] = constructor_func;
+    const target = candidate.resolved.bind(constructor_this, func);
+    vm.stack.setTopPtr(region_start);
+    const entry = vm.machine.pushDerivedConstructorCall(
+        vm.global,
+        vm.stack,
+        &target,
+        region_start,
+        argc,
+    ) catch |err| {
+        owned_new_target.free(vm.rt);
+        if (!constructorSetupRecover(vm, err)) return .threw;
+        return .handled;
+    };
+    entry.frame.takeConstructorNewTarget(owned_new_target);
+    return .{ .entry = entry };
+}
+
+/// Enter constructor spread from its committed owned
+/// `[func, new_target, args...]` operand transaction. The direct constructor
+/// handler below retains its measured in-handler shape.
+fn enterSameMachineSpreadConstructor(
+    vm: *Vm,
+    region_base: usize,
+    argc: u16,
+    candidate: *const call_runtime.SameMachineConstructorTarget,
+) DerivedConstructorEntryResult {
+    const region_start = vm.stack.values + region_base;
+    const func = region_start[0];
+    const new_target = region_start[1];
+    if (candidate.resolved.fb.isDerivedClassConstructor()) {
+        return pushSpreadDerivedConstructorEntry(
+            vm,
+            region_base,
+            region_start,
+            func,
+            candidate,
+            argc,
+        );
+    }
+
+    // First JS_CallConstructorInternal poll: before instance creation,
+    // constructibility effects, and the inner bytecode-call poll.
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    const args = (region_start + 2)[0..argc];
+    const prepared = call_runtime.prepareSameMachineConstructorAfterFirstPoll(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        func,
+        new_target,
+        candidate,
+        args,
+        vm.function,
+        vm.frame,
+    ) catch |err| {
+        if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+        return .handled;
+    };
+    switch (prepared) {
+        .completed => |result| {
+            call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+            vm.stack.pushOwnedAssumeCapacity(result);
+            return .handled;
+        },
+        .instance => |instance| {
+            // Move both call bindings out of the parser-owned region: func
+            // becomes the method-shaped callable, while new.target moves into
+            // the callee FrameCold binding. This covers both duplicated
+            // `new F(...)` and differing `super(...)` new targets.
+            const constructor_func = region_start[0];
+            const owned_new_target = region_start[1];
+            region_start[0] = instance;
+            region_start[1] = constructor_func;
+            const target = candidate.resolved.bind(instance, func);
+            vm.stack.setTopPtr(region_start);
+            const entry = vm.machine.pushConstructorCall(
+                vm.global,
+                vm.stack,
+                &target,
+                region_start,
+                argc,
+            ) catch |err| {
+                owned_new_target.free(vm.rt);
+                if (!constructorSetupRecover(vm, err)) return .threw;
+                return .handled;
+            };
+            entry.frame.takeConstructorNewTarget(owned_new_target);
+            return .{ .entry = entry };
+        },
+    }
+}
+
 fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp); // frame.pc points at the u16 argc operand
     const argc = readInt(u16, pc + 1);
@@ -1713,6 +1939,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                 vm.ctx,
                 vm.output,
                 vm.global,
+                func,
                 func,
                 &candidate,
                 args,
@@ -2985,7 +3212,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method, false);
     }
     vm.stack.setTopPtr(sp);
-    const value = call_runtime.callValueOrBytecodePreRooted(
+    const value = call_runtime.callValueOrBytecodeRootPreRooted(
         vm.ctx,
         vm.output,
         vm.global,
@@ -3803,6 +4030,58 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     return cont(pc + 3, sp + 1, var_buf, vm);
 }
 
+/// Global var write (2-byte var-ref index) — the resident twin of `op_get_var`.
+/// qjs keeps OP_put_var's write-through arm inside JS_CallInternal
+/// (quickjs.c:18490-18525) and only the exceptional arms reach out; zjs used to
+/// run the whole opcode from the cold shell, so every steady-state global write
+/// built a 128-byte native frame and saved seven registers to execute a load,
+/// four guards and a store. That wrapper is what this handler removes.
+///
+/// Every arm other than the plain cell write-through — lexical TDZ, const
+/// violation, indirect cell, function-name slot, out-of-range operand, and the
+/// undeclared/deleted-binding fall-through to the global OBJECT — tail-calls the
+/// unchanged `cold_table` shell. Nothing is consumed before that hand-off: the
+/// operand is read through `pc` without touching `frame.pc`, the value is left on
+/// the stack, and no state is published, so the shell observes exactly the entry
+/// state it saw when it owned the opcode outright.
+pub fn op_put_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const idx = readInt(u16, pc + 1);
+    // Unlike op_get_var this keeps the operand bounds test: putVar's own
+    // `ref_idx < frame.var_refs.len` branch is a live semantic arm (it routes an
+    // unbound name to the global object), not a redundant guard, so the resident
+    // handler declines rather than asserting.
+    if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    const current = cell.pvalue.*;
+    // Same predicate as putVar's write-through arm, in the same order: not
+    // uninitialized (TDZ / deleted binding), not const, not an indirect var-ref,
+    // not a function-name slot. A shadowing global lexical did cell surgery at
+    // definition time, so the bound cell IS the binding and no per-write lexical
+    // test is needed (see the qjs note in vm_property_globals.putVar).
+    if (current.isUninitialized() or cell.varRefIsConstSlot().*) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (core.VarRef.fromValue(current) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (cell.varRefIsFunctionNameSlot().*) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Ownership moves from the stack slot into the cell — no dup, matching the
+    // `stack.pop()` the cold arm did. `setVarRefValue` releases the displaced
+    // value, which can run a native finalizer but cannot throw, allocate, or
+    // re-enter the VM, so this arm stays publish-free like op_get_var's hit leg.
+    // The dead slot below `sp - 1` is never re-read: the only consumer of a
+    // stale top_ptr is the catch unwinder, and this arm has no throwing edge.
+    //
+    // Forced inline: left to itself the backend outlines the whole store+release
+    // as a call and shrink-wraps a 64-byte frame with five saved registers onto
+    // the hit leg, which is most of the wrapper this cut exists to remove.
+    // Inlined it is a 16-byte store plus a refcount decrement, with a call only
+    // on the rare drop-to-zero. A 48-byte frame still survives on the hit leg
+    // because that call site is there at all -- the resident put_loc handler
+    // reaches the frameless form with the same source shape, so this is a
+    // register-allocation outcome, not a structural floor. Recorded as the
+    // residual rather than chased here: this cut is the mechanical move.
+    @call(.always_inline, core.VarRef.setVarRefValue, .{ cell, vm.ctx.runtime, (sp - 1)[0] });
+    return cont(pc + 3, sp - 1, var_buf, vm);
+}
+
 // ---- COLD handlers (the migration table, transcribed). dispatch_table assembled
 //      at the end references these. The bulk lives in colds.zig via @import to keep
 //      this file readable; see the comptime-included block below. ----
@@ -3817,6 +4096,7 @@ const specials: colds.SpecialHandlers = .{
     .op_call2 = op_call2,
     .op_call3 = op_call3,
     .op_call_method = op_call_method,
+    .op_apply = op_apply,
     .op_call_constructor = op_call_constructor,
     .op_for_of_next = op_for_of_next,
     .op_tail_call = op_tail_call,
@@ -4040,6 +4320,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 switch (continuation.action) {
                     .proxy_get => try completeProxyGetContinuation(vm, result, continuation.takeAtom()),
                     .for_of_next => try completeForOfNextContinuation(vm, result, continuation.takeForOfDepth()),
+                    .native_boundary => return result,
                     .constructor => unreachable,
                     .next => unreachable,
                 }
@@ -4094,6 +4375,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
             },
             .suspended => return vm.return_value,
             .reenter => unreachable, // cold callees complete inside call_vm.call.
+            .native_returned => return vm.return_value,
         }
     }
 }

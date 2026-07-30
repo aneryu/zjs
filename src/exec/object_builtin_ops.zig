@@ -40,7 +40,7 @@ const qjsDefinePropertiesOnTarget = call_runtime.qjsDefinePropertiesOnTarget;
 const isCallableValue = call_runtime.isCallableValue;
 const iteratorForValue = call_runtime.iteratorForValue;
 const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const valueTruthy = coercion_ops.valueTruthy;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
@@ -905,6 +905,15 @@ pub fn qjsObjectGroupByCall(
 
     const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
+    var callback_call = call_runtime.SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        args[1],
+        caller_function,
+        caller_frame,
+    );
 
     var index: usize = 0;
     while (true) {
@@ -918,7 +927,7 @@ pub fn qjsObjectGroupByCall(
         if (step.done) return out_value;
 
         const index_value = value_ops.numberToValue(@floatFromInt(index));
-        const raw_key = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), args[1], &.{ step.value, index_value }, caller_function, caller_frame) catch |err| {
+        const raw_key = callback_call.call(&.{ step.value, index_value }) catch |err| {
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
@@ -955,7 +964,7 @@ fn objectAddEntriesStepValue(
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
 
-    const next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
+    const next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
     defer next_result_value.free(ctx.runtime);
     const next_result = objectFromValue(next_result_value) orelse return error.TypeError;
     if (next_result.class_id == core.class.ids.regexp) return .{ .value = core.JSValue.undefinedValue(), .done = false };
@@ -1067,7 +1076,7 @@ pub fn objectIsExtensibleForIntegrity(
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return target.isExtensible();
     if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
+    const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
     defer result.free(ctx.runtime);
     const extensible = valueTruthy(result);
     if (extensible != target.isExtensible()) return error.TypeError;

@@ -27,7 +27,7 @@ const ValueSliceRoot = array_ops.ValueSliceRoot;
 const appendSourceStringUtf8 = string_ops.appendSourceStringUtf8;
 const argsFromArray = array_ops.argsFromArray;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const freeArgs = call_runtime.freeArgs;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
 const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
@@ -359,7 +359,7 @@ pub fn execDirectEval(
             return eval_err;
         }
     else
-        call_runtime.callValueOrBytecodePreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, rooted_args, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodeRootPreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, rooted_args, function, frame) catch |err| {
             if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                 return .continue_loop;
             }
@@ -414,7 +414,7 @@ pub fn execApplyEval(
             return eval_err;
         }
     else
-        callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
+        callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
             if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                 return .continue_loop;
             }

@@ -588,13 +588,12 @@ pub fn qjsRegExpExecGeneric(
     defer exec_method.free(ctx.runtime);
     if (!exec_method.isUndefined() and !exec_method.isNull()) {
         if (isCallableValue(exec_method)) {
-            // qjs JS_RegExpExec forwards the already-owned `s` cell directly
-            // to JS_CallFree. `rx` is retained by the surrounding builtin,
-            // `exec_method` by this scope, and `string_value` by its caller, so
-            // the generic call's defensive eight-slot staging copy is
-            // redundant here as well.
+            // JS_RegExpExec is a synchronous native algorithm boundary. The
+            // receiver, method and string are all rooted by this scope, so an
+            // eligible bytecode override can execute on the active Machine;
+            // non-eligible targets retain the authoritative root-call path.
             const call_args = [_]core.JSValue{string_value};
-            const result = try call_runtime.callValueOrBytecodePreRooted(
+            const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
                 ctx,
                 output,
                 global,

@@ -1,0 +1,259 @@
+{
+ "note": "Phase 6 closeout snapshot. Measurement only, no code changes, and NOT a policy baseline refresh. Its purpose is to re-rank the remaining gaps against current rather than historical numbers.",
+ "provenance": {
+  "phase0_baseline_dir": "reports/perf/qjs-align/2026-07-27",
+  "phase0_zjs_commit": "c84a58fa",
+  "phase0_zjs_sha256": "6ad056d7039f416e0677cd286e5bc2f2dbb68302c7cb53d75bc965bdfbbb039c",
+  "snapshot_zjs_commit": "0f726fc00a60ad98040b10fdebf38cd04ddd3c76",
+  "snapshot_zjs_sha256": "df03ae4919b571f227af2da3af490680b28a7daad67e340856e0c3360eb3d14c",
+  "pinned_qjs_commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+  "pinned_qjs_sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+  "qjs_binary_unchanged_from_phase0": true,
+  "host": "Cortex-X925 / Cortex-A725, pinned CPU 19",
+  "sampling": {
+   "microbench_and_hotpath": "iters 30 warmup 5, same as Phase 0",
+   "same_runtime": "5 samples, 200 iterations, 20 warmup",
+   "direct": "6 timed samples; the first attempt used 5, which makes the ABBA order unbalanced and voided every headline, so it was re-run"
+  }
+ },
+ "same_runtime_p0_sentinels": {
+  "metric": "steady execute median, zjs over qjs",
+  "cases": {
+   "global_write_loop": {
+    "phase0": 1.715,
+    "now": 1.039
+   },
+   "prop_read_mono_loop": {
+    "phase0": 0.8668,
+    "now": 0.8741
+   },
+   "fib_rec": {
+    "phase0": 1.3361,
+    "now": 1.3
+   },
+   "call_body_loop": {
+    "phase0": 1.1592,
+    "now": 1.1354
+   },
+   "method_call_loop": {
+    "phase0": 1.1536,
+    "now": 1.1394
+   },
+   "typed_array_read": {
+    "phase0": 0.9659,
+    "now": 0.9725
+   },
+   "typed_array_write": {
+    "phase0": 1.0238,
+    "now": 1.0085
+   }
+  },
+  "geomean": {
+   "phase0": 1.1479,
+   "now": 1.0594,
+   "limit": 1.1
+  },
+  "exit_line": {
+   "geomean_pass": {
+    "phase0": false,
+    "now": true
+   },
+   "per_case_pass": {
+    "phase0": false,
+    "now": false
+   },
+   "over_limit_cases": {
+    "phase0": [
+     "global_write_loop 1.7150",
+     "fib_rec 1.3361"
+    ],
+    "now": [
+     "fib_rec 1.3000"
+    ]
+   }
+  },
+  "headline": "the geomean passes the 1.10 exit line for the first time; fib_rec at 1.3000 is the only case still over the 1.20 per-case limit"
+ },
+ "whole_process": {
+  "microbench": {
+   "cases": 75,
+   "paired_geomean": {
+    "phase0": 1.3609,
+    "now": 1.334
+   },
+   "startup_adjusted_geomean": {
+    "phase0": 2.2441,
+    "now": 1.5298
+   },
+   "zjs_faster": {
+    "phase0": 1,
+    "now": 1
+   },
+   "qjs_faster": {
+    "phase0": 74,
+    "now": 72
+   },
+   "near_tie": {
+    "phase0": 0,
+    "now": 2
+   }
+  },
+  "hotpath": {
+   "cases": 12,
+   "paired_geomean": {
+    "phase0": 1.3039,
+    "now": 1.219
+   },
+   "startup_adjusted_geomean": {
+    "phase0": 1.3118,
+    "now": 1.2333
+   },
+   "zjs_faster": {
+    "phase0": 1,
+    "now": 2
+   },
+   "qjs_faster": {
+    "phase0": 11,
+    "now": 10
+   }
+  },
+  "reading": "startup-adjusted moved most (2.2441 to 1.5298) while microbench's paired geomean barely moved (1.3609 to 1.3340), so that improvement concentrates in process startup and first execution rather than steady state. Neither is the arbitration metric (PRD 5.2)."
+ },
+ "direct_core": {
+  "headline_is": "loop-only instructions, zjs over qjs; wall is the ns/op ratio",
+  "cases": {
+   "dtoa/mixed-free": {
+    "insn": {
+     "phase0": 0.8937,
+     "now": 0.8904
+    },
+    "wall": {
+     "phase0": 1.0242,
+     "now": 1.0205
+    }
+   },
+   "regexp/exec-latin1": {
+    "insn": {
+     "phase0": 0.9725,
+     "now": 0.9727
+    },
+    "wall": {
+     "phase0": 0.842,
+     "now": 0.8271
+    }
+   },
+   "property_lookup/own-data": {
+    "insn": {
+     "phase0": 0.8601,
+     "now": 0.8608
+    },
+    "wall": {
+     "phase0": 1.3719,
+     "now": 1.3789
+    }
+   },
+   "typed_array/int32-get": {
+    "insn": {
+     "phase0": null,
+     "now": null,
+     "reason": "harness not comparable, public-api-proxy"
+    },
+    "wall": {
+     "phase0": 1.1168,
+     "now": 1.0988
+    }
+   },
+   "bigint/mul-multilimb": {
+    "insn": {
+     "phase0": 1.7728,
+     "now": 1.5319
+    },
+    "wall": {
+     "phase0": 2.0284,
+     "now": 1.3165
+    }
+   }
+  },
+  "reading": "bigint/mul-multilimb is the only case that moved materially, wall 2.03 to 1.32 from P6-01 and P6-01c. property_lookup/own-data still shows wall 1.38 against insn 0.86 and carries a documented zjs-only recordPropLookup bias."
+ },
+ "js_bigint_size_matrix": {
+  "mul": {
+   "1x8": 0.8956,
+   "16x16": 0.941,
+   "8x8": 0.9859,
+   "28x28": 1.0229,
+   "29x29": 1.0425,
+   "28x29": 1.0477,
+   "8x1": 1.0928,
+   "2x2": 1.1652
+  },
+  "div_mod": {
+   "div_16x8": 1.2034,
+   "mod_8x4": 1.5261,
+   "div_8x1": 1.8834,
+   "div_8x4": 2.5921
+  },
+  "note": "these twelve are not policy sentinels, so the harness marks them invalid; the ratios are valid but do not participate in the exit line"
+ },
+ "reranked_priorities": [
+  {
+   "rank": 1,
+   "item": "fib_rec",
+   "gap": 1.3,
+   "owner": "the only sentinel still over the P0 per-case 1.20 limit. Phase 3 falsified six hypotheses and concluded the residue is the Frame/Stack state model itself, needing a structural redesign."
+  },
+  {
+   "rank": 2,
+   "item": "property_lookup/own-data wall",
+   "gap": 1.3789,
+   "owner": "largest direct-core wall gap with instructions at 0.86 in the opposite direction, and it carries a documented zjs-only recordPropLookup bias that has to be removed before judging."
+  },
+  {
+   "rank": 3,
+   "item": "bigint_div_8x4",
+   "gap": 2.5921,
+   "owner": "OWNER CHANGED: SmallObjectSlab arena churn per P6-04d2c and the P6-04 closeout. Not to be handled inside BigInt."
+  },
+  {
+   "rank": 4,
+   "item": "bigint_div_8x1",
+   "gap": 1.8834,
+   "owner": "single-limb is already linear; the residue is fixed allocation plus JS publication, same source as rank 3."
+  },
+  {
+   "rank": 5,
+   "item": "microbench paired geomean",
+   "gap": 1.334,
+   "owner": "aggregate over 75 cases, 72 still slower. NOT re-ranked per case this round -- see limits."
+  },
+  {
+   "rank": 6,
+   "item": "call_body_loop / method_call_loop",
+   "gap": "1.1354 / 1.1394",
+   "owner": "inside the 1.20 limit, untouched since the Phase 3 closeout."
+  },
+  {
+   "rank": 7,
+   "item": "bigint_mul_2x2",
+   "gap": 1.1652,
+   "owner": "small-size multiplication fixed tax, same source as rank 3; P6-02 located a roughly constant 9-10 ns wrapper cost."
+  }
+ ],
+ "conclusion": "the next step should not return to BigInt. The top two items are not BigInt at all, and ranks 3, 4 and 7 are BigInt cases whose residue d2.5 and d2c already attributed to the allocator's empty-arena churn, which is cross-type behaviour.",
+ "route": {
+  "1": "close the P6-04d3 dossier - done at bdbd617d and 5fdb3fc3",
+  "2": "produce this snapshot - done",
+  "3": "re-rank against current gaps - done",
+  "4": "if allocator churn holds across types, open P7-00",
+  "5": "otherwise take the largest next item, fib_rec or property_lookup",
+  "p7_00_preconditions": "fixed in P6-04-closeout.md section 7; only after churn is confirmed on multiple unrelated types and multiple size classes, and never by tuning a class for div_8x4"
+ },
+ "limits": [
+  "this is not a policy baseline refresh: neither policy.json nor the Phase 0 frozen baseline was touched",
+  "microbench's 75 cases were only aggregated, not re-ranked case by case, so rank 5 is an aggregate signal and a real ordering needs a per-case diff that was not done",
+  "typed_array/int32-get has no headline on either side because the harness is not comparable; only wall is readable",
+  "the direction-conflict warnings on dtoa, property_lookup and int32-get (instructions and wall disagreeing by more than 2%) remain unattributed; no cycles or cache analysis was done here",
+  "the startup-adjusted 2.2441 to 1.5298 move is inferred from the relative motion of two metrics, not decomposed into startup versus steady state",
+  "the first direct run used 5 samples and was superseded; only the 6-sample artifact is kept"
+ ]
+}

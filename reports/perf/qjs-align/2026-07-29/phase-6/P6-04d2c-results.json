@@ -1,0 +1,684 @@
+{
+ "note": "P6-04d2c: merge the u and v division scratch into one allocation. P0 = eaf8a04d, P1 = d6cb67e2 on branch wip/p6-04d2c-scratch-merge.",
+ "p0": "eaf8a04d",
+ "p1": "d6cb67e2",
+ "p1_location": "branch wip/p6-04d2c-scratch-merge, NOT merged",
+ "status": "REJECTED",
+ "verdict": "REJECTED. The crossover is strongly non-monotonic and no threshold on u_len + v_len can separate the winning shapes from the losing ones: sum = 17 gives 0.6175 for 8x8 and 0.9773 for 12x4. Per the plan, a non-monotonic crossover means rejecting the scratch merge rather than searching for a benchmark-shaped threshold.",
+ "plan_number_correction": "the plan framed this as 4 -> 3 allocations, which was the pre-d2b topology. d2b already took multi-limb to 3, so this cut is 3 -> 2. The `both` path goes 4 -> 3.",
+ "mechanism": {
+  "change": "one [u][v] block replaces two allocations; u and v have identical lifetimes",
+  "order_preserved": "[u][v], matching what the two separate allocations produced logically, so the multiply-subtract window, the copies and the unshift all see the same relative layout",
+  "alias_guard": "a debug assertion pins that u and v are adjacent and disjoint, checking the u-end / v-start seam explicitly, since every helper below takes u's window and v as separate slices",
+  "untouched": "algorithm, estimate, reciprocal, correction, add-back, multiply-subtract, normalization, sign, result construction"
+ },
+ "topology": {
+  "multi_limb": {
+   "p0": 3,
+   "p1": 2
+  },
+  "single_limb": {
+   "p0": 2,
+   "p1": 2
+  },
+  "memcpy_per_op": {
+   "p0": 2,
+   "p1": 2
+  },
+  "oom_sweep_now_a_topology_lock": "the allocation count assertion is exact rather than a lower bound: three for both, two for div and rem"
+ },
+ "purity": "identical counters on both corpora: digits 320754 / corrections 95009 / addbacks 0 / clamps 0 / submul limbs 2241550 and, on the frozen vectors, 10192 / 2939 / 24 / 8 / 35512, plus identical estimate-kind counts",
+ "direct_core": {
+  "harness": "four build instances per side, all sixteen combinations, three interleaved rounds",
+  "cases": {
+   "div-size-8x4": {
+    "group": "primary",
+    "p0_ns": 108.69,
+    "p1_ns": 101.25,
+    "geomean": 0.9333,
+    "min": 0.9253,
+    "max": 0.9451,
+    "all_same_direction": true
+   },
+   "mod-size-8x4": {
+    "group": "primary",
+    "p0_ns": 109.11,
+    "p1_ns": 99.08,
+    "geomean": 0.9082,
+    "min": 0.9054,
+    "max": 0.9112,
+    "all_same_direction": true
+   },
+   "div-size-16x8": {
+    "group": "primary",
+    "p0_ns": 208.95,
+    "p1_ns": 204.58,
+    "geomean": 0.9782,
+    "min": 0.9694,
+    "max": 0.9851,
+    "all_same_direction": true
+   },
+   "mod-size-16x8": {
+    "group": "primary",
+    "p0_ns": 211.46,
+    "p1_ns": 204.12,
+    "geomean": 0.9653,
+    "min": 0.9637,
+    "max": 0.9669,
+    "all_same_direction": true
+   },
+   "div-size-24x8": {
+    "group": "primary",
+    "p0_ns": 343.12,
+    "p1_ns": 339.41,
+    "geomean": 0.9893,
+    "min": 0.9882,
+    "max": 0.9907,
+    "all_same_direction": true
+   },
+   "mod-size-24x8": {
+    "group": "primary",
+    "p0_ns": 345.62,
+    "p1_ns": 339.1,
+    "geomean": 0.9817,
+    "min": 0.9801,
+    "max": 0.9845,
+    "all_same_direction": true
+   },
+   "div-size-12x4": {
+    "group": "primary",
+    "p0_ns": 154.57,
+    "p1_ns": 148.44,
+    "geomean": 0.9611,
+    "min": 0.9575,
+    "max": 0.9664,
+    "all_same_direction": true
+   },
+   "mod-size-12x4": {
+    "group": "primary",
+    "p0_ns": 154.84,
+    "p1_ns": 146.36,
+    "geomean": 0.9453,
+    "min": 0.9423,
+    "max": 0.9483,
+    "all_same_direction": true
+   },
+   "div-size-16x4": {
+    "group": "primary",
+    "p0_ns": 201.16,
+    "p1_ns": 195.84,
+    "geomean": 0.9731,
+    "min": 0.9682,
+    "max": 0.9772,
+    "all_same_direction": true
+   },
+   "mod-size-16x4": {
+    "group": "primary",
+    "p0_ns": 202.1,
+    "p1_ns": 193.95,
+    "geomean": 0.9596,
+    "min": 0.9566,
+    "max": 0.9627,
+    "all_same_direction": true
+   },
+   "div-size-2x2": {
+    "group": "one_digit",
+    "p0_ns": 49.77,
+    "p1_ns": 42.59,
+    "geomean": 0.856,
+    "min": 0.8469,
+    "max": 0.8659,
+    "all_same_direction": true
+   },
+   "mod-size-2x2": {
+    "group": "one_digit",
+    "p0_ns": 50.65,
+    "p1_ns": 41.43,
+    "geomean": 0.8202,
+    "min": 0.8144,
+    "max": 0.8307,
+    "all_same_direction": true
+   },
+   "div-size-8x8": {
+    "group": "one_digit",
+    "p0_ns": 59.34,
+    "p1_ns": 52.65,
+    "geomean": 0.8852,
+    "min": 0.8635,
+    "max": 0.9035,
+    "all_same_direction": true
+   },
+   "mod-size-8x8": {
+    "group": "one_digit",
+    "p0_ns": 60.84,
+    "p1_ns": 51.69,
+    "geomean": 0.8503,
+    "min": 0.8439,
+    "max": 0.8583,
+    "all_same_direction": true
+   },
+   "div-size-16x16": {
+    "group": "one_digit",
+    "p0_ns": 70.13,
+    "p1_ns": 63.93,
+    "geomean": 0.9112,
+    "min": 0.903,
+    "max": 0.9186,
+    "all_same_direction": true
+   },
+   "mod-size-16x16": {
+    "group": "one_digit",
+    "p0_ns": 73.76,
+    "p1_ns": 67.0,
+    "geomean": 0.9085,
+    "min": 0.9025,
+    "max": 0.9146,
+    "all_same_direction": true
+   },
+   "div-size-32x32": {
+    "group": "one_digit",
+    "p0_ns": 94.01,
+    "p1_ns": 87.8,
+    "geomean": 0.9348,
+    "min": 0.9323,
+    "max": 0.9391,
+    "all_same_direction": true
+   },
+   "mod-size-32x32": {
+    "group": "one_digit",
+    "p0_ns": 101.08,
+    "p1_ns": 94.96,
+    "geomean": 0.939,
+    "min": 0.9316,
+    "max": 0.9455,
+    "all_same_direction": true
+   },
+   "div-size-5x4": {
+    "group": "below",
+    "p0_ns": 70.19,
+    "p1_ns": 62.97,
+    "geomean": 0.8978,
+    "min": 0.89,
+    "max": 0.9068,
+    "all_same_direction": true
+   },
+   "mod-size-5x4": {
+    "group": "below",
+    "p0_ns": 70.9,
+    "p1_ns": 60.55,
+    "geomean": 0.8541,
+    "min": 0.8505,
+    "max": 0.8576,
+    "all_same_direction": true
+   },
+   "div-size-6x4": {
+    "group": "below",
+    "p0_ns": 88.18,
+    "p1_ns": 81.85,
+    "geomean": 0.9275,
+    "min": 0.92,
+    "max": 0.9337,
+    "all_same_direction": true
+   },
+   "mod-size-6x4": {
+    "group": "below",
+    "p0_ns": 89.15,
+    "p1_ns": 78.89,
+    "geomean": 0.8857,
+    "min": 0.8817,
+    "max": 0.8911,
+    "all_same_direction": true
+   },
+   "div-size-9x8": {
+    "group": "below",
+    "p0_ns": 83.13,
+    "p1_ns": 76.14,
+    "geomean": 0.9176,
+    "min": 0.9095,
+    "max": 0.9291,
+    "all_same_direction": true
+   },
+   "mod-size-9x8": {
+    "group": "below",
+    "p0_ns": 84.7,
+    "p1_ns": 75.58,
+    "geomean": 0.8934,
+    "min": 0.8879,
+    "max": 0.9013,
+    "all_same_direction": true
+   },
+   "div-size-1x1": {
+    "group": "single",
+    "p0_ns": 34.96,
+    "p1_ns": 35.01,
+    "geomean": 1.0027,
+    "min": 0.9895,
+    "max": 1.0188,
+    "all_same_direction": false
+   },
+   "mod-size-1x1": {
+    "group": "single",
+    "p0_ns": 34.95,
+    "p1_ns": 34.75,
+    "geomean": 0.9935,
+    "min": 0.9845,
+    "max": 1.0007,
+    "all_same_direction": false
+   },
+   "div-size-2x1": {
+    "group": "single",
+    "p0_ns": 38.88,
+    "p1_ns": 39.53,
+    "geomean": 1.019,
+    "min": 0.9998,
+    "max": 1.0427,
+    "all_same_direction": false
+   },
+   "mod-size-2x1": {
+    "group": "single",
+    "p0_ns": 39.19,
+    "p1_ns": 38.76,
+    "geomean": 0.9908,
+    "min": 0.9773,
+    "max": 1.0081,
+    "all_same_direction": false
+   },
+   "div-size-8x1": {
+    "group": "single",
+    "p0_ns": 101.47,
+    "p1_ns": 102.1,
+    "geomean": 1.0066,
+    "min": 1.0028,
+    "max": 1.0115,
+    "all_same_direction": true
+   },
+   "mod-size-8x1": {
+    "group": "single",
+    "p0_ns": 101.83,
+    "p1_ns": 102.27,
+    "geomean": 1.0056,
+    "min": 1.0,
+    "max": 1.0139,
+    "all_same_direction": false
+   },
+   "div-size-16x1": {
+    "group": "single",
+    "p0_ns": 187.94,
+    "p1_ns": 188.38,
+    "geomean": 1.0024,
+    "min": 0.998,
+    "max": 1.0068,
+    "all_same_direction": false
+   },
+   "mod-size-16x1": {
+    "group": "single",
+    "p0_ns": 188.3,
+    "p1_ns": 188.58,
+    "geomean": 1.0006,
+    "min": 0.9961,
+    "max": 1.0033,
+    "all_same_direction": false
+   },
+   "div-rel-lt": {
+    "group": "rel",
+    "p0_ns": 7.66,
+    "p1_ns": 7.67,
+    "geomean": 0.9999,
+    "min": 0.9965,
+    "max": 1.0019,
+    "all_same_direction": false
+   },
+   "div-rel-eq": {
+    "group": "rel",
+    "p0_ns": 54.25,
+    "p1_ns": 47.9,
+    "geomean": 0.8826,
+    "min": 0.8747,
+    "max": 0.89,
+    "all_same_direction": true
+   },
+   "div-rel-q1": {
+    "group": "rel",
+    "p0_ns": 54.3,
+    "p1_ns": 47.94,
+    "geomean": 0.8808,
+    "min": 0.8701,
+    "max": 0.8877,
+    "all_same_direction": true
+   },
+   "div-rel-exact": {
+    "group": "rel",
+    "p0_ns": 105.34,
+    "p1_ns": 98.33,
+    "geomean": 0.9314,
+    "min": 0.9195,
+    "max": 0.9393,
+    "all_same_direction": true
+   }
+  },
+  "summary": "no regression anywhere; div_8x4 -6.7%, mod_8x4 -9.2%, 16x8 -2.2/-3.5%, 24x8 -1.1/-1.8%, one-digit shapes -6 to -18%",
+  "one_stable_but_sub_gate_item": "div-size-8x1 is 1.0066 with all sixteen combinations above 1.0, a stable +0.66% -- under the 1% line"
+ },
+ "js_level": {
+  "cases": {
+   "bigint_div_8x1": {
+    "p0_ms": 0.0238,
+    "p1_ms": 0.0238,
+    "geomean": 0.9998,
+    "min": 0.9967,
+    "max": 1.0024,
+    "all_same_direction": false,
+    "p1_over_qjs": 1.93,
+    "p0_over_qjs": 1.93
+   },
+   "bigint_div_8x4": {
+    "p0_ms": 0.0379,
+    "p1_ms": 0.0263,
+    "geomean": 0.6923,
+    "min": 0.6861,
+    "max": 0.6948,
+    "all_same_direction": true,
+    "p1_over_qjs": 1.86,
+    "p0_over_qjs": 2.68
+   },
+   "bigint_div_16x8": {
+    "p0_ms": 0.0238,
+    "p1_ms": 0.0259,
+    "geomean": 1.0882,
+    "min": 1.085,
+    "max": 1.0916,
+    "all_same_direction": true,
+    "p1_over_qjs": 1.44,
+    "p0_over_qjs": 1.32
+   },
+   "bigint_mod_8x4": {
+    "p0_ms": 0.0337,
+    "p1_ms": 0.024,
+    "geomean": 0.7128,
+    "min": 0.7069,
+    "max": 0.7211,
+    "all_same_direction": true,
+    "p1_over_qjs": 1.09,
+    "p0_over_qjs": 1.53
+   },
+   "local_arith_loop": {
+    "p0_ms": 5.9975,
+    "p1_ms": 6.0032,
+    "geomean": 0.9987,
+    "min": 0.9901,
+    "max": 1.0029,
+    "all_same_direction": false,
+    "p1_over_qjs": 0.93,
+    "p0_over_qjs": 0.93
+   }
+  },
+  "headline": "div_8x4 -30.8% (2.68x -> 1.86x), mod_8x4 -28.7% (1.53x -> 1.09x), div_16x8 +8.8% (1.32x -> 1.44x), div_8x1 unchanged, control 0.9987"
+ },
+ "size_class_mechanism": {
+  "confirmed_by": "JS-level profile of both sides",
+  "div_8x4": {
+   "p0": {
+    "addArena": 5.03,
+    "_int_malloc": 4.19,
+    "allocAligned": 10.32
+   },
+   "p1": {
+    "addArena": "absent",
+    "_int_malloc": "absent",
+    "allocAligned": 5.68
+   },
+   "reading": "the merge removes a churning size class entirely, which is the 30.8% gain"
+  },
+  "div_16x8": {
+   "p0": {
+    "_int_malloc": "absent",
+    "allocAligned": 4.53
+   },
+   "p1": {
+    "_int_malloc": 2.58,
+    "memcpy": 2.65,
+    "allocAligned": 3.86
+   },
+   "reading": "the merge introduces a churning class: the merged 25-limb block lands in a class the runtime does not keep populated, so the backing allocator is hit where P0 never hit it"
+  },
+  "why_it_cuts_both_ways": "P6-04d2.5 predicted exactly this fork: merging removes a touched size class on some shapes and adds one on others, and the slab returns an arena the moment a class empties. The same mechanism is worth 30% on one shape and costs 9% on another."
+ },
+ "gates": {
+  "allocations_3_to_2": "met",
+  "div_8x4_or_mod_8x4_at_least_5_percent": "met by a wide margin: direct-core 6.7% and 9.2%, JS 30.8% and 28.7%",
+  "16x8_and_24x8_no_stable_regression": "VIOLATED at the JS level: div_16x8 +8.8%, all sixteen combinations above 1.0, range 1.0850 to 1.0916. direct-core shows no regression (-2.2%), so this is purely a slab size-class effect.",
+  "single_limb_and_sentinels_no_new_regression": "met: div-size-8x1 +0.66% is stable but under 1%; mod-size-2x1 0.9908 and div-size-6x4 0.9275 both improve",
+  "algorithm_counters_unchanged": "met",
+  "correctness": "met"
+ },
+ "options_for_adjudication": null,
+ "recommendation": "rejected; main line stays at eaf8a04d and the branch is evidence only, never to be merged",
+ "correctness": {
+  "random_differential": {
+   "cases": 20000,
+   "limbs": "1-64",
+   "result": "byte-identical to pinned QuickJS"
+  },
+  "targeted_probe": {
+   "lines": 487,
+   "result": "byte-identical to pinned QuickJS"
+  },
+  "test262": {
+   "errors": 0,
+   "prepared": 49775,
+   "passed": 44541,
+   "known": 25
+  },
+  "focused_suites": {
+   "core": 312,
+   "parser": 463,
+   "bytecode": 188,
+   "exec": 389,
+   "builtins": 193,
+   "runtime": 72,
+   "runner": 43
+  },
+  "oom": 14,
+  "altrepr": 2002,
+  "release_safe_core": 312,
+  "force_gc_core": 312,
+  "force_gc_cross_engine": "the 20000-case differential is byte-identical to qjs under force-GC"
+ },
+ "limits": [
+  "the size-class explanation comes from symbol shares plus the appearance and disappearance of addArena and _int_malloc; arena creations were not counted directly",
+  "24x8 has no JS case, so its JS behaviour under the merge is unmeasured -- only direct-core, where it improves 1.1 to 1.8%",
+  "no attempt was made to pick a friendlier size class, since that is allocator-aware tuning the plan excluded",
+  "only shift == 0 operands in the topology counts"
+ ],
+ "crossover_sweep": {
+  "method": "two fixed binaries (bsplit = 28f93e17, bmerged = d6cb67e2), 21 shapes x div/mod, median of three, with fourteen key points rechecked over five repeats whose min/max spans are all under 0.5%",
+  "cross_check": "agrees with the eight-instance measurement: div_8x4 0.719 against 0.6923, div_16x8 1.097 against 1.0882",
+  "ratios_merged_over_split": [
+   {
+    "sum_limbs": 5,
+    "shape": "2x2",
+    "merged_class": 48,
+    "ratio": 0.9
+   },
+   {
+    "sum_limbs": 9,
+    "shape": "4x4",
+    "merged_class": 80,
+    "ratio": 1.4371
+   },
+   {
+    "sum_limbs": 10,
+    "shape": "5x4",
+    "merged_class": 88,
+    "ratio": 1.3644
+   },
+   {
+    "sum_limbs": 11,
+    "shape": "6x4",
+    "merged_class": 96,
+    "ratio": 1.3051
+   },
+   {
+    "sum_limbs": 13,
+    "shape": "8x4",
+    "merged_class": 112,
+    "ratio": 0.7189
+   },
+   {
+    "sum_limbs": 14,
+    "shape": "9x4",
+    "merged_class": 120,
+    "ratio": 0.7192
+   },
+   {
+    "sum_limbs": 15,
+    "shape": "10x4",
+    "merged_class": 128,
+    "ratio": 0.7661
+   },
+   {
+    "sum_limbs": 16,
+    "shape": "11x4",
+    "merged_class": 144,
+    "ratio": 0.9655
+   },
+   {
+    "sum_limbs": 17,
+    "shape": "12x4",
+    "merged_class": 144,
+    "ratio": 0.9773
+   },
+   {
+    "sum_limbs": 17,
+    "shape": "8x8",
+    "merged_class": 144,
+    "ratio": 0.6175
+   },
+   {
+    "sum_limbs": 18,
+    "shape": "9x8",
+    "merged_class": 160,
+    "ratio": 0.8575
+   },
+   {
+    "sum_limbs": 19,
+    "shape": "10x8",
+    "merged_class": 160,
+    "ratio": 0.8789
+   },
+   {
+    "sum_limbs": 20,
+    "shape": "11x8",
+    "merged_class": 176,
+    "ratio": 1.1544
+   },
+   {
+    "sum_limbs": 21,
+    "shape": "12x8",
+    "merged_class": 176,
+    "ratio": 1.1438
+   },
+   {
+    "sum_limbs": 21,
+    "shape": "16x4",
+    "merged_class": 176,
+    "ratio": 1.1057
+   },
+   {
+    "sum_limbs": 22,
+    "shape": "13x8",
+    "merged_class": 192,
+    "ratio": 0.9745
+   },
+   {
+    "sum_limbs": 23,
+    "shape": "14x8",
+    "merged_class": 192,
+    "ratio": 0.9781
+   },
+   {
+    "sum_limbs": 25,
+    "shape": "16x8",
+    "merged_class": 208,
+    "ratio": 1.0968
+   },
+   {
+    "sum_limbs": 33,
+    "shape": "24x8",
+    "merged_class": 288,
+    "ratio": 0.995
+   },
+   {
+    "sum_limbs": 33,
+    "shape": "16x16",
+    "merged_class": 288,
+    "ratio": 0.9312
+   },
+   {
+    "sum_limbs": 65,
+    "shape": "32x32",
+    "merged_class": null,
+    "ratio": 0.995
+   }
+  ],
+  "three_independent_reasons_to_reject": [
+   "the same sum_limbs gives opposite verdicts: 17 is 0.6175 for 8x8 and 0.9773 for 12x4, so no static threshold on u_len + v_len can separate them",
+   "the sequence flips direction repeatedly: 9/10/11 badly worse, 13/14/15 much better, 16/17 neutral, 17 much better, 18/19 better, 20/21 worse, 22/23 neutral, 25 worse, 33 neutral -- worse than the plan's own rejection example",
+   "even grouping by merged size class fails: at 144 B, 12x4 is 0.9773 while 8x8 is 0.6175"
+  ],
+  "mechanism_confirmed_both_ways": {
+   "div_4x4": {
+    "ratio": 1.4371,
+    "split_addArena": "absent",
+    "merged_addArena": "12.45%",
+    "reading": "the merge introduced arena churn"
+   },
+   "div_8x8": {
+    "ratio": 0.6175,
+    "split_addArena": "9.45%",
+    "merged_addArena": "absent",
+    "reading": "the merge removed arena churn"
+   },
+   "conclusion": "whether the merge helps or hurts is decided entirely by whether the resulting size class happens to be churning, which is not a function of u_len + v_len"
+  }
+ },
+ "correction_to_earlier_report": {
+  "what_I_said": "three of four JS cases improve, two dramatically, net strongly positive",
+  "why_it_was_unrepresentative": "only four JS cases existed at the time",
+  "full_picture": {
+   "large_gains": [
+    "8x4 -28%",
+    "9x4 -28%",
+    "10x4 -23%",
+    "8x8 -38%",
+    "9x8 -14%",
+    "10x8 -12%"
+   ],
+   "large_regressions": [
+    "4x4 +44%",
+    "5x4 +36%",
+    "6x4 +31%",
+    "11x8 +15%",
+    "12x8 +14%",
+    "16x4 +11%",
+    "16x8 +10%"
+   ],
+   "neutral": [
+    "2x2",
+    "11x4",
+    "12x4",
+    "13x8",
+    "14x8",
+    "24x8",
+    "16x16",
+    "32x32"
+   ]
+  },
+  "consequence": "the unconditional merge is a cross-shape size-class lottery, not 'helps small, hurts 16x8'. The three worst regressions are far larger than the 16x8 +8.8% the waiver was proposed on, so proposing accept-with-waiver rested on incomplete evidence and should not have been offered."
+ },
+ "general_finding_recorded_not_addressed": {
+  "issue": "SmallObjectSlab returns an arena to the backing allocator the moment a size class's last block is freed, so a workload that allocates and fully frees each operation creates and destroys arenas every operation. addArena reaches 12.45% on div_4x4 merged and 9.45% on div_8x8 split.",
+  "scope": "an allocator-layer behaviour that BigInt division merely runs into, not a BigInt implementation debt. It explains why allocations halving between P6-04d0 and d2.5 left the JS allocator share unchanged.",
+  "action": "if it is to be fixed, it belongs to its own allocator-layer investigation and should not be worked around by tuning BigInt's allocation topology further."
+ }
+}

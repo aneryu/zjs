@@ -69,10 +69,6 @@ pub fn constructBuiltinSuperConstructor(
 ) !?core.JSValue {
     if (std.mem.eql(u8, name, "Symbol") or std.mem.eql(u8, name, "BigInt")) return error.TypeError;
 
-    if (std.mem.eql(u8, name, "Promise")) {
-        const executor = if (args.len >= 1) args[0] else return error.TypeError;
-        if (!isCallableValue(executor)) return error.TypeError;
-    }
     if (std.mem.eql(u8, name, "Iterator")) {
         if (new_target.sameValue(constructor)) return error.TypeError;
         var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
@@ -109,6 +105,10 @@ pub fn constructBuiltinSuperConstructor(
 
     if (std.mem.eql(u8, name, "RegExp")) {
         return try qjsRegExpConstructCall(ctx, output, global, object_ops.objectFromValue(constructor), new_target, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "Promise")) {
+        const function_object = objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
+        return try constructPromiseBuiltinSuperNativeVm(ctx, output, global, function_object, new_target, args, caller_function, caller_frame);
     }
 
     var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
@@ -156,7 +156,6 @@ pub fn constructBuiltinSuperConstructor(
     }
     if (std.mem.eql(u8, name, "SuppressedError")) return try qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (isErrorConstructorName(name)) return try qjsErrorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "Promise")) return try qjsPromiseConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "WeakRef")) {
         const target = if (args.len >= 1) args[0] else return error.TypeError;
         if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
@@ -177,4 +176,50 @@ pub fn constructBuiltinSuperConstructor(
     }
 
     return null;
+}
+
+/// Promise construction with a distinct `new.target` must keep the observable
+/// VM `[[Get]]` used by GetPrototypeFromConstructor. The direct Promise helper
+/// can use its ordinary intrinsic data property, but Reflect.construct and
+/// derived `super()` must run an accessor/Proxy `newTarget.prototype` while
+/// the Promise native frame is active.
+fn constructPromiseBuiltinSuperNativeVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, 1);
+    var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+    native_scope.push();
+    defer native_scope.deinit();
+
+    return constructPromiseBuiltinSuperInScope(ctx, output, global, new_target, args, caller_function, caller_frame) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+        return err;
+    };
+}
+
+fn constructPromiseBuiltinSuperInScope(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    new_target: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const executor = if (args.len >= 1)
+        args[0]
+    else
+        return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
+    if (!isCallableValue(executor)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
+
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Promise", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
+    return qjsPromiseConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
 }

@@ -195,7 +195,7 @@ pub fn callValueWithThisGlobalsAndGlobal(
         return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
     }
     if (core.class.isBytecodeFunctionClass(object.class_id)) {
-        return call_runtime.callValueOrBytecode(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
+        return call_runtime.callValueOrBytecodeRoot(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
     }
     if (object.class_id == core.class.ids.c_closure) {
         const closure_kind = closure_mod.closureKind(ctx.runtime, callee) catch 0;
@@ -941,7 +941,7 @@ pub fn getValueProperty(
                 core.JSValue.undefinedValue()
             else blk: {
                 if (try activeGlobalObject(ctx.runtime, global, globals)) |active_global| {
-                    break :blk try call_runtime.callValueOrBytecode(ctx, output, active_global, receiver_value, desc.getter, &.{}, null, null);
+                    break :blk try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, active_global, receiver_value, desc.getter, &.{}, null, null);
                 }
                 break :blk try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver_value, desc.getter, &.{});
             },

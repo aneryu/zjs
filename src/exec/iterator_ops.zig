@@ -20,6 +20,7 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const IteratorZipError = exceptions.HostError;
+const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
 pub const for_in_iterator_kind: u8 = 251;
 pub const Step = enum { done, continue_loop };
 
@@ -42,7 +43,7 @@ pub fn forOfStart(
         defer async_method.free(ctx.runtime);
         if (!async_method.isUndefined() and !async_method.isNull()) {
             if (!call_runtime.isCallableValue(async_method)) return error.TypeError;
-            const iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, async_method, &.{}, function, frame);
+            const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterable, async_method, &.{}, function, frame);
             errdefer iterator_value.free(ctx.runtime);
             _ = try property_ops.expectObject(iterator_value);
             const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty);
@@ -59,7 +60,7 @@ pub fn forOfStart(
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
         return error.TypeError;
     }
-    const iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
+    const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
     var owns_iterator_value = true;
     errdefer if (owns_iterator_value) iterator_value.free(ctx.runtime);
     _ = try property_ops.expectObject(iterator_value);
@@ -348,7 +349,7 @@ pub fn iteratorNext(
     const arg_value = stack.values[stack.len() - 1].dup();
     defer arg_value.free(ctx.runtime);
 
-    const result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{arg_value}, function, frame);
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{arg_value}, function, frame);
     const old_arg = stack.pop() catch |err| {
         result.free(ctx.runtime);
         return err;
@@ -417,7 +418,7 @@ pub fn forAwaitOfNext(
     stack.values[marker_index] = core.JSValue.undefinedValue();
     marker.free(ctx.runtime);
 
-    const result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, function, frame);
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, function, frame);
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
 }
@@ -515,9 +516,9 @@ pub fn iteratorCall(
     }
 
     const result = if ((flags & 2) != 0)
-        try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, method, &.{}, function, frame)
+        try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, method, &.{}, function, frame)
     else
-        try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, method, &.{arg_value}, function, frame);
+        try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, method, &.{arg_value}, function, frame);
 
     errdefer result.free(ctx.runtime);
     try stack.reserveAdditional(1);
@@ -1877,7 +1878,7 @@ pub fn qjsIteratorZipCollectIndexed(
     var count: usize = 0;
 
     while (true) {
-        const item_result = call_runtime.callValueOrBytecode(ctx, output, global, iterables_iterator, iterables_next, &.{}, caller_function, caller_frame) catch |err| {
+        const item_result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, iterables_iterator, iterables_next, &.{}, caller_function, caller_frame) catch |err| {
             return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
         defer item_result.free(ctx.runtime);
@@ -1917,7 +1918,7 @@ pub fn qjsIteratorZipCollectIndexed(
             var index: usize = 0;
             var done = false;
             while (index < count) : (index += 1) {
-                const pad_step = call_runtime.callValueOrBytecode(ctx, output, global, padding_iterator, padding_next, &.{}, caller_function, caller_frame) catch |err| {
+                const pad_step = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, padding_iterator, padding_next, &.{}, caller_function, caller_frame) catch |err| {
                     padding_iterator.free(ctx.runtime);
                     padding_iterator = core.JSValue.undefinedValue();
                     return qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
@@ -2050,7 +2051,7 @@ pub fn qjsIteratorZipFlattenableRecord(
     defer iterator_method.free(ctx.runtime);
     const iterator_value = if (!iterator_method.isUndefined() and !iterator_method.isNull()) blk: {
         if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try call_runtime.callValueOrBytecode(ctx, output, global, value, iterator_method, &.{}, caller_function, caller_frame);
+        const iterator = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, iterator_method, &.{}, caller_function, caller_frame);
         errdefer iterator.free(ctx.runtime);
         _ = objectFromValue(iterator) orelse return error.TypeError;
         break :blk iterator;
@@ -2285,7 +2286,23 @@ pub fn qjsIteratorZipClose(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    try call_runtime.qjsIteratorClose(ctx, output, global, iterator_value, caller_function, caller_frame);
+    const return_key = try ctx.runtime.internAtom("return");
+    defer ctx.runtime.atoms.free(return_key);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
+    defer return_method.free(ctx.runtime);
+    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
+    const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
+        ctx,
+        output,
+        global,
+        iterator_value,
+        return_method,
+        &.{},
+        caller_function,
+        caller_frame,
+    );
+    result.free(ctx.runtime);
 }
 
 pub fn qjsIteratorZipCloseAllAndPropagate(
@@ -2412,7 +2429,7 @@ fn qjsIteratorDisposeCall(
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return core.JSValue.undefinedValue();
     if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
-    const result = try call_runtime.callValueOrBytecode(ctx, output, global, receiver, return_method, &.{}, caller_function, caller_frame);
+    const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, return_method, &.{}, caller_function, caller_frame);
     result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
 }
@@ -2431,23 +2448,27 @@ fn qjsIteratorToArrayCall(
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
     defer next_method.free(ctx.runtime);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
+    var next_call = SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        iterator.value(),
+        next_method,
+        caller_function,
+        caller_frame,
+    );
 
     const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
     var index: u32 = 0;
     while (true) : (index += 1) {
-        const next = try call_runtime.callValueOrBytecode(ctx, output, global, iterator.value(), next_method, &.{}, caller_function, caller_frame);
-        defer next.free(ctx.runtime);
-        const next_object = objectFromValue(next) orelse return error.TypeError;
-        const done_value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);
-        defer done_value.free(ctx.runtime);
-        if (coercion_ops.valueTruthy(done_value)) {
+        const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
+        defer step.value.free(ctx.runtime);
+        if (step.done) {
             out.setArrayLength(index);
             return out.value();
         }
-        const value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame);
-        defer value.free(ctx.runtime);
-        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(step.value, true, true, true));
     }
 }
 
@@ -2470,10 +2491,28 @@ fn qjsIteratorPredicateCall(
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
     defer next_method.free(ctx.runtime);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
+    var next_call = SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        iterator.value(),
+        next_method,
+        caller_function,
+        caller_frame,
+    );
+    var callback_call = SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        args[0],
+        caller_function,
+        caller_frame,
+    );
 
     var index: usize = 0;
     while (true) : (index += 1) {
-        const step = try iteratorStepWithNext(ctx, output, global, iterator.value(), next_method, caller_function, caller_frame);
+        const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
         defer step.value.free(ctx.runtime);
         if (step.done) {
             return switch (kind) {
@@ -2483,31 +2522,22 @@ fn qjsIteratorPredicateCall(
             };
         }
 
-        const result = call_runtime.callValueOrBytecode(
-            ctx,
-            output,
-            global,
-            core.JSValue.undefinedValue(),
-            args[0],
-            &.{ step.value, core.JSValue.int32(@intCast(index)) },
-            caller_function,
-            caller_frame,
-        ) catch |err| {
+        const result = callback_call.call(&.{ step.value, core.JSValue.int32(@intCast(index)) }) catch |err| {
             return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator.value(), err, caller_function, caller_frame);
         };
         defer result.free(ctx.runtime);
         const truthy = coercion_ops.valueTruthy(result);
         switch (kind) {
             .every => if (!truthy) {
-                try call_runtime.qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try qjsIteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
                 return core.JSValue.boolean(false);
             },
             .some => if (truthy) {
-                try call_runtime.qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try qjsIteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
                 return core.JSValue.boolean(true);
             },
             .find => if (truthy) {
-                try call_runtime.qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try qjsIteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
                 return step.value.dup();
             },
             .for_each => {},
@@ -2533,10 +2563,28 @@ fn qjsIteratorReduceCall(
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
     defer next_method.free(ctx.runtime);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
+    var next_call = SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        iterator.value(),
+        next_method,
+        caller_function,
+        caller_frame,
+    );
+    var callback_call = SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        args[0],
+        caller_function,
+        caller_frame,
+    );
 
     var index: usize = 0;
     var accumulator = if (args.len >= 2) args[1].dup() else blk: {
-        const first = try iteratorStepWithNext(ctx, output, global, iterator.value(), next_method, caller_function, caller_frame);
+        const first = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
         defer if (first.done) first.value.free(ctx.runtime);
         if (first.done) return error.TypeError;
         index = 1;
@@ -2545,20 +2593,11 @@ fn qjsIteratorReduceCall(
     errdefer accumulator.free(ctx.runtime);
 
     while (true) : (index += 1) {
-        const step = try iteratorStepWithNext(ctx, output, global, iterator.value(), next_method, caller_function, caller_frame);
+        const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
         defer step.value.free(ctx.runtime);
         if (step.done) return accumulator;
 
-        const result = call_runtime.callValueOrBytecode(
-            ctx,
-            output,
-            global,
-            core.JSValue.undefinedValue(),
-            args[0],
-            &.{ accumulator, step.value, core.JSValue.int32(@intCast(index)) },
-            caller_function,
-            caller_frame,
-        ) catch |err| {
+        const result = callback_call.call(&.{ accumulator, step.value, core.JSValue.int32(@intCast(index)) }) catch |err| {
             return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator.value(), err, caller_function, caller_frame);
         };
         accumulator.free(ctx.runtime);
@@ -2575,7 +2614,7 @@ fn iteratorStepWithNext(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
-    const next_result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
+    const next_result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
     defer next_result.free(ctx.runtime);
     const next_object = objectFromValue(next_result) orelse return error.TypeError;
     const done = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);
@@ -2583,6 +2622,45 @@ fn iteratorStepWithNext(
     if (coercion_ops.valueTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
     const value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame);
     return .{ .value = value, .done = false };
+}
+
+fn iteratorStepWithSyncCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    next_call: *SyncInternalCallSite,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !IteratorStep {
+    const next_result = try next_call.call(&.{});
+    defer next_result.free(ctx.runtime);
+    const next_object = objectFromValue(next_result) orelse return error.TypeError;
+    const done = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);
+    defer done.free(ctx.runtime);
+    if (coercion_ops.valueTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    const value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame);
+    return .{ .value = value, .done = false };
+}
+
+fn iteratorStepWithSyncValues(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+    next_method: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !IteratorStep {
+    var next_call = SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        iterator_value,
+        next_method,
+        caller_function,
+        caller_frame,
+    );
+    return iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
 }
 
 fn qjsIteratorCreateCallbackHelper(
@@ -2861,7 +2939,7 @@ fn qjsIteratorZipHelperNext(
 
         const next_method = qjsIteratorZipGetIndex(nexts, index);
         defer next_method.free(ctx.runtime);
-        const step_result = call_runtime.callValueOrBytecode(ctx, output, global, iter, next_method, &.{}, caller_function, caller_frame) catch |err| {
+        const step_result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, iter, next_method, &.{}, caller_function, caller_frame) catch |err| {
             return qjsIteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
         };
         defer step_result.free(ctx.runtime);
@@ -2991,7 +3069,7 @@ pub fn qjsIteratorHelperNext(
             while (true) {
                 if (helper.iteratorData()) |inner_iterator| {
                     const inner_next = helper.iteratorInnerNext() orelse return error.TypeError;
-                    const inner_step = try iteratorStepWithNext(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
+                    const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                     defer inner_step.value.free(ctx.runtime);
                     if (!inner_step.done) return try call_runtime.createIteratorResult(ctx.runtime, global, inner_step.value, false);
                     try qjsIteratorHelperClearInner(ctx.runtime, helper);
@@ -3008,19 +3086,20 @@ pub fn qjsIteratorHelperNext(
                 defer item.free(ctx.runtime);
                 const method = try records.getProperty(core.atom.atomFromUInt32(item_index + 1));
                 defer method.free(ctx.runtime);
-                const inner_iterator = try call_runtime.callValueOrBytecode(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
+                const inner_iterator = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
                 defer inner_iterator.free(ctx.runtime);
                 try qjsIteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
             }
         },
         .take => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
+            var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
             if ((helper.iteratorIndexSlot().*) == 0) {
                 try qjsIteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
                 return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             helper.iteratorIndexSlot().* -= 1;
-            const step = try iteratorStepWithNext(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+            const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             defer step.value.free(ctx.runtime);
             if (step.done) {
                 try qjsIteratorHelperClear(ctx.runtime, helper);
@@ -3030,15 +3109,16 @@ pub fn qjsIteratorHelperNext(
         },
         .drop => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
+            var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
             while ((helper.iteratorIndexSlot().*) > 0) : (helper.iteratorIndexSlot().* -= 1) {
-                const skipped = try iteratorStepWithNext(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+                const skipped = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
                 defer skipped.value.free(ctx.runtime);
                 if (skipped.done) {
                     try qjsIteratorHelperClear(ctx.runtime, helper);
                     return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
             }
-            const step = try iteratorStepWithNext(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+            const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             defer step.value.free(ctx.runtime);
             if (step.done) {
                 try qjsIteratorHelperClear(ctx.runtime, helper);
@@ -3049,17 +3129,27 @@ pub fn qjsIteratorHelperNext(
         .map, .filter, .flatMap => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
             const callback = helper.iteratorCallback() orelse return error.TypeError;
+            var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+            var callback_call = SyncInternalCallSite.init(
+                ctx,
+                output,
+                global,
+                core.JSValue.undefinedValue(),
+                callback,
+                caller_function,
+                caller_frame,
+            );
             while (true) {
                 if (kind == .flatMap) {
                     if (helper.iteratorData()) |inner_iterator| {
                         const inner_next = helper.iteratorInnerNext() orelse return error.TypeError;
-                        const inner_step = try iteratorStepWithNext(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
+                        const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                         defer inner_step.value.free(ctx.runtime);
                         if (!inner_step.done) return try call_runtime.createIteratorResult(ctx.runtime, global, inner_step.value, false);
                         try qjsIteratorHelperClearInner(ctx.runtime, helper);
                     }
                 }
-                const step = try iteratorStepWithNext(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+                const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
                 defer step.value.free(ctx.runtime);
                 if (step.done) {
                     try qjsIteratorHelperClear(ctx.runtime, helper);
@@ -3067,16 +3157,7 @@ pub fn qjsIteratorHelperNext(
                 }
                 const index = (helper.iteratorIndexSlot().*);
                 helper.iteratorIndexSlot().* += 1;
-                const mapped = call_runtime.callValueOrBytecode(
-                    ctx,
-                    output,
-                    global,
-                    core.JSValue.undefinedValue(),
-                    callback,
-                    &.{ step.value, core.JSValue.int32(@intCast(index)) },
-                    caller_function,
-                    caller_frame,
-                ) catch |err| {
+                const mapped = callback_call.call(&.{ step.value, core.JSValue.int32(@intCast(index)) }) catch |err| {
                     return iteratorHelperCloseWithCompletionAndPropagate(ctx, output, global, helper, err, caller_function, caller_frame);
                 };
                 defer mapped.free(ctx.runtime);
@@ -3108,7 +3189,7 @@ fn qjsIteratorHelperSetInner(
         mapped_object.value().dup()
     else blk: {
         if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
-        const value = try call_runtime.callValueOrBytecode(ctx, output, global, mapped, iterator_method, &.{}, caller_function, caller_frame);
+        const value = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, mapped, iterator_method, &.{}, caller_function, caller_frame);
         errdefer value.free(ctx.runtime);
         _ = objectFromValue(value) orelse return error.TypeError;
         break :blk value;

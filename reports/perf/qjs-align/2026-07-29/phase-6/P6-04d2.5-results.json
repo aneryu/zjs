@@ -1,0 +1,408 @@
+{
+ "note": "P6-04d2.5 division cost re-profile. Profiling only, no code changes.",
+ "head": "2e727ad5",
+ "verdict": "Situation B: fixed cost is 49.5 ns, at or above the 45 ns line, so d2c has value. div_8x4 is now 45.3% fixed and 53.3% per-digit.",
+ "why_reprofile": "P6-04d0's coefficients were measured with 6 allocations, no reciprocal and two abs clones. d1, d2a and d2b all moved both the fixed and the estimate terms, so the old model cannot judge d2c. A new non-linearity also appeared: reciprocal_threshold = 3 splits the digit axis into two slopes, so this round fits piecewise instead of taking two endpoints.",
+ "axis1_width_one_digit": {
+  "note": "m = 0, reciprocal not enabled",
+  "rows": [
+   {
+    "shape": "2x2",
+    "div_ns": 49.52,
+    "mod_ns": 50.31
+   },
+   {
+    "shape": "4x4",
+    "div_ns": 53.22,
+    "mod_ns": 53.8
+   },
+   {
+    "shape": "8x8",
+    "div_ns": 58.86,
+    "mod_ns": 60.48
+   },
+   {
+    "shape": "16x16",
+    "div_ns": 69.79,
+    "mod_ns": 73.97
+   },
+   {
+    "shape": "32x32",
+    "div_ns": 93.87,
+    "mod_ns": 101.1
+   }
+  ],
+  "fit": {
+   "ns_per_operand_limb": 1.462,
+   "intercept_ns": 46.93
+  }
+ },
+ "axis2_nb4": {
+  "rows": [
+   {
+    "shape": "4x4",
+    "digits": 1,
+    "m": 0,
+    "reciprocal": false,
+    "div_ns": 53.52,
+    "mod_ns": 53.79
+   },
+   {
+    "shape": "5x4",
+    "digits": 2,
+    "m": 1,
+    "reciprocal": false,
+    "div_ns": 70.06,
+    "mod_ns": 70.64
+   },
+   {
+    "shape": "6x4",
+    "digits": 3,
+    "m": 2,
+    "reciprocal": false,
+    "div_ns": 88.64,
+    "mod_ns": 89.08
+   },
+   {
+    "shape": "7x4",
+    "digits": 4,
+    "m": 3,
+    "reciprocal": true,
+    "div_ns": 94.86,
+    "mod_ns": 94.35
+   },
+   {
+    "shape": "8x4",
+    "digits": 5,
+    "m": 4,
+    "reciprocal": true,
+    "div_ns": 109.24,
+    "mod_ns": 109.11
+   },
+   {
+    "shape": "10x4",
+    "digits": 7,
+    "m": 6,
+    "reciprocal": true,
+    "div_ns": 129.21,
+    "mod_ns": 130.42
+   },
+   {
+    "shape": "12x4",
+    "digits": 9,
+    "m": 8,
+    "reciprocal": true,
+    "div_ns": 154.61,
+    "mod_ns": 155.27
+   },
+   {
+    "shape": "16x4",
+    "digits": 13,
+    "m": 12,
+    "reciprocal": true,
+    "div_ns": 200.61,
+    "mod_ns": 202.09
+   },
+   {
+    "shape": "20x4",
+    "digits": 17,
+    "m": 16,
+    "reciprocal": true,
+    "div_ns": 248.06,
+    "mod_ns": 248.22
+   }
+  ],
+  "fit_eligible": {
+   "slope_ns_per_digit": 11.654,
+   "intercept_ns": 49.48,
+   "range": "digits 5..17"
+  },
+  "fit_below_threshold": {
+   "slope_ns_per_digit": 17.56,
+   "intercept_ns": 35.62,
+   "range": "digits 1..3"
+  }
+ },
+ "axis3_nb8": {
+  "rows": [
+   {
+    "shape": "8x8",
+    "digits": 1,
+    "m": 0,
+    "reciprocal": false,
+    "div_ns": 58.7,
+    "mod_ns": 60.82
+   },
+   {
+    "shape": "9x8",
+    "digits": 2,
+    "m": 1,
+    "reciprocal": false,
+    "div_ns": 82.65,
+    "mod_ns": 84.75
+   },
+   {
+    "shape": "10x8",
+    "digits": 3,
+    "m": 2,
+    "reciprocal": false,
+    "div_ns": 107.06,
+    "mod_ns": 110.11
+   },
+   {
+    "shape": "11x8",
+    "digits": 4,
+    "m": 3,
+    "reciprocal": true,
+    "div_ns": 115.89,
+    "mod_ns": 118.32
+   },
+   {
+    "shape": "12x8",
+    "digits": 5,
+    "m": 4,
+    "reciprocal": true,
+    "div_ns": 133.07,
+    "mod_ns": 135.29
+   },
+   {
+    "shape": "16x8",
+    "digits": 9,
+    "m": 8,
+    "reciprocal": true,
+    "div_ns": 209.08,
+    "mod_ns": 211.36
+   },
+   {
+    "shape": "20x8",
+    "digits": 13,
+    "m": 12,
+    "reciprocal": true,
+    "div_ns": 279.32,
+    "mod_ns": 282.96
+   },
+   {
+    "shape": "24x8",
+    "digits": 17,
+    "m": 16,
+    "reciprocal": true,
+    "div_ns": 342.93,
+    "mod_ns": 345.51
+   }
+  ],
+  "fit_eligible": {
+   "slope_ns_per_digit": 17.495,
+   "intercept_ns": 48.65,
+   "range": "digits 5..17"
+  },
+  "fit_below_threshold": {
+   "slope_ns_per_digit": 24.18,
+   "intercept_ns": 34.44,
+   "range": "digits 1..3"
+  }
+ },
+ "cost_model": {
+  "eligible_per_digit_ns": "5.81 + 1.460 * nb",
+  "below_threshold_per_digit_ns": "10.94 + 1.655 * nb",
+  "fixed_ns": "46.9 to 49.5 across three axes",
+  "caveat": "the reciprocal init cannot be separated out of the intercept by subtraction: axis 1 (no init) is 46.93 and axis 2 eligible (with init) is 49.48, a 2.6 ns gap, while perf puts udivmod at 8.52% x 109.24 = 9.3 ns on 8x4. The two are inconsistent, so the eligible intercept absorbs some non-linearity. What is solid is the magnitude, about 47 +- 3 ns, not its internal breakdown."
+ },
+ "comparison_with_d0": {
+  "fixed_ns": {
+   "d0": "57-68",
+   "d2.5": "46.9-49.5"
+  },
+  "digit_constant_ns": {
+   "d0": 12.43,
+   "d2.5": 5.81,
+   "cause": "d1's reciprocal"
+  },
+  "digit_nb_term": {
+   "d0": 1.372,
+   "d2.5": 1.46,
+   "note": "essentially unchanged; multiply-subtract has never been touched"
+  },
+  "div_8x4_ns": {
+   "d0": 146.3,
+   "d2.5": 109.24
+  },
+  "div_16x8_ns": {
+   "d0": 272.7,
+   "d2.5": 209.08
+  }
+ },
+ "div_8x4_breakdown": {
+  "total_ns": 109.24,
+  "fixed_ns": 49.5,
+  "fixed_percent": 45.3,
+  "digits": 5,
+  "digit_ns": 58.3,
+  "digit_percent": 53.3,
+  "fit_residual_ns": 1.5
+ },
+ "direct_core_symbol_shares": {
+  "caveat": "init.gpa is libc malloc, so the allocator share is overstated relative to the JS slab path",
+  "rows": [
+   {
+    "shape": "2x2",
+    "digits": 1,
+    "long": 23.99,
+    "allocator": 42.9,
+    "udivmod": 11.96,
+    "divRemAllocOutput": 15.57
+   },
+   {
+    "shape": "8x4",
+    "digits": 5,
+    "long": 57.64,
+    "allocator": 22.0,
+    "udivmod": 8.52,
+    "divRemAllocOutput": 6.52
+   },
+   {
+    "shape": "16x8",
+    "digits": 9,
+    "long": 77.8,
+    "allocator": 8.6,
+    "udivmod": 5.15,
+    "divRemAllocOutput": 2.5
+   },
+   {
+    "shape": "24x8",
+    "digits": 17,
+    "long": 87.89,
+    "allocator": 3.8,
+    "udivmod": 1.98,
+    "divRemAllocOutput": 1.53
+   }
+  ],
+  "allocator_absolute_ns_8x4": 24.0,
+  "reading": "16x8 at 77.8% and 24x8 at 87.9% kernel are almost purely kernel-bound, which is exactly why d2a and d2b helped them least"
+ },
+ "js_symbol_shares": {
+  "div_8x4": {
+   "long": 33.6,
+   "allocAlignedBytesNoTrigger": 9.87,
+   "addArena": 6.77,
+   "_int_malloc": 4.91,
+   "freeAlignedBytes": 3.55,
+   "unlink_chunk": 1.85,
+   "allocator_total": 27.0,
+   "udivmod": 3.22,
+   "value_ops_binary": 9.49,
+   "createFromOwned": 2.3
+  },
+  "div_16x8": {
+   "long": 64.87,
+   "allocAlignedBytesNoTrigger": 4.29,
+   "allocator_total": 4.3,
+   "udivmod": 3.67,
+   "value_ops_binary": 6.99,
+   "createFromOwned": 2.2
+  },
+  "mod_8x4": {
+   "long": 38.44,
+   "allocAlignedBytesNoTrigger": 7.27,
+   "addArena": 6.13,
+   "_int_malloc": 5.41,
+   "unlink_chunk": 2.3,
+   "freeAlignedBytes": 2.26,
+   "allocator_total": 23.4,
+   "udivmod": 3.04,
+   "value_ops_binary": 10.92,
+   "memcpy": 3.06
+  }
+ },
+ "arena_churn_finding": {
+  "observation": "P6-04d0 measured div_8x4's JS allocator share at 26.3% with six allocations per op; it is 27.0% now with three. Halving the count did not move the share.",
+  "cause": "addArena 6.77% plus _int_malloc 4.91% plus unlink_chunk 1.85% is 13.5% spent creating and destroying arenas rather than on per-allocation bookkeeping. The slab returns an arena to the backing allocator as soon as that size class's last block is freed, and this workload frees everything it allocates each operation, so every operation creates and destroys arenas. The cost tracks the number of size classes touched, not the number of allocations.",
+  "implication_for_d2c": "merging u and v may remove a touched size class as well as an allocation, which could make the JS-level gain larger than the allocation count implies -- or not, if the merged block lands in a class something else already occupies. This is reasoning from the shares, not a measurement."
+ },
+ "decision": {
+  "situation_A": {
+   "criterion": "digit >= 60 ns AND fixed <= 35-40 ns",
+   "measured": "digit 58.3, fixed 49.5",
+   "holds": false
+  },
+  "situation_B": {
+   "criterion": "fixed >= 45 ns",
+   "measured": "fixed 49.5 ns",
+   "holds": true
+  },
+  "verdict": "Situation B: proceed with d2c",
+  "projection_direct_core": "allocator is 24.0 ns over three allocations; merging u and v removes one allocation and one free, about 8 ns, so 109.2 -> about 101 ns, roughly -7.3%, matching the PRD's situation-B arithmetic",
+  "projection_js": "potentially larger because of the arena-churn mechanism, potentially not; explicitly an extrapolation and must be measured, not cited"
+ },
+ "input_for_d3": {
+  "kernel_bound_shapes": "16x8 at 77.8% and 24x8 at 87.9% have no fixed cost left to cut, and their 1.33x is already close",
+  "only_shape_outside_2x": "div_8x4 at 2.68x, a 45/53 mixed shape",
+  "per_digit_split": {
+   "nb4": {
+    "estimate_ns": 5.81,
+    "estimate_percent": 50,
+    "multiply_subtract_ns": 5.84,
+    "multiply_subtract_percent": 50
+   },
+   "nb8": {
+    "estimate_ns": 5.81,
+    "estimate_percent": 33,
+    "multiply_subtract_ns": 11.68,
+    "multiply_subtract_percent": 67
+   }
+  },
+  "observation": "multiply-subtract now equals or exceeds the estimate, and it is the only kernel part d1 did not touch. Whether subMulAt's double-borrow @subWithOverflow chain lowers to an SBC chain on ARM is worth disassembling -- but that is d3 work, not this round.",
+  "threshold_break_even": {
+   "measured_slope_difference_ns_per_digit": 5.91,
+   "init_cost_ns": "9 to 12",
+   "break_even_digits": "about 1.6, so m = 2 (three digits) may already deserve the reciprocal",
+   "current_threshold": 3,
+   "status": "extrapolation, needs its own one-cut"
+  }
+ },
+ "limits": [
+  "only shift == 0 operands were measured",
+  "the eligible intercept is extrapolated from digits 5..17 down to 0 and cannot be used to subtract out the reciprocal init cost",
+  "direct-core and JS allocator shares are explained but not normalized onto a common allocator",
+  "the JS-side d2c projection and the threshold break-even point are both extrapolations, not measurements",
+  "mod and div were not fitted separately; their times differ by at most 3% on every shape",
+  "the arena-churn finding comes from symbol shares; arena creation and destruction were not counted directly"
+ ],
+ "next_cut": {
+  "name": "P6-04d2c",
+  "scope": "merge the u and v scratch into one allocation, 3 -> 2",
+  "excluded": "quotient/remainder FAM, scratch arena, allocator cache, temp pool; same scratch layout, same subMul, same correction",
+  "gates": [
+   "allocations 3 -> 2",
+   "div_8x4 and mod_8x4 at least 5%",
+   "16x8 and 24x8 no stable regression at or above 1% (they have no fixed cost left)",
+   "single-limb and both sentinels no new regression",
+   "algorithm counters unchanged"
+  ]
+ },
+ "denominator": {
+  "direct_core_ns_per_op": {
+   "8x4": 109.2,
+   "12x4": 154.6,
+   "16x4": 200.6,
+   "16x8": 209.1,
+   "24x8": 342.9,
+   "2x2": 49.5,
+   "8x8": 58.7,
+   "16x16": 69.8,
+   "32x32": 93.9,
+   "5x4": 70.1,
+   "6x4": 88.6,
+   "9x8": 82.7,
+   "7x4": 94.9,
+   "11x8": 115.9
+  },
+  "js_over_qjs": {
+   "div_8x1": 1.93,
+   "div_8x4": 2.68,
+   "div_16x8": 1.33,
+   "mod_8x4": 1.53
+  },
+  "cost_model": "fixed 47 +- 3 ns plus digits * (5.81 + 1.460*nb) ns with the reciprocal enabled",
+  "topology": "multi-limb 3 allocations, single-limb 2, 2 memcpys"
+ }
+}

@@ -1682,6 +1682,7 @@ const SimpleJsonStringifyError = std.mem.Allocator.Error || error{
 
 const JsonStringifyVmOptions = struct {
     replacer: core.JSValue = core.JSValue.undefinedValue(),
+    replacer_call: ?*call_runtime.SyncInternalCallSite = null,
     property_list: []const core.Atom = &.{},
     has_property_list: bool = false,
     gap: []const u8 = "",
@@ -1792,7 +1793,16 @@ pub fn qjsJsonParseCall(
     parsed = core.JSValue.undefinedValue();
     stored_parsed.free(ctx.runtime);
 
-    return try qjsJsonInternalizeProperty(ctx, output, global, holder_value, root_key, reviver, &parse_result.record, caller_function, caller_frame);
+    var reviver_call = call_runtime.SyncInternalCallSite.init(
+        ctx,
+        output,
+        global,
+        holder_value,
+        reviver,
+        caller_function,
+        caller_frame,
+    );
+    return try qjsJsonInternalizeProperty(ctx, output, global, holder_value, root_key, reviver, &reviver_call, &parse_result.record, caller_function, caller_frame);
 }
 
 test "JSON.parse roots direct function bytecode input while coercing to string" {
@@ -1845,6 +1855,7 @@ pub fn qjsJsonInternalizeProperty(
     holder_value: core.JSValue,
     key: core.Atom,
     reviver: core.JSValue,
+    reviver_call: *call_runtime.SyncInternalCallSite,
     record: ?*const JsonParseRecord,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
@@ -1896,7 +1907,7 @@ pub fn qjsJsonInternalizeProperty(
                 const child_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
                 defer deinitLengthIndexAtom(ctx.runtime, child_key);
                 const child_record: ?*const JsonParseRecord = if (active_record) |rec| rec.arrayElement(index) else null;
-                try qjsJsonInternalizeChild(ctx, output, global, value, object, child_key.atom, rooted_reviver, child_record, caller_function, caller_frame);
+                try qjsJsonInternalizeChild(ctx, output, global, value, object, child_key.atom, rooted_reviver, reviver_call, child_record, caller_function, caller_frame);
             }
         } else {
             // qjs snapshots own enumerable STRING property names ONCE via
@@ -1921,7 +1932,7 @@ pub fn qjsJsonInternalizeProperty(
             }
             for (enumerable_keys.items) |child_key| {
                 const child_record: ?*const JsonParseRecord = if (active_record) |rec| rec.findObjectEntry(child_key) else null;
-                try qjsJsonInternalizeChild(ctx, output, global, value, object, child_key, rooted_reviver, child_record, caller_function, caller_frame);
+                try qjsJsonInternalizeChild(ctx, output, global, value, object, child_key, rooted_reviver, reviver_call, child_record, caller_function, caller_frame);
             }
         }
     }
@@ -1941,7 +1952,7 @@ pub fn qjsJsonInternalizeProperty(
         context_value = core.JSValue.undefinedValue();
         owned_context.free(ctx.runtime);
     }
-    const result = try call_runtime.callValueOrBytecode(ctx, output, global, rooted_holder_value, rooted_reviver, &.{ key_value, value, context_value }, caller_function, caller_frame);
+    const result = try reviver_call.callWithThis(rooted_holder_value, &.{ key_value, value, context_value });
     if (result.same(value) or result.same(key_value) or result.same(rooted_holder_value)) {
         const duplicated = result.dup();
         result.free(ctx.runtime);
@@ -1961,6 +1972,7 @@ pub fn qjsJsonInternalizeChild(
     holder: *core.Object,
     key: core.Atom,
     reviver: core.JSValue,
+    reviver_call: *call_runtime.SyncInternalCallSite,
     record: ?*const JsonParseRecord,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
@@ -1980,7 +1992,7 @@ pub fn qjsJsonInternalizeChild(
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    revived = try qjsJsonInternalizeProperty(ctx, output, global, rooted_holder_value, key, rooted_reviver, record, caller_function, caller_frame);
+    revived = try qjsJsonInternalizeProperty(ctx, output, global, rooted_holder_value, key, rooted_reviver, reviver_call, record, caller_function, caller_frame);
     defer {
         const owned_revived = revived;
         revived = core.JSValue.undefinedValue();
@@ -2105,8 +2117,22 @@ pub fn qjsJsonStringifyCall(
     defer property_list.deinit(ctx.runtime);
     var gap = try qjsJsonStringifyGap(ctx, output, global, space, caller_function, caller_frame);
     defer gap.deinit(ctx.runtime.memory.allocator);
+    var replacer_call_storage: call_runtime.SyncInternalCallSite = undefined;
+    const replacer_call: ?*call_runtime.SyncInternalCallSite = if (call_runtime.isCallableValue(replacer)) blk: {
+        replacer_call_storage = call_runtime.SyncInternalCallSite.init(
+            ctx,
+            output,
+            global,
+            core.JSValue.undefinedValue(),
+            replacer,
+            caller_function,
+            caller_frame,
+        );
+        break :blk &replacer_call_storage;
+    } else null;
     const options = JsonStringifyVmOptions{
         .replacer = replacer,
+        .replacer_call = replacer_call,
         .property_list = property_list.items,
         .has_property_list = property_list.has_property_list,
         .gap = gap.items,
@@ -2631,15 +2657,15 @@ pub fn qjsJsonSerializeProperty(
             owned_to_json.free(ctx.runtime);
         }
         if (call_runtime.isCallableValue(to_json)) {
-            const next = try call_runtime.callValueOrBytecode(ctx, output, global, value, to_json, &.{key_value}, caller_function, caller_frame);
+            const next = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, to_json, &.{key_value}, caller_function, caller_frame);
             const old_value = value;
             value = next;
             old_value.free(ctx.runtime);
         }
     }
 
-    if (call_runtime.isCallableValue(rooted_replacer)) {
-        const next = try call_runtime.callValueOrBytecode(ctx, output, global, rooted_holder_value, rooted_replacer, &.{ key_value, value }, caller_function, caller_frame);
+    if (options.replacer_call) |replacer_call| {
+        const next = try replacer_call.callWithThis(rooted_holder_value, &.{ key_value, value });
         const old_value = value;
         value = next;
         old_value.free(ctx.runtime);

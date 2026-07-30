@@ -1,0 +1,136 @@
+{
+ "note": "P6-02 JS-level BigInt allocation topology. Measurement only, no production representation change.",
+ "head": "4517af55",
+ "verdict": "two allocations per op confirmed and wrapper cost is measurable -> P6-03 has a real target",
+ "dynamic_counts_2x2_limbs": {
+  "method": "gdb silent breakpoints on semantic entries, linearity checked at N=0/1/200",
+  "zjs": {
+   "createFromOwned (wrapper)": {
+    "N0": 4,
+    "N1": 5,
+    "N200": 204,
+    "per_op": 1
+   },
+   "mulAlloc (limbs)": {
+    "N0": 0,
+    "N1": 1,
+    "N200": 200,
+    "per_op": 1
+   },
+   "cloneWithAllocator (temp)": {
+    "N0": 2,
+    "N1": 3,
+    "N200": 3,
+    "per_op": 0
+   },
+   "destroyFromHeader (finalize)": {
+    "N0": 2,
+    "N1": 2,
+    "N200": 201,
+    "per_op": 1,
+    "note": "N-1 frees inside the loop; the last r escapes to String(r) and is freed at teardown"
+   }
+  },
+  "qjs": {
+   "js_bigint_mul": {
+    "N0": 0,
+    "N1": 1,
+    "N200": 200,
+    "per_op": 1
+   },
+   "js_bigint_new": {
+    "N0": 23,
+    "N1": 25,
+    "N200": 224,
+    "per_op": 1
+   }
+  },
+  "totals": {
+   "zjs_allocations_per_op": 2,
+   "qjs_allocations_per_op": 1
+  },
+  "third_allocation_ruled_out": "value_ops.zig:817 passes rt.memory.allocator while createFromOwned compares against accountedAllocator(); the clone branch would be a third allocation but measures +0 per op"
+ },
+ "js_level_cross_engine_ns_per_mul": {
+  "2x2": {
+   "qjs": 35.17,
+   "zjs": 59.98,
+   "ratio": 1.7051
+  },
+  "1x8": {
+   "qjs": 46.01,
+   "zjs": 60.52,
+   "ratio": 1.3152
+  },
+  "8x1": {
+   "qjs": 37.85,
+   "zjs": 60.49,
+   "ratio": 1.5982
+  },
+  "8x8": {
+   "qjs": 75.94,
+   "zjs": 91.35,
+   "ratio": 1.2029
+  },
+  "16x16": {
+   "qjs": 192.72,
+   "zjs": 199.85,
+   "ratio": 1.037
+  },
+  "order_symmetry": "zjs 1x8 60.52 vs 8x1 60.49 - P6-01c's removal of order dependence holds at the JS level; qjs remains asymmetric at 46.01 vs 37.85"
+ },
+ "wrapper_cost": {
+  "2x2": {
+   "createFromOwned_percent": 15.01,
+   "approx_ns": 9.0,
+   "mulAlloc_percent": 9.16,
+   "freeAlignedBytes_percent": 6.79,
+   "destroyZeroRefNow_percent": 3.85,
+   "value_ops.binary_percent": 21.32
+  },
+  "8x8": {
+   "createFromOwned_percent": 10.65,
+   "approx_ns": 9.7,
+   "mulAlloc_percent": 40.77,
+   "freeAlignedBytes_percent": 4.42,
+   "destroyZeroRefNow_percent": 2.52,
+   "value_ops.binary_percent": 12.92
+  },
+  "shape": "wrapper is roughly 9-10 ns per multiply and near-constant across sizes, a fixed tax, while mulAlloc scales from 5.5 to 37.2 ns",
+  "share_of_2x2_gap": "the cross-engine gap at 2x2 is 24.8 ns and the wrapper is about 9.0 of it, roughly 36%"
+ },
+ "gate": {
+  "wrapper_allocs_per_op": 1,
+  "limb_allocs_per_op": 1,
+  "temp_allocs_per_op": 0,
+  "qjs_combined": 1,
+  "wrapper_cost_threshold": ">=5% or 1-2 ns on small cases",
+  "wrapper_measured": "15.01% / ~9.0 ns",
+  "all_met": true
+ },
+ "product_positioning": "small/medium BigInt fixed-cost optimization only - 16x16 is already 1.0370x and this must not be extrapolated to large-integer multiplication",
+ "p6_03_boundary": {
+  "implement": "HeapBigInt header plus trailing limbs, one FAM allocation",
+  "preserve": [
+   "sign-magnitude",
+   "64-bit limbs",
+   "current basecase",
+   "P6-01 first-row overwrite",
+   "P6-01c shorter operand as outer",
+   "normalization semantics",
+   "JS-observable behaviour"
+  ],
+  "must_not_touch": [
+   "two's complement representation",
+   "Karatsuba",
+   "GC policy",
+   "limb algorithm"
+  ]
+ },
+ "limits": [
+  "only mul measured; add/sub/div/pow share createBigIntOwned -> createFromOwned and are expected to match but are unverified",
+  "allocation counts only, bytes per op not recorded",
+  "wrapper ns figures are share times total, not an independent measurement",
+  "JS-level and direct-core absolute times are not subtracted; the harnesses differ in allocator and surrounding path"
+ ]
+}

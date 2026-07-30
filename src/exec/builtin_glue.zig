@@ -21,7 +21,7 @@ const string_ops = @import("string_ops.zig");
 
 // Helpers that remain in call_runtime.zig (generic utilities outside the builtin
 // glue cluster).
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
 const constructorNameEqlLocal = call_runtime.constructorNameEqlLocal;
 const constructorPrototypeObject = object_ops.constructorPrototypeObject;
@@ -525,7 +525,7 @@ pub fn addCollectionEntriesFromIterator(
     const iterator_method = try getIteratorMethod(ctx, output, global, iterable_value);
     defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) return error.TypeError;
-    const iterator_value = try callValueOrBytecode(ctx, output, global, iterable_value, iterator_method, &.{}, null, null);
+    const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, iterable_value, iterator_method, &.{}, null, null);
     defer iterator_value.free(ctx.runtime);
     _ = try property_ops.expectObject(iterator_value);
 
@@ -567,7 +567,7 @@ pub fn callCollectionAdderFromVm(
     adder: core.JSValue,
     args: []const core.JSValue,
 ) !void {
-    const out = try callValueOrBytecode(ctx, output, global, collection_value, adder, args, null, null);
+    const out = try callValueOrBytecodeRoot(ctx, output, global, collection_value, adder, args, null, null);
     out.free(ctx.runtime);
 }
 

@@ -1,0 +1,594 @@
+{
+ "note": "P6-04c multi-limb normalized long division. P0 = ca31bb9c (the P6-04a baseline), P1 = 8eb4decf.",
+ "p0": "ca31bb9c",
+ "p1": "8eb4decf",
+ "verdict": "clear success with one approved performance waiver: multi-limb 28.4x to 271.8x with every combination same-direction, allocations from O(numerator bits) to a constant 6, two JS shapes already inside the 2x second-stage target, and the one missed gate (mod-size-2x1) accepted as an explicit waiver rather than reported as a pass",
+ "commits": {
+  "ad6bd639": "normalize ownership transferred exactly once, plus the multi-limb fail-index OOM sweep",
+  "8eb4decf": "bit-at-a-time branch deleted and replaced by normalized limb division"
+ },
+ "mechanism": {
+  "aligned_with": "qjs js_bigint_divrem plus mp_divnorm (quickjs.c:11893-11976): normalize the divisor's top limb, estimate one quotient digit, correct against the second divisor limb, multiply-subtract, add back on overshoot",
+  "deliberately_not_copied": "qjs's top-quotient-limb 0-or-1 special case. Its JSBigInt is two's complement with sign extension so the top quotient limb can only be 0 or 1; zjs is normalized sign-magnitude where it is any u64. The mechanism is mirrored, the representation-specific case is not.",
+  "no_shrinking_realloc": "both results are sized exactly before allocation: the quotient's top digit is non-zero exactly when the numerator's leading nb limbs are at least the divisor, and the remainder's unshifted length is measured with a read-only helper before its buffer exists. A zero remainder allocates nothing.",
+  "scratch": "u and v stay as two separate allocations on purpose, so the topology stays readable and the OOM sweep can fail each independently; merging is left to P6-04d"
+ },
+ "allocation_topology": {
+  "method": "gdb silent breakpoints, slope between N=1 and N=21",
+  "rows": [
+   {
+    "shape": "4x2",
+    "numerator_bits": 256,
+    "p0": {
+     "shl": 256,
+     "subAbsAlloc": 126,
+     "alloc": 640
+    },
+    "p1": {
+     "shl": 0,
+     "subAbsAlloc": 0,
+     "alloc": 6
+    }
+   },
+   {
+    "shape": "8x4",
+    "numerator_bits": 512,
+    "p0": {
+     "shl": 512,
+     "subAbsAlloc": 254,
+     "alloc": 1278
+    },
+    "p1": {
+     "shl": 0,
+     "subAbsAlloc": 0,
+     "alloc": 6
+    }
+   },
+   {
+    "shape": "16x8",
+    "numerator_bits": 1024,
+    "p0": {
+     "shl": 1024,
+     "subAbsAlloc": 510,
+     "alloc": 2554
+    },
+    "p1": {
+     "shl": 0,
+     "subAbsAlloc": 0,
+     "alloc": 6
+    }
+   },
+   {
+    "shape": "16x16",
+    "numerator_bits": 1024,
+    "p1": {
+     "alloc": 6
+    }
+   },
+   {
+    "shape": "8x1",
+    "numerator_bits": 512,
+    "p1": {
+     "alloc": 4
+    },
+    "note": "single-limb path from P6-04b, unchanged"
+   }
+  ],
+  "composition": "6 = two absCloneWithAllocator in divRemAlloc, u, v, quotient, remainder; independent of the numerator's width"
+ },
+ "direct_core": {
+  "harness": "four build instances per side, all sixteen combinations, three interleaved rounds",
+  "cases": {
+   "div-size-2x2": {
+    "kind": "multi",
+    "p0_ns": 2073.7,
+    "p1_ns": 72.38,
+    "speedup": 28.7,
+    "geomean": 0.0349,
+    "min": 0.0331,
+    "max": 0.0366,
+    "all_same_direction": true
+   },
+   "div-size-4x2": {
+    "kind": "multi",
+    "p0_ns": 4829.9,
+    "p1_ns": 101.9,
+    "speedup": 47.4,
+    "geomean": 0.0212,
+    "min": 0.0198,
+    "max": 0.0229,
+    "all_same_direction": true
+   },
+   "div-size-8x4": {
+    "kind": "multi",
+    "p0_ns": 11186.4,
+    "p1_ns": 147.52,
+    "speedup": 75.8,
+    "geomean": 0.0132,
+    "min": 0.0122,
+    "max": 0.0142,
+    "all_same_direction": true
+   },
+   "div-size-8x8": {
+    "kind": "multi",
+    "p0_ns": 10504.8,
+    "p1_ns": 82.74,
+    "speedup": 127.0,
+    "geomean": 0.0079,
+    "min": 0.0076,
+    "max": 0.0082,
+    "all_same_direction": true
+   },
+   "div-size-16x8": {
+    "kind": "multi",
+    "p0_ns": 27627.3,
+    "p1_ns": 274.76,
+    "speedup": 100.6,
+    "geomean": 0.01,
+    "min": 0.0096,
+    "max": 0.0104,
+    "all_same_direction": true
+   },
+   "div-size-16x16": {
+    "kind": "multi",
+    "p0_ns": 26364.4,
+    "p1_ns": 97.0,
+    "speedup": 271.8,
+    "geomean": 0.0037,
+    "min": 0.0036,
+    "max": 0.004,
+    "all_same_direction": true
+   },
+   "mod-size-2x2": {
+    "kind": "multi",
+    "p0_ns": 2067.1,
+    "p1_ns": 72.75,
+    "speedup": 28.4,
+    "geomean": 0.0352,
+    "min": 0.0334,
+    "max": 0.0368,
+    "all_same_direction": true
+   },
+   "mod-size-4x2": {
+    "kind": "multi",
+    "p0_ns": 4785.5,
+    "p1_ns": 101.13,
+    "speedup": 47.3,
+    "geomean": 0.0212,
+    "min": 0.0198,
+    "max": 0.0229,
+    "all_same_direction": true
+   },
+   "mod-size-8x4": {
+    "kind": "multi",
+    "p0_ns": 11231.9,
+    "p1_ns": 146.96,
+    "speedup": 76.4,
+    "geomean": 0.0131,
+    "min": 0.0123,
+    "max": 0.014,
+    "all_same_direction": true
+   },
+   "mod-size-8x8": {
+    "kind": "multi",
+    "p0_ns": 10532.1,
+    "p1_ns": 82.61,
+    "speedup": 127.5,
+    "geomean": 0.0079,
+    "min": 0.0076,
+    "max": 0.0082,
+    "all_same_direction": true
+   },
+   "mod-size-16x8": {
+    "kind": "multi",
+    "p0_ns": 27599.2,
+    "p1_ns": 273.77,
+    "speedup": 100.8,
+    "geomean": 0.0099,
+    "min": 0.0095,
+    "max": 0.0103,
+    "all_same_direction": true
+   },
+   "mod-size-16x16": {
+    "kind": "multi",
+    "p0_ns": 26257.1,
+    "p1_ns": 96.71,
+    "speedup": 271.5,
+    "geomean": 0.0037,
+    "min": 0.0036,
+    "max": 0.0038,
+    "all_same_direction": true
+   },
+   "div-size-1x1": {
+    "kind": "single",
+    "p0_ns": 964.4,
+    "p1_ns": 49.79,
+    "speedup": 19.4,
+    "geomean": 0.052,
+    "min": 0.0508,
+    "max": 0.0539,
+    "all_same_direction": true
+   },
+   "div-size-2x1": {
+    "kind": "single",
+    "p0_ns": 2188.7,
+    "p1_ns": 61.21,
+    "speedup": 35.8,
+    "geomean": 0.028,
+    "min": 0.0258,
+    "max": 0.0303,
+    "all_same_direction": true
+   },
+   "div-size-8x1": {
+    "kind": "single",
+    "p0_ns": 10375.4,
+    "p1_ns": 123.7,
+    "speedup": 83.9,
+    "geomean": 0.012,
+    "min": 0.0107,
+    "max": 0.0136,
+    "all_same_direction": true
+   },
+   "div-size-16x1": {
+    "kind": "single",
+    "p0_ns": 22964.5,
+    "p1_ns": 212.98,
+    "speedup": 107.8,
+    "geomean": 0.0093,
+    "min": 0.0083,
+    "max": 0.0104,
+    "all_same_direction": true
+   },
+   "mod-size-1x1": {
+    "kind": "single",
+    "p0_ns": 946.6,
+    "p1_ns": 51.18,
+    "speedup": 18.5,
+    "geomean": 0.0535,
+    "min": 0.0512,
+    "max": 0.0548,
+    "all_same_direction": true
+   },
+   "mod-size-2x1": {
+    "kind": "single",
+    "p0_ns": 2210.5,
+    "p1_ns": 59.45,
+    "speedup": 37.2,
+    "geomean": 0.027,
+    "min": 0.0256,
+    "max": 0.0287,
+    "all_same_direction": true
+   },
+   "mod-size-8x1": {
+    "kind": "single",
+    "p0_ns": 10455.3,
+    "p1_ns": 123.54,
+    "speedup": 84.6,
+    "geomean": 0.0119,
+    "min": 0.0107,
+    "max": 0.0132,
+    "all_same_direction": true
+   },
+   "mod-size-16x1": {
+    "kind": "single",
+    "p0_ns": 22849.5,
+    "p1_ns": 211.64,
+    "speedup": 108.0,
+    "geomean": 0.0093,
+    "min": 0.0083,
+    "max": 0.0105,
+    "all_same_direction": true
+   },
+   "div-rel-lt": {
+    "kind": "rel",
+    "p0_ns": 25.9,
+    "p1_ns": 25.09,
+    "speedup": 1.0,
+    "geomean": 0.9739,
+    "min": 0.9401,
+    "max": 1.0224,
+    "all_same_direction": false
+   },
+   "div-rel-eq": {
+    "kind": "rel",
+    "p0_ns": 4678.6,
+    "p1_ns": 69.75,
+    "speedup": 67.1,
+    "geomean": 0.015,
+    "min": 0.0141,
+    "max": 0.0162,
+    "all_same_direction": true
+   },
+   "div-rel-q1": {
+    "kind": "rel",
+    "p0_ns": 4713.7,
+    "p1_ns": 76.77,
+    "speedup": 61.4,
+    "geomean": 0.0164,
+    "min": 0.0154,
+    "max": 0.0175,
+    "all_same_direction": true
+   },
+   "div-rel-exact": {
+    "kind": "rel",
+    "p0_ns": 11438.8,
+    "p1_ns": 133.66,
+    "speedup": 85.6,
+    "geomean": 0.0117,
+    "min": 0.0108,
+    "max": 0.0127,
+    "all_same_direction": true
+   },
+   "div-size-8x4s0": {
+    "kind": "shift",
+    "p0_ns": 11191.2,
+    "p1_ns": 146.98,
+    "speedup": 76.1,
+    "geomean": 0.0132,
+    "min": 0.0123,
+    "max": 0.0142,
+    "all_same_direction": true
+   },
+   "div-size-8x4s1": {
+    "kind": "shift",
+    "p0_ns": 11279.0,
+    "p1_ns": 148.71,
+    "speedup": 75.8,
+    "geomean": 0.0132,
+    "min": 0.0126,
+    "max": 0.014,
+    "all_same_direction": true
+   },
+   "div-size-8x4s32": {
+    "kind": "shift",
+    "p0_ns": 11388.9,
+    "p1_ns": 149.97,
+    "speedup": 75.9,
+    "geomean": 0.0132,
+    "min": 0.0125,
+    "max": 0.014,
+    "all_same_direction": true
+   },
+   "div-size-8x4s63": {
+    "kind": "shift",
+    "p0_ns": 11075.6,
+    "p1_ns": 153.13,
+    "speedup": 72.3,
+    "geomean": 0.0139,
+    "min": 0.0128,
+    "max": 0.015,
+    "all_same_direction": true
+   }
+  },
+  "shift_axis": "P6-04a recorded this axis while it was inert because nothing normalized. It is live now, and flat: 147.0 ns at shift 0 to 153.1 ns at shift 63, a 4.2% span with no expensive step."
+ },
+ "js_level": {
+  "harness": "four build instances per side, all sixteen combinations",
+  "cases": {
+   "bigint_div_8x1": {
+    "p0_ms": 3.1293,
+    "p1_ms": 0.0283,
+    "speedup": 110.5,
+    "geomean": 0.0091,
+    "min": 0.009,
+    "max": 0.0091,
+    "p1_over_qjs": 2.3,
+    "p0_over_qjs": 253.7,
+    "all_same_direction": true
+   },
+   "bigint_div_8x4": {
+    "p0_ms": 3.4349,
+    "p1_ms": 0.0453,
+    "speedup": 75.8,
+    "geomean": 0.0132,
+    "min": 0.0132,
+    "max": 0.0133,
+    "p1_over_qjs": 3.2,
+    "p0_over_qjs": 242.9,
+    "all_same_direction": true
+   },
+   "bigint_div_16x8": {
+    "p0_ms": 3.8397,
+    "p1_ms": 0.0289,
+    "speedup": 133.0,
+    "geomean": 0.0075,
+    "min": 0.0075,
+    "max": 0.0076,
+    "p1_over_qjs": 1.6,
+    "p0_over_qjs": 213.4,
+    "all_same_direction": true
+   },
+   "bigint_mod_8x4": {
+    "p0_ms": 3.3676,
+    "p1_ms": 0.0412,
+    "speedup": 81.7,
+    "geomean": 0.0122,
+    "min": 0.0122,
+    "max": 0.0122,
+    "p1_over_qjs": 1.87,
+    "p0_over_qjs": 152.8,
+    "all_same_direction": true
+   },
+   "local_arith_loop": {
+    "p0_ms": 5.9949,
+    "p1_ms": 6.0011,
+    "speedup": 1.0,
+    "geomean": 1.001,
+    "min": 1.0003,
+    "max": 1.0017,
+    "p1_over_qjs": 0.93,
+    "p0_over_qjs": 0.9,
+    "all_same_direction": true
+   }
+  },
+  "attribution_note": "div_8x1's 110.5x belongs to P6-04b, not this cut: P0 here is ca31bb9c, which predates it",
+  "second_stage_target": "the 2x goal is already met on div_16x8 at 1.60x and mod_8x4 at 1.87x; div_8x4 is still 3.20x"
+ },
+ "single_limb_no_regression_gate": {
+  "baseline": "ad6bd639 (P6-04b plus the ownership fix), four instances, which is the correct denominator for this gate rather than ca31bb9c",
+  "cases": {
+   "div-size-1x1": {
+    "p6_04b_ns": 50.0,
+    "p6_04c_ns": 51.3,
+    "geomean": 1.0191,
+    "min": 0.9857,
+    "max": 1.0396
+   },
+   "div-size-2x1": {
+    "p6_04b_ns": 59.72,
+    "p6_04c_ns": 60.01,
+    "geomean": 1.016,
+    "min": 0.9879,
+    "max": 1.0684
+   },
+   "div-size-8x1": {
+    "p6_04b_ns": 125.12,
+    "p6_04c_ns": 124.06,
+    "geomean": 0.9907,
+    "min": 0.985,
+    "max": 0.9949
+   },
+   "div-size-16x1": {
+    "p6_04b_ns": 211.97,
+    "p6_04c_ns": 210.64,
+    "geomean": 0.9946,
+    "min": 0.9904,
+    "max": 1.0005
+   },
+   "mod-size-1x1": {
+    "p6_04b_ns": 49.81,
+    "p6_04c_ns": 49.85,
+    "geomean": 1.0081,
+    "min": 0.9983,
+    "max": 1.0326
+   },
+   "mod-size-2x1": {
+    "p6_04b_ns": 59.53,
+    "p6_04c_ns": 61.04,
+    "geomean": 1.0347,
+    "min": 1.0216,
+    "max": 1.0672
+   },
+   "mod-size-8x1": {
+    "p6_04b_ns": 125.25,
+    "p6_04c_ns": 124.23,
+    "geomean": 0.991,
+    "min": 0.9856,
+    "max": 0.9948
+   },
+   "mod-size-16x1": {
+    "p6_04b_ns": 211.89,
+    "p6_04c_ns": 211.39,
+    "geomean": 0.9969,
+    "min": 0.9909,
+    "max": 1.0013
+   },
+   "div-rel-lt": {
+    "p6_04b_ns": 25.68,
+    "p6_04c_ns": 25.18,
+    "geomean": 0.9811,
+    "min": 0.971,
+    "max": 0.9923
+   }
+  },
+  "verdict": "MISSED. mod-size-2x1 is the one shape with all sixteen combinations above 1.0 (range 1.0216 to 1.0672), a 3.5% geomean and 1.5 ns in absolute terms. div-size-1x1, div-size-2x1 and mod-size-1x1 all have ranges straddling 1.0, so they are noise. 8x1 and 16x1 are slightly faster at 0.991 to 0.997.",
+  "cause": "almost certainly code layout: divRemAbsAlloc went from two branches plus an inlined bit loop to two branches plus two noinline calls, moving the dispatcher's codegen",
+  "not_chased": "1.5 ns per operation against 28x to 272x elsewhere; P6-04d will touch this dispatcher again if it merges the scratch allocations, and it should be re-measured then",
+  "waiver": {
+   "status": "approved explicit waiver, not a pass",
+   "statement": "the regression is real, stable and does not meet the original gate: mod-size-2x1 at +3.47% geomean and +1.51 ns, all sixteen combinations above 1.0 with a lower bound of 1.0216",
+   "accepted_because": "it is weighed against 28.7x to 271.8x on the multi-limb path",
+   "obligations": [
+    "keep mod-size-2x1 as a permanent sentinel",
+    "every P6-04d cut must re-measure div/mod at 1x1, 2x1, 8x1 and 16x1",
+    "re-judge after P6-04d completes; if mod 2x1 still regresses above 1%, take a separate one-cut that inspects the dispatcher body and the single-limb helper's call placement",
+    "that cut must not re-inline the multi-limb algorithm and must not trade 8x1 or 16x1 away for this 1.5 ns"
+   ]
+  }
+ },
+ "correctness": {
+  "directed_vectors": {
+   "test": "normalized long division handles every quotient-estimate correction",
+   "provenance": "each vector was found by instrumenting the estimate loop with event counters, searching for triggering inputs, and freezing the input; the counters are not in the shipped code",
+   "events": {
+    "one qhat correction": "two vectors, random search",
+    "two and three consecutive corrections": "random search",
+    "add-back": "three vectors, directed search - random differentials cannot reach it, roughly two in 2^64 and needing three or more divisor limbs for the two-limb correction to miss",
+    "clamped estimate": "constructed by hand - needs the running window's top limb to equal the divisor's, built from a numerator whose leading two limbs are below the divisor but share its top limb, so the first digit is zero and leaves them in place"
+   },
+   "assertions": "q*b+r == a, abs(r) < abs(b), remainder sign, no leading zero limb, across all four sign combinations"
+  },
+  "shift_coverage": "all 64 normalization shifts, not a sample of four, each crossed with nb 2-5 and na from nb to nb+3",
+  "relations": "lhs < rhs, lhs == rhs, quotient 1, exact division, largest non-zero remainder",
+  "random_differential": {
+   "cases": 20000,
+   "limbs": "1-64",
+   "bias": "saturated, sparse, alternating, near 2^63, equal limb counts, one limb longer",
+   "result": "byte-identical to pinned QuickJS",
+   "identity": "q*b+r == a on all 20000"
+  },
+  "targeted_probe": {
+   "lines": 487,
+   "result": "byte-identical to pinned QuickJS"
+  },
+  "oom_sweep": "every allocation point failed in turn across all four sign combinations; each attempt returns the correct result or OutOfMemory with no outstanding allocation and the caller's operand limbs unmodified; a separate mode fails every shrinking realloc, refusing both the remap and the alloc-and-copy fallback, and the runtime keeps working afterwards",
+  "test262": {
+   "errors": 0,
+   "prepared": 49775,
+   "passed": 44541,
+   "known": 25
+  },
+  "focused_suites": {
+   "core": 311,
+   "parser": 463,
+   "bytecode": 188,
+   "exec": 389,
+   "builtins": 193,
+   "runtime": 72,
+   "runner": 43
+  },
+  "oom": 14,
+  "altrepr": 2001,
+  "release_safe_core": 311,
+  "force_gc_core": 311,
+  "force_gc_cross_engine": "the 487-line probe and the 20000-case differential are both byte-identical to qjs under force-GC"
+ },
+ "correction_to_P6_04b": {
+  "claim_being_corrected": "P6-04b recorded divRemAbsAlloc's normalize ownership problem as a pre-existing double free that test-oom did not reach",
+  "measurement": "instrumented, the two tail normalize calls shrink 0 times in 2001 divisions: subAbsAlloc normalizes the remainder every iteration and setBit leaves the quotient's top limb non-zero, so the failing branch is dead",
+  "correct_statement": "ad6bd639 hardens an unsound ownership pattern rather than fixing a live defect, and the fail-index sweep is a forward OOM contract rather than a regression test"
+ },
+ "gates": {
+  "8x8_at_least_20x_same_direction": "127.0x and 127.5x, same-direction",
+  "16x16_at_least_20x_same_direction": "271.8x and 271.5x, same-direction",
+  "allocations_to_constant": "640 / 1278 / 2554 become a constant 6",
+  "single_limb_no_stable_regression": "MISSED on mod-size-2x1 at +3.5% geomean, 1.5 ns absolute, all sixteen combinations above 1.0 - accepted as an approved explicit waiver, not a pass",
+  "correctness": true,
+  "overall": "clear success with an approved waiver on the single-limb gate"
+ },
+ "limits": [
+  "the 1.6-3.5% regression on the smallest single-limb shapes was not chased and the gate is missed",
+  "u and v remain two separate scratch allocations by design; merging is P6-04d",
+  "no reciprocal precomputation, Burnikel-Ziegler, Newton reciprocal, quotient/remainder FAM or combined scratch, all excluded by the PRD",
+  "div_8x4 is still 3.20x of qjs; the second-stage target is met only on div_16x8 and mod_8x4",
+  "the directed vectors' event coverage was verified with temporary counters; the shipped test asserts correct results, not that a given vector still takes a given branch",
+  "pow is not measured, being a repeated mulAlloc and unrelated to division"
+ ],
+ "next_denominator": {
+  "direct_core_ns_per_op": {
+   "div_2x2": 72.4,
+   "div_4x2": 101.9,
+   "div_8x4": 147.5,
+   "div_8x8": 82.7,
+   "div_16x8": 274.8,
+   "div_16x16": 97.0
+  },
+  "js_over_qjs": {
+   "div_8x4": 3.2,
+   "div_16x8": 1.6,
+   "mod_8x4": 1.87
+  },
+  "allocations_per_op": 6,
+  "profile_order_if_continuing": "scratch allocation (four of the six are mergeable), the qhat division, normalization copies, building quotient and remainder together, the result wrapper/FAM, helper codegen"
+ }
+}

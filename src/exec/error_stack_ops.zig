@@ -16,7 +16,7 @@ const string_ops = @import("string_ops.zig");
 // error-stack cluster).
 const buildCallSiteArray = array_ops.buildCallSiteArray;
 const buildErrorStackStringValue = string_ops.buildErrorStackStringValue;
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const defineDataProperty = object_ops.defineDataProperty;
 const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
 const isCallableValue = call_runtime.isCallableValue;
@@ -53,7 +53,7 @@ pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, globa
         defer sites.free(ctx.runtime);
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
-        return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites }, null, null) catch |err| {
+        return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites }, null, null) catch |err| {
             if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
                 const thrown_value = ctx.takeException();
                 thrown_value.free(ctx.runtime);
@@ -83,7 +83,7 @@ pub fn formatCapturedErrorStackValue(
         defer sites_arg.free(ctx.runtime);
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
-        return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_arg }, null, null) catch |err| {
+        return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_arg }, null, null) catch |err| {
             if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
                 const thrown_value = ctx.takeException();
                 thrown_value.free(ctx.runtime);

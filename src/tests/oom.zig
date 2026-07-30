@@ -85,6 +85,219 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "calls-ok:5:7" },
     },
     .{
+        .name = "native-callback-map-reflect-apply",
+        .source =
+        \\function oomNativeHelper(value, index) {
+        \\  "use strict";
+        \\  return arguments[0] + arguments[1];
+        \\}
+        \\function oomNativeThrow() {
+        \\  throw new RangeError("native-callback");
+        \\}
+        \\const order = [];
+        \\try {
+        \\  [1].map(function oomThrowingMapCallback() {
+        \\    order.push("callback");
+        \\    return Reflect.apply(oomNativeThrow, null, []);
+        \\  });
+        \\} catch (error) {
+        \\  if (!(error instanceof RangeError)) throw error;
+        \\  order.push("outer");
+        \\}
+        \\let trace;
+        \\const mapped = [2].map(function oomMapCallback(value, index) {
+        \\  trace = new Error("native-callback-trace").stack;
+        \\  return Reflect.apply(oomNativeHelper, null, [value, index]);
+        \\});
+        \\const callbackAt = trace.indexOf("    at oomMapCallback");
+        \\const nativeAt = trace.indexOf("map (native)");
+        \\order.join(",") === "callback,outer" &&
+        \\mapped[0] === 2 &&
+        \\callbackAt === 0 &&
+        \\nativeAt > callbackAt
+        \\  ? "native-reentry-oom-ok" : "native-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "native-reentry-oom-ok" },
+    },
+    .{
+        .name = "native-callback-map-set",
+        .source =
+        \\function oomCollectionHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\let checksum = 0;
+        \\new Map([["key", 2]]).forEach(function oomMapCallback(value) {
+        \\  new Set([value]).forEach(function oomSetCallback(inner) {
+        \\    trace = new Error("collection-callback-trace").stack;
+        \\    checksum = oomCollectionHelper(inner);
+        \\  });
+        \\});
+        \\const setCallbackAt = trace.indexOf("    at oomSetCallback");
+        \\const setNativeAt = trace.indexOf("forEach (native)", setCallbackAt);
+        \\const mapCallbackAt = trace.indexOf("    at oomMapCallback", setNativeAt);
+        \\const mapNativeAt = trace.indexOf("forEach (native)", mapCallbackAt);
+        \\checksum === 3 &&
+        \\setCallbackAt === 0 &&
+        \\setNativeAt > setCallbackAt &&
+        \\mapCallbackAt > setNativeAt &&
+        \\mapNativeAt > mapCallbackAt
+        \\  ? "collection-reentry-oom-ok" : "collection-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "collection-reentry-oom-ok" },
+    },
+    .{
+        .name = "native-callback-property-proxy-coercion",
+        .source =
+        \\function oomPropertyHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\const accessor = Object.defineProperty({}, "value", {
+        \\  get: function oomPropertyGetter() {
+        \\    trace = new Error("property-callback-trace").stack;
+        \\    return oomPropertyHelper(1);
+        \\  }
+        \\});
+        \\const proxy = new Proxy(accessor, {
+        \\  get: function oomPropertyGetTrap(target, key, receiver) {
+        \\    return Reflect.get(target, key, receiver);
+        \\  }
+        \\});
+        \\const primitive = {
+        \\  [Symbol.toPrimitive]: function oomPropertyPrimitive() {
+        \\    return oomPropertyHelper(39);
+        \\  }
+        \\};
+        \\const checksum = proxy.value + primitive;
+        \\const getterAt = trace.indexOf("    at oomPropertyGetter");
+        \\const reflectAt = trace.indexOf("get (native)", getterAt);
+        \\const trapAt = trace.indexOf("    at oomPropertyGetTrap", reflectAt);
+        \\checksum === 42 &&
+        \\getterAt === 0 &&
+        \\reflectAt > getterAt &&
+        \\trapAt > reflectAt
+        \\  ? "property-reentry-oom-ok" : "property-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "property-reentry-oom-ok" },
+    },
+    .{
+        .name = "native-callback-json",
+        .source =
+        \\function oomJsonHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\const parsed = JSON.parse('{"value":1}', function oomJsonReviver(key, value) {
+        \\  if (key === "value") {
+        \\    trace = new Error("json-callback-trace").stack;
+        \\    return oomJsonHelper(value);
+        \\  }
+        \\  return value;
+        \\});
+        \\const serializable = {
+        \\  value: parsed.value,
+        \\  toJSON: function oomJsonToJSON() {
+        \\    return {value: oomJsonHelper(this.value)};
+        \\  }
+        \\};
+        \\const text = JSON.stringify(serializable, function oomJsonReplacer(key, value) {
+        \\  return value;
+        \\});
+        \\const reviverAt = trace.indexOf("    at oomJsonReviver");
+        \\const parseAt = trace.indexOf("parse (native)", reviverAt);
+        \\text === '{"value":3}' &&
+        \\reviverAt === 0 &&
+        \\parseAt > reviverAt
+        \\  ? "json-reentry-oom-ok" : "json-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "json-reentry-oom-ok" },
+    },
+    .{
+        .name = "native-callback-string-iterator-dispose",
+        .source =
+        \\function oomCohortFiveHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let trace;
+        \\const mapped = Iterator.from([1]).map(function oomIteratorCallback(value) {
+        \\  return String(value).replace("1", function oomStringReplacer(text) {
+        \\    trace = new Error("cohort-five-callback-trace").stack;
+        \\    return oomCohortFiveHelper(Number(text));
+        \\  });
+        \\}).toArray();
+        \\const order = [];
+        \\const stack = new DisposableStack();
+        \\stack.defer(function oomDisposeCleanup() {
+        \\  order.push("cleanup");
+        \\});
+        \\stack.defer(function oomDisposeThrow() {
+        \\  order.push("callback");
+        \\  throw new RangeError("dispose");
+        \\});
+        \\try {
+        \\  stack.dispose();
+        \\} catch (error) {
+        \\  if (!(error instanceof RangeError)) throw error;
+        \\  order.push("outer");
+        \\}
+        \\const replacerAt = trace.indexOf("    at oomStringReplacer");
+        \\const replaceAt = trace.indexOf("replace (native)", replacerAt);
+        \\const iteratorAt = trace.indexOf("    at oomIteratorCallback", replaceAt);
+        \\mapped[0] === "2" &&
+        \\order.join(",") === "callback,cleanup,outer" &&
+        \\replacerAt === 0 &&
+        \\replaceAt > replacerAt &&
+        \\iteratorAt > replaceAt
+        \\  ? "cohort-five-reentry-oom-ok" : "cohort-five-reentry-oom-bad"
+        ,
+        .expect = .{ .string = "cohort-five-reentry-oom-ok" },
+    },
+    .{
+        .name = "native-callback-promise-executor",
+        .source =
+        \\function oomPromiseHelper(value) {
+        \\  return value + 1;
+        \\}
+        \\let promiseTrace;
+        \\function oomPromiseOuter() {
+        \\  return new Promise(function oomPromiseExecutor(resolve) {
+        \\    promiseTrace = new Error("promise-executor-trace").stack;
+        \\    resolve(Reflect.apply(oomPromiseHelper, null, [41]));
+        \\  });
+        \\}
+        \\globalThis.oomPromiseValue = 0;
+        \\globalThis.oomPromiseOrder = [];
+        \\oomPromiseOuter().then(function oomPromiseReaction(value) {
+        \\  oomPromiseValue = value;
+        \\});
+        \\new Promise(function oomPromiseThrowingExecutor() {
+        \\  oomPromiseOrder.push("executor");
+        \\  throw new RangeError("executor");
+        \\}).catch(function oomPromiseRejectReaction(error) {
+        \\  if (!(error instanceof RangeError)) throw error;
+        \\  oomPromiseOrder.push("reaction");
+        \\});
+        \\oomPromiseOrder.push("outer");
+        \\globalThis.oomPromiseTrace = promiseTrace;
+        \\"scheduled"
+        ,
+        .expect = .{ .string = "scheduled" },
+        .drain_jobs = true,
+        .post_source =
+        \\const executorAt = oomPromiseTrace.indexOf("    at oomPromiseExecutor");
+        \\const promiseAt = oomPromiseTrace.indexOf("Promise (native)", executorAt);
+        \\const outerAt = oomPromiseTrace.indexOf("    at oomPromiseOuter", promiseAt);
+        \\oomPromiseValue === 42 &&
+        \\oomPromiseOrder.join(",") === "executor,outer,reaction" &&
+        \\executorAt === 0 &&
+        \\promiseAt > executorAt &&
+        \\outerAt > promiseAt
+        \\  ? "promise-executor-oom-ok" : "promise-executor-oom-bad"
+        ,
+        .post_expect = "promise-executor-oom-ok",
+    },
+    .{
         .name = "tail-moved-args",
         .source =
         \\function target(a,b,c,d,e,f,g,h,i,j) {
@@ -302,10 +515,26 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     errdefer if (!waiters_cleaned) zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
     var wrapper = BindingContext.borrowCore(ctx);
 
-    const value = try wrapper.eval(snippet.source, .{
+    const value = wrapper.eval(snippet.source, .{
         .mode = snippet.mode,
         .filename = corpus_filename,
-    });
+    }) catch |err| {
+        // A JS catch can observe the allocation-free preallocated OOM
+        // InternalError and rethrow that exact value. The embedding boundary
+        // then reports JSException even though the injected failure is still
+        // the sole cause. Normalize only that identity back to OutOfMemory so
+        // checkAllAllocationFailures retains its leak accounting; arbitrary
+        // user exceptions and freshly-created InternalErrors remain failures.
+        if (err == error.JSException and ctx.hasException()) {
+            if (ctx.preallocated_oom_error) |preallocated| {
+                if (ctx.runtime.current_exception.sameValue(preallocated)) {
+                    ctx.clearException();
+                    return error.OutOfMemory;
+                }
+            }
+        }
+        return err;
+    };
     {
         defer value.free(rt);
         try expectValue(rt, value, snippet.expect);
@@ -1007,6 +1236,30 @@ test "oom recovery canary: arithmetic snippet" {
 
 test "oom recovery canary: root and nested closure construction" {
     try recoveryCanarySweep(corpusSnippetNamed("calls-closures"));
+}
+
+test "oom recovery canary: native callback map through Reflect.apply" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-map-reflect-apply"));
+}
+
+test "oom recovery canary: nested Map and Set callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-map-set"));
+}
+
+test "oom recovery canary: accessor Proxy and primitive coercion callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-property-proxy-coercion"));
+}
+
+test "oom recovery canary: JSON reviver replacer and toJSON callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-json"));
+}
+
+test "oom recovery canary: String Iterator helper and DisposableStack callbacks" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-string-iterator-dispose"));
+}
+
+test "oom recovery canary: Promise executor callback" {
+    try recoveryCanarySweep(corpusSnippetNamed("native-callback-promise-executor"));
 }
 
 test "oom recovery canary: repeated private class identity" {

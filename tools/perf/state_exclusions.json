@@ -1,0 +1,38 @@
+{
+  "policy_id": "simple-constructor-v1",
+  "policy_version": 2,
+  "rationale": "Symbols whose difference between two builds is explained by the experiment itself (variant switch or layout pad) rather than by the compiler state. They must not vote when deciding whether two builds share a state. This list is checked in and may not be extended by an artifact under test.",
+  "exact_symbols": [
+    "exec.call_runtime.constructSimpleFieldConstructor",
+    "exec.call_runtime.ensureSimpleCtorMemo",
+    "exec.call_runtime.simpleFieldConstructorPattern",
+    "exec.call_runtime.simpleLocalThisFieldConstructorPattern",
+    "exec.call_runtime.simpleStackThisFieldConstructorPattern",
+    "exec.call_runtime.tryAppendSimpleConstructorField",
+    "exec.call_runtime.decodeSimpleConstructorPutLoc",
+    "exec.call_runtime.decodeSimpleConstructorGetLoc",
+    "exec.call_runtime.decodeSimpleConstructorArgGet",
+    "exec.call_runtime.prototypeChainBlocksSimpleFieldStore",
+    "exec.call_runtime.constructOrdinaryBytecodeFunctionObject",
+    "exec.call_runtime.prepareSameMachineConstructorAfterFirstPoll"
+  ],
+  "audited_patterns": [
+    {
+      "pattern": "^zjs_dossier_pad_[0-9]+$",
+      "reason": "layout-lineage pad exports; present only when -Dzjs_dossier_layout_pad > 0"
+    },
+    {
+      "pattern": "dossier_variant",
+      "reason": "variant attestation surface emitted by the measurement harnesses"
+    },
+    {
+      "pattern": "dossier_options",
+      "reason": "build-options module carrying the variant identity"
+    },
+    {
+      "pattern": "__anon_[0-9]+|__struct_[0-9]+|__union_[0-9]+|__enum_[0-9]+",
+      "reason": "compiler-internal anonymous declaration numbering. Changing a comptime branch shifts these numbers wholesale -- measured 471 renamed symbols between variants, all of the form printFloat__anon_70877 vs __anon_70879 -- which is a renaming, not a code difference. Left in, presence penalties from the renames dominated the distance (9420 of 11644) and made cross-variant state matching impossible."
+    }
+  ],
+  "minimum_votable_symbols": 500
+}

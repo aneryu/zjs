@@ -1,0 +1,429 @@
+{
+ "note": "P6-04b single-limb divisor fast path. P0 = ca31bb9c (the P6-04a baseline), P1 = 952f1aec.",
+ "p0": "ca31bb9c",
+ "p1": "952f1aec",
+ "verdict": "clear pass on the single-limb axis (18.5x to 98x direct-core, 110x at the JS level) with the multi-limb path measured neutral at the JS level once the helper is noinline",
+ "mechanism": "one high-to-low pass computing each quotient digit from a u128 of the running remainder and the next numerator limb, mirroring qjs mp_div1norm (quickjs.c:11332); the quotient buffer is allocated at its exact final length so no normalization pass and no shrinking realloc is needed",
+ "allocation_topology": {
+  "method": "gdb silent breakpoints, slope between N=1 and N=21",
+  "single_limb_divisor": [
+   {
+    "shape": "2x1",
+    "numerator_bits": 128,
+    "p0": {
+     "shl": 128,
+     "subAbsAlloc": 62,
+     "alloc": 320
+    },
+    "p1": {
+     "shl": 0,
+     "subAbsAlloc": 0,
+     "alloc": 4
+    }
+   },
+   {
+    "shape": "8x1",
+    "numerator_bits": 512,
+    "p0": {
+     "shl": 512,
+     "subAbsAlloc": 247,
+     "alloc": 1273
+    },
+    "p1": {
+     "shl": 0,
+     "subAbsAlloc": 0,
+     "alloc": 4
+    }
+   },
+   {
+    "shape": "16x1",
+    "numerator_bits": 1024,
+    "p0": {
+     "shl": 1024,
+     "subAbsAlloc": 491,
+     "alloc": 2541
+    },
+    "p1": {
+     "shl": 0,
+     "subAbsAlloc": 0,
+     "alloc": 4
+    }
+   }
+  ],
+  "multi_limb_divisor_unchanged": [
+   {
+    "shape": "4x2",
+    "alloc": 640
+   },
+   {
+    "shape": "8x4",
+    "alloc": 1278
+   },
+   {
+    "shape": "16x8",
+    "alloc": 2554
+   }
+  ],
+  "result": "O(numerator bits) becomes a constant 4 allocations per division on the single-limb path"
+ },
+ "direct_core": {
+  "harness": "four build instances per side, all sixteen combinations, median of three rounds",
+  "single_limb": {
+   "div-size-1x1": {
+    "p0_ns": 950.6,
+    "p1_ns": 51.49,
+    "speedup": 18.5,
+    "geomean": 0.0541,
+    "min": 0.0525,
+    "max": 0.0558
+   },
+   "div-size-2x1": {
+    "p0_ns": 2108.9,
+    "p1_ns": 59.99,
+    "speedup": 35.2,
+    "geomean": 0.0283,
+    "min": 0.0265,
+    "max": 0.0299
+   },
+   "div-size-8x1": {
+    "p0_ns": 9325.7,
+    "p1_ns": 124.36,
+    "speedup": 75.0,
+    "geomean": 0.0127,
+    "min": 0.0107,
+    "max": 0.0136
+   },
+   "div-size-16x1": {
+    "p0_ns": 20768.2,
+    "p1_ns": 211.53,
+    "speedup": 98.2,
+    "geomean": 0.0097,
+    "min": 0.0083,
+    "max": 0.0103
+   },
+   "mod-size-1x1": {
+    "p0_ns": 950.9,
+    "p1_ns": 50.79,
+    "speedup": 18.7,
+    "geomean": 0.053,
+    "min": 0.0514,
+    "max": 0.0539
+   },
+   "mod-size-2x1": {
+    "p0_ns": 2105.3,
+    "p1_ns": 60.13,
+    "speedup": 35.0,
+    "geomean": 0.0281,
+    "min": 0.0263,
+    "max": 0.029
+   },
+   "mod-size-8x1": {
+    "p0_ns": 9329.9,
+    "p1_ns": 123.6,
+    "speedup": 75.5,
+    "geomean": 0.0127,
+    "min": 0.0107,
+    "max": 0.0136
+   },
+   "mod-size-16x1": {
+    "p0_ns": 20643.8,
+    "p1_ns": 210.35,
+    "speedup": 98.1,
+    "geomean": 0.0097,
+    "min": 0.0083,
+    "max": 0.0103
+   }
+  },
+  "multi_limb": {
+   "div-size-4x2": {
+    "p0_ns": 4559.0,
+    "p1_ns": 4987.2,
+    "geomean": 1.0622,
+    "min": 0.9232,
+    "max": 1.1545,
+    "p0_instance_spread_percent": 12.59,
+    "p1_instance_spread_percent": 11.08
+   },
+   "div-size-8x4": {
+    "p0_ns": 10616.4,
+    "p1_ns": 11611.8,
+    "geomean": 1.0654,
+    "min": 0.9255,
+    "max": 1.1668,
+    "p0_instance_spread_percent": 13.07,
+    "p1_instance_spread_percent": 11.5
+   },
+   "div-size-8x8": {
+    "p0_ns": 10169.6,
+    "p1_ns": 10783.8,
+    "geomean": 1.0447,
+    "min": 0.9562,
+    "max": 1.1092,
+    "p0_instance_spread_percent": 7.15,
+    "p1_instance_spread_percent": 8.26
+   },
+   "div-size-16x8": {
+    "p0_ns": 26647.6,
+    "p1_ns": 28710.5,
+    "geomean": 1.057,
+    "min": 0.9635,
+    "max": 1.1171,
+    "p0_instance_spread_percent": 8.03,
+    "p1_instance_spread_percent": 7.32
+   },
+   "div-size-16x16": {
+    "p0_ns": 25674.6,
+    "p1_ns": 26953.6,
+    "geomean": 1.0374,
+    "min": 0.9781,
+    "max": 1.0747,
+    "p0_instance_spread_percent": 5.18,
+    "p1_instance_spread_percent": 4.48
+   },
+   "mod-size-4x2": {
+    "p0_ns": 4538.3,
+    "p1_ns": 4963.0,
+    "geomean": 1.0635,
+    "min": 0.9204,
+    "max": 1.1651,
+    "p0_instance_spread_percent": 13.5,
+    "p1_instance_spread_percent": 11.53
+   },
+   "mod-size-8x4": {
+    "p0_ns": 10671.0,
+    "p1_ns": 11614.8,
+    "geomean": 1.0623,
+    "min": 0.9251,
+    "max": 1.165,
+    "p0_instance_spread_percent": 13.21,
+    "p1_instance_spread_percent": 11.24
+   },
+   "mod-size-8x8": {
+    "p0_ns": 10145.1,
+    "p1_ns": 10826.8,
+    "geomean": 1.0492,
+    "min": 0.9569,
+    "max": 1.1133,
+    "p0_instance_spread_percent": 8.13,
+    "p1_instance_spread_percent": 7.6
+   },
+   "mod-size-16x8": {
+    "p0_ns": 26564.1,
+    "p1_ns": 28519.6,
+    "geomean": 1.0557,
+    "min": 0.9666,
+    "max": 1.1162,
+    "p0_instance_spread_percent": 7.41,
+    "p1_instance_spread_percent": 7.51
+   },
+   "mod-size-16x16": {
+    "p0_ns": 25698.3,
+    "p1_ns": 26881.1,
+    "geomean": 1.0361,
+    "min": 0.9829,
+    "max": 1.072,
+    "p0_instance_spread_percent": 4.59,
+    "p1_instance_spread_percent": 4.28
+   },
+   "div-rel-lt": {
+    "p0_ns": 25.6,
+    "p1_ns": 26.3,
+    "geomean": 1.0157,
+    "min": 0.9611,
+    "max": 1.0443,
+    "p0_instance_spread_percent": 5.16,
+    "p1_instance_spread_percent": 3.32
+   },
+   "div-rel-eq": {
+    "p0_ns": 4459.8,
+    "p1_ns": 4821.7,
+    "geomean": 1.0533,
+    "min": 0.919,
+    "max": 1.1498,
+    "p0_instance_spread_percent": 10.41,
+    "p1_instance_spread_percent": 13.31
+   },
+   "div-rel-q1": {
+    "p0_ns": 4438.7,
+    "p1_ns": 4803.2,
+    "geomean": 1.0543,
+    "min": 0.9164,
+    "max": 1.1552,
+    "p0_instance_spread_percent": 12.42,
+    "p1_instance_spread_percent": 12.13
+   },
+   "div-rel-exact": {
+    "p0_ns": 10679.1,
+    "p1_ns": 11829.1,
+    "geomean": 1.0699,
+    "min": 0.9011,
+    "max": 1.1893,
+    "p0_instance_spread_percent": 15.82,
+    "p1_instance_spread_percent": 13.95
+   },
+   "div-size-8x4s0": {
+    "p0_ns": 10544.3,
+    "p1_ns": 11642.9,
+    "geomean": 1.0692,
+    "min": 0.9216,
+    "max": 1.1665,
+    "p0_instance_spread_percent": 13.49,
+    "p1_instance_spread_percent": 11.52
+   },
+   "div-size-8x4s1": {
+    "p0_ns": 10808.3,
+    "p1_ns": 11659.5,
+    "geomean": 1.0567,
+    "min": 0.9413,
+    "max": 1.1409,
+    "p0_instance_spread_percent": 9.32,
+    "p1_instance_spread_percent": 10.87
+   },
+   "div-size-8x4s32": {
+    "p0_ns": 10902.6,
+    "p1_ns": 11850.3,
+    "geomean": 1.0638,
+    "min": 0.9418,
+    "max": 1.1544,
+    "p0_instance_spread_percent": 10.04,
+    "p1_instance_spread_percent": 11.39
+   },
+   "div-size-8x4s63": {
+    "p0_ns": 10385.0,
+    "p1_ns": 11572.9,
+    "geomean": 1.0771,
+    "min": 0.9126,
+    "max": 1.1926,
+    "p0_instance_spread_percent": 14.31,
+    "p1_instance_spread_percent": 14.32
+   }
+  },
+  "multi_limb_reading": "geomeans sit at 1.04-1.08 but the within-side instance spread is 7-16% on exactly those cases, so the direct-core multi-limb comparison is not resolvable at this sample size. These cases run about 1278 allocator calls per operation through init.gpa, which makes them dominated by allocator behaviour and highly layout-sensitive. The JS-level measurement, which has tight distributions, is the one that resolves the question."
+ },
+ "js_level": {
+  "harness": "three sides of four build instances each (baseline, inline helper, noinline helper), all sixteen combinations per comparison",
+  "cases": {
+   "bigint_div_8x1": {
+    "baseline_ms": 3.1146,
+    "inline": {
+     "ms": 0.0283,
+     "geomean": 0.0091,
+     "min": 0.009,
+     "max": 0.0091
+    },
+    "noinline": {
+     "ms": 0.0285,
+     "geomean": 0.0091,
+     "min": 0.009,
+     "max": 0.0091
+    },
+    "qjs_ms": 0.0123
+   },
+   "bigint_div_8x4": {
+    "baseline_ms": 3.401,
+    "inline": {
+     "ms": 3.4921,
+     "geomean": 1.0216,
+     "min": 1.0093,
+     "max": 1.027
+    },
+    "noinline": {
+     "ms": 3.4144,
+     "geomean": 0.9992,
+     "min": 0.988,
+     "max": 1.0042
+    },
+    "qjs_ms": 0.0141
+   },
+   "bigint_div_16x8": {
+    "baseline_ms": 3.8189,
+    "inline": {
+     "ms": 3.9247,
+     "geomean": 1.0212,
+     "min": 1.0013,
+     "max": 1.0283
+    },
+    "noinline": {
+     "ms": 3.809,
+     "geomean": 0.997,
+     "min": 0.9915,
+     "max": 1.0017
+    },
+    "qjs_ms": 0.018
+   },
+   "bigint_mod_8x4": {
+    "baseline_ms": 3.3794,
+    "inline": {
+     "ms": 3.4581,
+     "geomean": 1.0235,
+     "min": 1.0199,
+     "max": 1.0278
+    },
+    "noinline": {
+     "ms": 3.3753,
+     "geomean": 1.0016,
+     "min": 0.9982,
+     "max": 1.0106
+    },
+    "qjs_ms": 0.022
+   }
+  },
+  "single_limb_result": "bigint_div_8x1 geomean 0.0091 both variants, a 110x speedup; against pinned QuickJS 252.4x becomes 2.29x",
+  "noinline_decision": "inlined, the helper cost the multi-limb bit loop 2.1-2.4% with all sixteen combinations above 1.0; with the call boundary the same comparison is 0.997-1.002. The fast path is unaffected either way."
+ },
+ "correctness": {
+  "random_differential": {
+   "cases": 10000,
+   "limbs": "1-32",
+   "patterns": "saturated, sparse, alternating, top-bit-plus-one, dense normalized",
+   "signs": "both",
+   "result": "byte-identical to pinned QuickJS",
+   "identity": "q*b+r == a held on all 10000"
+  },
+  "targeted_probe": {
+   "lines": 487,
+   "content": "12 numerators x 10 divisor edge values x 4 sign combinations plus exact/equal/less-than/zero/one cases",
+   "result": "byte-identical to pinned QuickJS"
+  },
+  "unit_test": "single-limb division is exact and allocation-bounded: 16 numerator lengths x 10 divisors x 6 limb patterns x 4 sign combinations, checking q*b+r == a, the remainder's sign and magnitude, and that no result carries a leading zero limb",
+  "test262": {
+   "errors": 0,
+   "prepared": 49775,
+   "passed": 44541,
+   "known": 25
+  },
+  "focused_suites": {
+   "core": 307,
+   "parser": 463,
+   "bytecode": 188,
+   "exec": 389,
+   "builtins": 193,
+   "runtime": 72,
+   "runner": 43
+  },
+  "oom": 14,
+  "altrepr": 1996,
+  "release_safe_core": 306,
+  "force_gc_core": 306,
+  "force_gc_probe": "byte-identical to qjs"
+ },
+ "gates": {
+  "8x1_at_least_20x": "75.0x direct-core, 110.2x at the JS level",
+  "allocations_O_bits_to_O_1": "320/1273/2541 to a constant 4",
+  "sign_and_remainder_semantics": "consistent across all four sign combinations",
+  "single_limb_no_regression": "none; every single-limb shape improved",
+  "overall": "pass"
+ },
+ "limits": [
+  "the direct-core multi-limb comparison is inconclusive: within-side instance spread of 7-16% exceeds the 4-8% geomean, so only the JS-level measurement resolves it",
+  "1x1 is 18.5x, below the 20x line the gate names for 8x1; the gate's shape is met at 75x",
+  "the normalization-shift axis is still inert, as expected: it only becomes live with P6-04c's Algorithm D",
+  "multi-limb divisors are entirely untouched and remain at about 2.5 allocations per numerator bit",
+  "an unsound normalize ownership pattern was noticed here and recorded; it was later measured to be unreachable (the tail normalize shrinks 0 times in 2001 divisions), so it is a model hardening rather than a live defect - see P6-04c section 7"
+ ],
+ "ownership_pattern_note": {
+  "original_wording": "recorded as a pre-existing double free that test-oom did not reach",
+  "corrected": "the failing branch is dead: instrumented, the two tail normalize calls shrink 0 times in 2001 divisions because subAbsAlloc normalizes the remainder every iteration and setBit leaves the quotient's top limb non-zero, so realloc is never called",
+  "status": "ownership-model hardening in ad6bd639, not a fix for a dynamically reachable double free"
+ }
+}

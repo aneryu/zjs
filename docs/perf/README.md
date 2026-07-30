@@ -44,6 +44,101 @@ results for arithmetic, dense array, object property, and string loops before
 emitting timing JSON. Use the JSON as a local diagnostic signal, not as a
 release gate.
 
+### Native callback and execution-root suite
+
+`native-callback` is the mechanism-focused suite for synchronous
+native-to-bytecode re-entry. It covers direct, `.call`, `.apply`,
+`Reflect.apply`, and spread calls at argument counts 0/1/2/8/9/16/64; dense,
+holey, generic array-like, and Proxy argument sources; bytecode, native, bound,
+and Proxy targets; Array, Map, JSON, and Promise callbacks; callback-to-helper
+chains; and Promise-job, generator-resume, and async-resume negative controls.
+Every runnable case prints a deterministic checksum before it is timed.
+Cross-Realm construction is listed explicitly as unsupported by the common
+qjs/zjs CLI surface and remains covered by `src/tests/exec.zig`.
+
+Record the full current ReleaseFast diagnostic with:
+
+```sh
+taskset -c 19 zig build perf-native-callback --seed 0 --summary all
+```
+
+The step uses five warmups, 30 timed samples, three independent sessions, and
+ABBA interleaving. It writes
+`.zig-cache/perf/current/native-callback-zjs-releasefast.json`. Pin an isolated
+CPU externally on Linux; the runner deliberately does not choose a machine-
+specific CPU.
+
+For an old/new stage comparison, keep the old binary in the reference column
+of both reports so stdout remains checked and the new report directly
+interleaves old/new:
+
+```sh
+taskset -c 19 bun tools/compare/run_microbench.js \
+  --suite native-callback \
+  --qjs /path/to/old-zjs --zjs /path/to/old-zjs \
+  --interleaved --sessions 3 --warmup 5 --iters 30 \
+  --output /tmp/native-callback-old.json
+
+taskset -c 19 bun tools/compare/run_microbench.js \
+  --suite native-callback \
+  --qjs /path/to/old-zjs --zjs /path/to/new-zjs \
+  --interleaved --sessions 3 --warmup 5 --iters 30 \
+  --output /tmp/native-callback-new.json
+```
+
+Then apply strict stage thresholds, including each named completion target:
+
+```sh
+node tools/perf/diff_report.js \
+  --require-case-improvement apply_argc0:0.60 \
+  --require-case-improvement apply_argc1:0.65 \
+  --require-case-improvement reflect_apply_argc1:0.65 \
+  --require-case-improvement apply_argc64:0.70 \
+  --require-case-improvement array_foreach_bytecode:0.60 \
+  --require-case-improvement map_foreach_bytecode:0.60 \
+  --require-case-improvement array_callback_helper:0.45 \
+  --require-case-improvement map_callback_helper:0.45 \
+  --case-regression-ratio 1.05 \
+  --geomean-regression-ratio 1.02 \
+  /tmp/native-callback-old.json \
+  /tmp/native-callback-new.json
+```
+
+Do not use the full-suite geomean as the callback-cohort acceptance number:
+the full suite intentionally contains direct-call and execution-root controls.
+Capture matching old/new reports with these category selectors:
+
+```sh
+--category apply \
+--category arg-shape \
+--category target-bytecode \
+--category callback-bytecode \
+--category callback-helper
+```
+
+Apply `--geomean-improvement-ratio 0.70` to those two cohort-only reports.
+Separately capture the control report with:
+
+```sh
+--category call-control \
+--category target-control \
+--category callback-native-control \
+--category hotpath-control \
+--category root-control
+```
+
+The control diff uses `--case-regression-ratio 1.05` and
+`--geomean-regression-ratio 1.02`, without an improvement requirement. Spread
+has its own category because it enters the VM directly rather than crossing a
+native fence.
+
+Each JSON timing row records samples, standard deviation, CV, and per-session
+statistics. If either engine's CV exceeds 5%, lengthen that case's useful
+workload and rerun; do not accept a noisy ratio. For a pinned QuickJS
+comparison, the normalized re-entry cost for any bytecode/native pair is
+`(bytecode row zjs/qjs) / (native row zjs/qjs)`, which separates callback
+re-entry cost from the surrounding builtin implementation.
+
 ## Checked-In Artifacts
 
 The active checked-in self baseline is
@@ -95,7 +190,8 @@ node tools/perf/diff_report.js --allow-sample-config-drift OLD.json NEW.json
 ```
 
 Use `--allow-sample-config-drift` only for retrospective diagnostics; gate-like
-comparisons should use matching `iters` and `warmup`.
+comparisons should use matching iterations, warmups, sessions, and interleaving
+mode.
 
 ## Runtime Profiling
 

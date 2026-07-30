@@ -40,7 +40,7 @@ Options:
   --geomean-improvement-ratio N  Require summary geomean to improve by this ratio
   --warn-case-regressions        Report case regressions but do not fail on them
   --ignore-geomean-regression    Report geomean but do not fail on regression
-  --allow-sample-config-drift    Allow comparing reports with different iters/warmup
+  --allow-sample-config-drift    Allow comparing reports with different sampling/order settings
   -h, --help                     Show this help`);
 }
 
@@ -116,23 +116,46 @@ function statusText(row) {
     return row.status || 'unknown';
 }
 
+function statusSeverity(status) {
+    switch (status) {
+        case 'ok':
+            return 0;
+        case 'unsupported':
+        case 'skipped':
+            return 1;
+        case 'invalid':
+        case 'failed':
+            return 2;
+        default:
+            return 2;
+    }
+}
+
 function sampleConfig(report) {
     const iters = report && report.iters;
     const warmup = report && report.warmup;
     if (!Number.isFinite(iters) || !Number.isFinite(warmup)) return null;
-    return { iters, warmup };
+    return {
+        iters,
+        warmup,
+        sessions: Number.isFinite(report.sessions) ? report.sessions : 1,
+        interleaved: report.interleaved === true,
+    };
 }
 
 function sameSampleConfig(oldReport, newReport) {
     const oldConfig = sampleConfig(oldReport);
     const newConfig = sampleConfig(newReport);
     if (oldConfig == null || newConfig == null) return false;
-    return oldConfig.iters === newConfig.iters && oldConfig.warmup === newConfig.warmup;
+    return oldConfig.iters === newConfig.iters &&
+        oldConfig.warmup === newConfig.warmup &&
+        oldConfig.sessions === newConfig.sessions &&
+        oldConfig.interleaved === newConfig.interleaved;
 }
 
 function sampleConfigText(config) {
     if (config == null) return 'missing';
-    return `iters=${config.iters}, warmup=${config.warmup}`;
+    return `iters=${config.iters}, warmup=${config.warmup}, sessions=${config.sessions}, interleaved=${config.interleaved}`;
 }
 
 function compareReports(oldReport, newReport) {
@@ -150,6 +173,8 @@ function compareReports(oldReport, newReport) {
     const newUnsupported = summaryCount(newReport, 'unsupported');
     const oldSkipped = summaryCount(oldReport, 'skipped');
     const newSkipped = summaryCount(newReport, 'skipped');
+    const oldInvalid = summaryCount(oldReport, 'invalid');
+    const newInvalid = summaryCount(newReport, 'invalid');
     const oldGeomean = reportGeomean(oldReport);
     const newGeomean = reportGeomean(newReport);
     const oldSampleConfig = sampleConfig(oldReport);
@@ -169,6 +194,9 @@ function compareReports(oldReport, newReport) {
     }
     if (newSkipped > oldSkipped) {
         failures.push(`skipped case count increased: ${oldSkipped} -> ${newSkipped}`);
+    }
+    if (newInvalid > oldInvalid) {
+        failures.push(`invalid case count increased: ${oldInvalid} -> ${newInvalid}`);
     }
     if (failOnGeomeanRegression && oldGeomean != null && newGeomean != null && newGeomean > oldGeomean * geomeanRegressionRatio) {
         failures.push(`geometric mean regressed: ${oldGeomean.toFixed(4)} -> ${newGeomean.toFixed(4)}`);
@@ -201,7 +229,14 @@ function compareReports(oldReport, newReport) {
                 newStatus: statusText(newRow),
                 reason: newRow.reason || '',
             });
-            if (oldRow.status === 'ok' || newRow.status === 'unsupported' || newRow.status === 'skipped') {
+            const severityIncreased = statusSeverity(newRow.status) > statusSeverity(oldRow.status);
+            if (
+                oldRow.status === 'ok' ||
+                newRow.status === 'unsupported' ||
+                newRow.status === 'skipped' ||
+                newRow.status === 'invalid' ||
+                severityIncreased
+            ) {
                 failures.push(`case status changed: ${name} ${statusText(oldRow)} -> ${statusText(newRow)}`);
             }
         }
@@ -296,6 +331,8 @@ function compareReports(oldReport, newReport) {
             newUnsupported,
             oldSkipped,
             newSkipped,
+            oldInvalid,
+            newInvalid,
             oldSampleConfig,
             newSampleConfig,
         },
@@ -340,6 +377,7 @@ function formatText(result) {
         `  compatible:   ${result.summary.oldCompatible} -> ${result.summary.newCompatible}`,
         `  unsupported:  ${result.summary.oldUnsupported} -> ${result.summary.newUnsupported}`,
         `  skipped:      ${result.summary.oldSkipped} -> ${result.summary.newSkipped}`,
+        `  invalid:      ${result.summary.oldInvalid} -> ${result.summary.newInvalid}`,
         `  sample cfg:   ${sampleConfigText(result.summary.oldSampleConfig)} -> ${sampleConfigText(result.summary.newSampleConfig)}`,
         '',
     ];

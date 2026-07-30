@@ -360,7 +360,7 @@ pub const JSContext = struct {
     pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: core.FunctionCallOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
         const this_value = options.this_value orelse JSValue.undefinedValue();
-        return exec.call_runtime.callValueOrBytecode(self.core, options.output, global, this_value, callee, args, null, null);
+        return exec.call_runtime.callValueOrBytecodeRoot(self.core, options.output, global, this_value, callee, args, null, null);
     }
 
     pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
