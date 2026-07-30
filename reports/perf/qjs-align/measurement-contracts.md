@@ -101,3 +101,34 @@ cycles +30.85，而 `stall_backend_mem` 仅 +0.04）。反之也有指令赢而�
 
 **对策**：任何候选在进入生产改动前，必须先给出**绝对贡献**（单事件成本 × 实际频次），
 而不是比值或静态调用点数。「静态调用点多」不能证明动态覆盖面。
+
+## 10. worktree 里没有 test262 语料，门禁必须实跑而非假定
+
+**来源**：P7-61
+
+`test262` 是 git submodule（`.gitmodules`，gitlink `160000`）。**`git worktree add` 不会初始化
+submodule**，因此九个 worktree 中 `test262/test` 条目数**全为 0**，只有集成树 `/home/aneryu/zjs`
+有语料。P7-61 的 `test-runner` 因此在缺语料上 2/45 失败，直到把集成树的语料以只读方式接入
+（gitlink 保持干净）。
+
+**已核实的好消息**：缺语料时门禁**响亮失败**（`run-test262-dev` 收到 SIGABRT，build 判失败），
+**不会**静默以 0 个用例通过。因此任何形如 `Result: 0/49775 errors, passed 44541` 的报告都必须
+来自真实语料，不可能是假绿。
+
+**对策**：在 worktree 中跑 test262 前，先确认语料可用（`ls test262/test | wc -l` 非零）；
+接入方式必须保持 gitlink 干净。凡在 worktree 中报告 test262 结果的产物，应记录语料来源。
+
+## 11. `zjs_nan_boxing` 的默认值依赖目标平台，不是常量 false
+
+**来源**：P7-61（更正 P7-60 §8.3）
+
+`build.zig:21-22`：
+
+```zig
+const target_default_nan_boxing = target.result.ptrBitWidth() < 64;
+const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", ...) orelse target_default_nan_boxing;
+```
+
+在 aarch64（64 位）上默认为 **false**，即**默认表示是 16 字节 payload+tag，NaN boxing 才是
+alternate**。P7-60 §8.3 把两者说反了。任何涉及 JSValue 表示的结论都必须写明测的是哪一种，
+并跑 `-Dzjs_nan_boxing=true` 门禁。
