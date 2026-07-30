@@ -869,25 +869,33 @@ fn unshiftedLimbAt(normalized: []const Limb, index: usize, shift: u6) Limb {
 
 /// `numerator -= divisor * qhat` across `divisor.len + 1` limbs. Returns true
 /// when the result went negative, meaning `qhat` was one too large.
-fn subMulAt(numerator: []Limb, divisor: []const Limb, qhat: Limb) bool {
+///
+/// One fused wrapping `u128` chain per limb, mirroring qjs `mp_sub_mul1`
+/// (quickjs.c:11419). The previous shape split the same computation into a
+/// product carry plus two `@subWithOverflow` results, and LLVM materialized
+/// each of those overflow bits into a register, spilled it to the stack, then
+/// re-narrowed and masked it -- six instructions per limb of pure overhead plus
+/// two dead stores, visible in the disassembly as `cset` / `strb [sp]` /
+/// `and #0xff` / `and #0x1` pairs.
+///
+/// Here the negated high half of the wide value *is* the next borrow, so no
+/// overflow flag ever has to become a value. Note the borrow is a full limb
+/// rather than 0 or 1, exactly as in qjs, which is why the top limb is handled
+/// with a wrapping subtract and an unsigned-greater test.
+pub fn subMulAt(numerator: []Limb, divisor: []const Limb, qhat: Limb) bool {
     std.debug.assert(numerator.len == divisor.len + 1);
-    var carry: Limb = 0;
     var borrow: Limb = 0;
     for (divisor, 0..) |limb, i| {
-        const product = @as(DoubleLimb, limb) * qhat + carry;
-        carry = @intCast(product >> limb_bits);
-        const low: Limb = @truncate(product);
-        const first = @subWithOverflow(numerator[i], low);
-        const second = @subWithOverflow(first[0], borrow);
-        numerator[i] = second[0];
-        // At most one of the two can wrap: the first only wraps when it leaves
-        // a non-zero value, which the second cannot then underflow.
-        borrow = @as(Limb, first[1]) + @as(Limb, second[1]);
+        const wide: DoubleLimb = @as(DoubleLimb, numerator[i]) -%
+            @as(DoubleLimb, limb) *% @as(DoubleLimb, qhat) -%
+            @as(DoubleLimb, borrow);
+        numerator[i] = @truncate(wide);
+        borrow = 0 -% @as(Limb, @truncate(wide >> limb_bits));
     }
-    const top_first = @subWithOverflow(numerator[divisor.len], carry);
-    const top_second = @subWithOverflow(top_first[0], borrow);
-    numerator[divisor.len] = top_second[0];
-    return (top_first[1] | top_second[1]) != 0;
+    const top = numerator[divisor.len];
+    const updated = top -% borrow;
+    numerator[divisor.len] = updated;
+    return updated > top;
 }
 
 /// `numerator += divisor` across `divisor.len + 1` limbs. The final carry is
