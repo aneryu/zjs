@@ -1,0 +1,40 @@
+{
+ "note": "P7-60 op.lnot frequency corpus. `synthetic_lnot` exists only for the type-cost matrix and must never be cited as product frequency evidence.",
+ "groups": {
+  "microbench": {
+   "roots": ["tools/perf/redefine_census/corpus/microbench"]
+  },
+  "wrapped": {
+   "roots": ["tools/perf/redefine_census/corpus/wrapped"]
+  },
+  "named_eval": {
+   "roots": ["tools/perf/redefine_census/corpus/named_eval"]
+  },
+  "p0_sentinel": {
+   "roots": ["tools/perf/same_runtime/cases"]
+  },
+  "product": {
+   "roots": [
+    "tools/perf/redefine_census/corpus/gbemu_product.js",
+    "~/javascript-zoo/bench/box2d.js",
+    "~/javascript-zoo/bench/code-load.js",
+    "~/javascript-zoo/bench/crypto.js",
+    "~/javascript-zoo/bench/deltablue.js",
+    "~/javascript-zoo/bench/earley-boyer.js",
+    "~/javascript-zoo/bench/gbemu.js",
+    "~/javascript-zoo/bench/mandreel.js",
+    "~/javascript-zoo/bench/navier-stokes.js",
+    "~/javascript-zoo/bench/pdfjs.js",
+    "~/javascript-zoo/bench/raytrace.js",
+    "~/javascript-zoo/bench/regexp.js",
+    "~/javascript-zoo/bench/richards.js",
+    "~/javascript-zoo/bench/splay.js",
+    "~/javascript-zoo/bench/typescript.js",
+    "~/javascript-zoo/bench/zlib.js"
+   ]
+  },
+  "bootstrap": {
+   "roots": ["tools/perf/logical_not/bootstrap"]
+  }
+ }
+}

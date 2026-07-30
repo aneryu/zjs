@@ -25,7 +25,37 @@
 - **归因边界**。尚未区分这笔成本是**函数调用边界**（缺快速 handler 导致落到通用路径）
   还是 **`ToBoolean` 语义本身**昂贵。两者对应完全不同的一刀。
 
-**当前状态**：不抢占 P7-50 / P7-41 的顺序，也不在两条画像完成前启动。
+**当前状态（2026-07-30 更新，本条已画像完毕）**：四项前置全部补齐，见
+`P7-60-logical-not/P7-60-logical-not.md`。结论与登记时的担心相反：
+
+```text
+genuine unfaithful divergence, and NOT dynamically cold
+→ escalate (not deferred)
+```
+
+- **类型矩阵**：21 格 × 两次独立扫描。qjs 严格按 `quickjs.c:19096` 的 tag 判据分两档
+  （immediate 18.0 insn / 2.7–2.9 cyc；其余 38–48 insn / 4.8–6.4 cyc）；**zjs 是一条平线**
+  87–137 insn / 18.3–25.0 cyc，与类型无关。差值最大的恰是 qjs 有内联臂的四个 immediate tag
+  （**+18.00 cyc** 均值），最小的是 qjs 也付调用的 object（+12.5）。
+- **same-runtime 基线**：`ab4fc64b`、6 样本 ABBA、两次冷构建逐字节相同。复现 P7-41 探针
+  为 **20.27 vs 3.13 cyc**（指令数 91.05 / 18.01 逐位复现）。
+- **绝对 Pareto 贡献**：动态计数（临时 tag 计数器，已还原）。`microbench`(75) /
+  `p0_sentinel`(48) / `named_eval` / `bootstrap` 全 **0**；`wrapped` 的 5 个非零条目**就是
+  P7-41 的探针本身**；但 **16 个产品型负载全部非零，其中 11 个每轮 >10⁵ 次** ——
+  `earley-boyer` 2.06×10⁷ 次 = **1.53% cycles / 364.9 M**、`mandreel` **1.35%**、
+  `raytrace` **1.03%**、`splay` 0.77%、`zlib` 275 M。比 P7-51A 那条 deferred 项
+  （唯一产品负载 ≈8.9 k cycles 全程）大四到五个数量级。
+- **归因边界**：**是冷 dispatch 协议，不是 `ToBoolean`**。定周期 ×3 per-symbol 拆分给
+  `toBoolean` 只有 **1.58 cyc（7%）**；同一引擎的 `op_if_false8` 做同语义判断，内联时
+  33 insn / 4.3 cyc、被路由进 `cold_table` 时 121 insn / 22.6 cyc，冷路由税
+  **+88 insn / +18.3 cyc** ≈ `op.lnot` 的全部成本。
+
+**一刀的形状**：给 `op.lnot` 一个快 handler，immediate 臂复用引擎里已有的
+`JSValue.asBranchImmediateBool`（`value.zig:450`，本身就是 `quickjs.c:19096` 的逐字镜像、
+已被 `op_if_false8` 使用），complex 类型原封不动落回现有冷 handler。
+**注意**：按字面的「最大阶段 ≥40%」判据本线落在「关闭」一侧（最大阶段 31%），
+dossier §6.3 论证该判据的前提（各阶段可独立删）在此不成立，并把取舍交回协调者。
+`splay` 不在受益面内（94.3% object 操作数，忠实 immediate 臂不覆盖）。
 
 ## same-flags property replacement should gate shape COW（deferred alignment fix）
 

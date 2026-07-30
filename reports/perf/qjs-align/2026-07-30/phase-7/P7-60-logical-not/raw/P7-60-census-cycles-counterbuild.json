@@ -1,0 +1,239 @@
+{
+ "collector": "tools/perf/logical_not/run_census.py",
+ "mode": "cycles",
+ "binary": "/home/aneryu/worktrees/zjs-p7-logicalnot/.tmp/bin/zjs-census",
+ "cpu": 19,
+ "pmu": "armv8_pmuv3_1",
+ "host_lock": "exclusive",
+ "entries": {
+  "product/gbemu_product": {
+   "status": "ok",
+   "wall_s": 1.3141447419766337,
+   "cycles": 5009615628.0,
+   "instructions": 25629765759.0,
+   "lnot_total": 284209,
+   "tags": {
+    "object": 25,
+    "int": 25,
+    "boolean": 284149,
+    "null": 5,
+    "undefined": 5
+   },
+   "script": "tools/perf/redefine_census/corpus/gbemu_product.js",
+   "group": "product"
+  },
+  "product/box2d": {
+   "status": "ok",
+   "wall_s": 1.0466138771735132,
+   "cycles": 4044592912.0,
+   "instructions": 17983128405.0,
+   "lnot_total": 335842,
+   "tags": {
+    "object": 5780,
+    "int": 82410,
+    "boolean": 247642,
+    "null": 10
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/box2d.js",
+   "group": "product"
+  },
+  "product/code-load": {
+   "status": "ok",
+   "wall_s": 2.022730143973604,
+   "cycles": 7786957304.0,
+   "instructions": 23710518855.0,
+   "lnot_total": 14905,
+   "tags": {
+    "string": 94,
+    "object": 564,
+    "int": 12072,
+    "boolean": 1893,
+    "undefined": 282
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/code-load.js",
+   "group": "product"
+  },
+  "product/crypto": {
+   "status": "ok",
+   "wall_s": 6.165693921968341,
+   "cycles": 24008112108.0,
+   "instructions": 126940915904.0,
+   "lnot_total": 6,
+   "tags": {
+    "boolean": 6
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/crypto.js",
+   "group": "product"
+  },
+  "product/deltablue": {
+   "status": "ok",
+   "wall_s": 2.0206351920496672,
+   "cycles": 7847860478.0,
+   "instructions": 35091703938.0,
+   "lnot_total": 514082,
+   "tags": {
+    "boolean": 514082
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/deltablue.js",
+   "group": "product"
+  },
+  "product/earley-boyer": {
+   "status": "ok",
+   "wall_s": 6.20203280588612,
+   "cycles": 24147392279.0,
+   "instructions": 107917841609.0,
+   "lnot_total": 20626384,
+   "tags": {
+    "boolean": 20626384
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/earley-boyer.js",
+   "group": "product"
+  },
+  "product/gbemu": {
+   "status": "ok",
+   "wall_s": 1.296087145106867,
+   "cycles": 5013700787.0,
+   "instructions": 25629857934.0,
+   "lnot_total": 284209,
+   "tags": {
+    "object": 25,
+    "int": 25,
+    "boolean": 284149,
+    "null": 5,
+    "undefined": 5
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/gbemu.js",
+   "group": "product"
+  },
+  "product/mandreel": {
+   "status": "ok",
+   "wall_s": 5.495624622097239,
+   "cycles": 21353897297.0,
+   "instructions": 120079774852.0,
+   "lnot_total": 16034159,
+   "tags": {
+    "object": 2,
+    "boolean": 16034155,
+    "undefined": 2
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/mandreel.js",
+   "group": "product"
+  },
+  "product/navier-stokes": {
+   "status": "ok",
+   "wall_s": 2.0501933661289513,
+   "cycles": 7958826884.0,
+   "instructions": 40763581190.0,
+   "lnot_total": 2,
+   "tags": {
+    "boolean": 2
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/navier-stokes.js",
+   "group": "product"
+  },
+  "product/pdfjs": {
+   "status": "ok",
+   "wall_s": 1.3206993469502777,
+   "cycles": 5104306697.0,
+   "instructions": 23770564320.0,
+   "lnot_total": 586994,
+   "tags": {
+    "string": 98290,
+    "object": 17006,
+    "int": 40850,
+    "boolean": 387182,
+    "null": 1245,
+    "undefined": 42421
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/pdfjs.js",
+   "group": "product"
+  },
+  "product/raytrace": {
+   "status": "ok",
+   "wall_s": 3.038878042018041,
+   "cycles": 11817128175.0,
+   "instructions": 54404581182.0,
+   "lnot_total": 7091133,
+   "tags": {
+    "object": 1802004,
+    "int": 5182659,
+    "boolean": 105435,
+    "float64": 1035
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/raytrace.js",
+   "group": "product"
+  },
+  "product/regexp": {
+   "status": "ok",
+   "wall_s": 3.2203752850182354,
+   "cycles": 12520561007.0,
+   "instructions": 62119748348.0,
+   "lnot_total": 3,
+   "tags": {
+    "boolean": 3
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/regexp.js",
+   "group": "product"
+  },
+  "product/richards": {
+   "status": "ok",
+   "wall_s": 2.014999123988673,
+   "cycles": 7823884441.0,
+   "instructions": 36377055527.0,
+   "lnot_total": 2,
+   "tags": {
+    "boolean": 2
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/richards.js",
+   "group": "product"
+  },
+  "product/splay": {
+   "status": "ok",
+   "wall_s": 2.5080187269486487,
+   "cycles": 9678655744.0,
+   "instructions": 35992006151.0,
+   "lnot_total": 5784438,
+   "tags": {
+    "object": 5455475,
+    "boolean": 3,
+    "null": 328960
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/splay.js",
+   "group": "product"
+  },
+  "product/typescript": {
+   "status": "ok",
+   "wall_s": 7.928302640095353,
+   "cycles": 30789953346.0,
+   "instructions": 113881584416.0,
+   "lnot_total": 5673591,
+   "tags": {
+    "string": 35,
+    "object": 799313,
+    "int": 455570,
+    "boolean": 4318131,
+    "null": 74555,
+    "undefined": 25987
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/typescript.js",
+   "group": "product"
+  },
+  "product/zlib": {
+   "status": "ok",
+   "wall_s": 47.39803184103221,
+   "cycles": 184797773560.0,
+   "instructions": 976757037781.0,
+   "lnot_total": 14481087,
+   "tags": {
+    "string": 9,
+    "object": 19,
+    "int": 14473229,
+    "boolean": 7824,
+    "null": 2,
+    "undefined": 4
+   },
+   "script": "/home/aneryu/javascript-zoo/bench/zlib.js",
+   "group": "product"
+  }
+ }
+}
