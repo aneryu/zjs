@@ -1,0 +1,3488 @@
+{
+  "tool": "P7-70-resolvability",
+  "generatedFrom": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.zig-cache/perf/p7-70/microbench-75-run-a.json",
+  "engineCommit": "1fb79bc39b3b4277a382d96283f18a41d53894cb",
+  "zjsSha256": "c5625b9977ebd1c2de212e973c03e6724ececb537c33d454d29cf8bc4c0dbd5b",
+  "qjsCommit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+  "qjsSha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+  "generation": "2026-07-30T17:59:14.142Z#2057153",
+  "policy": {
+    "policy_id": "qjs-align-p7-70-whole-process-measurement",
+    "policy_version": 1,
+    "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+    "path": "/home/aneryu/worktrees/zjs-p7-measurement-contract/tools/compare/measurement_policy.json"
+  },
+  "startupBaseline": {
+    "qjsMedianMs": 0.4314755000000332,
+    "zjsMedianMs": 0.560181499999544,
+    "qjsIqrMs": 0.006645749999734107,
+    "zjsIqrMs": 0.019041500000184897,
+    "ratio": 1.2982927188206537,
+    "deltaMs": 0.12870599999951082,
+    "recollected": true,
+    "note": "recollected in the same measurement generation as the cases; Phase 6 values (0.7907 / 0.9986) are NOT reused"
+  },
+  "thresholds": {
+    "source": "/home/aneryu/worktrees/zjs-p7-measurement-contract/tools/compare/measurement_policy.json",
+    "note": "thresholds are read from the repository policy, never from this file"
+  },
+  "classes": [
+    {
+      "class": "execution-dominant",
+      "caseCount": 15,
+      "pairedGeomean": 1.1548415876172877,
+      "absoluteTotalDeltaMs": 23.883715999998117,
+      "medianStartupShareQjs": 0.0318290657771564,
+      "stable": 15,
+      "unstable": 0,
+      "validated": 14,
+      "cases": [
+        "math_min",
+        "uri_decode_4byte",
+        "uri_component_decode_4byte",
+        "vm_int_sum_large",
+        "prop_read_mono",
+        "prop_read_poly3",
+        "proto_read",
+        "global_read_loop",
+        "call2_loop",
+        "closure_call_loop",
+        "arrow_call_loop",
+        "dense_array_write_read",
+        "array_map_callback",
+        "map_string_keys",
+        "regexp_test_cached"
+      ]
+    },
+    {
+      "class": "partially-resolvable",
+      "caseCount": 8,
+      "pairedGeomean": 1.2143134960056172,
+      "absoluteTotalDeltaMs": 2.3960510000000568,
+      "medianStartupShareQjs": 0.3113447986880094,
+      "stable": 5,
+      "unstable": 3,
+      "validated": 2,
+      "cases": [
+        "int_sum",
+        "prop_read",
+        "array_read",
+        "func_call",
+        "global_read",
+        "array_for",
+        "arrow_tail_recursion",
+        "string_concat_loop"
+      ]
+    },
+    {
+      "class": "startup-dominated",
+      "caseCount": 52,
+      "pairedGeomean": 1.3399203087839482,
+      "absoluteTotalDeltaMs": 8.605238500000894,
+      "medianStartupShareQjs": 0.9247461117425791,
+      "stable": 30,
+      "unstable": 22,
+      "validated": 0,
+      "cases": [
+        "json_roundtrip",
+        "empty_loop",
+        "string_build",
+        "date_now",
+        "prop_write",
+        "prop_create",
+        "prop_delete",
+        "array_write",
+        "array_prop_create",
+        "array_length_decr",
+        "array_hole_length_decr",
+        "array_push",
+        "array_pop",
+        "typed_array_read",
+        "typed_array_write",
+        "global_write",
+        "global_write_strict",
+        "local_destruct",
+        "global_destruct",
+        "global_destruct_strict",
+        "closure_var",
+        "float_arith",
+        "map_set",
+        "map_delete",
+        "weak_map_set",
+        "weak_map_delete",
+        "array_for_in",
+        "array_for_of",
+        "object_null",
+        "regexp_ascii",
+        "regexp_utf16",
+        "string_build2",
+        "string_concat0",
+        "string_concat1",
+        "string_concat2",
+        "string_concat3",
+        "string_slice1",
+        "string_slice2",
+        "string_slice3",
+        "sort_bench",
+        "int_to_string",
+        "int_toString",
+        "float_to_string",
+        "float_toString",
+        "float_toFixed",
+        "float_toPrecision",
+        "float_toExponential",
+        "string_to_int",
+        "string_to_float",
+        "bigint64_arith",
+        "bigint256_arith",
+        "bigint_short_sum"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "name": "int_sum",
+      "category": "arithmetic",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.36807040396637664,
+      "startupShareZjs": 0.4230332683378655,
+      "adjusted": {
+        "ratio": 1.0313618741131323,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 1.1722634999999855,
+      "zjsMedianMs": 1.3242020000000139,
+      "qjsIqrMs": 0.07211225000006038,
+      "zjsIqrMs": 0.08137900000002674,
+      "pairedRatio": 1.1484942344771927,
+      "pairedP25": 1.1330723161353844,
+      "pairedP75": 1.1622651650317102,
+      "pairedGeomean": 1.135085097223994,
+      "absoluteDeltaMs": 0.1519385000000284,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.151469774427785,
+        "pairedP25": 1.1239998253620334,
+        "pairedP75": 1.1641428436948682,
+        "absoluteDeltaMs": 0.16840049999973417,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": 0.016461999999705768
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.1480454686999515,
+        "absoluteDeltaMs": 0.18050550000043586
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a417e8762feaab23b79cedb3c0f64136796f7bf7a5666eee3b3d929a5b704917",
+        "zjsStdoutSha256": "a417e8762feaab23b79cedb3c0f64136796f7bf7a5666eee3b3d929a5b704917",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "json_roundtrip",
+      "category": "json",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.8869920320363882,
+      "startupShareZjs": 0.8376182565533901,
+      "adjusted": {
+        "ratio": 1.975487743882105,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.4864479999999958,
+      "zjsMedianMs": 0.6687790000000291,
+      "qjsIqrMs": 0.023710500000049706,
+      "zjsIqrMs": 0.009150249999919424,
+      "pairedRatio": 1.3706077774654462,
+      "pairedP25": 1.3324246018620776,
+      "pairedP75": 1.4021180921242618,
+      "pairedGeomean": 1.3496053380170696,
+      "absoluteDeltaMs": 0.18233100000003333,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "zjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "empty_loop",
+      "category": "control",
+      "subsystem": "control",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.5076200268942674,
+      "startupShareZjs": 0.572430657422416,
+      "adjusted": {
+        "ratio": 0.9997574796049513,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.8499969999999735,
+      "zjsMedianMs": 0.9786014999999679,
+      "qjsIqrMs": 0.027508500000038794,
+      "zjsIqrMs": 0.03172100000011824,
+      "pairedRatio": 1.152146391796221,
+      "pairedP25": 1.1333649804500339,
+      "pairedP75": 1.1726167439239297,
+      "pairedGeomean": 1.1540300957901881,
+      "absoluteDeltaMs": 0.12860449999999446,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "zjsStdoutSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_read",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.3030318247133885,
+      "startupShareZjs": 0.3380667459455318,
+      "adjusted": {
+        "ratio": 1.10524780415747,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 1.4238619999999287,
+      "zjsMedianMs": 1.6570144999999457,
+      "qjsIqrMs": 0.0149960000000533,
+      "zjsIqrMs": 0.08521574999988957,
+      "pairedRatio": 1.156457624577311,
+      "pairedP25": 1.1419451166667574,
+      "pairedP75": 1.2254822860552368,
+      "pairedGeomean": 1.1791676382282346,
+      "absoluteDeltaMs": 0.23315250000001697,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "zjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_read",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.32607649138399575,
+      "startupShareZjs": 0.35695481109956806,
+      "adjusted": {
+        "ratio": 1.1316438250943937,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 1.3232340000000704,
+      "zjsMedianMs": 1.569334500000025,
+      "qjsIqrMs": 0.02598325000005275,
+      "zjsIqrMs": 0.03229699999985769,
+      "pairedRatio": 1.192418859418459,
+      "pairedP25": 1.1830629775097645,
+      "pairedP75": 1.205989851984895,
+      "pairedGeomean": 1.1871631156331792,
+      "absoluteDeltaMs": 0.24610049999995454,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "eef977c220f0b24545feca5839c8076f25715747f8af9057976fe89aa803c23f",
+        "zjsStdoutSha256": "eef977c220f0b24545feca5839c8076f25715747f8af9057976fe89aa803c23f",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "func_call",
+      "category": "function",
+      "subsystem": "call",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.21208057946753264,
+      "startupShareZjs": 0.22232459510327782,
+      "adjusted": {
+        "ratio": 1.2223696875823735,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 2.034488500000009,
+      "zjsMedianMs": 2.5196559999999977,
+      "qjsIqrMs": 0.02269374999991669,
+      "zjsIqrMs": 0.10568499999996561,
+      "pairedRatio": 1.2426148470645666,
+      "pairedP25": 1.2161036097172553,
+      "pairedP75": 1.2513304308555573,
+      "pairedGeomean": 1.2351194798041865,
+      "absoluteDeltaMs": 0.48516749999998865,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.2522515011757553,
+        "pairedP25": 1.240124454043083,
+        "pairedP75": 1.26123960734938,
+        "absoluteDeltaMs": 0.5148110000000088,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": 0.02964350000002014
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.2533720245826743,
+        "absoluteDeltaMs": 0.5103920000001381
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1fc848b51678051e902f2bf8f03975636a275603904d8edcc9fc26101336f41f",
+        "zjsStdoutSha256": "1fc848b51678051e902f2bf8f03975636a275603904d8edcc9fc26101336f41f",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "math_min",
+      "category": "math",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.19785329594619844,
+      "startupShareZjs": 0.19345788905660952,
+      "adjusted": {
+        "ratio": 1.3350659217253873,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 2.1807850000000144,
+      "zjsMedianMs": 2.8956249999999955,
+      "qjsIqrMs": 0.01658050000000344,
+      "zjsIqrMs": 0.04865824999987467,
+      "pairedRatio": 1.3285066107259276,
+      "pairedP25": 1.3156404650526103,
+      "pairedP75": 1.342040012396367,
+      "pairedGeomean": 1.3293752169696258,
+      "absoluteDeltaMs": 0.714839999999981,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.322581759161146,
+        "pairedP25": 1.3066551679635783,
+        "pairedP75": 1.3402756566153475,
+        "absoluteDeltaMs": 0.6866349999995691,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": -0.02820500000041193
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.3324316169746866,
+        "absoluteDeltaMs": 0.7307505000003403
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "ee7aba636a65e64ec010725d8b04dde5725c098a095777a42a3267d90fcc0c73",
+        "zjsStdoutSha256": "ee7aba636a65e64ec010725d8b04dde5725c098a095777a42a3267d90fcc0c73",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_build",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.7502349507625169,
+      "startupShareZjs": 0.743764526092802,
+      "adjusted": {
+        "ratio": 1.343513522924012,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.5751205000000255,
+      "zjsMedianMs": 0.7531704999999533,
+      "qjsIqrMs": 0.028507749999960197,
+      "zjsIqrMs": 0.008029999999990878,
+      "pairedRatio": 1.3113466645374046,
+      "pairedP25": 1.2667379894846351,
+      "pairedP75": 1.3295477418737947,
+      "pairedGeomean": 1.2817232163137138,
+      "absoluteDeltaMs": 0.17804999999992788,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1d8fa3c8ab49d50b30fccbbd901735d5896a5d7959a5ad7ccecb79c1c849cc66",
+        "zjsStdoutSha256": "1d8fa3c8ab49d50b30fccbbd901735d5896a5d7959a5ad7ccecb79c1c849cc66",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "uri_decode_4byte",
+      "category": "uri",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.030647882958077015,
+      "startupShareZjs": 0.030906033507149964,
+      "adjusted": {
+        "ratio": 1.2871055332963326,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 14.078476499999852,
+      "zjsMedianMs": 18.125311999999894,
+      "qjsIqrMs": 0.05823224999994636,
+      "zjsIqrMs": 0.04208000000011225,
+      "pairedRatio": 1.2846417998286448,
+      "pairedP25": 1.28304238604591,
+      "pairedP75": 1.2885759341362641,
+      "pairedGeomean": 1.2856604305620274,
+      "absoluteDeltaMs": 4.046835500000043,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.2867449482203743,
+        "pairedP25": 1.2833551580131148,
+        "pairedP75": 1.29227854180186,
+        "absoluteDeltaMs": 4.072060499999907,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": 0.02522499999986394
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.2856772874955753,
+        "absoluteDeltaMs": 4.004226999999787
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "zjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "uri_component_decode_4byte",
+      "category": "uri",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.030696021840021525,
+      "startupShareZjs": 0.03080414449850963,
+      "adjusted": {
+        "ratio": 1.2935913947400826,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 14.056397999999945,
+      "zjsMedianMs": 18.18526399999996,
+      "qjsIqrMs": 0.04770524999992176,
+      "zjsIqrMs": 0.08135025000012774,
+      "pairedRatio": 1.2947325346356942,
+      "pairedP25": 1.2926071808498878,
+      "pairedP75": 1.2987492135544376,
+      "pairedGeomean": 1.295687600503705,
+      "absoluteDeltaMs": 4.128866000000016,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.2894055913899423,
+        "pairedP25": 1.2859796300890458,
+        "pairedP75": 1.2918000606252042,
+        "absoluteDeltaMs": 4.067340000000058,
+        "directionAgrees": true,
+        "iqrOverlap": false,
+        "absoluteDeltaMovementMs": -0.061525999999958
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.2920106663231508,
+        "absoluteDeltaMs": 4.07249900000005
+      },
+      "stability": "stable-direction-only",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "zjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "date_now",
+      "category": "date",
+      "subsystem": "date",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.8901127918432985,
+      "startupShareZjs": 0.8228609242722622,
+      "adjusted": {
+        "ratio": 2.2639063585452983,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.4847424999999248,
+      "zjsMedianMs": 0.680772999999931,
+      "qjsIqrMs": 0.024882750000131182,
+      "zjsIqrMs": 0.019009499999981472,
+      "pairedRatio": 1.4527798754836372,
+      "pairedP25": 1.3796701540639837,
+      "pairedP75": 1.4919455984591439,
+      "pairedGeomean": 1.4422174545089321,
+      "absoluteDeltaMs": 0.1960305000000062,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "0db7dc125eefa3a61e331aa637c30455fd25dc784da05020091afed76e3a984e",
+        "zjsStdoutSha256": "0db7dc125eefa3a61e331aa637c30455fd25dc784da05020091afed76e3a984e",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_write",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.8811394811705474,
+      "startupShareZjs": 0.8396301428475956,
+      "adjusted": {
+        "ratio": 1.8382915116902707,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.48967899999991005,
+      "zjsMedianMs": 0.6671764999999823,
+      "qjsIqrMs": 0.01374325000023191,
+      "zjsIqrMs": 0.0050269999999841275,
+      "pairedRatio": 1.3564057963031937,
+      "pairedP25": 1.3509580679409532,
+      "pairedP75": 1.3831258518302239,
+      "pairedGeomean": 1.346854403999163,
+      "absoluteDeltaMs": 0.17749750000007225,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "zjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_create",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9642794088398083,
+      "startupShareZjs": 0.9543475612813023,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.44745899999998073,
+      "zjsMedianMs": 0.5869784999999865,
+      "qjsIqrMs": 0.02316600000000335,
+      "zjsIqrMs": 0.007013999999969656,
+      "pairedRatio": 1.3115422019091472,
+      "pairedP25": 1.279627614115654,
+      "pairedP75": 1.3599350653762121,
+      "pairedGeomean": 1.319597585993811,
+      "absoluteDeltaMs": 0.1395195000000058,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+        "zjsStdoutSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_delete",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9066068391243834,
+      "startupShareZjs": 0.8443602200045622,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4759235000000217,
+      "zjsMedianMs": 0.6634389999999257,
+      "qjsIqrMs": 0.025098999999841,
+      "zjsIqrMs": 0.011927500000240343,
+      "pairedRatio": 1.389852110504724,
+      "pairedP25": 1.3475288582894618,
+      "pairedP75": 1.4264554819510566,
+      "pairedGeomean": 1.3672258048555468,
+      "absoluteDeltaMs": 0.18751549999990402,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "21d91041c5d1a59661f8936571ee5c87e96f6f0c7a532b52ec17c5b9bea8220b",
+        "zjsStdoutSha256": "21d91041c5d1a59661f8936571ee5c87e96f6f0c7a532b52ec17c5b9bea8220b",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_write",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9031908624968439,
+      "startupShareZjs": 0.8519643963842892,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4777235000000246,
+      "zjsMedianMs": 0.6575174999999263,
+      "qjsIqrMs": 0.023215249999907428,
+      "zjsIqrMs": 0.01210724999998547,
+      "pairedRatio": 1.4065987046084856,
+      "pairedP25": 1.3243764238772453,
+      "pairedP75": 1.4507853893538902,
+      "pairedGeomean": 1.4000203221791712,
+      "absoluteDeltaMs": 0.17979399999990164,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "10159baf262b43a92d95db59dae1f72c645127301661e0a3ce4e38b295a97c58",
+        "zjsStdoutSha256": "10159baf262b43a92d95db59dae1f72c645127301661e0a3ce4e38b295a97c58",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_prop_create",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9182019669578946,
+      "startupShareZjs": 0.8512704514140529,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.46991349999996146,
+      "zjsMedianMs": 0.6580534999999372,
+      "qjsIqrMs": 0.04613649999993186,
+      "zjsIqrMs": 0.007017999999959557,
+      "pairedRatio": 1.3985396640984122,
+      "pairedP25": 1.3095185743292854,
+      "pairedP75": 1.4247307974658152,
+      "pairedGeomean": 1.2979651441260829,
+      "absoluteDeltaMs": 0.18813999999997577,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "2e6d31a5983a91251bfae5aefa1c0a19d8ba3cf601d0e8a706b4cfa9661a6b8a",
+        "zjsStdoutSha256": "2e6d31a5983a91251bfae5aefa1c0a19d8ba3cf601d0e8a706b4cfa9661a6b8a",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_length_decr",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9085779684181684,
+      "startupShareZjs": 0.8605209534240179,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4748909999999569,
+      "zjsMedianMs": 0.6509795000000622,
+      "qjsIqrMs": 0.009199250000165193,
+      "zjsIqrMs": 0.014916250000112541,
+      "pairedRatio": 1.3834279934813472,
+      "pairedP25": 1.365057718860236,
+      "pairedP75": 1.396832069575023,
+      "pairedGeomean": 1.3923866659737025,
+      "absoluteDeltaMs": 0.17608850000010534,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "zjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_hole_length_decr",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9049326347933724,
+      "startupShareZjs": 0.8616228329892957,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.47680400000001555,
+      "zjsMedianMs": 0.6501470000000609,
+      "qjsIqrMs": 0.016992249999987052,
+      "zjsIqrMs": 0.01019925000002786,
+      "pairedRatio": 1.3677320212233193,
+      "pairedP25": 1.331655475594061,
+      "pairedP75": 1.4051283841514668,
+      "pairedGeomean": 1.3332483118225231,
+      "absoluteDeltaMs": 0.17334300000004532,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "zjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_push",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9062564651893227,
+      "startupShareZjs": 0.8560688606504894,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4761074999998982,
+      "zjsMedianMs": 0.6543649999999843,
+      "qjsIqrMs": 0.015440250000040123,
+      "zjsIqrMs": 0.012051749999955064,
+      "pairedRatio": 1.3969157363275087,
+      "pairedP25": 1.3587540947854049,
+      "pairedP75": 1.3996875993372875,
+      "pairedGeomean": 1.3309535006773197,
+      "absoluteDeltaMs": 0.1782575000000861,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+        "zjsStdoutSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_pop",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.8953910165290571,
+      "startupShareZjs": 0.86172886794686,
+      "adjusted": {
+        "ratio": 1.7831063589319334,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.4818849999999202,
+      "zjsMedianMs": 0.6500669999999218,
+      "qjsIqrMs": 0.01577224999982718,
+      "zjsIqrMs": 0.02118550000000141,
+      "pairedRatio": 1.3780562509855891,
+      "pairedP25": 1.3158174004873344,
+      "pairedP75": 1.3988275003837176,
+      "pairedGeomean": 1.326114596816539,
+      "absoluteDeltaMs": 0.1681820000000016,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "451d660bc5f37a981539cf07c4c6a182693a7d165b4589ecb1165a72555ff90a",
+        "zjsStdoutSha256": "451d660bc5f37a981539cf07c4c6a182693a7d165b4589ecb1165a72555ff90a",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "typed_array_read",
+      "category": "typedarray",
+      "subsystem": "typed-array/ArrayBuffer",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9001440520882377,
+      "startupShareZjs": 0.8553368706334311,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4793405000000348,
+      "zjsMedianMs": 0.6549249999999347,
+      "qjsIqrMs": 0.02183799999971825,
+      "zjsIqrMs": 0.01762899999999945,
+      "pairedRatio": 1.3634834323194607,
+      "pairedP25": 1.3359646836529357,
+      "pairedP75": 1.4017640738272936,
+      "pairedGeomean": 1.3996229300659289,
+      "absoluteDeltaMs": 0.1755844999998999,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "7de1555df0c2700329e815b93b32c571c3ea54dc967b89e81ab73b9972b72d1d",
+        "zjsStdoutSha256": "7de1555df0c2700329e815b93b32c571c3ea54dc967b89e81ab73b9972b72d1d",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "typed_array_write",
+      "category": "typedarray",
+      "subsystem": "typed-array/ArrayBuffer",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.8905858798515446,
+      "startupShareZjs": 0.8338100139390097,
+      "adjusted": {
+        "ratio": 2.1062639715517713,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.484485000000177,
+      "zjsMedianMs": 0.6718334999998206,
+      "qjsIqrMs": 0.012571250000178225,
+      "zjsIqrMs": 0.015244250000023385,
+      "pairedRatio": 1.3838050538568927,
+      "pairedP25": 1.3696553814040964,
+      "pairedP75": 1.4339747413339696,
+      "pairedGeomean": 1.4303054785248612,
+      "absoluteDeltaMs": 0.18734849999964354,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "10159baf262b43a92d95db59dae1f72c645127301661e0a3ce4e38b295a97c58",
+        "zjsStdoutSha256": "10159baf262b43a92d95db59dae1f72c645127301661e0a3ce4e38b295a97c58",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "global_read",
+      "category": "global",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.36237966359353435,
+      "startupShareZjs": 0.39093171763326634,
+      "adjusted": {
+        "ratio": 1.1495804119360244,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 1.1906724999998914,
+      "zjsMedianMs": 1.432939499999975,
+      "qjsIqrMs": 0.013207000000193148,
+      "zjsIqrMs": 0.0993072500003791,
+      "pairedRatio": 1.2166505363241193,
+      "pairedP25": 1.1975495192071244,
+      "pairedP75": 1.2709253084911396,
+      "pairedGeomean": 1.225726423864837,
+      "absoluteDeltaMs": 0.2422670000000835,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "2d5c043a952d70ef9564858b25a01a30613abfb3d1562f67ef8d089646bbf786",
+        "zjsStdoutSha256": "2d5c043a952d70ef9564858b25a01a30613abfb3d1562f67ef8d089646bbf786",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "global_write",
+      "category": "global",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9106489718477992,
+      "startupShareZjs": 0.8938690874150527,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution",
+          "residual-below-case-iqr"
+        ]
+      },
+      "qjsMedianMs": 0.47381099999984144,
+      "zjsMedianMs": 0.6266930000001594,
+      "qjsIqrMs": 0.03732625000009193,
+      "zjsIqrMs": 0.07137925000006362,
+      "pairedRatio": 1.3297364717290623,
+      "pairedP25": 1.3017585424454405,
+      "pairedP75": 1.351590354545797,
+      "pairedGeomean": 1.3253126869109308,
+      "absoluteDeltaMs": 0.15288200000031793,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "zjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "global_write_strict",
+      "category": "global",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9417603296674766,
+      "startupShareZjs": 0.871544802724412,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution",
+          "residual-below-case-iqr"
+        ]
+      },
+      "qjsMedianMs": 0.4581585000000814,
+      "zjsMedianMs": 0.6427455000000464,
+      "qjsIqrMs": 0.02660300000013649,
+      "zjsIqrMs": 0.08515950000003158,
+      "pairedRatio": 1.357222637642939,
+      "pairedP25": 1.3052963448326587,
+      "pairedP75": 1.3923015737561935,
+      "pairedGeomean": 1.3638347653979088,
+      "absoluteDeltaMs": 0.18458699999996497,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "zjsStdoutSha256": "dd3c30165c70119327c37bf6e4f68639ae780d839f03643557b4e242c24587e7",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "local_destruct",
+      "category": "destructuring",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9326054347076524,
+      "startupShareZjs": 0.8719904672502812,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.46265599999992446,
+      "zjsMedianMs": 0.6424170000000231,
+      "qjsIqrMs": 0.01848475000019789,
+      "zjsIqrMs": 0.056743250000522494,
+      "pairedRatio": 1.3043658750414235,
+      "pairedP25": 1.2784457670418419,
+      "pairedP75": 1.4256127340242715,
+      "pairedGeomean": 1.3580600330937076,
+      "absoluteDeltaMs": 0.17976100000009865,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "zjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "global_destruct",
+      "category": "destructuring",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9177332509486674,
+      "startupShareZjs": 0.8614207761185123,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4701535000001513,
+      "zjsMedianMs": 0.6502995000000737,
+      "qjsIqrMs": 0.022454749999837986,
+      "zjsIqrMs": 0.009743749999756801,
+      "pairedRatio": 1.3804998490624558,
+      "pairedP25": 1.3397982024724169,
+      "pairedP75": 1.4369604766624606,
+      "pairedGeomean": 1.3946804100856969,
+      "absoluteDeltaMs": 0.18014599999992242,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "10159baf262b43a92d95db59dae1f72c645127301661e0a3ce4e38b295a97c58",
+        "zjsStdoutSha256": "10159baf262b43a92d95db59dae1f72c645127301661e0a3ce4e38b295a97c58",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "global_destruct_strict",
+      "category": "destructuring",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9295675272747344,
+      "startupShareZjs": 0.8982046537574268,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4641679999999724,
+      "zjsMedianMs": 0.6236679999999524,
+      "qjsIqrMs": 0.031619999999975335,
+      "zjsIqrMs": 0.0151157500000636,
+      "pairedRatio": 1.345832125983483,
+      "pairedP25": 1.296747472462166,
+      "pairedP75": 1.3778715154163559,
+      "pairedGeomean": 1.3735976516172315,
+      "absoluteDeltaMs": 0.15949999999998,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e",
+        "zjsStdoutSha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "closure_var",
+      "category": "function",
+      "subsystem": "closure/function-creation",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.0002874685729428,
+      "startupShareZjs": 0.9393533641422652,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.43135149999989153,
+      "zjsMedianMs": 0.5963480000000345,
+      "qjsIqrMs": 0.020400750000135304,
+      "zjsIqrMs": 0.012531500000250162,
+      "pairedRatio": 1.393289939851714,
+      "pairedP25": 1.378719353785568,
+      "pairedP75": 1.417433965661487,
+      "pairedGeomean": 1.4075682018298217,
+      "absoluteDeltaMs": 0.164996500000143,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a6e2b7a040683432de03a18fd8a1939a2fdf82585b364bfc874bdd4095c4cae1",
+        "zjsStdoutSha256": "a6e2b7a040683432de03a18fd8a1939a2fdf82585b364bfc874bdd4095c4cae1",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "float_arith",
+      "category": "arithmetic",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.003827089981473,
+      "startupShareZjs": 1.0130432266536957,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.42983049999975265,
+      "zjsMedianMs": 0.5529690000000755,
+      "qjsIqrMs": 0.01581575000000157,
+      "zjsIqrMs": 0.03903900000022986,
+      "pairedRatio": 1.290338921935486,
+      "pairedP25": 1.2642822209906073,
+      "pairedP75": 1.3086016398892453,
+      "pairedGeomean": 1.247142945674024,
+      "absoluteDeltaMs": 0.12313850000032289,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "8f7a6fa061358354382293d616d5724a3943f312956b96c7dff3c8a61b1e8892",
+        "zjsStdoutSha256": "8f7a6fa061358354382293d616d5724a3943f312956b96c7dff3c8a61b1e8892",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "map_set",
+      "category": "collection",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9403810339549254,
+      "startupShareZjs": 0.8770047155036546,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4588304999999764,
+      "zjsMedianMs": 0.6387439999998605,
+      "qjsIqrMs": 0.024271750000139036,
+      "zjsIqrMs": 0.007662000000209446,
+      "pairedRatio": 1.3878674733120666,
+      "pairedP25": 1.3578542811549517,
+      "pairedP75": 1.403105183518561,
+      "pairedGeomean": 1.348051995495949,
+      "absoluteDeltaMs": 0.17991349999988415,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "zjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "map_delete",
+      "category": "collection",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9313161226125569,
+      "startupShareZjs": 0.8808113732505425,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4632965000000695,
+      "zjsMedianMs": 0.6359834999998384,
+      "qjsIqrMs": 0.013771499999961634,
+      "zjsIqrMs": 0.014599999999859392,
+      "pairedRatio": 1.3724365782863008,
+      "pairedP25": 1.350524668021947,
+      "pairedP75": 1.3967803006669932,
+      "pairedGeomean": 1.3546074061171476,
+      "absoluteDeltaMs": 0.1726869999997689,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+        "zjsStdoutSha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "weak_map_set",
+      "category": "collection",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9324290886848386,
+      "startupShareZjs": 0.8752500880815678,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.46274350000021514,
+      "zjsMedianMs": 0.6400245000002087,
+      "qjsIqrMs": 0.021121749999792883,
+      "zjsIqrMs": 0.008801999999491272,
+      "pairedRatio": 1.3987286622515689,
+      "pairedP25": 1.35973488771866,
+      "pairedP75": 1.413623347827589,
+      "pairedGeomean": 1.4049911207008074,
+      "absoluteDeltaMs": 0.17728099999999358,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "zjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "weak_map_delete",
+      "category": "collection",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9115271957911283,
+      "startupShareZjs": 0.8874443546716382,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.47335449999991397,
+      "zjsMedianMs": 0.6312300000001869,
+      "qjsIqrMs": 0.05318225000007715,
+      "zjsIqrMs": 0.02176550000001498,
+      "pairedRatio": 1.3400863748935579,
+      "pairedP25": 1.2353181210427167,
+      "pairedP75": 1.4003048291949682,
+      "pairedGeomean": 1.284410082157542,
+      "absoluteDeltaMs": 0.15787550000027295,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+        "zjsStdoutSha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_for",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.3196577726626303,
+      "startupShareZjs": 0.33969849398570146,
+      "adjusted": {
+        "ratio": 1.1857117656092937,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 1.3498045000001184,
+      "zjsMedianMs": 1.649054999999862,
+      "qjsIqrMs": 0.010430500000097709,
+      "zjsIqrMs": 0.061605250000070555,
+      "pairedRatio": 1.2141086626271478,
+      "pairedP25": 1.1959537012217647,
+      "pairedP75": 1.2662601395170228,
+      "pairedGeomean": 1.3077458474297057,
+      "absoluteDeltaMs": 0.2992504999997436,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "eef977c220f0b24545feca5839c8076f25715747f8af9057976fe89aa803c23f",
+        "zjsStdoutSha256": "eef977c220f0b24545feca5839c8076f25715747f8af9057976fe89aa803c23f",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_for_in",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.8980317107488054,
+      "startupShareZjs": 0.8685718405657353,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.48046799999997347,
+      "zjsMedianMs": 0.6449454999999489,
+      "qjsIqrMs": 0.01820874999998523,
+      "zjsIqrMs": 0.03778300000010404,
+      "pairedRatio": 1.372442928770334,
+      "pairedP25": 1.3485915192459133,
+      "pairedP75": 1.404965904358437,
+      "pairedGeomean": 1.387580868751332,
+      "absoluteDeltaMs": 0.1644774999999754,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb",
+        "zjsStdoutSha256": "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_for_of",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.013754004438213,
+      "startupShareZjs": 1.0156311190072969,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.42562150000003385,
+      "zjsMedianMs": 0.5515599999998813,
+      "qjsIqrMs": 0.028260249999902953,
+      "zjsIqrMs": 0.006182249999710621,
+      "pairedRatio": 1.2889476037291359,
+      "pairedP25": 1.2267440089878523,
+      "pairedP75": 1.3395219415634096,
+      "pairedGeomean": 1.2720864091088455,
+      "absoluteDeltaMs": 0.1259384999998474,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "238903180cc104ec2c5d8b3f20c5bc61b389ec0a967df8cc208cdc7cd454174f",
+        "zjsStdoutSha256": "238903180cc104ec2c5d8b3f20c5bc61b389ec0a967df8cc208cdc7cd454174f",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "object_null",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.0337317559349228,
+      "startupShareZjs": 1.0202202233187825,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.417395999999826,
+      "zjsMedianMs": 0.5490789999998924,
+      "qjsIqrMs": 0.026062249999426967,
+      "zjsIqrMs": 0.017172500000015134,
+      "pairedRatio": 1.3262979855613422,
+      "pairedP25": 1.2597032308293743,
+      "pairedP75": 1.3678543598713155,
+      "pairedGeomean": 1.3369862533072951,
+      "absoluteDeltaMs": 0.13168300000006639,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "zjsStdoutSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "regexp_ascii",
+      "category": "regexp",
+      "subsystem": "regexp",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.0056813149418977,
+      "startupShareZjs": 0.9946775359158508,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.42903799999999137,
+      "zjsMedianMs": 0.563178999999991,
+      "qjsIqrMs": 0.0051372499998478816,
+      "zjsIqrMs": 0.012135750000084045,
+      "pairedRatio": 1.3269461335600825,
+      "pairedP25": 1.3002811401586072,
+      "pairedP75": 1.342410801327513,
+      "pairedGeomean": 1.3336118673548771,
+      "absoluteDeltaMs": 0.13414099999999962,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+        "zjsStdoutSha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "regexp_utf16",
+      "category": "regexp",
+      "subsystem": "regexp",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9301446494783501,
+      "startupShareZjs": 0.8857926936284595,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4638800000000174,
+      "zjsMedianMs": 0.6324070000000575,
+      "qjsIqrMs": 0.018044750000285603,
+      "zjsIqrMs": 0.012763500000232852,
+      "pairedRatio": 1.369056157564442,
+      "pairedP25": 1.3567582346830667,
+      "pairedP75": 1.3956768479974382,
+      "pairedGeomean": 1.3148620824573962,
+      "absoluteDeltaMs": 0.16852700000004006,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+        "zjsStdoutSha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_build2",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.7209660993020331,
+      "startupShareZjs": 0.7051812137642905,
+      "adjusted": {
+        "ratio": 1.4024420185325885,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.5984684999998535,
+      "zjsMedianMs": 0.7943795000001046,
+      "qjsIqrMs": 0.0051295000000664,
+      "zjsIqrMs": 0.006658000000015818,
+      "pairedRatio": 1.3236564258112182,
+      "pairedP25": 1.3124086134963826,
+      "pairedP75": 1.3437016117439673,
+      "pairedGeomean": 1.3080766056474835,
+      "absoluteDeltaMs": 0.19591100000025108,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "ce3238bf88811a6ee196eda8040193abaeb3a62b683b6e861bac204afc372d79",
+        "zjsStdoutSha256": "ce3238bf88811a6ee196eda8040193abaeb3a62b683b6e861bac204afc372d79",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_concat0",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.0275868556679946,
+      "startupShareZjs": 1.0275872822233272,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4198919999998907,
+      "zjsMedianMs": 0.5451425000001109,
+      "qjsIqrMs": 0.010835250000127417,
+      "zjsIqrMs": 0.01644074999978784,
+      "pairedRatio": 1.2914127802616977,
+      "pairedP25": 1.2812853849555854,
+      "pairedP75": 1.3068307687978462,
+      "pairedGeomean": 1.2617283639772416,
+      "absoluteDeltaMs": 0.1252505000002202,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a63d8014dba891345b30174df2b2a57efbb65b4f9f09b98f245d1b3192277ece",
+        "zjsStdoutSha256": "a63d8014dba891345b30174df2b2a57efbb65b4f9f09b98f245d1b3192277ece",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_concat1",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.0301604658550128,
+      "startupShareZjs": 1.0207705049160691,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.41884299999992436,
+      "zjsMedianMs": 0.548783000000185,
+      "qjsIqrMs": 0.00833849999969516,
+      "zjsIqrMs": 0.020661999999902037,
+      "pairedRatio": 1.3014137804340162,
+      "pairedP25": 1.2899711222932868,
+      "pairedP75": 1.3194645802302947,
+      "pairedGeomean": 1.3243188606936207,
+      "absoluteDeltaMs": 0.12994000000026062,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "0111f7554519f7126c570c154b894f1fbcddf4faa126f6d644b974dab6c77411",
+        "zjsStdoutSha256": "0111f7554519f7126c570c154b894f1fbcddf4faa126f6d644b974dab6c77411",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_concat2",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9337851393131991,
+      "startupShareZjs": 0.9107672272296765,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4620714999998654,
+      "zjsMedianMs": 0.6150654999999006,
+      "qjsIqrMs": 0.01825675000031879,
+      "zjsIqrMs": 0.01854174999971292,
+      "pairedRatio": 1.3288553767166813,
+      "pairedP25": 1.3009644003045968,
+      "pairedP75": 1.349354958165997,
+      "pairedGeomean": 1.2733556384014497,
+      "absoluteDeltaMs": 0.15299400000003516,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb",
+        "zjsStdoutSha256": "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_concat3",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.0206036450510472,
+      "startupShareZjs": 1.0347728024196234,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4227650000000267,
+      "zjsMedianMs": 0.5413570000000618,
+      "qjsIqrMs": 0.0036612499999364445,
+      "zjsIqrMs": 0.014635999999995875,
+      "pairedRatio": 1.285453102036525,
+      "pairedP25": 1.268624296424733,
+      "pairedP75": 1.309945260450668,
+      "pairedGeomean": 1.27804520832976,
+      "absoluteDeltaMs": 0.11859200000003511,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a63d8014dba891345b30174df2b2a57efbb65b4f9f09b98f245d1b3192277ece",
+        "zjsStdoutSha256": "a63d8014dba891345b30174df2b2a57efbb65b4f9f09b98f245d1b3192277ece",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_slice1",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9098357458178691,
+      "startupShareZjs": 0.8577480079124795,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4742344999999659,
+      "zjsMedianMs": 0.6530840000000353,
+      "qjsIqrMs": 0.020862249999936466,
+      "zjsIqrMs": 0.019353000000023712,
+      "pairedRatio": 1.3873304556311754,
+      "pairedP25": 1.345331306500762,
+      "pairedP75": 1.409691577483771,
+      "pairedGeomean": 1.374104526358167,
+      "absoluteDeltaMs": 0.17884950000006938,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1c8e1341e48f23a471f727286b6d110c4f8f88d97d6b27bdfb746565a54331c2",
+        "zjsStdoutSha256": "1c8e1341e48f23a471f727286b6d110c4f8f88d97d6b27bdfb746565a54331c2",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_slice2",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.909742706359341,
+      "startupShareZjs": 0.84826823848235,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4742829999997866,
+      "zjsMedianMs": 0.6603824999999688,
+      "qjsIqrMs": 0.02177425000002131,
+      "zjsIqrMs": 0.012527499999691827,
+      "pairedRatio": 1.3919621902374901,
+      "pairedP25": 1.355202416119559,
+      "pairedP75": 1.4321252529668285,
+      "pairedGeomean": 1.371000493847539,
+      "absoluteDeltaMs": 0.18609950000018216,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1c8e1341e48f23a471f727286b6d110c4f8f88d97d6b27bdfb746565a54331c2",
+        "zjsStdoutSha256": "1c8e1341e48f23a471f727286b6d110c4f8f88d97d6b27bdfb746565a54331c2",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_slice3",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9199246962104239,
+      "startupShareZjs": 0.8502671402326488,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4690335000000232,
+      "zjsMedianMs": 0.65883000000008,
+      "qjsIqrMs": 0.014095999999995001,
+      "zjsIqrMs": 0.012591249999786669,
+      "pairedRatio": 1.391205481742936,
+      "pairedP25": 1.3769616878771906,
+      "pairedP75": 1.425028657109411,
+      "pairedGeomean": 1.4251691294271047,
+      "absoluteDeltaMs": 0.18979650000005677,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "8ab174e706bd87ff3b3ea0b164ddfd93bc881bd6920242e57bdfd2397601e7b7",
+        "zjsStdoutSha256": "8ab174e706bd87ff3b3ea0b164ddfd93bc881bd6920242e57bdfd2397601e7b7",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "sort_bench",
+      "category": "sort",
+      "subsystem": "array",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.8908193939195724,
+      "startupShareZjs": 0.8378318552627505,
+      "adjusted": {
+        "ratio": 2.0503380135354354,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.48435799999992923,
+      "zjsMedianMs": 0.6686085000001185,
+      "qjsIqrMs": 0.03195774999983314,
+      "zjsIqrMs": 0.009477499999889005,
+      "pairedRatio": 1.37602135244251,
+      "pairedP25": 1.312369065737238,
+      "pairedP75": 1.4039363171609094,
+      "pairedGeomean": 1.3151216301912285,
+      "absoluteDeltaMs": 0.18425050000018928,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "7a8988e95e356e2b5b8fecf5e31f7c2e7e8fb44a5cd9d89ebb0d1e60b1f5c689",
+        "zjsStdoutSha256": "7a8988e95e356e2b5b8fecf5e31f7c2e7e8fb44a5cd9d89ebb0d1e60b1f5c689",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "int_to_string",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9128848906325966,
+      "startupShareZjs": 0.8768399847221525,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4726505000000998,
+      "zjsMedianMs": 0.6388640000000123,
+      "qjsIqrMs": 0.030828249999899526,
+      "zjsIqrMs": 0.017816749999951753,
+      "pairedRatio": 1.347635305771591,
+      "pairedP25": 1.3137613534120844,
+      "pairedP75": 1.3749962978991248,
+      "pairedGeomean": 1.321832475717898,
+      "absoluteDeltaMs": 0.16621349999991253,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "f33ae3bc9a22cd7564990a794789954409977013966fb1a8f43c35776b833a95",
+        "zjsStdoutSha256": "f33ae3bc9a22cd7564990a794789954409977013966fb1a8f43c35776b833a95",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "int_toString",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9179216563098431,
+      "startupShareZjs": 0.8833127688001272,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.47005699999999706,
+      "zjsMedianMs": 0.6341824999999517,
+      "qjsIqrMs": 0.011679499999786458,
+      "zjsIqrMs": 0.011167250000539752,
+      "pairedRatio": 1.3512236037445722,
+      "pairedP25": 1.3203038938721368,
+      "pairedP75": 1.3801604466675041,
+      "pairedGeomean": 1.3545055297687243,
+      "absoluteDeltaMs": 0.16412549999995463,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "f33ae3bc9a22cd7564990a794789954409977013966fb1a8f43c35776b833a95",
+        "zjsStdoutSha256": "f33ae3bc9a22cd7564990a794789954409977013966fb1a8f43c35776b833a95",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "float_to_string",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.0081438818661554,
+      "startupShareZjs": 0.9852133966706517,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4279900000001362,
+      "zjsMedianMs": 0.5685889999999745,
+      "qjsIqrMs": 0.017004749999841806,
+      "zjsIqrMs": 0.014560249999817643,
+      "pairedRatio": 1.329168141808096,
+      "pairedP25": 1.3042783927354502,
+      "pairedP75": 1.355809049482901,
+      "pairedGeomean": 1.361554287357924,
+      "absoluteDeltaMs": 0.14059899999983827,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "zjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "float_toString",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9568866485106081,
+      "startupShareZjs": 0.9281550775997833,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4509160000002339,
+      "zjsMedianMs": 0.6035429999997177,
+      "qjsIqrMs": 0.013839499999676264,
+      "zjsIqrMs": 0.009982249999779924,
+      "pairedRatio": 1.3452779776101411,
+      "pairedP25": 1.324424158500647,
+      "pairedP75": 1.3797208230222902,
+      "pairedGeomean": 1.393180359341969,
+      "absoluteDeltaMs": 0.15262699999948381,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "zjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "float_toFixed",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9709464621454335,
+      "startupShareZjs": 0.9450847474778018,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4443864999998368,
+      "zjsMedianMs": 0.5927314999998998,
+      "qjsIqrMs": 0.01740849999987404,
+      "zjsIqrMs": 0.005313749999800166,
+      "pairedRatio": 1.3500439629915566,
+      "pairedP25": 1.3199431689246057,
+      "pairedP75": 1.3877163547779556,
+      "pairedGeomean": 1.3552823927477147,
+      "absoluteDeltaMs": 0.148345000000063,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "e1e62844b9aeb4c7fec236a17450618a7f946e9a8304b6e8c46dbc95f70be859",
+        "zjsStdoutSha256": "e1e62844b9aeb4c7fec236a17450618a7f946e9a8304b6e8c46dbc95f70be859",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "float_toPrecision",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 1.02778267414979,
+      "startupShareZjs": 0.9547908151603989,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4198119999998653,
+      "zjsMedianMs": 0.5867060000000492,
+      "qjsIqrMs": 0.023978750000082982,
+      "zjsIqrMs": 0.07676925000021129,
+      "pairedRatio": 1.3009847292249244,
+      "pairedP25": 1.2291835373969424,
+      "pairedP75": 1.430285633649325,
+      "pairedGeomean": 1.3122091025409997,
+      "absoluteDeltaMs": 0.16689400000018395,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "zjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "float_toExponential",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9739974198327316,
+      "startupShareZjs": 0.9390502405107127,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.44299449999994067,
+      "zjsMedianMs": 0.5965405000001738,
+      "qjsIqrMs": 0.013396250000027976,
+      "zjsIqrMs": 0.006709250000085376,
+      "pairedRatio": 1.3545322014491652,
+      "pairedP25": 1.3374189366641693,
+      "pairedP75": 1.3960375221921317,
+      "pairedGeomean": 1.380625246289372,
+      "absoluteDeltaMs": 0.1535460000002331,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "83362fd743aaeefc297ef236c8dbe2dacc33afced847b5bde9b2033bf3d3d02e",
+        "zjsStdoutSha256": "83362fd743aaeefc297ef236c8dbe2dacc33afced847b5bde9b2033bf3d3d02e",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_to_int",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9594740938401541,
+      "startupShareZjs": 0.9270736966829068,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4497000000001208,
+      "zjsMedianMs": 0.6042469999999867,
+      "qjsIqrMs": 0.01201875000003838,
+      "zjsIqrMs": 0.006421499999987645,
+      "pairedRatio": 1.358900606923216,
+      "pairedP25": 1.3200723809637118,
+      "pairedP75": 1.371436426246456,
+      "pairedGeomean": 1.3904318745029793,
+      "absoluteDeltaMs": 0.15454699999986587,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "f33ae3bc9a22cd7564990a794789954409977013966fb1a8f43c35776b833a95",
+        "zjsStdoutSha256": "f33ae3bc9a22cd7564990a794789954409977013966fb1a8f43c35776b833a95",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_to_float",
+      "category": "conversion",
+      "subsystem": "number/dtoa",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9596437440023656,
+      "startupShareZjs": 0.9401226798231499,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4496204999998099,
+      "zjsMedianMs": 0.5958600000001297,
+      "qjsIqrMs": 0.017989749999742344,
+      "zjsIqrMs": 0.01535250000040378,
+      "pairedRatio": 1.3330400906776112,
+      "pairedP25": 1.307960702619506,
+      "pairedP75": 1.3746388533442446,
+      "pairedGeomean": 1.3752860678202774,
+      "absoluteDeltaMs": 0.14623950000031982,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "zjsStdoutSha256": "abee8e617456f9b2d30df1e5eabcf9d6f4989c2b6b4f7b37b8ffa7cffab123e0",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "bigint64_arith",
+      "category": "bigint",
+      "subsystem": "BigInt",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9692005831257462,
+      "startupShareZjs": 0.9451612876004211,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.44518700000003264,
+      "zjsMedianMs": 0.592683500000021,
+      "qjsIqrMs": 0.019480750000184344,
+      "zjsIqrMs": 0.005429499999991094,
+      "pairedRatio": 1.3320598851894627,
+      "pairedP25": 1.285963052175517,
+      "pairedP75": 1.386741628632302,
+      "pairedGeomean": 1.2801027921294563,
+      "absoluteDeltaMs": 0.14749649999998837,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "zjsStdoutSha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "bigint256_arith",
+      "category": "bigint",
+      "subsystem": "BigInt",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.9959111084436106,
+      "startupShareZjs": 0.934549355327632,
+      "adjusted": {
+        "ratio": null,
+        "status": "unresolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": [
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "qjsMedianMs": 0.4332470000001649,
+      "zjsMedianMs": 0.599413499999855,
+      "qjsIqrMs": 0.06494625000016185,
+      "zjsIqrMs": 0.019537499999728425,
+      "pairedRatio": 1.3421092709421383,
+      "pairedP25": 1.2173836090853771,
+      "pairedP75": 1.408553733419037,
+      "pairedGeomean": 1.249212543819419,
+      "absoluteDeltaMs": 0.16616649999969013,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "unstable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "76a691c166bd673063ef4e851d0af2aa6cbf1ff67df0eb1ee04d401f7c2a5378",
+        "zjsStdoutSha256": "76a691c166bd673063ef4e851d0af2aa6cbf1ff67df0eb1ee04d401f7c2a5378",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "vm_int_sum_large",
+      "category": "control",
+      "subsystem": "call",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.0355702213764051,
+      "startupShareZjs": 0.04104568245166854,
+      "adjusted": {
+        "ratio": 1.1187138527689267,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 12.130245000000059,
+      "zjsMedianMs": 13.647757000000183,
+      "qjsIqrMs": 0.22129700000016328,
+      "zjsIqrMs": 0.04816475000018272,
+      "pairedRatio": 1.1211432693578318,
+      "pairedP25": 1.1099152962022771,
+      "pairedP75": 1.1288676567611087,
+      "pairedGeomean": 1.1113784031314593,
+      "absoluteDeltaMs": 1.5175120000001243,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.1194628760699183,
+        "pairedP25": 1.1148757783336773,
+        "pairedP75": 1.1245382103143804,
+        "absoluteDeltaMs": 1.4513675000000603,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": -0.066144500000064
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.1172371578361588,
+        "absoluteDeltaMs": 1.4347380000001522
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": "Phase 1-6 VM loop work (1.620 -> 1.121 across snapshots)",
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "dbb4498f673634c698bd6e593ef54bdadf465654b13fb7bfe689016e602e7ef8",
+        "zjsStdoutSha256": "dbb4498f673634c698bd6e593ef54bdadf465654b13fb7bfe689016e602e7ef8",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_read_mono",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.02693091671585995,
+      "startupShareZjs": 0.0335917500926047,
+      "adjusted": {
+        "ratio": 1.0337322897132615,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 16.021567500000174,
+      "zjsMedianMs": 16.676163000000088,
+      "qjsIqrMs": 0.058555249999812986,
+      "zjsIqrMs": 0.08930900000007114,
+      "pairedRatio": 1.0409830911462388,
+      "pairedP25": 1.0375837513416695,
+      "pairedP75": 1.044377367479964,
+      "pairedGeomean": 1.0401802540133234,
+      "absoluteDeltaMs": 0.654595499999914,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.03758623310453,
+        "pairedP25": 1.0352607795838344,
+        "pairedP75": 1.0467941709163586,
+        "absoluteDeltaMs": 0.6052190000004884,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": -0.049376499999425505
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.0469328826309652,
+        "absoluteDeltaMs": 0.7511169999997946
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": "P7-10 property-lookup audit; top-level binding access registered as the open question",
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "f5bbc9df805e66180e1640add85a5de00bf2e13d1f5415e22278318f2d82d5d1",
+        "zjsStdoutSha256": "f5bbc9df805e66180e1640add85a5de00bf2e13d1f5415e22278318f2d82d5d1",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_read_poly3",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.018523164478771628,
+      "startupShareZjs": 0.024523184619714474,
+      "adjusted": {
+        "ratio": 0.9746480869263249,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 23.293832999999722,
+      "zjsMedianMs": 22.842934499999956,
+      "qjsIqrMs": 0.04492049999998926,
+      "zjsIqrMs": 0.02976050000086161,
+      "pairedRatio": 0.9804182941163466,
+      "pairedP25": 0.9801759108047624,
+      "pairedP75": 0.9808529595981423,
+      "pairedGeomean": 0.9779032378278023,
+      "absoluteDeltaMs": -0.4508984999997665,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 0.9805505862667501,
+        "pairedP25": 0.9794370061736455,
+        "pairedP75": 0.9818053817263066,
+        "absoluteDeltaMs": -0.4455315000000155,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": 0.005366999999750988
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 0.9818339435988102,
+        "absoluteDeltaMs": -0.4378814999995484
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": "Phase 1-6 inline-cache/shape work; zjs now ahead",
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "d2284d0c6608221b6ff7d74f2d4c6e07c0c7f7540ee4c15f820f46b7ae28f7b9",
+        "zjsStdoutSha256": "d2284d0c6608221b6ff7d74f2d4c6e07c0c7f7540ee4c15f820f46b7ae28f7b9",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "proto_read",
+      "category": "object",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.02490579274675726,
+      "startupShareZjs": 0.03043184138411088,
+      "adjusted": {
+        "ratio": 1.0565170928312464,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 17.324303000000327,
+      "zjsMedianMs": 18.407742499999586,
+      "qjsIqrMs": 0.07133875000022272,
+      "zjsIqrMs": 0.1131392499996764,
+      "pairedRatio": 1.0633246438107629,
+      "pairedP25": 1.0616395345649727,
+      "pairedP75": 1.06442486914455,
+      "pairedGeomean": 1.0666621249611528,
+      "absoluteDeltaMs": 1.0834394999992583,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.0596069244334845,
+        "pairedP25": 1.0581070708905842,
+        "pairedP75": 1.060647348721177,
+        "absoluteDeltaMs": 1.0079149999999117,
+        "directionAgrees": true,
+        "iqrOverlap": false,
+        "absoluteDeltaMovementMs": -0.07552449999934652
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.061693630741685,
+        "absoluteDeltaMs": 1.0670789999999215
+      },
+      "stability": "stable-direction-only",
+      "routeEligible": true,
+      "relatedOptimisation": "Phase 1-6 prototype read work (1.437 -> 1.063 across snapshots)",
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "zjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "global_read_loop",
+      "category": "global",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.03555089884202432,
+      "startupShareZjs": 0.042770952952158575,
+      "adjusted": {
+        "ratio": 1.071052690593756,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 12.136837999999898,
+      "zjsMedianMs": 13.097241499999654,
+      "qjsIqrMs": 0.02131724999958351,
+      "zjsIqrMs": 0.03782950000049823,
+      "pairedRatio": 1.0789766751459258,
+      "pairedP25": 1.0775918947002303,
+      "pairedP75": 1.0817300131741372,
+      "pairedGeomean": 1.0797785153843913,
+      "absoluteDeltaMs": 0.9604034999997566,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.0834024294685616,
+        "pairedP25": 1.0809926713860858,
+        "pairedP75": 1.0859204337269222,
+        "absoluteDeltaMs": 1.0225089999994452,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": 0.06210549999968862
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.081264187666974,
+        "absoluteDeltaMs": 0.9739814999998089
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": "P7-10 property-lookup audit; Phase 1-6 global lexical work (1.607 -> 1.079 across snapshots)",
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "zjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "call2_loop",
+      "category": "function",
+      "subsystem": "call",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.0318290657771564,
+      "startupShareZjs": 0.03311104402383713,
+      "adjusted": {
+        "ratio": 1.2463734745568145,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 13.556021499999588,
+      "zjsMedianMs": 16.91826749999973,
+      "qjsIqrMs": 0.028319749999809574,
+      "zjsIqrMs": 0.11566824999886194,
+      "pairedRatio": 1.2474633471429564,
+      "pairedP25": 1.2462845641630123,
+      "pairedP75": 1.2508072705720295,
+      "pairedGeomean": 1.2485825909927768,
+      "absoluteDeltaMs": 3.362246000000141,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.25016639235609,
+        "pairedP25": 1.2476140244139078,
+        "pairedP75": 1.2524539410847462,
+        "absoluteDeltaMs": 3.3967840000002525,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": 0.034538000000111424
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.2447255459728548,
+        "absoluteDeltaMs": 3.340474500000255
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "zjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "closure_call_loop",
+      "category": "function",
+      "subsystem": "closure/function-creation",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.03150583055253497,
+      "startupShareZjs": 0.03325966724863394,
+      "adjusted": {
+        "ratio": 1.227604528460523,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 13.695100000000366,
+      "zjsMedianMs": 16.842666999999892,
+      "qjsIqrMs": 0.06485299999985727,
+      "zjsIqrMs": 0.029983499999843843,
+      "pairedRatio": 1.229414503255553,
+      "pairedP25": 1.2281466033441175,
+      "pairedP75": 1.231443504605146,
+      "pairedGeomean": 1.2256552053193979,
+      "absoluteDeltaMs": 3.147566999999526,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.2364259986040609,
+        "pairedP25": 1.23442532102922,
+        "pairedP75": 1.2377775378606795,
+        "absoluteDeltaMs": 3.2291179999999713,
+        "directionAgrees": true,
+        "iqrOverlap": false,
+        "absoluteDeltaMovementMs": 0.08155100000044513
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.2310241768912067,
+        "absoluteDeltaMs": 3.1518549999998413
+      },
+      "stability": "stable-direction-only",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "zjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "arrow_call_loop",
+      "category": "function",
+      "subsystem": "call",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.03180923431378585,
+      "startupShareZjs": 0.033044220283842296,
+      "adjusted": {
+        "ratio": 1.2481765111125727,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 13.564473000000362,
+      "zjsMedianMs": 16.952480500000092,
+      "qjsIqrMs": 0.030265000000326836,
+      "zjsIqrMs": 0.02609475000031125,
+      "pairedRatio": 1.2506944833135414,
+      "pairedP25": 1.2501792187929346,
+      "pairedP75": 1.2515007046226574,
+      "pairedGeomean": 1.2503137291240496,
+      "absoluteDeltaMs": 3.3880074999997305,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.252854421598454,
+        "pairedP25": 1.2517077103028185,
+        "pairedP75": 1.2540233797760991,
+        "absoluteDeltaMs": 3.4268745000000536,
+        "directionAgrees": true,
+        "iqrOverlap": false,
+        "absoluteDeltaMovementMs": 0.03886700000032306
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.2471921518961864,
+        "absoluteDeltaMs": 3.361684500000024
+      },
+      "stability": "stable-direction-only",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "zjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "arrow_tail_recursion",
+      "category": "function",
+      "subsystem": "call",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.2834848075708765,
+      "startupShareZjs": 0.31002858256832777,
+      "adjusted": {
+        "ratio": 1.143158297232359,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 1.522041000000172,
+      "zjsMedianMs": 1.806870500000059,
+      "qjsIqrMs": 0.024906249999503416,
+      "zjsIqrMs": 0.020513249999339678,
+      "pairedRatio": 1.1853389653707849,
+      "pairedP25": 1.16932965333669,
+      "pairedP75": 1.2057300659529209,
+      "pairedGeomean": 1.181040583137177,
+      "absoluteDeltaMs": 0.28482949999988705,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "cae8934a441243980ca44aadcdf5e70da43aff4b901e7d53b6f17b479ec4986e",
+        "zjsStdoutSha256": "cae8934a441243980ca44aadcdf5e70da43aff4b901e7d53b6f17b479ec4986e",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "dense_array_write_read",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.09462907299584614,
+      "startupShareZjs": 0.09830385158674251,
+      "adjusted": {
+        "ratio": 1.24468754352718,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 4.5596504999998615,
+      "zjsMedianMs": 5.698469499999646,
+      "qjsIqrMs": 0.034968749999507054,
+      "zjsIqrMs": 0.0645337500000096,
+      "pairedRatio": 1.2546121976186206,
+      "pairedP25": 1.2445807494786036,
+      "pairedP75": 1.2615181135041156,
+      "pairedGeomean": 1.2508942840024582,
+      "absoluteDeltaMs": 1.1388189999997849,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.2515423187922186,
+        "pairedP25": 1.2431355305010712,
+        "pairedP75": 1.2530857806221762,
+        "absoluteDeltaMs": 1.1259659999998348,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": -0.012852999999950043
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.243965242747889,
+        "absoluteDeltaMs": 1.0939289999996618
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "f9cb6a31b60a88b69cb9a46e7873c7311a2a0ac9208ea9681cf8171c71ebfb7a",
+        "zjsStdoutSha256": "f9cb6a31b60a88b69cb9a46e7873c7311a2a0ac9208ea9681cf8171c71ebfb7a",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_map_callback",
+      "category": "array",
+      "subsystem": "array",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.0786090956708011,
+      "startupShareZjs": 0.07648584149384255,
+      "adjusted": {
+        "ratio": 1.337408286610697,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 5.4888749999995525,
+      "zjsMedianMs": 7.323989499999698,
+      "qjsIqrMs": 0.02693499999963933,
+      "zjsIqrMs": 0.031892499999912616,
+      "pairedRatio": 1.336987934587474,
+      "pairedP25": 1.3280232714242117,
+      "pairedP75": 1.3406150763259257,
+      "pairedGeomean": 1.335153173325365,
+      "absoluteDeltaMs": 1.8351145000001452,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 1.3342701584322945,
+        "pairedP25": 1.3298478108538538,
+        "pairedP75": 1.345880162541087,
+        "absoluteDeltaMs": 1.8602954999998929,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": 0.025180999999747655
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 1.3602853644279227,
+        "absoluteDeltaMs": 1.9580370000003313
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": "63c409c0 perf: reuse active Machine for array callbacks (P7-40 re-measured this case at 1.364x cycles)",
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e",
+        "zjsStdoutSha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "string_concat_loop",
+      "category": "string",
+      "subsystem": "string/URI",
+      "resolvabilityClass": "partially-resolvable",
+      "startupShareQjs": 0.2782264330765455,
+      "startupShareZjs": 0.27951048623036107,
+      "adjusted": {
+        "ratio": 1.2900293612758709,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 1.5508069999996223,
+      "zjsMedianMs": 2.0041519999999764,
+      "qjsIqrMs": 0.08137449999958335,
+      "zjsIqrMs": 0.05583499999988817,
+      "pairedRatio": 1.2804541174801116,
+      "pairedP25": 1.2532108483608688,
+      "pairedP75": 1.3099903612844856,
+      "pairedGeomean": 1.2724523134856545,
+      "absoluteDeltaMs": 0.45334500000035405,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "0be508172e87a2af98f344d18610bbaaa0e6bbfcef0c7804b24457f839e129c9",
+        "zjsStdoutSha256": "0be508172e87a2af98f344d18610bbaaa0e6bbfcef0c7804b24457f839e129c9",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "map_string_keys",
+      "category": "collection",
+      "subsystem": "binding/property",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.16016878999806639,
+      "startupShareZjs": 0.17493472910985888,
+      "adjusted": {
+        "ratio": 1.1678061991125428,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 2.693880000000263,
+      "zjsMedianMs": 3.2022314999999253,
+      "qjsIqrMs": 0.16252725000049395,
+      "zjsIqrMs": 0.25636850000000777,
+      "pairedRatio": 1.2004126523292329,
+      "pairedP25": 1.183873320975498,
+      "pairedP75": 1.2202565339740146,
+      "pairedGeomean": 1.2012985125642563,
+      "absoluteDeltaMs": 0.5083514999996623,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "d6075389cdb7a8f518e688411a7c63544210fcef63d52dc47068a46cef0d92ab",
+        "zjsStdoutSha256": "d6075389cdb7a8f518e688411a7c63544210fcef63d52dc47068a46cef0d92ab",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "regexp_test_cached",
+      "category": "regexp",
+      "subsystem": "regexp",
+      "resolvabilityClass": "execution-dominant",
+      "startupShareQjs": 0.04053512027425227,
+      "startupShareZjs": 0.06596188814775845,
+      "adjusted": {
+        "ratio": 0.7766878716460941,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 10.644485499999973,
+      "zjsMedianMs": 8.492502499999773,
+      "qjsIqrMs": 0.17161300000020674,
+      "zjsIqrMs": 0.024494750000940257,
+      "pairedRatio": 0.7974555247677924,
+      "pairedP25": 0.7854623192011094,
+      "pairedP75": 0.7989126420732581,
+      "pairedGeomean": 0.7829370415210727,
+      "absoluteDeltaMs": -2.1519830000002003,
+      "validation": {
+        "sampled": true,
+        "pairedRatio": 0.8003947966193062,
+        "pairedP25": 0.7987245981638433,
+        "pairedP75": 0.8021013775719816,
+        "absoluteDeltaMs": -2.158730999999989,
+        "directionAgrees": true,
+        "iqrOverlap": true,
+        "absoluteDeltaMovementMs": -0.00674799999978859
+      },
+      "buildInstanceB": {
+        "sampled": true,
+        "pairedRatio": 0.7971953174352029,
+        "absoluteDeltaMs": -2.1758629999999357
+      },
+      "stability": "stable",
+      "routeEligible": true,
+      "relatedOptimisation": "e8ee55b regexp lastIndex alignment; zjs ahead",
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "b80500a01f984c764f1a3b486622d0ef7cc5b13fa9bd57ec9015113eaf875597",
+        "zjsStdoutSha256": "b80500a01f984c764f1a3b486622d0ef7cc5b13fa9bd57ec9015113eaf875597",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "bigint_short_sum",
+      "category": "bigint",
+      "subsystem": "BigInt",
+      "resolvabilityClass": "startup-dominated",
+      "startupShareQjs": 0.5533205607128403,
+      "startupShareZjs": 0.5372273854993078,
+      "adjusted": {
+        "ratio": 1.3853610570824082,
+        "status": "resolved",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "unresolvedReasons": []
+      },
+      "qjsMedianMs": 0.7797930000001543,
+      "zjsMedianMs": 1.0427270000000135,
+      "qjsIqrMs": 0.018837250000842687,
+      "zjsIqrMs": 0.010034250000217071,
+      "pairedRatio": 1.3404398376324727,
+      "pairedP25": 1.3240856022081768,
+      "pairedP75": 1.3863004197193622,
+      "pairedGeomean": 1.3491672718235033,
+      "absoluteDeltaMs": 0.2629339999998592,
+      "validation": {
+        "sampled": false
+      },
+      "buildInstanceB": {
+        "sampled": false
+      },
+      "stability": "stable-within-run",
+      "routeEligible": false,
+      "relatedOptimisation": null,
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+        "zjsStdoutSha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    }
+  ],
+  "unmappedCases": []
+}

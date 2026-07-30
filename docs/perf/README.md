@@ -44,6 +44,60 @@ results for arithmetic, dense array, object property, and string loops before
 emitting timing JSON. Use the JSON as a local diagnostic signal, not as a
 release gate.
 
+### Whole-process measurement contract
+
+`tools/compare/run_microbench.js` is governed by
+`tools/compare/measurement_policy.json`, the authoritative policy. Nothing reads
+thresholds from the artifact under test.
+
+`--formal` turns on formal sampling. It fails closed -- non-zero exit,
+`complete=false`, `headline=null`, `pairedGeomean=null` -- when the sampling
+design cannot be balanced (odd sample count, odd warmup, an artifact-declared
+order that does not match the recorded execution, a treatment missing from a
+round), when the collector or a measured child is not pinned to exactly the
+requested CPU, when affinity moves during the run, when the PMU serving the CPU
+cannot be identified, or when required provenance is missing.
+
+```sh
+ZJS_MEASUREMENT_LOCK=/tmp/zjs-host-heavy.lock ZJS_MEASUREMENT_LOCK_MODE=exclusive \
+flock -x /tmp/zjs-host-heavy.lock taskset -c 19 bun tools/compare/run_microbench.js \
+  --formal --cpu 19 --iters 8 --warmup 4 \
+  --zjs path/to/zjs --qjs path/to/qjs --output /tmp/microbench.json
+
+bun tools/compare/validate_measurement_artifact.js --formal /tmp/microbench.json
+```
+
+The validator additionally refuses a snapshot taken from a dirty worktree, a
+case whose recorded source hash disagrees with the suite table, a startup
+baseline from a different measurement generation, and any artifact carrying its
+own policy body.
+
+`startupAdjustedGeometricMean` is permanently `null`: it is diagnostic-only and
+not headline eligible. Per-case adjusted ratios exist only for cases whose
+startup residual clears the startup IQR, the case's own IQR and the minimum time
+resolution; everything else is `unresolved`.
+
+Contract and red-team suites:
+
+```sh
+zig build perf-measurement-contract
+bun tools/compare/test_measurement_redteam.js --zjs path/to/zjs --qjs path/to/qjs --cpu 19
+```
+
+The red-team suite requires a clean worktree: the reference artifact it tampers
+with must record `dirty=false`, otherwise every attack is adjudicated by the
+dirty-worktree rule instead of its own.
+
+### Session mode
+
+`--sessions N` (or `BENCH_SESSIONS`) groups ABBA rounds into independent timing
+sessions, each with its own warmup; `--interleaved` requires it. Session mode is
+**off by default** and session results are never headline eligible: the artifact
+carries a versioned `meta.sessions` block (`schemaVersion: 2`) and session
+samples live in their own pool, never merged into the legacy
+one-process-per-case pool. With `--sessions 1` and no `--interleaved` the legacy
+path is used unchanged.
+
 ### Native callback and execution-root suite
 
 `native-callback` is the mechanism-focused suite for synchronous

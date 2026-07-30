@@ -14,3 +14,10 @@ quickjs/
 # Python bytecode from tools/perf helpers
 __pycache__/
 *.pyc
+
+# P7-70 measurement scratch: independent cold-cache build instances, the
+# task-prescribed TMPDIR and the per-worktree Zig global cache.
+.tmp/
+.build-a/
+.build-b/
+.zig-global-cache/

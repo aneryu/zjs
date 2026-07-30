@@ -8,9 +8,27 @@ import process from 'node:process';
 import { performance } from 'node:perf_hooks';
 import { cases as microbenchCases, categories as microbenchCategories } from './microbench_cases.js';
 import { cases as hotpathCases, categories as hotpathCategories } from './hotpath_cases.js';
+import { cases as nativeCallbackCases, categories as nativeCallbackCategories } from './native_callback_cases.js';
+import {
+    CONTRACT_EXIT_CODES,
+    aggregateVerdict,
+    assertNoSelfSuppliedPolicy,
+    classifyStartupResolvability,
+    loadPolicy,
+    parseCpuList,
+    policyReference,
+    startupAdjustedSummary,
+    validateAffinityAttestation,
+    validateGenerationCoherence,
+    validateProvenance,
+    validateSampleContract,
+    validateSessionSchema,
+    validateWarmupContract,
+} from './measurement_contract.js';
 
 const toolDir = import.meta.dir;
 const root = path.resolve(toolDir, '../..');
+const policy = loadPolicy();
 
 const defaultZjs = path.join(root, 'zig-out', 'bin', 'zjs');
 const defaultQjs = fs.existsSync(path.join(root, 'build', 'qjs'))
@@ -21,6 +39,12 @@ let zjsBin = process.env.QJS_ZIG || defaultZjs;
 let qjsBin = process.env.QJS || defaultQjs;
 let iters = parseInteger(process.env.BENCH_ITERS, 10);
 let warmup = parseInteger(process.env.BENCH_WARMUP, 3);
+// Session mode is restored but default-off: BENCH_SESSIONS=1 and --interleaved
+// unset keep the legacy one-process-per-case path byte-for-byte.
+let sessions = parseInteger(process.env.BENCH_SESSIONS, policy.sessions.defaultSessions);
+let interleaved = policy.sessions.defaultInterleaved;
+let formalMode = false;
+let diagnosticMode = false;
 let includeUnsupported = false;
 let zjsOnly = false;
 let emitJson = false;
@@ -57,6 +81,29 @@ const suites = {
         categories: hotpathCategories,
         description: 'focused hotpath calibration suite',
     },
+    'native-callback': {
+        cases: nativeCallbackCases,
+        categories: nativeCallbackCategories,
+        description: 'synchronous native callback and execution-root control suite',
+    },
+};
+
+// The amplified diagnostics corpus is optional: it is a P7-70 side product and
+// the runner must keep working in trees that do not carry it.
+try {
+    const amplified = await import('./amplified_cases.js');
+    suites.amplified = {
+        cases: amplified.cases,
+        categories: amplified.categories,
+        description: 'P7-70 amplified diagnostics; diagnostic-only, never part of the 75-case compatibility geomean',
+    };
+} catch {
+    // no amplified corpus in this tree
+}
+
+const measurementLock = {
+    path: process.env.ZJS_MEASUREMENT_LOCK ?? null,
+    mode: process.env.ZJS_MEASUREMENT_LOCK_MODE ?? null,
 };
 
 function parseInteger(value, fallback) {
@@ -75,16 +122,22 @@ Use --zjs-only for self-baseline reports that compare zjs to a checked-in zjs re
 Options:
   --iters N                 Timed iterations per case and binary (default: ${iters})
   --warmup N                Warmup runs per case and binary (default: ${warmup})
+  --sessions N              Independent timing sessions; opt-in, never headline (default: ${sessions})
+  --interleaved             Run each session in ABBA quads; requires --sessions and an even --iters
+  --formal                  Formal sampling: fail closed on sample imbalance, unpinned
+                            affinity, escaping children and incomplete provenance
+  --diagnostic              Explicitly diagnostic run: contract violations are recorded,
+                            complete=false and every headline is nulled
   --case NAME               Run one case; repeatable
   --category NAME           Run one category; repeatable
-  --suite NAME              Case suite: microbench or hotpath (default: ${suiteName})
+  --suite NAME              Case suite: ${Object.keys(suites).join(', ')} (default: ${suiteName})
   --include-unsupported     Show unsupported cases in the terminal table
   --zjs-only                Use zjs for the reference column; does not require C qjs
   --json                    Print the JSON report to stdout instead of the table
   --output PATH             Write the JSON report to PATH
   --emit-scripts DIR        Write generated benchmark scripts to DIR for profiling
-  --cpu N                   Assert that the runner inherited affinity to CPU N;
-                            warns and records a mismatch, but never wraps timed children
+  --cpu N                   Require that the runner and every measured child are pinned
+                            to exactly {N}; in --formal mode a mismatch fails closed
   --pmu                     Collect the PRD 3.2 instructions-first arbitration metrics;
                             opt in explicitly and pin the outer runner with taskset
   --pmu-runs K              Repetitions per perf stat collection (default: ${pmuRuns})
@@ -99,6 +152,9 @@ Environment:
   QJS                       Path to C qjs
   BENCH_ITERS               Default iteration count
   BENCH_WARMUP              Default warmup count
+  BENCH_SESSIONS            Default independent session count (default 1 = legacy path)
+  ZJS_MEASUREMENT_LOCK      Path of the exclusive measurement lock held by the caller
+  ZJS_MEASUREMENT_LOCK_MODE Lock mode recorded into the artifact (exclusive/shared)
   ZJS_BUILD_MODE            Explicit build-mode metadata when the binary does not export it
   ZJS_JSVALUE_REPRESENTATION
                             Explicit JSValue representation metadata`);
@@ -148,23 +204,119 @@ function runCommand(cmd, captureOutput, cwd = undefined) {
     }
 }
 
-function parseCpuList(mask) {
-    const cpus = [];
-    for (const segment of mask.split(',')) {
-        const trimmed = segment.trim();
-        if (!trimmed) continue;
-        const range = trimmed.match(/^(\d+)-(\d+)$/);
-        if (range) {
-            const first = Number(range[1]);
-            const last = Number(range[2]);
-            if (last < first) return null;
-            for (let cpu = first; cpu <= last; cpu += 1) cpus.push(cpu);
+function readAffinityOfPid(pid) {
+    const statusPath = pid === 'self' ? '/proc/self/status' : `/proc/${pid}/status`;
+    try {
+        const status = fs.readFileSync(statusPath, 'utf8');
+        const mask = status.match(/^Cpus_allowed_list:\s*(.+?)\s*$/m)?.[1] ?? null;
+        return { mask, cpus: mask == null ? null : parseCpuList(mask), unavailableReason: null };
+    } catch (err) {
+        return { mask: null, cpus: null, unavailableReason: err instanceof Error ? err.message : String(err) };
+    }
+}
+
+function detectPmuIdentity(cpu) {
+    if (!Number.isInteger(cpu)) {
+        return { name: null, cpus: null, source: null, unavailableReason: 'no CPU was requested' };
+    }
+    let entries = [];
+    try {
+        entries = fs.readdirSync('/sys/devices').filter((name) => /pmu|cpu/i.test(name));
+    } catch (err) {
+        return { name: null, cpus: null, source: null, unavailableReason: err instanceof Error ? err.message : String(err) };
+    }
+    for (const entry of entries) {
+        const cpusPath = `/sys/devices/${entry}/cpus`;
+        let raw = null;
+        try {
+            raw = fs.readFileSync(cpusPath, 'utf8').trim();
+        } catch {
             continue;
         }
-        if (!/^\d+$/.test(trimmed)) return null;
-        cpus.push(Number(trimmed));
+        const cpus = parseCpuList(raw);
+        if (cpus && cpus.includes(cpu)) {
+            let type = null;
+            try {
+                type = Number(fs.readFileSync(`/sys/devices/${entry}/type`, 'utf8').trim());
+            } catch {
+                type = null;
+            }
+            return { name: entry, cpus, mask: raw, type, source: cpusPath, unavailableReason: null };
+        }
     }
-    return [...new Set(cpus)];
+    return {
+        name: null,
+        cpus: null,
+        source: '/sys/devices/*/cpus',
+        unavailableReason: `no PMU device declares CPU ${cpu} in its cpus mask`,
+    };
+}
+
+// Attest the affinity of a *real measured child*. The probe spawns the very
+// binary under test through `engineCommand`, so the affinity it reports is the
+// one the timed children inherit. `Bun.spawn` (not spawnSync) is used only
+// because the PID must be readable while the child is alive.
+async function attestChildAffinity(engine, binary, probeScript) {
+    const command = engineCommand(engine, binary, probeScript);
+    let child;
+    try {
+        child = Bun.spawn({ cmd: command, stdout: 'ignore', stderr: 'pipe' });
+    } catch (err) {
+        return {
+            treatment: engine,
+            pid: null,
+            mask: null,
+            cpus: null,
+            command,
+            unavailableReason: err instanceof Error ? err.message : String(err),
+        };
+    }
+    const pid = child.pid ?? null;
+    let observed = { mask: null, cpus: null, unavailableReason: 'child exited before its affinity could be read' };
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+        const read = readAffinityOfPid(pid);
+        if (read.mask != null) {
+            observed = read;
+            break;
+        }
+        await Bun.sleep(1);
+    }
+    const exitCode = await child.exited;
+    return {
+        treatment: engine,
+        pid,
+        mask: observed.mask,
+        cpus: observed.cpus,
+        command,
+        exitCode,
+        probeScript,
+        ...(observed.unavailableReason ? { unavailableReason: observed.unavailableReason } : {}),
+    };
+}
+
+const affinityProbeSource = [
+    '// affinity attestation probe: spin long enough for /proc/<pid>/status to be read',
+    'const deadline = Date.now() + 250;',
+    'let sink = 0;',
+    'while (Date.now() < deadline) sink += 1;',
+    'if (sink < 0) print(sink);',
+].join('\n');
+
+async function attestAffinity(phase, probeScript) {
+    const treatments = zjsOnly ? ['zjs'] : ['qjs', 'zjs'];
+    const binaries = { qjs: qjsBin, zjs: zjsBin };
+    const records = [];
+    for (const treatment of treatments) {
+        const record = await attestChildAffinity(treatment, binaries[treatment], probeScript);
+        records.push({ ...record, phase });
+    }
+    if (zjsOnly) {
+        // The reference column is the same zjs binary; mirror the record so the
+        // contract still sees an attestation for both declared treatments.
+        const zjs = records.find((record) => record.treatment === 'zjs');
+        records.push({ ...zjs, treatment: 'qjs', mirroredFrom: 'zjs', note: '--zjs-only: the qjs column is the zjs binary' });
+    }
+    return records;
 }
 
 function readCurrentAffinity() {
@@ -211,6 +363,8 @@ function initializeAffinity() {
             `--cpu ${requestedCpu} does not match runner Cpus_allowed_list=${measured}; ` +
             'timed children will inherit the measured runner affinity';
         currentAffinity.warning = warning;
+        // In formal mode this is an error, not a warning; the fail-closed check
+        // runs after argument parsing so the artifact can still record the state.
         console.error(`warning: ${warning}`);
     }
 }
@@ -260,6 +414,10 @@ function benchPair(qjsBinary, zjsBinary, script) {
     const zjsSamples = [];
     const pairs = [];
     const warmupOrders = [];
+    // `executedOrders` is written as each engine actually completes, so the
+    // contract validator compares the artifact's declared order against a
+    // record of the run rather than against the same generator that produced it.
+    const executedOrders = [];
 
     for (let i = 0; i < warmup; i += 1) {
         const order = pairOrder(i);
@@ -280,6 +438,7 @@ function benchPair(qjsBinary, zjsBinary, script) {
                     zjsSamples,
                     pairs,
                     warmupOrders,
+                    executedOrders,
                 };
             }
         }
@@ -287,6 +446,8 @@ function benchPair(qjsBinary, zjsBinary, script) {
 
     for (let i = 0; i < iters; i += 1) {
         const order = pairOrder(i);
+        const executed = [];
+        executedOrders.push(executed);
         const elapsed = {};
         for (const engine of order) {
             const start = performance.now();
@@ -306,14 +467,17 @@ function benchPair(qjsBinary, zjsBinary, script) {
                     zjsSamples,
                     pairs,
                     warmupOrders,
+                    executedOrders,
                 };
             }
+            executed.push(engine);
         }
         qjsSamples.push(elapsed.qjs);
         zjsSamples.push(elapsed.zjs);
         pairs.push({
             index: i,
             order: order.join('->'),
+            executedOrder: executed.join('->'),
             qjsMs: elapsed.qjs,
             zjsMs: elapsed.zjs,
         });
@@ -325,6 +489,125 @@ function benchPair(qjsBinary, zjsBinary, script) {
         zjsSamples,
         pairs,
         warmupOrders,
+        executedOrders,
+    };
+}
+
+// Restored session mode (schema v2). Opt-in only: `sessions === 1 &&
+// !interleaved` never reaches this function, so the legacy one-process-per-case
+// path above is untouched. Session samples are kept in their own pool and are
+// never merged into the legacy pool -- the two are different sampling designs.
+function benchInterleaved(qjsBinary, zjsBinary, script) {
+    const binaries = { qjs: qjsBinary, zjs: zjsBinary };
+    const sessionRows = [];
+    const qjsSamples = [];
+    const zjsSamples = [];
+    const pairs = [];
+    const warmupOrders = [];
+    const executedOrders = [];
+    let globalIndex = 0;
+
+    for (let session = 0; session < sessions; session += 1) {
+        for (let i = 0; i < warmup; i += 1) {
+            const order = pairOrder(i);
+            warmupOrders.push(order.join('->'));
+            for (const engine of order) {
+                const result = runBinary(engine, binaries[engine], script, false);
+                if (result.exitCode !== 0) {
+                    return {
+                        status: 'failed',
+                        failure: { phase: 'warmup', index: i, session, engine, exitCode: result.exitCode, spawnError: result.spawnError },
+                        qjsSamples,
+                        zjsSamples,
+                        pairs,
+                        warmupOrders,
+                        executedOrders,
+                        sessions: sessionRows,
+                    };
+                }
+            }
+        }
+
+        const sessionQjs = [];
+        const sessionZjs = [];
+        for (let i = 0; i < iters; i += 1) {
+            const order = pairOrder(i);
+            const executed = [];
+            executedOrders.push(executed);
+            const elapsed = {};
+            for (const engine of order) {
+                const start = performance.now();
+                const result = runBinary(engine, binaries[engine], script, false);
+                elapsed[engine] = performance.now() - start;
+                if (result.exitCode !== 0) {
+                    return {
+                        status: 'failed',
+                        failure: { phase: 'timed', index: i, session, engine, exitCode: result.exitCode, spawnError: result.spawnError },
+                        qjsSamples,
+                        zjsSamples,
+                        pairs,
+                        warmupOrders,
+                        executedOrders,
+                        sessions: sessionRows,
+                    };
+                }
+                executed.push(engine);
+            }
+            sessionQjs.push(elapsed.qjs);
+            sessionZjs.push(elapsed.zjs);
+            pairs.push({
+                index: globalIndex,
+                session,
+                order: order.join('->'),
+                executedOrder: executed.join('->'),
+                qjsMs: elapsed.qjs,
+                zjsMs: elapsed.zjs,
+            });
+            globalIndex += 1;
+        }
+        qjsSamples.push(...sessionQjs);
+        zjsSamples.push(...sessionZjs);
+        sessionRows.push({
+            session,
+            qjs: stats(sessionQjs),
+            zjs: stats(sessionZjs),
+        });
+    }
+
+    return {
+        status: 'ok',
+        failure: null,
+        qjsSamples,
+        zjsSamples,
+        pairs,
+        warmupOrders,
+        executedOrders,
+        sessions: sessionRows,
+    };
+}
+
+function runBenchPair(qjsBinary, zjsBinary, script) {
+    return sessionModeEnabled() ? benchInterleaved(qjsBinary, zjsBinary, script) : benchPair(qjsBinary, zjsBinary, script);
+}
+
+function sessionModeEnabled() {
+    return interleaved || sessions !== policy.sessions.defaultSessions;
+}
+
+function sessionBlock() {
+    const enabled = sessionModeEnabled();
+    return {
+        schemaVersion: policy.sessions.schemaVersion,
+        enabled,
+        sessions: enabled ? sessions : policy.sessions.defaultSessions,
+        interleaved,
+        headlineEligible: false,
+        legacyPathUnchanged: !enabled,
+        mixedWithLegacySamples: false,
+        samplePool: enabled ? 'session' : 'legacy',
+        description: enabled
+            ? 'ABBA rounds grouped into independent sessions, each preceded by its own warmup'
+            : 'legacy one-process-per-case ABBA path; session mode is off',
     };
 }
 
@@ -1040,7 +1323,7 @@ function detectCpuModel() {
     };
 }
 
-function collectMetadata() {
+function collectMetadata(extra = {}) {
     const resolvedZjs = realpathOrResolved(zjsBin);
     const resolvedQjs = zjsOnly ? null : realpathOrResolved(qjsBin);
     const zjsIdentity = gitIdentityForBinary(resolvedZjs);
@@ -1176,10 +1459,29 @@ function collectMetadata() {
             requestedCpuMatches: currentAffinity.requestedCpuMatches,
             kernel: firstLine(kernel.value) || os.release(),
             arch: os.arch(),
+            pmuIdentity: extra.pmuIdentity ?? detectPmuIdentity(requestedCpu ?? currentAffinity.pinnedCpu),
         },
+        lock: {
+            path: measurementLock.path,
+            mode: measurementLock.mode,
+            heldBy: 'caller',
+            ...(measurementLock.path
+                ? {}
+                : { unavailableReason: 'ZJS_MEASUREMENT_LOCK was not set by the caller' }),
+        },
+        environment: {
+            ZIG_GLOBAL_CACHE_DIR: process.env.ZIG_GLOBAL_CACHE_DIR ?? null,
+            TMPDIR: process.env.TMPDIR ?? null,
+            ZJS_REPO_ROOT: process.env.ZJS_REPO_ROOT ?? null,
+        },
+        caseSources: extra.caseSources ?? null,
+        startupBaselineIdentity: extra.startupBaselineIdentity ?? null,
+        attestation: extra.attestation ?? null,
+        sessions: sessionBlock(),
         sampling: {
             warmup,
             iters,
+            samples: sessionModeEnabled() ? sessions * iters : iters,
             order: 'ABBA per-sample interleaved',
             orderDescription:
                 'Warmup and timed rounds both alternate: zero-based even rounds run qjs then zjs; odd rounds run zjs then qjs. The two engines in each round are adjacent processes.',
@@ -1307,6 +1609,9 @@ function collectMetadata() {
         meta.host.affinityUnavailableReason = currentAffinity.unavailableReason;
     }
     if (currentAffinity.warning) meta.host.affinityWarning = currentAffinity.warning;
+    if (meta.host.pmuIdentity?.unavailableReason) {
+        meta.host.pmuIdentityUnavailableReason = meta.host.pmuIdentity.unavailableReason;
+    }
     if (kernel.unavailableReason) meta.host.kernelProbeUnavailableReason = kernel.unavailableReason;
     if (perfVersion.unavailableReason) meta.pmu.perfVersionUnavailableReason = perfVersion.unavailableReason;
     if (!collectPmu) {
@@ -1396,6 +1701,78 @@ function makeUnsupportedRow(item, reason) {
     };
 }
 
+function buildContractVerdict(report) {
+    const declaredOrders = report.meta.sampling.timed.sampleOrders.map((order) => order.split('->'));
+    const executedRows = report.cases.filter((row) => row.status === 'ok' && Array.isArray(row.executedOrders));
+    // The sample contract is evaluated against every compatible case: one bad
+    // case is enough to invalidate the headline.
+    const perCase = executedRows.map((row) =>
+        validateSampleContract(
+            {
+                samples: report.meta.sampling.samples,
+                declaredOrders: sessionModeEnabled()
+                    ? row.executedOrders.map(() => null).map((_, index) => declaredOrders[index % declaredOrders.length])
+                    : declaredOrders,
+                executedOrders: row.executedOrders.map((order) => (Array.isArray(order) ? order : String(order).split('->'))),
+            },
+            policy,
+        ),
+    );
+    const sampleFailures = perCase.filter((result) => !result.ok);
+    const sampleContract = sampleFailures.length === 0
+        ? (perCase[0] ?? validateSampleContract({ samples: report.meta.sampling.samples, declaredOrders, executedOrders: declaredOrders }, policy))
+        : {
+            ...sampleFailures[0],
+            failingCases: executedRows
+                .map((row, index) => (perCase[index].ok ? null : row.name))
+                .filter(Boolean),
+        };
+
+    const warmupContract = formalMode ? validateWarmupContract(warmup, policy) : { ok: true, violations: [] };
+    const affinity = formalMode
+        ? validateAffinityAttestation(
+            {
+                requestedCpu,
+                collectorStart: report.meta.attestation?.collectorStart,
+                collectorEnd: report.meta.attestation?.collectorEnd,
+                children: report.meta.attestation?.children ?? [],
+                pmu: report.meta.host.pmuIdentity,
+            },
+            policy,
+        )
+        : { ok: true, violations: [], skipped: 'not formal mode' };
+    const provenance = formalMode ? validateProvenance(report, policy) : { ok: true, violations: [], skipped: 'not formal mode' };
+    // Worktree cleanliness is adjudicated by validate_measurement_artifact.js,
+    // not here: the runner produces evidence (including the recorded dirty
+    // state), the validator decides whether that evidence may be published.
+    const generation = formalMode ? validateGenerationCoherence(report) : { ok: true, violations: [], skipped: 'not formal mode' };
+    const artifactPolicy = assertNoSelfSuppliedPolicy(report, policy);
+    const sessionSchema = validateSessionSchema(report.meta.sessions, policy);
+
+    const verdict = aggregateVerdict([
+        sampleContract,
+        warmupContract,
+        affinity,
+        provenance,
+        generation,
+        artifactPolicy,
+        sessionSchema,
+    ]);
+    return {
+        policyRef: policyReference(policy),
+        formalMode,
+        diagnosticMode,
+        sampleContract,
+        warmupContract,
+        affinityAttestation: affinity,
+        provenance,
+        generation,
+        artifactPolicy,
+        sessionSchema,
+        ...verdict,
+    };
+}
+
 function makeReport(rows, selected, meta) {
     const compatible = rows.filter((row) => row.status === 'ok');
     const validationFailures = rows.filter((row) => row.expectedStatus === 'supported' && row.status !== 'ok');
@@ -1403,11 +1780,8 @@ function makeReport(rows, selected, meta) {
     const pairedRatios = compatible
         .map((row) => row.paired?.geomean)
         .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
-    const startupAdjustedRatios = compatible
-        .map((row) => row.startupAdjusted?.ratio)
-        .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
     const pairedGeomean = pairedRatios.length === 0 ? null : geometricMean(pairedRatios);
-    return {
+    const report = {
         tool: 'zjs-microbench',
         suite: suiteName,
         timestamp: new Date().toISOString(),
@@ -1431,16 +1805,44 @@ function makeReport(rows, selected, meta) {
             pairedGeomean,
             primaryMetric: 'pairedGeomean',
             primaryRatio: pairedGeomean,
-            startupAdjustedGeometricMean: startupAdjustedRatios.length === 0 ? null : geometricMean(startupAdjustedRatios),
-            startupAdjustedGeometricMeanIsArbitration: false,
+            compatibilityMetric: true,
+            routePriorityMetric: false,
+            ...startupAdjustedSummary(),
         },
         cases: rows,
     };
+
+    report.contract = buildContractVerdict(report);
+    report.complete = report.contract.complete && !diagnosticMode;
+    report.headline = report.complete ? pairedGeomean : null;
+    if (!report.complete) {
+        // Fail closed: the aggregate is removed, not annotated. A warning next
+        // to a published headline is the exact failure mode P7-70 removes.
+        report.summary.pairedGeomean = null;
+        report.summary.primaryRatio = null;
+        report.summary.geometricMean = null;
+        report.summary.headlineVoidReason = diagnosticMode
+            ? 'diagnostic run: headlines are nulled by construction'
+            : `measurement contract violated (${report.contract.errorClass}): ` +
+              report.contract.violations.map((v) => v.rule).join(', ');
+    }
+    return report;
 }
 
-function measureStartupBaseline(scriptDir) {
+function measureStartupBaseline(scriptDir, generation) {
     const script = path.join(scriptDir, '__startup_empty.js');
     fs.writeFileSync(script, '');
+    const identity = {
+        // The startup baseline must be re-collected in the same measurement
+        // generation as the cases; the generation id is what makes that
+        // checkable after the fact.
+        generation,
+        scriptPath: script,
+        scriptSha256: crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex'),
+        scriptBytes: fs.statSync(script).size,
+        samples: sessionModeEnabled() ? sessions * iters : iters,
+        warmup,
+    };
     const expected = runBinary('qjs', qjsBin, script, true);
     const actual = runBinary('zjs', zjsBin, script, true);
     const validation = validationResult(expected, actual);
@@ -1449,11 +1851,12 @@ function measureStartupBaseline(scriptDir) {
         return {
             status: 'invalid',
             reason: summarizeMismatch(expected, actual),
+            identity,
             validation,
             note,
         };
     }
-    const result = benchPair(qjsBin, zjsBin, script);
+    const result = runBenchPair(qjsBin, zjsBin, script);
     if (result.status !== 'ok') {
         const failure = result.failure;
         return {
@@ -1465,6 +1868,8 @@ function measureStartupBaseline(scriptDir) {
             zjs: { samples: result.zjsSamples },
             pairs: result.pairs,
             warmupOrders: result.warmupOrders,
+            executedOrders: result.executedOrders,
+            identity,
             validation,
             note,
         };
@@ -1481,29 +1886,60 @@ function measureStartupBaseline(scriptDir) {
         pairs: result.pairs,
         paired: pairedStats(result.pairs),
         warmupOrders: result.warmupOrders,
+        executedOrders: result.executedOrders,
+        identity,
         validation,
         note,
     };
 }
 
-function startupAdjustedAverage(measured, baseline) {
-    if (!measured || !baseline) return null;
-    const adjusted = measured.avg - baseline.avg;
-    return adjusted > 0 ? adjusted : null;
-}
-
+// P7-70 A3: `startupAdjusted` is demoted to diagnostic-only. A per-case adjusted
+// ratio only exists when the residual `total - startup_baseline` clears the
+// startup IQR, the case's own total-time IQR and the preset minimum time
+// resolution. Unresolved cases carry ratio=null and are never aggregated.
 function addStartupAdjustedRows(rows, startupBaseline) {
-    if (startupBaseline?.status !== 'ok') return;
     for (const row of rows) {
         if (row.status !== 'ok') continue;
-        const qjsAvg = startupAdjustedAverage(row.qjs, startupBaseline.qjs);
-        const zjsAvg = startupAdjustedAverage(row.zjs, startupBaseline.zjs);
-        const ratio = qjsAvg != null && zjsAvg != null ? zjsAvg / qjsAvg : null;
+        if (startupBaseline?.status !== 'ok') {
+            row.startupAdjusted = {
+                qjsAvg: null,
+                zjsAvg: null,
+                ratio: null,
+                winner: 'unknown',
+                diagnosticOnly: true,
+                headlineEligible: false,
+                status: 'unresolved',
+                unresolvedReasons: ['startup-baseline-unavailable'],
+            };
+            row.resolvability = {
+                resolvabilityClass: 'unknown',
+                startupShareQjs: null,
+                startupShareZjs: null,
+                adjusted: { ratio: null, status: 'unresolved' },
+            };
+            continue;
+        }
+        const classification = classifyStartupResolvability(
+            {
+                qjs: row.qjs,
+                zjs: row.zjs,
+                startupQjs: startupBaseline.qjs,
+                startupZjs: startupBaseline.zjs,
+            },
+            policy,
+        );
+        row.resolvability = classification;
         row.startupAdjusted = {
-            qjsAvg,
-            zjsAvg,
-            ratio,
-            winner: Number.isFinite(ratio) ? winnerForRatio(ratio) : 'unknown',
+            qjsAvg: classification.residual.qjs.residualMs,
+            zjsAvg: classification.residual.zjs.residualMs,
+            ratio: classification.adjusted.ratio,
+            winner: Number.isFinite(classification.adjusted.ratio)
+                ? winnerForRatio(classification.adjusted.ratio)
+                : 'unknown',
+            diagnosticOnly: true,
+            headlineEligible: false,
+            status: classification.adjusted.status,
+            unresolvedReasons: classification.adjusted.unresolvedReasons,
         };
     }
 }
@@ -1583,6 +2019,22 @@ for (let i = 0; i < args.length; i += 1) {
             if (!Number.isFinite(warmup) || warmup < 0) fail('error: warmup must be >= 0');
             break;
         }
+        case '--sessions': {
+            const value = args[++i];
+            if (value == null) fail('error: --sessions requires a value');
+            sessions = parseInteger(value, Number.NaN);
+            if (!Number.isFinite(sessions) || sessions <= 0) fail('error: sessions must be > 0');
+            break;
+        }
+        case '--interleaved':
+            interleaved = true;
+            break;
+        case '--formal':
+            formalMode = true;
+            break;
+        case '--diagnostic':
+            diagnosticMode = true;
+            break;
         case '--case': {
             const value = args[++i];
             if (value == null) fail('error: --case requires a value');
@@ -1674,12 +2126,56 @@ if (shouldList) {
     listCases();
     process.exit(0);
 }
+if (interleaved && !sessionModeEnabled()) fail('error: --interleaved requires --sessions N with N > 1');
 initializeAffinity();
-if (iters % 2 !== 0) {
-    console.error(
-        `warning: --iters ${iters} produces an unbalanced first-position count; ` +
-        'the artifact records orderBalanced=false',
-    );
+
+// P7-70 A1: fail closed *before* any process is spawned when the requested
+// sampling design cannot be balanced at all. An odd sample count has voided a
+// headline twice already (`run_direct.py --samples 5`, Phase 6 same-runtime
+// 3 qjs-first / 2 zjs-first), each time behind a warning that was ignored.
+const preflightSamples = sessionModeEnabled() ? sessions * iters : iters;
+const preflightSampleContract = validateSampleContract(
+    {
+        samples: preflightSamples,
+        declaredOrders: orderAudit(preflightSamples).sampleOrders.map((order) => order.split('->')),
+        executedOrders: orderAudit(preflightSamples).sampleOrders.map((order) => order.split('->')),
+    },
+    policy,
+);
+if (!preflightSampleContract.ok && !diagnosticMode) {
+    for (const violation of preflightSampleContract.violations) {
+        console.error(`error: ${violation.rule}: ${violation.detail}`);
+    }
+    console.error('error: SampleBalanceError: complete=false, headline=null, pairedGeomean=null');
+    process.exit(CONTRACT_EXIT_CODES.sampleBalance);
+}
+if (formalMode) {
+    const warmupContract = validateWarmupContract(warmup, policy);
+    if (!warmupContract.ok && !diagnosticMode) {
+        for (const violation of warmupContract.violations) {
+            console.error(`error: ${violation.rule}: ${violation.detail}`);
+        }
+        console.error('error: SampleBalanceError: complete=false, headline=null, pairedGeomean=null');
+        process.exit(CONTRACT_EXIT_CODES.sampleBalance);
+    }
+    // A2: the historical snapshot asked for CPU 19 and ran on `0-19`. That must
+    // not be a warning any more, and an allowed-list that merely *contains* 19
+    // is not pinning.
+    const preflightAffinity = validateAffinityAttestation(
+        {
+            requestedCpu,
+            collectorStart: { mask: currentAffinity.mask, cpus: currentAffinity.cpus },
+            collectorEnd: { mask: currentAffinity.mask, cpus: currentAffinity.cpus },
+            children: [],
+            pmu: detectPmuIdentity(requestedCpu),
+        },
+        policy,
+    ).violations.filter((violation) => !violation.rule.startsWith('child-'));
+    if (preflightAffinity.length !== 0 && !diagnosticMode) {
+        for (const violation of preflightAffinity) console.error(`error: ${violation.rule}: ${violation.detail}`);
+        console.error('error: AffinityAttestationError: complete=false, headline=null, pairedGeomean=null');
+        process.exit(CONTRACT_EXIT_CODES.affinityAttestation);
+    }
 }
 if (collectPmu && pmuRuns % 2 !== 0) {
     console.error(
@@ -1712,7 +2208,21 @@ if (zjsOnly) {
 const selected = selectedCaseList();
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zjs-microbench-'));
 if (emitScriptsDir) fs.mkdirSync(emitScriptsDir, { recursive: true });
+// One generation id ties the cases, the startup baseline and the attestation
+// records together: reusing a startup baseline from another generation is the
+// exact defect that voided the Phase 6 numbers.
+const measurementGeneration = `${new Date().toISOString()}#${process.pid}`;
+const caseSources = {};
+const attestation = { generation: measurementGeneration, children: [], collectorStart: null, collectorEnd: null };
 try {
+    if (formalMode) {
+        const probeScript = path.join(tempDir, '__affinity_probe.js');
+        fs.writeFileSync(probeScript, `${affinityProbeSource}\n`);
+        attestation.probeScript = probeScript;
+        attestation.probeSha256 = crypto.createHash('sha256').update(fs.readFileSync(probeScript)).digest('hex');
+        attestation.collectorStart = readAffinityOfPid('self');
+        attestation.children.push(...(await attestAffinity('pre', probeScript)));
+    }
     const rows = [];
     for (const item of selected) {
         if (!item.source) {
@@ -1721,7 +2231,10 @@ try {
         }
 
         const script = path.join(emitScriptsDir || tempDir, `${item.name}.js`);
-        fs.writeFileSync(script, `${item.source}\n`);
+        const scriptBody = `${item.source}\n`;
+        fs.writeFileSync(script, scriptBody);
+        const sourceSha256 = crypto.createHash('sha256').update(scriptBody).digest('hex');
+        caseSources[item.name] = { sourcePath: script, sourceSha256, sourceBytes: Buffer.byteLength(scriptBody) };
 
         const expected = runBinary('qjs', qjsBin, script, true);
         const actual = runBinary('zjs', zjsBin, script, true);
@@ -1745,7 +2258,7 @@ try {
             continue;
         }
 
-        const result = benchPair(qjsBin, zjsBin, script);
+        const result = runBenchPair(qjsBin, zjsBin, script);
         if (result.status !== 'ok') {
             const failure = result.failure;
             const reason =
@@ -1759,11 +2272,14 @@ try {
                 status: 'skipped',
                 reason,
                 notes: item.notes,
+                sourcePath: script,
+                sourceSha256,
                 validation,
                 qjs: { samples: result.qjsSamples },
                 zjs: { samples: result.zjsSamples },
                 pairs: result.pairs,
                 warmupOrders: result.warmupOrders,
+                executedOrders: result.executedOrders,
                 ...unavailableCaseMeasurements(reason),
             });
             continue;
@@ -1781,14 +2297,20 @@ try {
             expectedStatus: item.expectedStatus,
             status: 'ok',
             notes: item.notes,
+            sourcePath: script,
+            sourceSha256,
+            generation: measurementGeneration,
             validation,
             qjs: qjsStats,
             zjs: zjsStats,
             ratio,
+            absoluteDeltaMs: zjsStats.median - qjsStats.median,
             winner: winnerForRatio(ratio),
             pairs: result.pairs,
             paired: pairedStats(result.pairs),
             warmupOrders: result.warmupOrders,
+            executedOrders: result.executedOrders,
+            ...(result.sessions ? { sessions: result.sessions } : {}),
             pmu,
             peakRssKb,
             allocations: unavailableAllocationMetric('allocation count'),
@@ -1796,9 +2318,23 @@ try {
         });
     }
 
-    const startupBaseline = measureStartupBaseline(tempDir);
+    // Same measurement generation as the cases: the startup baseline is
+    // re-collected here, never reused from an archived snapshot.
+    const startupBaseline = measureStartupBaseline(tempDir, measurementGeneration);
     addStartupAdjustedRows(rows, startupBaseline);
-    const report = makeReport(rows, selected, collectMetadata());
+    if (formalMode) {
+        attestation.collectorEnd = readAffinityOfPid('self');
+        attestation.children.push(...(await attestAffinity('post', attestation.probeScript)));
+    }
+    const report = makeReport(
+        rows,
+        selected,
+        collectMetadata({
+            caseSources,
+            startupBaselineIdentity: startupBaseline.identity ?? null,
+            attestation: formalMode ? attestation : null,
+        }),
+    );
     if (zjsOnly) report.baseline = 'zjs-only';
     report.startupBaseline = startupBaseline;
     const json = `${JSON.stringify(report, null, 2)}\n`;
@@ -1812,7 +2348,16 @@ try {
     } else {
         printTable(report);
     }
-    if (hasValidationFailures(report)) process.exit(1);
+    if (hasValidationFailures(report)) process.exit(CONTRACT_EXIT_CODES.validationFailure);
+    if (!report.contract.complete) {
+        for (const violation of report.contract.violations) {
+            console.error(`error: ${violation.rule}: ${violation.detail}`);
+        }
+        console.error(
+            `error: ${report.contract.errorClass}: complete=false, headline=null, pairedGeomean=null`,
+        );
+        process.exit(report.contract.exitCode);
+    }
 } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
 }
