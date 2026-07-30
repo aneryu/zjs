@@ -69,3 +69,39 @@ Shape。qjs 的 `js_update_property_flags`（`quickjs.c:10332`）把 shape prepa
   plain construct 2.03x / out-of-line buffer 1.99x），本轮不追。
 - **`array_map_callback = 2.618x`** → P7-40 证明不复现（过期二进制 + 非绑核采样两项混杂），
   权威值 cycles 1.364x；P7-20 的第 1 名与 17.2% 份额已作废。
+
+## builtin→bytecode 回调桥的 driver 重入重派生（P7-42）
+
+**登记日期**：2026-07-30
+**来源**：P7-42 逐阶段归因（`P7-42-bridge-phase-attribution.md`）
+
+状态：
+
+```text
+named redundant work inside a confirmed tax
+but bounded at 18-29% of that tax
+→ deferred, below the 40% one-cut threshold
+```
+
+P7-42 把 P7-41 的共享桥税（本树 canonical 重测 **27.26 cyc/回调**，P7-41 为 27.43）拆成
+十四个每回调必经阶段，最大单一阶段 `S7c_vm_cache_rebuild` 只有 **6.98 cyc = 25.6%**，
+其余十个落在 3.3–6.4 的带里 → 生产路线按停止条件关闭。
+
+唯一点得出名字的冗余：`tryPushNativeBoundaryLeafArgsFast` 把 `*Entry`、callee `fb`、
+参数/操作数窗口基址与新帧的 `pc == 0` 全部**写进内存后丢弃**，紧接着 `runTC` 经
+`machine.depth → machine.top → entry.frame → frame.function → byteCode()` 把同一组值
+重派生一遍（`S7c` 31 insn 中约三分之一，加上 `S7d` 的 `pc/sp/var_buf` 与可证恒为 false 的
+`local_fast_blocked`）。事件画像与之吻合：税是**非内存**后端阻塞
+（`stall_backend +31.19`、`stall_backend_mem +0.04`、`l1d_cache_refill 0`、`br_mis_pred 0`）。
+
+**上限 5–8 cyc/回调 = 税的 18–29%**，因此**现在不实现**。
+
+**重启条件（任一成立）**：
+
+- 一刀门槛从 40% 下调，或桥税本身在某个 Pareto case 中的绝对份额上升；
+- 有独立证据表明 `runTC` 入口的重派生同样支配非回调 driver 入口（脚本入口 /
+  generator 恢复 / 构造器完成），使同一改动的受益面超出 builtin 回调；
+- driver activation 的搬家（把回调驱动改成 continuation）被单独立项并证明可逆。
+
+**明确不批准**：把 `S7a`…`S7e` 打成一刀（同时改 driver activation、Machine level 派生
+与返回 outcome），或把 fence / Machine / roots / return 四层凑成 27 cycles。
