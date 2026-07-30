@@ -10,7 +10,9 @@ import path from 'node:path';
 import process from 'node:process';
 import {
     CONTRACT_EXIT_CODES,
+    classifyStartupResolvability,
     loadPolicy,
+    startupAdjustedSummary,
     validateAffinityAttestation,
     validatePhaseSampling,
     validateProvenance,
@@ -295,6 +297,125 @@ record('A2-08', 'affinity', 'missing child attestation', 'AffinityAttestationErr
         pass: result.ok === false && rules(result).includes('child-attestation-missing'),
         rules: rules(result),
         message: detailFor(result, 'child-attestation-missing'),
+    };
+});
+
+// ---------------------------------------------------------------------------
+// A3 - startup residual resolvability
+// ---------------------------------------------------------------------------
+
+const startupQjs = { median: 0.79, p25: 0.77, p75: 0.83, avg: 0.79 };
+const startupZjs = { median: 1.0, p25: 0.97, p75: 1.05, avg: 1.0 };
+
+record('A3-01', 'startup', 'the aggregate startup-adjusted geomean is never emitted', 'startupAdjustedGeometricMean === null and headlineEligible === false', () => {
+    const summary = startupAdjustedSummary();
+    return {
+        pass:
+            summary.startupAdjustedGeometricMean === null &&
+            summary.startupAdjustedDiagnosticOnly === true &&
+            summary.startupAdjustedHeadlineEligible === false,
+        summary,
+    };
+});
+
+record('A3-02', 'startup', 'residual exactly zero yields no adjusted ratio', 'ratio null, status unresolved, reason residual-zero', () => {
+    const result = classifyStartupResolvability(
+        { qjs: { median: 0.79, p25: 0.78, p75: 0.8 }, zjs: { median: 1.0, p25: 0.99, p75: 1.01 }, startupQjs, startupZjs },
+        policy,
+    );
+    return {
+        pass:
+            result.adjusted.ratio === null &&
+            result.adjusted.status === 'unresolved' &&
+            result.adjusted.unresolvedReasons.includes('residual-zero'),
+        ratio: result.adjusted.ratio,
+        reasons: result.adjusted.unresolvedReasons,
+        resolvabilityClass: result.resolvabilityClass,
+    };
+});
+
+record('A3-03', 'startup', 'negative residual yields no adjusted ratio', 'ratio null, reason residual-negative', () => {
+    const result = classifyStartupResolvability(
+        { qjs: { median: 0.7, p25: 0.69, p75: 0.71 }, zjs: { median: 0.9, p25: 0.89, p75: 0.91 }, startupQjs, startupZjs },
+        policy,
+    );
+    return {
+        pass: result.adjusted.ratio === null && result.adjusted.unresolvedReasons.includes('residual-negative'),
+        ratio: result.adjusted.ratio,
+        reasons: result.adjusted.unresolvedReasons,
+    };
+});
+
+record('A3-04', 'startup', 'residual inside the noise band yields no adjusted ratio', 'ratio null, reason residual-below-startup-iqr', () => {
+    // qjs residual 0.03 ms, below the 0.06 ms startup IQR and below the 0.05 ms
+    // minimum time resolution. This is the `weak_map_set = 10.106` shape.
+    const result = classifyStartupResolvability(
+        { qjs: { median: 0.82, p25: 0.8, p75: 0.86 }, zjs: { median: 1.31, p25: 1.28, p75: 1.36 }, startupQjs, startupZjs },
+        policy,
+    );
+    return {
+        pass:
+            result.adjusted.ratio === null &&
+            result.adjusted.unresolvedReasons.includes('residual-below-startup-iqr') &&
+            result.adjusted.unresolvedReasons.includes('residual-below-min-time-resolution'),
+        ratio: result.adjusted.ratio,
+        reasons: result.adjusted.unresolvedReasons,
+        resolvabilityClass: result.resolvabilityClass,
+    };
+});
+
+record('A3-05', 'startup', 'a tampered (inflated) startup baseline cannot manufacture a large ratio', 'ratio null even though the naive quotient would be 10.3', () => {
+    const caseQjs = { median: 0.82, p25: 0.8, p75: 0.86 };
+    const caseZjs = { median: 1.31, p25: 1.28, p75: 1.36 };
+    const tampered = { median: 0.7995, p25: 0.799, p75: 0.8 };
+    const naive = (caseZjs.median - startupZjs.median) / (caseQjs.median - tampered.median);
+    const result = classifyStartupResolvability(
+        { qjs: caseQjs, zjs: caseZjs, startupQjs: tampered, startupZjs },
+        policy,
+    );
+    return {
+        pass: result.adjusted.ratio === null && naive > 5,
+        naiveRatio: naive,
+        ratio: result.adjusted.ratio,
+        reasons: result.adjusted.unresolvedReasons,
+    };
+});
+
+record('A3-06', 'startup', 'an execution-dominant case resolves and is classified', 'class execution-dominant, ratio finite', () => {
+    const result = classifyStartupResolvability(
+        {
+            qjs: { median: 18.5, p25: 18.4, p75: 18.7 },
+            zjs: { median: 23.0, p25: 22.8, p75: 23.3 },
+            startupQjs,
+            startupZjs,
+        },
+        policy,
+    );
+    return {
+        pass:
+            result.resolvabilityClass === 'execution-dominant' &&
+            Number.isFinite(result.adjusted.ratio) &&
+            result.adjusted.status === 'resolved' &&
+            result.adjusted.headlineEligible === false,
+        resolvabilityClass: result.resolvabilityClass,
+        ratio: result.adjusted.ratio,
+        startupShareQjs: result.startupShareQjs,
+    };
+});
+
+record('A3-07', 'startup', 'class boundaries follow the measured startup share', 'partially-resolvable at 33%, startup-dominated at 79%', () => {
+    const partial = classifyStartupResolvability(
+        { qjs: { median: 2.4, p25: 2.35, p75: 2.45 }, zjs: { median: 3.0, p25: 2.95, p75: 3.06 }, startupQjs, startupZjs },
+        policy,
+    );
+    const dominated = classifyStartupResolvability(
+        { qjs: { median: 1.0, p25: 0.98, p75: 1.02 }, zjs: { median: 1.3, p25: 1.28, p75: 1.33 }, startupQjs, startupZjs },
+        policy,
+    );
+    return {
+        pass: partial.resolvabilityClass === 'partially-resolvable' && dominated.resolvabilityClass === 'startup-dominated',
+        partial: { class: partial.resolvabilityClass, share: partial.startupShareQjs },
+        dominated: { class: dominated.resolvabilityClass, share: dominated.startupShareQjs },
     };
 });
 

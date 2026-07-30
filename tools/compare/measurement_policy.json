@@ -23,6 +23,16 @@
     "requireChildAttestationAtEnd": true,
     "requirePmuIdentity": true
   },
+  "startup": {
+    "headlineEligible": false,
+    "diagnosticOnly": true,
+    "minTimeResolutionMs": 0.05,
+    "requireResidualAboveStartupIqr": true,
+    "requireResidualAboveCaseIqr": true,
+    "executionDominantMaxStartupShare": 0.2,
+    "partiallyResolvableMaxStartupShare": 0.5,
+    "classifierEngine": "qjs"
+  },
   "provenance": {
     "requiredFields": [
       "meta.zjs.commit",

@@ -375,6 +375,104 @@ export function validateAffinityAttestation(input, policy) {
 }
 
 // ---------------------------------------------------------------------------
+// A3: startup residual resolvability. `startupAdjusted` is diagnostic only.
+// ---------------------------------------------------------------------------
+
+export function iqr(stats) {
+    if (!stats || !Number.isFinite(stats.p25) || !Number.isFinite(stats.p75)) return null;
+    return stats.p75 - stats.p25;
+}
+
+/**
+ * Resolve one engine's startup residual.
+ * Returns { residualMs, resolved, reasons[] }.
+ */
+export function resolveStartupResidual(caseStats, startupStats, policy) {
+    const rules = policy.startup;
+    const reasons = [];
+    if (!caseStats || !startupStats || !Number.isFinite(caseStats.median) || !Number.isFinite(startupStats.median)) {
+        return { residualMs: null, resolved: false, reasons: ['missing-statistics'] };
+    }
+    const residual = caseStats.median - startupStats.median;
+    if (!(residual > 0)) reasons.push(residual === 0 ? 'residual-zero' : 'residual-negative');
+    const startupIqr = iqr(startupStats);
+    const caseIqr = iqr(caseStats);
+    if (rules.requireResidualAboveStartupIqr && startupIqr != null && residual < startupIqr) {
+        reasons.push('residual-below-startup-iqr');
+    }
+    if (rules.requireResidualAboveCaseIqr && caseIqr != null && residual < caseIqr) {
+        reasons.push('residual-below-case-iqr');
+    }
+    if (residual < rules.minTimeResolutionMs) reasons.push('residual-below-min-time-resolution');
+    return {
+        residualMs: residual,
+        startupIqrMs: startupIqr,
+        caseIqrMs: caseIqr,
+        minTimeResolutionMs: rules.minTimeResolutionMs,
+        resolved: reasons.length === 0,
+        reasons,
+    };
+}
+
+/**
+ * Classify a case by *currently measured* startup share and compute a per-case
+ * adjusted ratio only when both engines resolve.
+ */
+export function classifyStartupResolvability(input, policy) {
+    const rules = policy.startup;
+    const qjs = resolveStartupResidual(input.qjs, input.startupQjs, policy);
+    const zjs = resolveStartupResidual(input.zjs, input.startupZjs, policy);
+
+    const shareOf = (caseStats, startupStats) =>
+        caseStats && startupStats && Number.isFinite(caseStats.median) && caseStats.median > 0
+            ? startupStats.median / caseStats.median
+            : null;
+    const startupShareQjs = shareOf(input.qjs, input.startupQjs);
+    const startupShareZjs = shareOf(input.zjs, input.startupZjs);
+    const classifierShare = rules.classifierEngine === 'zjs' ? startupShareZjs : startupShareQjs;
+
+    let resolvabilityClass = 'unknown';
+    if (Number.isFinite(classifierShare)) {
+        if (classifierShare <= rules.executionDominantMaxStartupShare) resolvabilityClass = 'execution-dominant';
+        else if (classifierShare <= rules.partiallyResolvableMaxStartupShare) resolvabilityClass = 'partially-resolvable';
+        else resolvabilityClass = 'startup-dominated';
+    }
+
+    const resolved = qjs.resolved && zjs.resolved;
+    // Never divide by a near-zero denominator: the ratio only exists when the
+    // qjs residual itself cleared every resolution test.
+    const ratio = resolved && qjs.residualMs > 0 ? zjs.residualMs / qjs.residualMs : null;
+
+    return {
+        resolvabilityClass,
+        startupShareQjs,
+        startupShareZjs,
+        classifierEngine: rules.classifierEngine,
+        residual: { qjs, zjs },
+        adjusted: {
+            ratio,
+            status: resolved ? 'resolved' : 'unresolved',
+            diagnosticOnly: true,
+            headlineEligible: false,
+            unresolvedReasons: resolved ? [] : [...new Set([...qjs.reasons, ...zjs.reasons])],
+        },
+    };
+}
+
+export function startupAdjustedSummary() {
+    // Codified demotion: the schema field survives, the number does not.
+    return {
+        startupAdjustedGeometricMean: null,
+        startupAdjustedDiagnosticOnly: true,
+        startupAdjustedHeadlineEligible: false,
+        startupAdjustedGeometricMeanIsArbitration: false,
+        startupAdjustedVoidReason:
+            'P7-20/P7-70: with this suite composition the majority of denominators are at or below the noise band; ' +
+            'unresolved cases are never aggregated and the aggregate is therefore not emitted',
+    };
+}
+
+// ---------------------------------------------------------------------------
 // A4: provenance completeness, and the ban on artifact-supplied thresholds.
 // ---------------------------------------------------------------------------
 

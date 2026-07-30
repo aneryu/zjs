@@ -12,9 +12,11 @@ import {
     CONTRACT_EXIT_CODES,
     aggregateVerdict,
     assertNoSelfSuppliedPolicy,
+    classifyStartupResolvability,
     loadPolicy,
     parseCpuList,
     policyReference,
+    startupAdjustedSummary,
     validateAffinityAttestation,
     validateGenerationCoherence,
     validateProvenance,
@@ -1626,9 +1628,6 @@ function makeReport(rows, selected, meta) {
     const pairedRatios = compatible
         .map((row) => row.paired?.geomean)
         .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
-    const startupAdjustedRatios = compatible
-        .map((row) => row.startupAdjusted?.ratio)
-        .filter((ratio) => Number.isFinite(ratio) && ratio > 0);
     const pairedGeomean = pairedRatios.length === 0 ? null : geometricMean(pairedRatios);
     const report = {
         tool: 'zjs-microbench',
@@ -1654,10 +1653,9 @@ function makeReport(rows, selected, meta) {
             pairedGeomean,
             primaryMetric: 'pairedGeomean',
             primaryRatio: pairedGeomean,
-            startupAdjustedGeometricMean: startupAdjustedRatios.length === 0 ? null : geometricMean(startupAdjustedRatios),
-            startupAdjustedGeometricMeanIsArbitration: false,
             compatibilityMetric: true,
             routePriorityMetric: false,
+            ...startupAdjustedSummary(),
         },
         cases: rows,
     };
@@ -1671,7 +1669,6 @@ function makeReport(rows, selected, meta) {
         report.summary.pairedGeomean = null;
         report.summary.primaryRatio = null;
         report.summary.geometricMean = null;
-        report.summary.startupAdjustedGeometricMean = null;
         report.summary.headlineVoidReason = diagnosticMode
             ? 'diagnostic run: headlines are nulled by construction'
             : `measurement contract violated (${report.contract.errorClass}): ` +
@@ -1744,24 +1741,53 @@ function measureStartupBaseline(scriptDir, generation) {
     };
 }
 
-function startupAdjustedAverage(measured, baseline) {
-    if (!measured || !baseline) return null;
-    const adjusted = measured.avg - baseline.avg;
-    return adjusted > 0 ? adjusted : null;
-}
-
+// P7-70 A3: `startupAdjusted` is demoted to diagnostic-only. A per-case adjusted
+// ratio only exists when the residual `total - startup_baseline` clears the
+// startup IQR, the case's own total-time IQR and the preset minimum time
+// resolution. Unresolved cases carry ratio=null and are never aggregated.
 function addStartupAdjustedRows(rows, startupBaseline) {
-    if (startupBaseline?.status !== 'ok') return;
     for (const row of rows) {
         if (row.status !== 'ok') continue;
-        const qjsAvg = startupAdjustedAverage(row.qjs, startupBaseline.qjs);
-        const zjsAvg = startupAdjustedAverage(row.zjs, startupBaseline.zjs);
-        const ratio = qjsAvg != null && zjsAvg != null ? zjsAvg / qjsAvg : null;
+        if (startupBaseline?.status !== 'ok') {
+            row.startupAdjusted = {
+                qjsAvg: null,
+                zjsAvg: null,
+                ratio: null,
+                winner: 'unknown',
+                diagnosticOnly: true,
+                headlineEligible: false,
+                status: 'unresolved',
+                unresolvedReasons: ['startup-baseline-unavailable'],
+            };
+            row.resolvability = {
+                resolvabilityClass: 'unknown',
+                startupShareQjs: null,
+                startupShareZjs: null,
+                adjusted: { ratio: null, status: 'unresolved' },
+            };
+            continue;
+        }
+        const classification = classifyStartupResolvability(
+            {
+                qjs: row.qjs,
+                zjs: row.zjs,
+                startupQjs: startupBaseline.qjs,
+                startupZjs: startupBaseline.zjs,
+            },
+            policy,
+        );
+        row.resolvability = classification;
         row.startupAdjusted = {
-            qjsAvg,
-            zjsAvg,
-            ratio,
-            winner: Number.isFinite(ratio) ? winnerForRatio(ratio) : 'unknown',
+            qjsAvg: classification.residual.qjs.residualMs,
+            zjsAvg: classification.residual.zjs.residualMs,
+            ratio: classification.adjusted.ratio,
+            winner: Number.isFinite(classification.adjusted.ratio)
+                ? winnerForRatio(classification.adjusted.ratio)
+                : 'unknown',
+            diagnosticOnly: true,
+            headlineEligible: false,
+            status: classification.adjusted.status,
+            unresolvedReasons: classification.adjusted.unresolvedReasons,
         };
     }
 }
