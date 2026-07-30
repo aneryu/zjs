@@ -57,6 +57,31 @@ genuine unfaithful divergence, and NOT dynamically cold
 dossier §6.3 论证该判据的前提（各阶段可独立删）在此不成立，并把取舍交回协调者。
 `splay` 不在受益面内（94.3% object 操作数，忠实 immediate 臂不覆盖）。
 
+**执行结果（2026-07-30，P7-61）**：一刀已实施、已计量、**已按阈值回退**，见
+`P7-61-lnot-hot-handler/P7-61-lnot-hot-handler.md`。
+
+```text
+immediate  +86.1% .. +91.2% cyc/op, +80.9% .. +85.7% insn/op   (4/4)
+product    geomean +0.83%; earley-boyer +1.39% / mandreel +1.16% / raytrace +0.84%
+splay      -0.04%（如预测，中性）
+FAIL       complex types -2.17% .. -5.64% whole-case，稳定复现
+           → 触发「complex types regress >= 1%」回退条款
+decision = REVERT（机制不入库；字节码形态钉子保留）
+```
+
+病因是**确定性的 +8.00 insn/op**：热 handler 未命中后要**再间接跳一次**才能到达原本
+一跳可达的冷壳。绝对值只有 +0.51 … +2.17 cyc/次，按语料加权在真实负载里最多值
+`splay` 的 0.04%（模型与实测吻合到 0.27pp，五个负载全中），但合成口径超阈值。
+
+**重启条件（任一成立）**：
+
+- 采用**专用冷 handler + 直接尾调**的形状（`op_add_loc_cold` 的写法）消掉那 8 条指令，
+  并当轮证明 immediate 热臂 codegen 未被扰动（`op_compare_cold` 有 +37 insn 的前科）；
+- 或协调者把 complex 判据从合成口径改为**语料加权口径**，此时四条产品门槛全过。
+
+**明确不批准**：顺手补 plain-object 快臂（qjs 的 lnot 快臂没有，那是第二个机制），
+或把 lnot 与其它被冷路由的 opcode 打成一刀。
+
 ## same-flags property replacement should gate shape COW（deferred alignment fix）
 
 **登记日期**：2026-07-30
