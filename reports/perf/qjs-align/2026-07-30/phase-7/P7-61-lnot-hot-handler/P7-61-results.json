@@ -57,7 +57,50 @@
     "t_symbol"
    ],
    "reproduced_in_second_scan": true,
-   "verdict": "FAIL"
+   "verdict": "FAIL",
+   "median_combo_whole_case_pct": {
+    "t_bigint_short": -2.7471004261656793,
+    "t_bigint_wide": -2.345280384112135,
+    "t_bigint_zero": -3.875988427487625,
+    "t_double_nan": -2.4560781759779866,
+    "t_double_neg_zero": -2.8633645610250853,
+    "t_double_nonzero": -1.8780175144075968,
+    "t_object_array": -3.5186687266661463,
+    "t_object_function": -3.6126966297437284,
+    "t_object_plain": -3.572376854840182,
+    "t_string_empty": -2.903606510507598,
+    "t_string_long": -2.608214920874105,
+    "t_string_rope": -1.8860868367652217,
+    "t_string_short": -2.5296674720200154,
+    "t_symbol": -2.935108466951063
+   },
+   "cases_regressing_ge_1pct_on_median_combo": [
+    "t_bigint_short",
+    "t_bigint_wide",
+    "t_bigint_zero",
+    "t_double_nan",
+    "t_double_neg_zero",
+    "t_double_nonzero",
+    "t_object_array",
+    "t_object_function",
+    "t_object_plain",
+    "t_string_empty",
+    "t_string_long",
+    "t_string_rope",
+    "t_string_short",
+    "t_symbol"
+   ],
+   "combo_counts": {
+    "total": 56,
+    "whole_case_negative": 54,
+    "marginal_negative": 55,
+    "whole_case_regressing_ge_1pct": 52,
+    "non_negative_combos": [
+     "t_string_long p0b/p1b",
+     "t_string_short p0b/p1b",
+     "t_string_rope p0b/p1b (marginal only)"
+    ]
+   }
   },
   "product_hot_group_ge_3_of_4_same_direction": {
    "improving": 3,
