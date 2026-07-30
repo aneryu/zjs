@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P7-61 dynamic purity probe: how many times does one `!x` reach each stage?
+"""P7-61/P7-62 dynamic purity probe: how many times does one `!x` reach each stage?
 
 Counting only, never timing -- the binaries here are built with
 `-Dzjs_enable_opcode_profile=true` plus a temporary counter, and the host lock
@@ -53,7 +53,8 @@ DECLS = {
                     "toString(){throw new Error('toString ran');}}];"),
 }
 
-SITES = ["hot_entered", "hot_immediate", "cold_body", "logical_not"]
+SITES = ["hot_entered", "hot_immediate", "cold_direct", "cold_body",
+         "logical_not"]
 
 
 def cli_source(decl, n):

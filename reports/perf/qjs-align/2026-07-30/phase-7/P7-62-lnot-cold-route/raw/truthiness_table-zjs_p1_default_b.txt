@@ -1,0 +1,33 @@
+undefined => !x=true !!x=false typeof=undefined
+null => !x=true !!x=false typeof=object
+false => !x=true !!x=false typeof=boolean
+true => !x=false !!x=true typeof=boolean
+int 0 => !x=true !!x=false typeof=number
+int 1 => !x=false !!x=true typeof=number
+int -1 => !x=false !!x=true typeof=number
+float +0 => !x=true !!x=false typeof=number
+float -0 => !x=true !!x=false typeof=number
+float NaN => !x=true !!x=false typeof=number
+float 1.5 => !x=false !!x=true typeof=number
+float Infinity => !x=false !!x=true typeof=number
+short bigint 0n => !x=true !!x=false typeof=bigint
+short bigint 7n => !x=false !!x=true typeof=bigint
+short bigint -7n => !x=false !!x=true typeof=bigint
+heap bigint => !x=false !!x=true typeof=bigint
+heap bigint neg => !x=false !!x=true typeof=bigint
+string empty => !x=true !!x=false typeof=string
+string 'a' => !x=false !!x=true typeof=string
+string '0' => !x=false !!x=true typeof=string
+string rope => !x=false !!x=true typeof=string
+string emptyRope => !x=true !!x=false typeof=string
+object {} => !x=false !!x=true typeof=object
+object [] => !x=false !!x=true typeof=object
+object new Number(0) => !x=false !!x=true typeof=object
+object new Boolean(false) => !x=false !!x=true typeof=object
+object trap valueOf => !x=false !!x=true typeof=object
+function => !x=false !!x=true typeof=function
+arrow => !x=false !!x=true typeof=function
+symbol => !x=false !!x=true typeof=symbol
+Date(0) => !x=false !!x=true typeof=object
+RegExp => !x=false !!x=true typeof=object
+Proxy of {} => !x=false !!x=true typeof=object
