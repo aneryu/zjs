@@ -9768,3 +9768,158 @@ fn phase2SourceSlotInvariantRun(allocator: std.mem.Allocator) !void {
 test "phase-2 trim OOM leaves transactional source-loc slots untouched (P2-R1T)" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2SourceSlotInvariantRun, .{});
 }
+
+test "P2-R1T relocation: shared goto target maps once for both sites" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     1,  0, 0, 0,
+        op.if_true,      20, 0, 0, 0,
+        op.line_num,     7,  0, 0, 0,
+        op.goto,         25, 0, 0, 0,
+        op.goto,         25, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 21), function.code.len);
+    try std.testing.expectEqual(op.if_true, function.code[5]);
+    try std.testing.expectEqual(@as(u32, 15), std.mem.readInt(u32, function.code[6..][0..4], .little));
+    try std.testing.expectEqual(op.goto, function.code[10]);
+    try std.testing.expectEqual(@as(u32, 20), std.mem.readInt(u32, function.code[11..][0..4], .little));
+    try std.testing.expectEqual(op.goto, function.code[15]);
+    try std.testing.expectEqual(@as(u32, 20), std.mem.readInt(u32, function.code[16..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[20]);
+}
+
+test "P2-R1T relocation: goto onto a dropped line_num lands on the next kept instruction" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.line_num,     3,  0, 0, 0,
+        op.goto,         10, 0, 0, 0,
+        op.line_num,     4,  0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), function.code.len);
+    try std.testing.expectEqual(op.goto, function.code[0]);
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, function.code[1..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[5]);
+}
+
+test "P2-R1T relocation: goto over a dead range maps to the reachable landing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.goto,         6,               0, 0, 0,
+        op.return_undef, op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), function.code.len);
+    try std.testing.expectEqual(op.goto, function.code[0]);
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, function.code[1..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[5]);
+}
+
+test "P2-R1T relocation: multiple source slots on one pc all remap and survive" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.line_num,     9,  0, 0, 0,
+        op.push_i32,     42, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(5, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    try function.appendSourceLoc(5, 3, 1);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 3), function.source_loc_slots.len);
+    const expected_lines = [_]i32{ 1, 2, 3 };
+    for (function.source_loc_slots, expected_lines) |slot, expected_line| {
+        try std.testing.expectEqual(@as(u32, 0), slot.pc);
+        try std.testing.expectEqual(expected_line, slot.line_num);
+    }
+}
+
+test "P2-R1T relocation: descending source slot pcs fail closed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     7, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    function.source_loc_slots[0].pc = 5;
+    function.source_loc_slots[1].pc = 0;
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try std.testing.expectError(error.InvalidBytecode, bytecode.pipeline.resolve_variables.run(&resolve_ctx));
+
+    try std.testing.expectEqual(@as(u32, 5), function.source_loc_slots[0].pc);
+    try std.testing.expectEqual(@as(u32, 0), function.source_loc_slots[1].pc);
+}
+
+test "P2-R1T relocation: mid-instruction source slot pc fails closed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     7, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    function.source_loc_slots[0].pc = 2;
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try std.testing.expectError(error.InvalidBytecode, bytecode.pipeline.resolve_variables.run(&resolve_ctx));
+
+    try std.testing.expectEqual(@as(u32, 2), function.source_loc_slots[0].pc);
+}
