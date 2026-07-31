@@ -31,4 +31,5 @@ pub const Builder = builder.Builder;
 test {
     _ = labels;
     _ = builder;
+    _ = @import("tests.zig");
 }

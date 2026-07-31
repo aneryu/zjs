@@ -217,6 +217,15 @@ pub const Builder = struct {
         slot.flags.bound = true;
     }
 
+    /// Return the first unbound label in function-local creation order.
+    pub fn firstUnboundLabel(self: *const Builder) ?LabelId {
+        var label_index: u32 = 0;
+        while (label_index < self.label_len) : (label_index += 1) {
+            if (!self.label_slots[label_index].flags.bound) return @enumFromInt(label_index);
+        }
+        return null;
+    }
+
     pub fn emitOp(self: *Builder, op_id: u8) Error!void {
         try self.reserveCode(1);
 
