@@ -1234,6 +1234,13 @@ pub const CompilePolicy = struct {
     runtime_strict: bool = false,
 };
 
+/// Optional compile-phase diagnostics. This state is owned by the caller and
+/// remains on its stack; neither parser nor published bytecode retains it.
+pub const CompileTiming = struct {
+    frontend_ns: u64 = 0,
+    finalize_ns: u64 = 0,
+};
+
 /// Production compilation authority. The borrowed realm is retained once by
 /// every FunctionBytecode at publication, matching QuickJS's
 /// `b->realm = JS_DupContext(ctx)` for both roots and recursively-finalized
@@ -1242,6 +1249,7 @@ pub const CompilePolicy = struct {
 pub const CompileContext = struct {
     realm: *core_context.RealmContext,
     policy: CompilePolicy = .{},
+    timing: ?*CompileTiming = null,
 
     pub inline fn artifactAllocator(self: CompileContext) @import("std").mem.Allocator {
         return self.realm.runtime.memory.persistent_allocator;
@@ -4125,6 +4133,8 @@ pub const pipeline_resolve_variables = struct {
     const EVAL_SCOPE_HEAD_BIAS: i32 = -function_bytecode.arg_scope_end;
     const APPLY_EVAL_SIZE: usize = opcode.sizeOfPhase1(opcode.op.apply_eval);
     const atom_var_object: atom.Atom = atom.ids.var_object; // "<var>"
+    const exact_scope_binding_index_threshold: usize = 64;
+    const ExactScopeBindingIndex = std.AutoHashMapUnmanaged(u64, u16);
 
     const ScopeOperand = struct {
         level: i16,
@@ -4187,6 +4197,14 @@ pub const pipeline_resolve_variables = struct {
         /// `resolve_variables` lowers `scope_get_var` / `scope_put_var` to
         /// local, closure, or QuickJS-style global closure-var references.
         function_def: ?*function_def_mod.FunctionDef = null,
+        /// Immutable sizing/write-pass accelerator built only after topology
+        /// analysis has appended every demand-created local. The linked scope
+        /// chain remains authoritative for outer-scope, with, and argument-
+        /// environment ordering.
+        exact_scope_bindings: ExactScopeBindingIndex = .empty,
+        exact_scope_binding_var_count: ?usize = null,
+        exact_scope_binding_scope_count: ?usize = null,
+        exact_scope_binding_topology_fingerprint: ?u64 = null,
 
         pub fn init(function: *bytecode_function.Bytecode) JSContext {
             return .{
@@ -4207,7 +4225,164 @@ pub const pipeline_resolve_variables = struct {
                 .function_def = fd,
             };
         }
+
+        fn exactScopeBindingKey(scope_level: i32, atom_id: atom.Atom) ?u64 {
+            if (scope_level < 0) return null;
+            return (@as(u64, @intCast(scope_level)) << 32) | atom_id;
+        }
+
+        fn mixExactScopeTopologyFingerprint(fingerprint: *u64, value: anytype) void {
+            var stable_value = value;
+            fingerprint.* = std.hash.Wyhash.hash(fingerprint.*, std.mem.asBytes(&stable_value));
+        }
+
+        /// Snapshot every field which can change exact-scope lookup order.
+        /// Validation runs before the lowered buffers are published, so a
+        /// future post-index topology write fails closed instead of committing
+        /// output produced from stale cached indices.
+        fn exactScopeTopologyFingerprint(fd: *const function_def_mod.FunctionDef) u64 {
+            var fingerprint: u64 = 0;
+            mixExactScopeTopologyFingerprint(&fingerprint, fd.scopes.len);
+            mixExactScopeTopologyFingerprint(&fingerprint, fd.vars.len);
+            for (fd.scopes) |scope| {
+                mixExactScopeTopologyFingerprint(&fingerprint, scope.first);
+            }
+            for (fd.vars) |vd| {
+                mixExactScopeTopologyFingerprint(&fingerprint, vd.var_name);
+                mixExactScopeTopologyFingerprint(&fingerprint, vd.scope_level);
+                mixExactScopeTopologyFingerprint(&fingerprint, vd.scope_next);
+            }
+            return fingerprint;
+        }
+
+        fn prepareExactScopeBindingIndex(self: *JSContext) Error!void {
+            const fd = self.function_def orelse return;
+            if (fd.vars.len < exact_scope_binding_index_threshold) return;
+            if (fd.vars.len > std.math.maxInt(u16)) return error.BytecodeOverflow;
+            errdefer self.deinitExactScopeBindingIndex();
+            try self.exact_scope_bindings.ensureTotalCapacity(
+                self.memory.allocator,
+                @intCast(fd.vars.len),
+            );
+
+            // Index only the exact-scope prefix rooted at each authoritative
+            // scopes[].first chain. An inherited head belongs to an outer
+            // scope, and scope-0 pseudo/function rows appended with appendVar
+            // are intentionally absent from this chain. The first matching
+            // row is the newest declaration and must win on duplicates.
+            for (fd.scopes, 0..) |scope, scope_index| {
+                var index = scope.first;
+                var visited: usize = 0;
+                while (index >= 0) {
+                    if (@as(usize, @intCast(index)) >= fd.vars.len or visited >= fd.vars.len) {
+                        return error.InvalidBytecode;
+                    }
+                    visited += 1;
+                    const local_index: usize = @intCast(index);
+                    const vd = fd.vars[local_index];
+                    if (vd.scope_level != @as(i32, @intCast(scope_index))) break;
+                    const key = exactScopeBindingKey(vd.scope_level, vd.var_name).?;
+                    if (!self.exact_scope_bindings.contains(key)) {
+                        self.exact_scope_bindings.putAssumeCapacity(key, @intCast(local_index));
+                    }
+                    index = vd.scope_next;
+                }
+            }
+            self.exact_scope_binding_var_count = fd.vars.len;
+            self.exact_scope_binding_scope_count = fd.scopes.len;
+            self.exact_scope_binding_topology_fingerprint = exactScopeTopologyFingerprint(fd);
+        }
+
+        fn deinitExactScopeBindingIndex(self: *JSContext) void {
+            self.exact_scope_bindings.deinit(self.memory.allocator);
+            self.exact_scope_bindings = .empty;
+            self.exact_scope_binding_var_count = null;
+            self.exact_scope_binding_scope_count = null;
+            self.exact_scope_binding_topology_fingerprint = null;
+        }
+
+        fn exactScopeBinding(
+            self: *const JSContext,
+            fd: *const function_def_mod.FunctionDef,
+            atom_id: atom.Atom,
+            scope_level: i32,
+        ) ?u16 {
+            const indexed_var_count = self.exact_scope_binding_var_count orelse return null;
+            const indexed_scope_count = self.exact_scope_binding_scope_count orelse return null;
+            // A future post-topology append must never consult stale indices.
+            // The caller falls back to the semantic linked-chain path and run()
+            // also rejects any topology drift before publishing output.
+            if (fd.vars.len != indexed_var_count or fd.scopes.len != indexed_scope_count) return null;
+            if (scope_level < 0 or @as(usize, @intCast(scope_level)) >= fd.scopes.len) return null;
+            const head = fd.scopes[@intCast(scope_level)].first;
+            if (head < 0 or @as(usize, @intCast(head)) >= fd.vars.len) return null;
+            // An empty scope inherits its parent's head. Such a scope must use
+            // the full chain so nearest-binding and ARG_SCOPE_END semantics
+            // remain solely defined by the existing representation.
+            if (fd.vars[@intCast(head)].scope_level != scope_level) return null;
+            const key = exactScopeBindingKey(scope_level, atom_id) orelse return null;
+            const index = self.exact_scope_bindings.get(key) orelse return null;
+            if (index >= fd.vars.len) return null;
+            const vd = fd.vars[index];
+            if (vd.scope_level != scope_level or vd.var_name != atom_id) return null;
+            return index;
+        }
+
+        fn validateExactScopeBindingVersion(self: *const JSContext) Error!void {
+            const indexed_var_count = self.exact_scope_binding_var_count orelse return;
+            const indexed_scope_count = self.exact_scope_binding_scope_count orelse return error.InvalidBytecode;
+            const indexed_fingerprint = self.exact_scope_binding_topology_fingerprint orelse return error.InvalidBytecode;
+            const fd = self.function_def orelse return error.NoFunctionDef;
+            if (fd.vars.len != indexed_var_count or
+                fd.scopes.len != indexed_scope_count or
+                exactScopeTopologyFingerprint(fd) != indexed_fingerprint)
+            {
+                return error.InvalidBytecode;
+            }
+        }
     };
+
+    test "exact-scope index OOM retry and topology mutation fail closed" {
+        const runtime_mod = @import("core/runtime.zig");
+        const rt = try runtime_mod.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+
+        const name = try rt.internAtom("exact-scope-index-invariants");
+        defer rt.atoms.free(name);
+        const binding = try rt.internAtom("same-scope-binding");
+        defer rt.atoms.free(binding);
+
+        var fd = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        _ = try fd.appendScope(-1);
+        for (0..exact_scope_binding_index_threshold) |_| {
+            _ = try fd.addScopeVar(binding, .normal, 0, false, false);
+        }
+
+        var bc = bytecode_function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        var ctx = JSContext.initWithFunctionDef(&bc, &fd);
+
+        rt.setMemoryLimit(rt.memory.allocated_bytes);
+        try std.testing.expectError(error.OutOfMemory, ctx.prepareExactScopeBindingIndex());
+        rt.setMemoryLimit(null);
+        try std.testing.expectEqual(@as(usize, 0), ctx.exact_scope_bindings.count());
+        try std.testing.expectEqual(@as(?usize, null), ctx.exact_scope_binding_var_count);
+        try std.testing.expectEqual(@as(?u64, null), ctx.exact_scope_binding_topology_fingerprint);
+
+        try ctx.prepareExactScopeBindingIndex();
+        defer ctx.deinitExactScopeBindingIndex();
+        try std.testing.expectEqual(
+            @as(?u16, @intCast(exact_scope_binding_index_threshold - 1)),
+            ctx.exactScopeBinding(&fd, binding, 0),
+        );
+        try ctx.validateExactScopeBindingVersion();
+
+        // Even a non-head indexed-row mutation invalidates the immutable
+        // snapshot before run() can publish its lowered buffers.
+        fd.vars[0].scope_next = 1;
+        try std.testing.expectError(error.InvalidBytecode, ctx.validateExactScopeBindingVersion());
+    }
 
     /// Run variable resolution on a function.
     ///
@@ -5189,6 +5364,7 @@ pub const pipeline_resolve_variables = struct {
     fn resolveScopeVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
         const fd = ctx.function_def orelse return null;
         if (scope_level < 0 or @as(usize, @intCast(scope_level)) >= fd.scopes.len) return null;
+        if (ctx.exactScopeBinding(fd, atom_id, scope_level)) |idx| return idx;
         var idx = fd.scopes[@intCast(scope_level)].first;
         var visited: usize = 0;
         while (idx >= 0) {
@@ -7412,6 +7588,11 @@ pub const pipeline_resolve_variables = struct {
             make_ref_reads_value,
         );
         if (ctx.function_def) |fd| try resolveEvalGlobalVarTargets(fd);
+        // Topology discovery above is the only part of this pass allowed to
+        // append demand-created locals. Build an immutable exact-scope index
+        // now, before the first sizing lookup, and reject any later growth.
+        try ctx.prepareExactScopeBindingIndex();
+        defer ctx.deinitExactScopeBindingIndex();
         const has_dynamic_env_objects = functionHasDynamicEnvObjects(ctx);
 
         // First pass: compute output size (in bytes) and atom count.
@@ -7985,6 +8166,7 @@ pub const pipeline_resolve_variables = struct {
         {
             return error.InvalidBytecode;
         }
+        try ctx.validateExactScopeBindingVersion();
         // Terminal entry: pc_map[old_len] == out_idx handles jumps that
         // target exactly one-past-the-end (e.g. loop exit to the next
         // instruction after the final byte).
@@ -10295,6 +10477,20 @@ pub const pipeline_stack_size = struct {
     /// Sentinel: pc has not yet been visited.
     const STACK_LEVEL_UNVISITED: u16 = 0xFFFF;
 
+    const ScratchRow = struct {
+        stack_level: u16,
+        catch_pos: i32,
+        pending_pc: u32,
+    };
+    const scratch_bytes_per_position =
+        @sizeOf(@FieldType(ScratchRow, "stack_level")) +
+        @sizeOf(@FieldType(ScratchRow, "catch_pos")) +
+        @sizeOf(@FieldType(ScratchRow, "pending_pc"));
+    const stack_scratch_position_capacity = 256;
+    const stack_scratch_bytes =
+        stack_scratch_position_capacity * scratch_bytes_per_position +
+        @alignOf(i32) - 1;
+
     pub const Error = error{
         StackUnderflow,
         StackOverflow,
@@ -10307,6 +10503,11 @@ pub const pipeline_stack_size = struct {
 
     /// Options for the BFS.
     pub const Options = struct {
+        /// Fallback owner for verifier scratch that exceeds the small-function
+        /// stack budget. The default preserves the standalone verifier API;
+        /// production finalization supplies the runtime-accounted allocator.
+        scratch_allocator: std.mem.Allocator = std.heap.page_allocator,
+
         /// When non-null, receives the return-balance proof: true iff every
         /// reachable `return` / `return_undef` terminator completes with an
         /// EMPTY operand stack once the return value is popped. The parser
@@ -10333,24 +10534,34 @@ pub const pipeline_stack_size = struct {
         if (options.returns_balanced_out) |out| out.* = true;
         if (bytecode.len == 0) return error.ReachableFalloff;
 
-        const allocator = std.heap.page_allocator;
-        const stack_level_tab = try allocator.alloc(u16, bytecode.len);
-        defer allocator.free(stack_level_tab);
-        @memset(stack_level_tab, STACK_LEVEL_UNVISITED);
-        const catch_pos_tab = try allocator.alloc(i32, bytecode.len);
-        defer allocator.free(catch_pos_tab);
-        @memset(catch_pos_tab, -1);
+        // MultiArrayList stores these fields as one tightly packed SoA owner:
+        // 2 + 4 + 4 bytes per bytecode position. Check the exact allocation
+        // arithmetic before initCapacity performs its unchecked multiply.
+        _ = std.math.mul(usize, scratch_bytes_per_position, bytecode.len) catch
+            return error.OutOfMemory;
 
-        var pc_stack: std.ArrayList(u32) = .empty;
-        defer pc_stack.deinit(allocator);
+        var stack_fallback = std.heap.stackFallback(stack_scratch_bytes, options.scratch_allocator);
+        const scratch_allocator = stack_fallback.get();
+        var scratch = try std.MultiArrayList(ScratchRow).initCapacity(scratch_allocator, bytecode.len);
+        defer scratch.deinit(scratch_allocator);
+        scratch.len = bytecode.len;
+        const scratch_slices = scratch.slice();
+
+        const stack_level_tab = scratch_slices.items(.stack_level);
+        @memset(stack_level_tab, STACK_LEVEL_UNVISITED);
+        const catch_pos_tab = scratch_slices.items(.catch_pos);
+        @memset(catch_pos_tab, -1);
+        const pending_pc = scratch_slices.items(.pending_pc);
+        var pending_len: usize = 0;
 
         // Seed: entry pc=0 with stack level 0.
-        try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, 0, 0, -1);
+        try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, 0, 0, -1);
 
         var stack_len_max: u16 = 0;
 
-        while (pc_stack.pop()) |pos_any| {
-            const pos: u32 = pos_any;
+        while (pending_len != 0) {
+            pending_len -= 1;
+            const pos = pending_pc[pending_len];
             var stack_len = stack_level_tab[pos];
             var catch_pos = catch_pos_tab[pos];
             const op = bytecode[pos];
@@ -10410,53 +10621,53 @@ pub const pipeline_stack_size = struct {
             if (eq(name, "goto")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 continue;
             } else if (eq(name, "goto16")) {
                 const diff = std.mem.readInt(i16, bytecode[pos + 1 ..][0..2], .little);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 continue;
             } else if (eq(name, "goto8")) {
                 const diff: i8 = @bitCast(bytecode[pos + 1]);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 continue;
             } else if (eq(name, "if_true") or eq(name, "if_false")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 // fall through.
             } else if (eq(name, "if_true8") or eq(name, "if_false8")) {
                 const diff: i8 = @bitCast(bytecode[pos + 1]);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 // fall through.
             } else if (op == opcode.op.gosub) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 1, catch_pos);
                 // fall through.
             } else if (op == opcode.op.with_get_var or op == opcode.op.with_delete_var) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 1, catch_pos);
                 // fall through.
             } else if (op == opcode.op.with_make_ref or op == opcode.op.with_get_ref) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 2, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 2, catch_pos);
                 // fall through.
             } else if (op == opcode.op.with_put_var) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
                 if (stack_len == 0) return error.StackUnderflow;
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len - 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len - 1, catch_pos);
                 // fall through.
             } else if (eq(name, "catch")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
                 catch_pos = @intCast(pos);
             } else if (op == opcode.op.for_of_start or op == opcode.op.for_await_of_start) {
                 catch_pos = @intCast(pos);
@@ -10478,7 +10689,7 @@ pub const pipeline_stack_size = struct {
             }
 
             // Fall-through.
-            try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, pos_next, stack_len, catch_pos);
+            try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, pos_next, stack_len, catch_pos);
         }
 
         return stack_len_max;
@@ -10508,8 +10719,8 @@ pub const pipeline_stack_size = struct {
     fn seed(
         stack_level_tab: []u16,
         catch_pos_tab: []i32,
-        pc_stack: *std.ArrayList(u32),
-        allocator: std.mem.Allocator,
+        pending_pc: []u32,
+        pending_len: *usize,
         pos: u32,
         stack_len: u16,
         catch_pos: i32,
@@ -10520,7 +10731,9 @@ pub const pipeline_stack_size = struct {
         if (existing == STACK_LEVEL_UNVISITED) {
             stack_level_tab[pos] = stack_len;
             catch_pos_tab[pos] = catch_pos;
-            try pc_stack.append(allocator, pos);
+            std.debug.assert(pending_len.* < pending_pc.len);
+            pending_pc[pending_len.*] = pos;
+            pending_len.* += 1;
         } else if (existing != stack_len) {
             return error.StackMismatch;
         } else if (catch_pos_tab[pos] != catch_pos) {
@@ -11707,11 +11920,17 @@ pub const pipeline_finalize = struct {
         try encodePc2Line(function);
 
         // Phase 3c: compute_stack_size over resolved QuickJS-format bytecode.
-        function.stack_size = try computeStackSizeForCurrentBytecode(function.code, &function.leaf_returns_balanced);
+        function.stack_size = try computeStackSizeForCurrentBytecode(function, &function.leaf_returns_balanced);
     }
 
-    fn computeStackSizeForCurrentBytecode(code: []const u8, leaf_returns_balanced: *bool) FinalizeError!u16 {
-        return stack_size.compute(code, .{ .returns_balanced_out = leaf_returns_balanced }) catch |err| switch (err) {
+    fn computeStackSizeForCurrentBytecode(function: *bytecode_function.Bytecode, leaf_returns_balanced: *bool) FinalizeError!u16 {
+        // Parser compilation switches MemoryAccount.allocator to the stable,
+        // accounted artifact allocator before entering finalization. Direct
+        // finalize callers likewise carry the runtime's current allocator.
+        return stack_size.compute(function.code, .{
+            .scratch_allocator = function.memory.allocator,
+            .returns_balanced_out = leaf_returns_balanced,
+        }) catch |err| switch (err) {
             // Reachable falloff is a verifier diagnosis; consumers of the
             // finalize pipeline observe the established invalid-bytecode API.
             error.ReachableFalloff => error.InvalidBytecode,

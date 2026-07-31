@@ -12,6 +12,7 @@ from pathlib import Path
 
 VERIFY_DIR = Path(__file__).resolve().parent
 VERIFIER = VERIFY_DIR.parent / "verify_same_runtime"
+RUNNER = VERIFY_DIR.parent / "same_runtime" / "run_same_runtime.js"
 POLICY_PATH = VERIFY_DIR.parent / "same_runtime" / "policy.json"
 POLICY = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
 P0_SENTINELS = tuple(
@@ -133,6 +134,37 @@ def passing_artifact() -> dict:
             "pmu": {"instructions": {}},
         },
         "cases": cases,
+    }
+
+
+def passing_harness_record() -> dict:
+    return {
+        "engine": "qjs",
+        "layer": "same-runtime",
+        "case": P0_SENTINELS[0],
+        "source_sha256": "a" * 64,
+        "compiles": 1,
+        "top_level_executions": 1,
+        "build": {"mode": "release"},
+        "jsvalue_representation": {
+            "size_bytes": 16,
+            "nan_boxing": False,
+        },
+        "teardown_mode": "normal",
+        "iterations": 1,
+        "warmup": 0,
+        "result_checksum": "same",
+        "phases": {
+            "eval_total_ns": 100,
+            "promise_jobs_ns": 11,
+            "final_job_drain_ns": 7,
+            "job_drain_ns": 18,
+        },
+        "resources": {},
+        "steady_execute": {
+            "samples_ns": [10],
+            "median_ns": 10,
+        },
     }
 
 
@@ -539,6 +571,131 @@ class VerifierTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0)
         self.assertIn("--require-exit-line", completed.stdout)
+
+    def test_runner_phase_comparability_is_explicit_and_fail_closed(
+        self,
+    ) -> None:
+        expected = {
+            "runtime_create_ns": True,
+            "compile_ns": True,
+            "first_execute_ns": True,
+            "eval_total_ns": True,
+            "realm_raw_create_ns": False,
+            "realm_bootstrap_ns": False,
+            "realm_ready_ns": False,
+            "compile_frontend_ns": False,
+            "compile_finalize_ns": False,
+            "parse_ns": False,
+            "root_function_publish_ns": False,
+            "vm_run_ns": False,
+            "engine_cold_to_first_result_ns": False,
+            "promise_jobs_ns": False,
+            "final_job_drain_ns": False,
+            "job_drain_ns": False,
+            "__future_unknown_phase_ns": False,
+        }
+        metadata = {}
+        for name in expected:
+            completed = subprocess.run(
+                [
+                    "node",
+                    str(RUNNER),
+                    "--describe-phase",
+                    name,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"{name}: {completed.stderr}",
+            )
+            metadata[name] = json.loads(completed.stdout)
+        self.assertEqual(
+            {
+                name: entry["comparable"]
+                for name, entry in metadata.items()
+            },
+            expected,
+        )
+        self.assertIn(
+            "not registered",
+            metadata["__future_unknown_phase_ns"]["reason"],
+        )
+        self.assertIn(
+            "Do not use this ratio as a hard parity gate",
+            metadata["first_execute_ns"]["note"],
+        )
+        self.assertFalse(
+            metadata["eval_total_ns"]["parity_gate_eligible"]
+        )
+        self.assertIn(
+            "Do not use this ratio as a hard parity gate",
+            metadata["eval_total_ns"]["note"],
+        )
+        self.assertIn(
+            "parse_ns equals compile_ns",
+            metadata["parse_ns"]["note"],
+        )
+
+    def test_runner_requires_split_job_drain_schema_and_sum(self) -> None:
+        path = self.temp_path / "harness-record.json"
+
+        def validate(record: dict) -> subprocess.CompletedProcess[str]:
+            path.write_text(
+                json.dumps(record) + "\n",
+                encoding="utf-8",
+            )
+            return subprocess.run(
+                [
+                    "node",
+                    str(RUNNER),
+                    "--validate-record",
+                    str(path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        valid = validate(passing_harness_record())
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertTrue(json.loads(valid.stdout)["valid"])
+
+        missing = passing_harness_record()
+        del missing["phases"]["promise_jobs_ns"]
+        invalid = validate(missing)
+        self.assertEqual(invalid.returncode, 1, invalid.stderr)
+        self.assertIn(
+            "phases.promise_jobs_ns is required",
+            invalid.stdout,
+        )
+
+        inconsistent = passing_harness_record()
+        inconsistent["phases"]["job_drain_ns"] = 19
+        invalid = validate(inconsistent)
+        self.assertEqual(invalid.returncode, 1, invalid.stderr)
+        self.assertIn(
+            "phases.job_drain_ns must equal",
+            invalid.stdout,
+        )
+
+    def test_runner_help_declares_external_affinity_and_explicit_pmu(
+        self,
+    ) -> None:
+        completed = subprocess.run(
+            ["node", str(RUNNER), "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("never\nchanges affinity", completed.stdout)
+        self.assertIn("--pmu", completed.stdout)
+        self.assertIn("--no-pmu", completed.stdout)
+        self.assertNotIn("CPU passed to taskset", completed.stdout)
 
 
 if __name__ == "__main__":

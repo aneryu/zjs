@@ -35,6 +35,14 @@
 #define QJS_HARNESS_JSVALUE_DESCRIPTION "payload-plus-tag"
 #endif
 
+#if defined(__APPLE__)
+#define QJS_HARNESS_PEAK_RSS_SOURCE \
+    "getrusage(RUSAGE_SELF).ru_maxrss (Darwin bytes)"
+#else
+#define QJS_HARNESS_PEAK_RSS_SOURCE \
+    "getrusage(RUSAGE_SELF).ru_maxrss (Linux/BSD KiB converted to bytes)"
+#endif
+
 typedef enum {
     TEARDOWN_NORMAL,
     TEARDOWN_LEAK_CHECK,
@@ -91,9 +99,13 @@ static void write_result(
     uint64_t runtime_create_ns,
     uint64_t context_create_ns,
     uint64_t globals_install_ns,
+    uint64_t realm_ready_ns,
     uint64_t compile_ns,
     uint64_t first_execute_ns,
+    uint64_t engine_cold_to_first_result_ns,
     uint64_t eval_total_ns,
+    uint64_t promise_jobs_ns,
+    uint64_t final_job_drain_ns,
     uint64_t job_drain_ns,
     int has_destroy_times,
     uint64_t context_destroy_ns,
@@ -125,12 +137,14 @@ int main(int argc, char **argv)
     if (!samples)
         fatal("unable to allocate timing samples");
 
-    uint64_t start = monotonic_ns();
+    const uint64_t engine_cold_start = monotonic_ns();
+    uint64_t start = engine_cold_start;
     JSRuntime *runtime = JS_NewRuntime();
     const uint64_t runtime_create_ns = elapsed_ns(start);
     if (!runtime)
         fatal("JS_NewRuntime failed");
 
+    const uint64_t realm_ready_start = monotonic_ns();
     start = monotonic_ns();
     JSContext *context = JS_NewContextRaw(runtime);
     const uint64_t context_create_ns = elapsed_ns(start);
@@ -141,6 +155,7 @@ int main(int argc, char **argv)
     if (install_standard_globals(context) != 0)
         fail_js(context, "standard-global installation");
     const uint64_t globals_install_ns = elapsed_ns(start);
+    const uint64_t realm_ready_ns = elapsed_ns(realm_ready_start);
 
     size_t compiles = 0;
     size_t top_level_executions = 0;
@@ -162,15 +177,17 @@ int main(int argc, char **argv)
     top_level_executions++;
     JSValue top_level_result = JS_EvalFunction(context, compiled);
     const uint64_t first_execute_ns = elapsed_ns(start);
+    const uint64_t engine_cold_to_first_result_ns =
+        elapsed_ns(engine_cold_start);
     if (JS_IsException(top_level_result))
         fail_js(context, "top-level execution");
-    const uint64_t eval_total_ns = elapsed_ns(eval_total_start);
-    JS_FreeValue(context, top_level_result);
 
     uint64_t job_drain_start = monotonic_ns();
     if (drain_jobs(runtime, context) != 0)
         fail_js(context, "post-top-level job drain");
-    uint64_t job_drain_ns = elapsed_ns(job_drain_start);
+    const uint64_t promise_jobs_ns = elapsed_ns(job_drain_start);
+    JS_FreeValue(context, top_level_result);
+    const uint64_t eval_total_ns = elapsed_ns(eval_total_start);
 
     JSValue global_object = JS_GetGlobalObject(context);
     if (JS_IsException(global_object))
@@ -212,7 +229,10 @@ int main(int argc, char **argv)
     job_drain_start = monotonic_ns();
     if (drain_jobs(runtime, context) != 0)
         fail_js(context, "final job drain");
-    job_drain_ns += elapsed_ns(job_drain_start);
+    const uint64_t final_job_drain_ns = elapsed_ns(job_drain_start);
+    if (UINT64_MAX - promise_jobs_ns < final_job_drain_ns)
+        fatal("job drain timing overflow");
+    const uint64_t job_drain_ns = promise_jobs_ns + final_job_drain_ns;
 
     const SampleStats stats = calculate_stats(samples, options.iterations);
 
@@ -256,9 +276,13 @@ int main(int argc, char **argv)
         runtime_create_ns,
         context_create_ns,
         globals_install_ns,
+        realm_ready_ns,
         compile_ns,
         first_execute_ns,
+        engine_cold_to_first_result_ns,
         eval_total_ns,
+        promise_jobs_ns,
+        final_job_drain_ns,
         job_drain_ns,
         has_destroy_times,
         context_destroy_ns,
@@ -403,9 +427,15 @@ static int peak_rss_bytes(uint64_t *value_out)
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss < 0)
         return -1;
+#if defined(__APPLE__)
+    /* Darwin reports ru_maxrss in bytes. */
+    *value_out = (uint64_t)usage.ru_maxrss;
+#else
+    /* Linux and the BSDs supported by this harness report KiB. */
     if ((uint64_t)usage.ru_maxrss > UINT64_MAX / UINT64_C(1024))
         return -1;
     *value_out = (uint64_t)usage.ru_maxrss * UINT64_C(1024);
+#endif
     return 0;
 }
 
@@ -589,9 +619,13 @@ static void write_result(
     uint64_t runtime_create_ns,
     uint64_t context_create_ns,
     uint64_t globals_install_ns,
+    uint64_t realm_ready_ns,
     uint64_t compile_ns,
     uint64_t first_execute_ns,
+    uint64_t engine_cold_to_first_result_ns,
     uint64_t eval_total_ns,
+    uint64_t promise_jobs_ns,
+    uint64_t final_job_drain_ns,
     uint64_t job_drain_ns,
     int has_destroy_times,
     uint64_t context_destroy_ns,
@@ -660,11 +694,21 @@ static void write_result(
         "\"JS_NewContextRaw installs basic objects; the remaining JS_NewContext intrinsic sequence is timed separately.\",\n"
         "  \"phase_definitions\": {\n"
         "    \"runtime_create_ns\": \"Create one engine runtime.\",\n"
-        "    \"context_create_ns\": \"Create one context; includes standard globals when the engine cannot expose them separately.\",\n"
-        "    \"globals_install_ns\": \"Install standard globals separately when the engine API exposes that boundary; otherwise null.\",\n"
-        "    \"compile_ns\": \"QuickJS JS_Eval(COMPILE_ONLY) internal timing; not directly comparable to zjs internal parse timing.\",\n"
-        "    \"first_execute_ns\": \"QuickJS JS_EvalFunction internal timing; not directly comparable to zjs internal VM-run timing.\",\n"
-        "    \"eval_total_ns\": \"Outer wall-clock time around JS_Eval(COMPILE_ONLY) plus JS_EvalFunction, including closure creation and first top-level execution.\",\n"
+        "    \"context_create_ns\": \"QuickJS JS_NewContextRaw, retained for schema compatibility.\",\n"
+        "    \"globals_install_ns\": \"The remaining QuickJS JS_NewContext intrinsic installation after JS_NewContextRaw.\",\n"
+        "    \"realm_raw_create_ns\": \"QuickJS JS_NewContextRaw; attribution-only because it already installs basic objects.\",\n"
+        "    \"realm_bootstrap_ns\": \"The remaining QuickJS intrinsic installation; attribution-only because the raw/bootstrap split differs from zjs.\",\n"
+        "    \"realm_ready_ns\": \"Outer wall-clock boundary around JS_NewContextRaw plus the remaining intrinsic installation.\",\n"
+        "    \"compile_ns\": \"QuickJS JS_Eval(COMPILE_ONLY), including parse, bytecode finalization, and creation of the FUNCTION_BYTECODE value.\",\n"
+        "    \"compile_frontend_ns\": \"Not exposed by the pinned QuickJS public API.\",\n"
+        "    \"compile_finalize_ns\": \"Not exposed by the pinned QuickJS public API.\",\n"
+        "    \"root_function_publish_ns\": \"Not exposed separately; QuickJS js_closure runs inside JS_EvalFunction.\",\n"
+        "    \"first_execute_ns\": \"QuickJS JS_EvalFunction, including js_closure/root publication and first top-level execution.\",\n"
+        "    \"vm_run_ns\": \"Not exposed separately by the pinned QuickJS public API.\",\n"
+        "    \"promise_jobs_ns\": \"Immediate JS_ExecutePendingJob drain while the first top-level completion value remains live; included in eval_total_ns.\",\n"
+        "    \"final_job_drain_ns\": \"JS_ExecutePendingJob drain after all warmup and timed run invocations.\",\n"
+        "    \"engine_cold_to_first_result_ns\": \"Outer engine-only wall clock from JS_NewRuntime through return from the first JS_EvalFunction.\",\n"
+        "    \"eval_total_ns\": \"Outer ordinary-global-script boundary around compile, first execution, immediate pending-job drain, then completion-value release.\",\n"
         "    \"steady_execute\": \"After warmup, each sample times one call to the retained run function; the source is never recompiled.\",\n"
         "    \"job_drain_ns\": \"Sum of pending-job drain time immediately after top-level execution and after all run invocations.\",\n"
         "    \"context_destroy_ns\": \"Destroy the context only in leak-check mode; null in normal mode.\",\n"
@@ -678,16 +722,32 @@ static void write_result(
         "    \"runtime_create_ns\": %" PRIu64 ",\n"
         "    \"context_create_ns\": %" PRIu64 ",\n"
         "    \"globals_install_ns\": %" PRIu64 ",\n"
+        "    \"realm_raw_create_ns\": %" PRIu64 ",\n"
+        "    \"realm_bootstrap_ns\": %" PRIu64 ",\n"
+        "    \"realm_ready_ns\": %" PRIu64 ",\n"
         "    \"compile_ns\": %" PRIu64 ",\n"
+        "    \"compile_frontend_ns\": null,\n"
+        "    \"compile_finalize_ns\": null,\n"
+        "    \"root_function_publish_ns\": null,\n"
         "    \"first_execute_ns\": %" PRIu64 ",\n"
+        "    \"vm_run_ns\": null,\n"
+        "    \"promise_jobs_ns\": %" PRIu64 ",\n"
+        "    \"final_job_drain_ns\": %" PRIu64 ",\n"
+        "    \"engine_cold_to_first_result_ns\": %" PRIu64 ",\n"
         "    \"eval_total_ns\": %" PRIu64 ",\n"
         "    \"job_drain_ns\": %" PRIu64 ",\n"
         "    \"context_destroy_ns\": ",
         runtime_create_ns,
         context_create_ns,
         globals_install_ns,
+        context_create_ns,
+        globals_install_ns,
+        realm_ready_ns,
         compile_ns,
         first_execute_ns,
+        promise_jobs_ns,
+        final_job_drain_ns,
+        engine_cold_to_first_result_ns,
         eval_total_ns,
         job_drain_ns
     );
@@ -732,7 +792,7 @@ static void write_result(
     fputs(
         ",\n"
         "    \"peak_rss_source\": "
-        "\"getrusage(RUSAGE_SELF).ru_maxrss (Linux KiB)\"\n"
+        "\"" QJS_HARNESS_PEAK_RSS_SOURCE "\"\n"
         "  }\n"
         "}\n",
         stdout

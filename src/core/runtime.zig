@@ -125,8 +125,15 @@ pub const VmStackWindowPolicy = packed struct(u64) {
 /// watermark restore. Values inside windows are owned by the frames using
 /// them and must be released before the watermark is restored.
 pub const VmStackArena = struct {
+    pub const first_chunk_bytes: usize = 4 * 1024;
+    pub const first_chunk_slots: usize = first_chunk_bytes / @sizeOf(JSValue);
     pub const chunk_slots: usize = 32 * 1024;
     pub const max_chunks: usize = 64;
+
+    comptime {
+        std.debug.assert(first_chunk_bytes % @sizeOf(JSValue) == 0);
+        std.debug.assert(first_chunk_slots <= chunk_slots);
+    }
 
     pub const Mark = struct {
         chunk: usize,
@@ -162,10 +169,13 @@ pub const VmStackArena = struct {
         if (n == 0) return self.chunks[0][0..0];
         if (n > chunk_slots) return null;
         if (self.chunk_count != 0) {
-            const used = self.used[self.active];
-            if (chunk_slots - used >= n) {
-                self.used[self.active] = used + n;
-                return self.chunks[self.active][used .. used + n];
+            const active = self.active;
+            const used = self.used[active];
+            const capacity = self.chunks[active].len;
+            std.debug.assert(used <= capacity);
+            if (capacity - used >= n) {
+                self.used[active] = used + n;
+                return self.chunks[active][used .. used + n];
             }
         }
         return self.carveSlow(account, n);
@@ -180,10 +190,13 @@ pub const VmStackArena = struct {
         if (n == 0 or self.chunk_count == 0) return null;
         const active = self.active;
         const used = self.used[active];
-        // This comparison also rejects n > chunk_slots, since used never
-        // exceeds chunk_slots. Keeping one authoritative capacity predicate
-        // avoids rechecking the same bound in warm frame constructors.
-        if (chunk_slots - used < n) return null;
+        const capacity = self.chunks[active].len;
+        std.debug.assert(used <= capacity);
+        // The active chunk's actual length is authoritative: the compact
+        // first chunk is 4 KiB, while every later chunk has chunk_slots.
+        // Keeping one capacity predicate also rejects oversized warm carves
+        // without duplicating the arena-wide maximum check.
+        if (capacity - used < n) return null;
         self.used[active] = used + n;
         return .{
             .mark = .{ .chunk = active, .used = used },
@@ -199,10 +212,19 @@ pub const VmStackArena = struct {
         const next_index = if (self.chunk_count == 0) 0 else self.active + 1;
         if (next_index >= max_chunks) return null;
         if (next_index >= self.chunk_count) {
-            const chunk = account.alloc(JSValue, chunk_slots) catch return null;
+            // Ordinary first-entry frames need only one 4 KiB page. A large
+            // first request and every later chunk retain the 32K-slot ceiling
+            // so deep or unusually wide calls do not turn into incremental
+            // chunk churn. Publish no arena state until allocation succeeds.
+            const allocation_slots = if (next_index == 0 and n <= first_chunk_slots)
+                first_chunk_slots
+            else
+                chunk_slots;
+            const chunk = account.alloc(JSValue, allocation_slots) catch return null;
             self.chunks[next_index] = chunk;
             self.chunk_count = next_index + 1;
         }
+        std.debug.assert(n <= self.chunks[next_index].len);
         self.active = next_index;
         self.used[next_index] = n;
         return self.chunks[next_index][0..n];
@@ -1695,24 +1717,56 @@ pub const JSRuntime = struct {
         }
     }
 
+    const ClassPrototypeContextList = enum {
+        live,
+        constructing,
+    };
+
+    fn nextRetainableClassPrototypeContext(
+        self: *JSRuntime,
+        start: ?*context_mod.JSContext,
+        comptime list: ClassPrototypeContextList,
+    ) context_mod.RealmRef {
+        var cursor = start;
+        while (cursor) |ctx| {
+            // Condemned Realm structs and their links stay allocated until the
+            // cycle collector's resource pass. Snapshot the borrowed link
+            // before deciding whether this node can still be retained. A
+            // condemned Realm already has trial rc zero; its own resource pass
+            // clears its class slots, so traversal must neither retain nor
+            // recursively clear it here.
+            const next = switch (list) {
+                .live => ctx.runtime_next,
+                .constructing => ctx.construction_next,
+            };
+            if (self.gc.phase != .remove_cycles or
+                !ctx.header.metaConst().flags.cycle_visited)
+            {
+                return context_mod.RealmRef.retain(ctx);
+            }
+            cursor = next;
+        }
+        return .{};
+    }
+
     /// Drop a dynamically unregistered class prototype from every live realm
     /// before its runtime definition (and possibly its plugin DSO) disappears.
     pub fn clearContextClassPrototype(self: *JSRuntime, class_id: class.ClassId) void {
         self.assertOwnerThread();
-        var current_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        var current_owner = self.nextRetainableClassPrototypeContext(self.context_head, .live);
         defer current_owner.deinit();
         while (current_owner.borrow()) |ctx| {
-            var next_owner = if (ctx.runtime_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            var next_owner = self.nextRetainableClassPrototypeContext(ctx.runtime_next, .live);
             ctx.clearClassPrototype(class_id);
             current_owner.deinit();
             current_owner = next_owner;
             next_owner = .{};
         }
 
-        var constructing_owner = if (self.constructing_context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        var constructing_owner = self.nextRetainableClassPrototypeContext(self.constructing_context_head, .constructing);
         defer constructing_owner.deinit();
         while (constructing_owner.borrow()) |ctx| {
-            var next_owner = if (ctx.construction_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            var next_owner = self.nextRetainableClassPrototypeContext(ctx.construction_next, .constructing);
             ctx.clearClassPrototype(class_id);
             constructing_owner.deinit();
             constructing_owner = next_owner;

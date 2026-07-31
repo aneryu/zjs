@@ -4878,6 +4878,273 @@ test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
     try std.testing.expectEqual(op.return_undef, bc.code[2]);
 }
 
+test "resolve_variables large exact-scope index preserves nearest and outer binding order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("large-exact-scope");
+    const shadowed_atom = try rt.internAtom("shadowed");
+    const outer_only_atom = try rt.internAtom("outer_only");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(shadowed_atom);
+    defer rt.atoms.free(outer_only_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(shadowed_atom, .normal, 0, false, false);
+    _ = try fd.addScopeVar(outer_only_atom, .normal, 0, false, false);
+    const body_scope = try fd.appendScope(0);
+    fd.body_scope = body_scope;
+    fd.scope_level = body_scope;
+
+    var filler_atoms: [64]core.Atom = undefined;
+    var atom_buffer: [16]u8 = undefined;
+    for (&filler_atoms, 0..) |*slot, index| {
+        const filler_name = try std.fmt.bufPrint(&atom_buffer, "filler_{d}", .{index});
+        slot.* = try rt.internAtom(filler_name);
+        _ = try fd.addScopeVar(slot.*, .normal, body_scope, false, false);
+    }
+    defer for (filler_atoms) |filler_atom| rt.atoms.free(filler_atom);
+    const inner_idx = try fd.addScopeVar(shadowed_atom, .normal, body_scope, false, false);
+    try std.testing.expectEqual(@as(i32, 66), inner_idx);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], shadowed_atom, .little);
+    std.mem.writeInt(u16, input[5..7], @intCast(body_scope), .little);
+    input[7] = op.scope_get_var;
+    std.mem.writeInt(u32, input[8..12], outer_only_atom, .little);
+    std.mem.writeInt(u16, input[12..14], @intCast(body_scope), .little);
+    input[14] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(shadowed_atom);
+    try bc.retainAtomOperand(outer_only_atom);
+    // Exercise the same final scope topology that production lowers after
+    // `prepareCurrentBeforeChildren`, rather than appendScope's parser-time
+    // inherited heads.
+    try fd.rebuildFinalScopeLinks();
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    // The inner declaration is the exact-scope hit; outer_only deliberately
+    // misses the index and must retain the linked-chain fallback ordering.
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.get_loc8, 66, op.get_loc1, op.return_undef },
+        bc.code,
+    );
+}
+
+test "resolve_variables exact-scope index preserves linked prefixes and sentinels" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("exact-scope-prefixes");
+    const linked_atom = try rt.internAtom("linked-scope-zero");
+    const duplicate_atom = try rt.internAtom("same-scope-duplicate");
+    const parameter_atom = try rt.internAtom("parameter-scope-binding");
+    const body_atom = try rt.internAtom("body-scope-binding");
+    const unlinked_atom = try rt.internAtom("unlinked-function-name");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(linked_atom);
+    defer rt.atoms.free(duplicate_atom);
+    defer rt.atoms.free(parameter_atom);
+    defer rt.atoms.free(body_atom);
+    defer rt.atoms.free(unlinked_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    // QuickJS reserves scope 1 for the parameter environment. A function with
+    // parameter expressions gives it no parent and rebuildFinalScopeLinks()
+    // installs ARG_SCOPE_END there. The body then starts at scope 2.
+    _ = try fd.appendScope(-1);
+    const parameter_scope = try fd.appendScope(-1);
+    const body_scope = try fd.appendScope(0);
+    const empty_child_scope = try fd.appendScope(body_scope);
+    fd.has_parameter_expressions = true;
+    fd.body_scope = body_scope;
+    fd.scope_level = body_scope;
+
+    const linked_idx = try fd.addScopeVar(linked_atom, .normal, 0, true, false);
+    const parameter_idx = try fd.addScopeVar(parameter_atom, .normal, parameter_scope, true, false);
+    const body_idx = try fd.addScopeVar(body_atom, .normal, body_scope, true, false);
+    const older_duplicate_idx = try fd.addScopeVar(duplicate_atom, .normal, body_scope, true, false);
+    try std.testing.expectEqual(@as(i32, 0), linked_idx);
+    try std.testing.expectEqual(@as(i32, 1), parameter_idx);
+    try std.testing.expectEqual(@as(i32, 2), body_idx);
+    try std.testing.expectEqual(@as(i32, 3), older_duplicate_idx);
+
+    var filler_atoms: [62]core.Atom = undefined;
+    var atom_buffer: [24]u8 = undefined;
+    for (&filler_atoms, 0..) |*slot, index| {
+        const filler_name = try std.fmt.bufPrint(&atom_buffer, "prefix_filler_{d}", .{index});
+        slot.* = try rt.internAtom(filler_name);
+        _ = try fd.addScopeVar(slot.*, .normal, body_scope, false, false);
+    }
+    defer for (filler_atoms) |filler_atom| rt.atoms.free(filler_atom);
+
+    const newer_duplicate_idx = try fd.addScopeVar(duplicate_atom, .normal, body_scope, true, false);
+    try std.testing.expectEqual(@as(i32, 66), newer_duplicate_idx);
+
+    // Rebuild exactly as production does before resolution. The empty child
+    // now inherits the body head, whereas scope 1 ends at ARG_SCOPE_END.
+    try fd.rebuildFinalScopeLinks();
+
+    // add_func_var-style rows appear after the final graph exists and must
+    // remain absent from scopes[0].first. There is no linked row of this name,
+    // so resolution has to miss the cache and use flat newest-first fallback.
+    const unlinked_idx = try fd.appendVar(.{
+        .var_name = unlinked_atom,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .function_name,
+    });
+    try std.testing.expectEqual(@as(i32, 67), unlinked_idx);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 36;
+    const queries = [_]struct {
+        offset: usize,
+        op_id: u8,
+        atom_id: core.Atom,
+        scope: i32,
+    }{
+        .{ .offset = 0, .op_id = op.scope_get_var, .atom_id = linked_atom, .scope = 0 },
+        .{ .offset = 7, .op_id = op.scope_get_var, .atom_id = duplicate_atom, .scope = body_scope },
+        .{ .offset = 14, .op_id = op.scope_get_var, .atom_id = body_atom, .scope = empty_child_scope },
+        .{ .offset = 21, .op_id = op.scope_get_var, .atom_id = unlinked_atom, .scope = 0 },
+        .{ .offset = 28, .op_id = op.scope_get_var_undef, .atom_id = linked_atom, .scope = parameter_scope },
+    };
+    for (queries) |query| {
+        input[query.offset] = query.op_id;
+        std.mem.writeInt(u32, input[query.offset + 1 ..][0..4], query.atom_id, .little);
+        std.mem.writeInt(u16, input[query.offset + 5 ..][0..2], @intCast(query.scope), .little);
+        try bc.retainAtomOperand(query.atom_id);
+    }
+    input[35] = op.return_undef;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{
+            op.get_loc_check,
+            0,
+            0,
+            op.get_loc_check,
+            66,
+            0,
+            op.get_loc_check,
+            2,
+            0,
+            op.get_loc8,
+            67,
+            op.get_var_undef,
+            0,
+            0,
+            op.return_undef,
+        },
+        bc.code,
+    );
+    try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
+    try std.testing.expectEqual(linked_atom, fd.closure_var[0].var_name);
+}
+
+fn runExactScopeIndexResolveVariablesOomRetry(
+    cleanup_rt: *core.JSRuntime,
+    fail_offset: usize,
+) !bool {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = core.memory.MemoryAccount.init(failing.allocator());
+    var atoms = core.atom.AtomTable.init(&account);
+    defer atoms.deinit();
+
+    const name = try atoms.internString("exact-scope-index-oom-retry");
+    defer atoms.free(name);
+    const binding = try atoms.internString("exact-scope-index-oom-binding");
+    defer atoms.free(binding);
+
+    var fd = function_def.FunctionDef.init(&account, &atoms, name);
+    defer fd.deinit(cleanup_rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+    for (0..64) |_| {
+        _ = try fd.addScopeVar(binding, .normal, 0, false, false);
+    }
+    try fd.rebuildFinalScopeLinks();
+
+    var bc = bytecode.Bytecode.init(&account, &atoms, name);
+    defer bc.deinit(cleanup_rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], binding, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(binding);
+
+    const original_code_ptr = bc.code.ptr;
+    const original_code_capacity = bc.code_capacity;
+    const original_atom_ptr = bc.atom_operands.ptr;
+    const original_atom_capacity = bc.atom_operands_capacity;
+    const original_binding_refs = atoms.refCount(binding).?;
+
+    failing.fail_index = failing.alloc_index + fail_offset;
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    const first_result = pipeline.resolve_variables.run(&ctx);
+    const failed = if (first_result) |_| false else |err| switch (err) {
+        error.OutOfMemory => true,
+        else => return err,
+    };
+    failing.fail_index = std.math.maxInt(usize);
+
+    if (failed) {
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@intFromPtr(original_code_ptr), @intFromPtr(bc.code.ptr));
+        try std.testing.expectEqual(original_code_capacity, bc.code_capacity);
+        try std.testing.expectEqualSlices(u8, &input, bc.code);
+        try std.testing.expectEqual(@intFromPtr(original_atom_ptr), @intFromPtr(bc.atom_operands.ptr));
+        try std.testing.expectEqual(original_atom_capacity, bc.atom_operands_capacity);
+        try std.testing.expectEqualSlices(core.Atom, &.{binding}, bc.atom_operands);
+        try std.testing.expectEqual(original_binding_refs, atoms.refCount(binding).?);
+
+        // The same resolver context and FunctionDef must remain reusable after
+        // any injected allocation failure, including the exact-scope map.
+        try pipeline.resolve_variables.run(&ctx);
+    } else {
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+
+    try std.testing.expectEqualSlices(u8, &.{ op.get_loc8, 63, op.return_undef }, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{}, bc.atom_operands);
+    return failed;
+}
+
+test "resolve_variables exact-scope index is retryable across allocation failures" {
+    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer cleanup_rt.destroy();
+
+    var fail_offset: usize = 0;
+    while (try runExactScopeIndexResolveVariablesOomRetry(cleanup_rt, fail_offset)) {
+        fail_offset += 1;
+    }
+    try std.testing.expect(fail_offset > 0);
+}
+
 test "F10.2: resolve_labels selects push_i8 for signed 8-bit integer literals" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8802,6 +9069,55 @@ test "stack_size compute reports the return-balance proof" {
         _ = try stack_size.compute(&bc, .{ .returns_balanced_out = &balanced });
         try std.testing.expect(balanced);
     }
+}
+
+test "stack_size scratch stays on stack through 256 positions and falls back at 257" {
+    const op = bytecode.opcode.op;
+
+    var inline_code = [_]u8{op.nop} ** 256;
+    inline_code[inline_code.len - 1] = op.return_undef;
+    var fail_inline = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        try stack_size.compute(&inline_code, .{ .scratch_allocator = fail_inline.allocator() }),
+    );
+    try std.testing.expect(!fail_inline.has_induced_failure);
+
+    var fallback_code = [_]u8{op.nop} ** 257;
+    fallback_code[fallback_code.len - 1] = op.return_undef;
+    var fail_fallback = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        stack_size.compute(&fallback_code, .{ .scratch_allocator = fail_fallback.allocator() }),
+    );
+    try std.testing.expect(fail_fallback.has_induced_failure);
+
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        try stack_size.compute(&fallback_code, .{ .scratch_allocator = std.testing.allocator }),
+    );
+}
+
+test "stack_size allocation-free LIFO handles multiple pending successors" {
+    const op = bytecode.opcode.op;
+
+    // Each conditional seeds a distinct return target while fall-through
+    // reaches the next conditional. Four target PCs are therefore pending
+    // simultaneously before the LIFO starts draining them.
+    const code = [_]u8{
+        op.push_1,       op.if_false8,    10,
+        op.push_1,       op.if_false8,    8,
+        op.push_1,       op.if_false8,    6,
+        op.push_1,       op.if_false8,    4,
+        op.return_undef, op.return_undef, op.return_undef,
+        op.return_undef,
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        try stack_size.compute(&code, .{ .scratch_allocator = failing.allocator() }),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
 }
 
 test "stack verifier and finalize reject reachable end edges" {

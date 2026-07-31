@@ -217,7 +217,23 @@ pub const ContextOptions = struct {
 pub const Options = ContextOptions;
 
 pub const ContextEvalTiming = struct {
+    /// Complete parser.compile boundary, retained under the historical name for
+    /// callers that already consume it.
     parse_ns: u64 = 0,
+    /// Alias of parse_ns with the boundary named for what it actually contains:
+    /// parser front-end work, bytecode finalization, and compile glue.
+    compile_ns: u64 = 0,
+    /// Lexer/parser/front-end work before FunctionBytecode finalization.
+    compile_frontend_ns: u64 = 0,
+    /// Recursive FunctionBytecode finalization and canonical artifact creation.
+    compile_finalize_ns: u64 = 0,
+    /// Ordinary script/eval root closure creation plus root-frame publication.
+    root_function_publish_ns: u64 = 0,
+    /// Ordinary script/eval execution from a compiled artifact through the
+    /// first completed top-level run. Includes root_function_publish_ns and
+    /// vm_run_ns. Root-function-value release remains in eval's existing
+    /// epilogue and is intentionally outside this diagnostic boundary.
+    first_execute_ns: u64 = 0,
     vm_run_ns: u64 = 0,
     promise_jobs_ns: u64 = 0,
 };

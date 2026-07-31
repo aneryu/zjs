@@ -3508,6 +3508,148 @@ pub const parser_core = struct {
         col_num: u32,
     };
 
+    /// Parser-only accelerator for the two declaration-conflict scans which
+    /// otherwise make a flat list of unique lexical declarations quadratic.
+    /// The finalized FunctionBytecode never observes this state.
+    const declaration_conflict_index_threshold: usize = 64;
+    const no_declaration_index: u32 = std.math.maxInt(u32);
+
+    const DeclarationConflictEntry = struct {
+        /// Newest linked lexical declaration in this exact scope.
+        newest_lexical: u32 = no_declaration_index,
+        /// Newest linked lexical-or-catch declaration in this exact scope.
+        newest_lexical_or_catch: u32 = no_declaration_index,
+        /// Oldest scope-0 var whose parser-time origin is this scope or one of
+        /// its descendants. This preserves find_var_in_child_scope's forward
+        /// scan result while making the query exact-scope.
+        oldest_child_function_var: u32 = no_declaration_index,
+    };
+
+    const DeclarationConflictIndex = struct {
+        const ScopeNameMap = std.AutoHashMapUnmanaged(u64, DeclarationConflictEntry);
+        const BuildError = error{ OutOfMemory, InvalidTopology };
+
+        scope_names: ScopeNameMap = .empty,
+        observed_vars_len: usize = 0,
+        dirty: bool = false,
+
+        fn deinit(self: *DeclarationConflictIndex, allocator: std.mem.Allocator) void {
+            self.scope_names.deinit(allocator);
+            self.* = .{};
+        }
+
+        fn scopeNameKey(scope_level: i32, name: Atom) ?u64 {
+            if (scope_level < 0) return null;
+            return (@as(u64, @intCast(scope_level)) << 32) | name;
+        }
+
+        fn validateScopes(fd: *const function_def_mod.FunctionDef) BuildError!void {
+            for (fd.scopes, 0..) |scope, scope_index| {
+                if (scope.parent < -1) return error.InvalidTopology;
+                if (scope.parent >= 0 and @as(usize, @intCast(scope.parent)) >= scope_index) {
+                    return error.InvalidTopology;
+                }
+            }
+        }
+
+        fn entry(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            key: u64,
+        ) BuildError!*DeclarationConflictEntry {
+            const result = try self.scope_names.getOrPut(allocator, key);
+            if (!result.found_existing) result.value_ptr.* = .{};
+            return result.value_ptr;
+        }
+
+        fn recordLinkedNewestFirst(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            vd: function_def_mod.VarDef,
+            var_index: usize,
+        ) BuildError!void {
+            const eligible_for_lexical = vd.is_lexical;
+            const eligible_for_lexical_or_catch = eligible_for_lexical or vd.var_kind == .catch_;
+            if (!eligible_for_lexical_or_catch) return;
+            const key = scopeNameKey(vd.scope_level, vd.var_name) orelse return error.InvalidTopology;
+            const value = try self.entry(allocator, key);
+            if (eligible_for_lexical and value.newest_lexical == no_declaration_index) {
+                value.newest_lexical = @intCast(var_index);
+            }
+            if (value.newest_lexical_or_catch == no_declaration_index) {
+                value.newest_lexical_or_catch = @intCast(var_index);
+            }
+        }
+
+        fn recordFunctionVarOriginOldestFirst(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            fd: *const function_def_mod.FunctionDef,
+            vd: function_def_mod.VarDef,
+            var_index: usize,
+        ) BuildError!void {
+            var scope = vd.scope_next;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    return error.InvalidTopology;
+                }
+                const key = scopeNameKey(scope, vd.var_name) orelse return error.InvalidTopology;
+                const value = try self.entry(allocator, key);
+                if (value.oldest_child_function_var == no_declaration_index) {
+                    value.oldest_child_function_var = @intCast(var_index);
+                }
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+        }
+
+        fn build(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            fd: *const function_def_mod.FunctionDef,
+        ) BuildError!void {
+            try validateScopes(fd);
+            if (fd.vars.len != 0) {
+                try self.scope_names.ensureTotalCapacity(allocator, @intCast(fd.vars.len));
+            }
+
+            // Each scope's local prefix is newest-first. Inherited heads stop
+            // at the first row owned by an outer scope.
+            for (fd.scopes, 0..) |scope, scope_index| {
+                var var_index = scope.first;
+                var visited: usize = 0;
+                while (var_index >= 0) : (visited += 1) {
+                    if (visited >= fd.vars.len or @as(usize, @intCast(var_index)) >= fd.vars.len) {
+                        return error.InvalidTopology;
+                    }
+                    const index: usize = @intCast(var_index);
+                    const vd = fd.vars[index];
+                    if (vd.scope_level != @as(i32, @intCast(scope_index))) break;
+                    try self.recordLinkedNewestFirst(allocator, vd, index);
+                    var_index = vd.scope_next;
+                }
+            }
+
+            // Parser-time scope-0 rows retain their source declaration scope
+            // in scope_next and are intentionally absent from scope.first.
+            // Walk oldest-first to preserve the legacy scan's returned index.
+            for (fd.vars, 0..) |vd, var_index| {
+                if (vd.scope_level != 0) continue;
+                try self.recordFunctionVarOriginOldestFirst(allocator, fd, vd, var_index);
+            }
+
+            self.observed_vars_len = fd.vars.len;
+            self.dirty = false;
+        }
+
+        fn readyFor(self: *const DeclarationConflictIndex, fd: *const function_def_mod.FunctionDef) bool {
+            return !self.dirty and self.observed_vars_len == fd.vars.len;
+        }
+    };
+
+    const DeclarationConflictIndexRegistry =
+        std.AutoHashMapUnmanaged(*function_def_mod.FunctionDef, DeclarationConflictIndex);
+
     pub const Error = lexer_mod.Error || error{
         UnexpectedToken,
         InvalidLhs,
@@ -3855,6 +3997,11 @@ pub const parser_core = struct {
         /// `vars` / `scopes` layout is populated correctly.
         function_def: function_def_mod.FunctionDef,
 
+        /// Ephemeral declaration-conflict indices keyed by the FunctionDef
+        /// being parsed. They accelerate only parser-time collision queries
+        /// and are never transferred into FunctionBytecode.
+        declaration_conflict_indices: DeclarationConflictIndexRegistry = .empty,
+
         /// Stack of FunctionDef pointers for nested function parsing.
         /// Mirrors `JSParseState.cur_func` stack management. The top of
         /// the stack is the current function being parsed. When entering
@@ -3986,6 +4133,7 @@ pub const parser_core = struct {
         /// be released. `anytype` matches `Bytecode.deinit`'s signature
         /// so callers pass their existing runtime pointer.
         pub fn deinit(self: *State, rt: anytype) void {
+            self.deinitDeclarationConflictIndices();
             if (self.source_line_starts.len != 0) {
                 self.function.memory.allocator.free(self.source_line_starts);
                 self.source_line_starts = &.{};
@@ -4052,6 +4200,214 @@ pub const parser_core = struct {
             return self.cur_func_stack[idx - 1];
         }
 
+        fn deinitDeclarationConflictIndices(self: *State) void {
+            const allocator = self.function.memory.allocator;
+            var iterator = self.declaration_conflict_indices.iterator();
+            while (iterator.next()) |entry| {
+                entry.value_ptr.deinit(allocator);
+            }
+            self.declaration_conflict_indices.deinit(allocator);
+            self.declaration_conflict_indices = .empty;
+        }
+
+        fn discardDeclarationConflictIndex(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+        ) void {
+            if (self.declaration_conflict_indices.getPtr(fd)) |index| {
+                index.deinit(self.function.memory.allocator);
+                _ = self.declaration_conflict_indices.remove(fd);
+            }
+        }
+
+        /// Return a complete index or null for the legacy scan path. Dirty
+        /// indices are rebuilt into a temporary owner and replaced only after
+        /// the complete topology has been indexed successfully.
+        fn declarationConflictIndex(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+        ) Error!?*DeclarationConflictIndex {
+            if (self.declaration_conflict_indices.getPtr(fd)) |existing| {
+                if (existing.readyFor(fd)) return existing;
+                existing.dirty = true;
+            }
+            if (fd.vars.len < declaration_conflict_index_threshold) return null;
+
+            const allocator = self.function.memory.allocator;
+            var candidate: DeclarationConflictIndex = .{};
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit(allocator);
+            candidate.build(allocator, fd) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidTopology => return null,
+            };
+
+            if (self.declaration_conflict_indices.getPtr(fd)) |existing| {
+                const replaced = existing.*;
+                existing.* = candidate;
+                candidate = replaced;
+                return existing;
+            }
+
+            try self.declaration_conflict_indices.put(allocator, fd, candidate);
+            candidate_owned = false;
+            return self.declaration_conflict_indices.getPtr(fd) orelse unreachable;
+        }
+
+        fn readyDeclarationConflictIndexForWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+        ) ?*DeclarationConflictIndex {
+            const index = self.declaration_conflict_indices.getPtr(fd) orelse return null;
+            if (!index.readyFor(fd)) {
+                index.dirty = true;
+                return null;
+            }
+            return index;
+        }
+
+        /// Reserve the sole possible exact-scope key before the authoritative
+        /// FunctionDef append. Once the append succeeds, publishing the cache
+        /// update is allocation-free.
+        fn prepareLinkedDeclarationIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            name: Atom,
+            kind: function_def_mod.VarKind,
+            is_lexical: bool,
+        ) Error!bool {
+            const index = self.readyDeclarationConflictIndexForWrite(fd) orelse return false;
+            if (!is_lexical and kind != .catch_) return true;
+            const key = DeclarationConflictIndex.scopeNameKey(self.scope_level, name) orelse {
+                index.dirty = true;
+                return false;
+            };
+            if (!index.scope_names.contains(key)) {
+                const needed = std.math.add(
+                    usize,
+                    @as(usize, @intCast(index.scope_names.count())),
+                    1,
+                ) catch return error.OutOfMemory;
+                try index.scope_names.ensureTotalCapacity(
+                    self.function.memory.allocator,
+                    @intCast(needed),
+                );
+            }
+            return true;
+        }
+
+        fn commitLinkedDeclarationIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            var_index: i32,
+            prepared: bool,
+        ) void {
+            if (!prepared) return;
+            const index = self.declaration_conflict_indices.getPtr(fd) orelse return;
+            if (index.dirty or
+                var_index < 0 or
+                @as(usize, @intCast(var_index)) + 1 != fd.vars.len or
+                index.observed_vars_len + 1 != fd.vars.len)
+            {
+                index.dirty = true;
+                return;
+            }
+            const vd = fd.vars[@intCast(var_index)];
+            if (vd.is_lexical or vd.var_kind == .catch_) {
+                const key = DeclarationConflictIndex.scopeNameKey(vd.scope_level, vd.var_name) orelse {
+                    index.dirty = true;
+                    return;
+                };
+                if (!index.scope_names.contains(key)) {
+                    index.scope_names.putAssumeCapacity(key, .{});
+                }
+                const value = index.scope_names.getPtr(key) orelse unreachable;
+                if (vd.is_lexical) value.newest_lexical = @intCast(var_index);
+                value.newest_lexical_or_catch = @intCast(var_index);
+            }
+            index.observed_vars_len = fd.vars.len;
+        }
+
+        /// A parser-time function var conflicts with lexical declarations in
+        /// its origin scope and every ancestor. Reserve all missing keys before
+        /// appending the unlinked scope-0 row.
+        fn prepareFunctionVarOriginIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            name: Atom,
+            origin_scope: i32,
+        ) Error!bool {
+            const index = self.readyDeclarationConflictIndexForWrite(fd) orelse return false;
+            var missing: usize = 0;
+            var scope = origin_scope;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    index.dirty = true;
+                    return false;
+                }
+                const key = DeclarationConflictIndex.scopeNameKey(scope, name) orelse {
+                    index.dirty = true;
+                    return false;
+                };
+                if (!index.scope_names.contains(key)) missing += 1;
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+            if (missing != 0) {
+                const needed = std.math.add(
+                    usize,
+                    @as(usize, @intCast(index.scope_names.count())),
+                    missing,
+                ) catch return error.OutOfMemory;
+                try index.scope_names.ensureTotalCapacity(
+                    self.function.memory.allocator,
+                    @intCast(needed),
+                );
+            }
+            return true;
+        }
+
+        fn commitFunctionVarOriginIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            var_index: i32,
+            origin_scope: i32,
+            prepared: bool,
+        ) void {
+            if (!prepared) return;
+            const index = self.declaration_conflict_indices.getPtr(fd) orelse return;
+            if (index.dirty or
+                var_index < 0 or
+                @as(usize, @intCast(var_index)) + 1 != fd.vars.len or
+                index.observed_vars_len + 1 != fd.vars.len)
+            {
+                index.dirty = true;
+                return;
+            }
+            const vd = fd.vars[@intCast(var_index)];
+            var scope = origin_scope;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    index.dirty = true;
+                    return;
+                }
+                const key = DeclarationConflictIndex.scopeNameKey(scope, vd.var_name) orelse {
+                    index.dirty = true;
+                    return;
+                };
+                if (!index.scope_names.contains(key)) {
+                    index.scope_names.putAssumeCapacity(key, .{});
+                }
+                const value = index.scope_names.getPtr(key) orelse unreachable;
+                if (value.oldest_child_function_var == no_declaration_index) {
+                    value.oldest_child_function_var = @intCast(var_index);
+                }
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+            index.observed_vars_len = fd.vars.len;
+        }
+
         /// Push a new FunctionDef onto the stack. Called when entering
         /// a nested function. Mirrors the parent link setup in
         /// `js_new_function_def` (`quickjs.c:31484-31490`).
@@ -4096,6 +4452,7 @@ pub const parser_core = struct {
         }
 
         fn discardFunctionDef(self: *State, fd: *function_def_mod.FunctionDef) void {
+            self.discardDeclarationConflictIndex(fd);
             if (self.runtime) |rt| {
                 fd.deinit(rt);
                 self.function.memory.destroy(function_def_mod.FunctionDef, fd);
@@ -4183,7 +4540,22 @@ pub const parser_core = struct {
             is_lexical: bool,
             is_const: bool,
         ) Error!i32 {
-            return self.cur_func().addScopeVar(name, kind, self.scope_level, is_lexical, is_const) catch return error.OutOfMemory;
+            const fd = self.cur_func();
+            const index_prepared = try self.prepareLinkedDeclarationIndexWrite(
+                fd,
+                name,
+                kind,
+                is_lexical,
+            );
+            const var_index = fd.addScopeVar(
+                name,
+                kind,
+                self.scope_level,
+                is_lexical,
+                is_const,
+            ) catch return error.OutOfMemory;
+            self.commitLinkedDeclarationIndexWrite(fd, var_index, index_prepared);
+            return var_index;
         }
 
         /// Parser-time declaration classes accepted by QuickJS `define_var`.
@@ -4242,11 +4614,12 @@ pub const parser_core = struct {
             return null;
         }
 
-        /// QuickJS `find_lexical_decl` (quickjs.c:24087).  `scope_first`
-        /// already denotes the complete visible chain; do not rebuild a
-        /// parallel name ledger here.  Only global-eval (not module/direct
-        /// eval) adds the GLOBAL_VAR_OFFSET lexical fallback.
-        fn findLexicalDeclaration(self: *State, name: Atom, check_catch: bool) ?LexicalDeclaration {
+        /// Authoritative QuickJS `find_lexical_decl` scan
+        /// (`quickjs.c:24087`). The parser-only index below is derived from
+        /// this exact linked topology and falls back here when unavailable or
+        /// dirty. Only global-eval (not module/direct eval) adds the
+        /// GLOBAL_VAR_OFFSET lexical fallback.
+        fn findLexicalDeclarationLegacy(self: *State, name: Atom, check_catch: bool) ?LexicalDeclaration {
             const fd = self.cur_func();
             var var_idx = fd.scope_first;
             var visited: usize = 0;
@@ -4269,11 +4642,70 @@ pub const parser_core = struct {
             return null;
         }
 
+        fn findIndexedLexicalDeclaration(
+            self: *State,
+            index: *const DeclarationConflictIndex,
+            fd: *const function_def_mod.FunctionDef,
+            name: Atom,
+            check_catch: bool,
+        ) error{InvalidTopology}!?u16 {
+            var scope = self.scope_level;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    return error.InvalidTopology;
+                }
+                const key = DeclarationConflictIndex.scopeNameKey(scope, name) orelse
+                    return error.InvalidTopology;
+                if (index.scope_names.get(key)) |entry| {
+                    const raw_index = if (check_catch)
+                        entry.newest_lexical_or_catch
+                    else
+                        entry.newest_lexical;
+                    if (raw_index != no_declaration_index) {
+                        if (@as(usize, @intCast(raw_index)) >= fd.vars.len or
+                            raw_index > std.math.maxInt(u16))
+                        {
+                            return error.InvalidTopology;
+                        }
+                        return @intCast(raw_index);
+                    }
+                }
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+            return null;
+        }
+
+        fn findLexicalDeclaration(
+            self: *State,
+            name: Atom,
+            check_catch: bool,
+        ) Error!?LexicalDeclaration {
+            const fd = self.cur_func();
+            if (try self.declarationConflictIndex(fd)) |index| {
+                const indexed = self.findIndexedLexicalDeclaration(index, fd, name, check_catch) catch {
+                    index.dirty = true;
+                    return self.findLexicalDeclarationLegacy(name, check_catch);
+                };
+                if (indexed) |var_index| return .{ .local = var_index };
+                if (fd.is_eval and
+                    !fd.is_direct_eval and
+                    !fd.is_indirect_eval and
+                    !fd.is_module and
+                    self.findLexicalGlobalVar(name))
+                {
+                    return .global;
+                }
+                return null;
+            }
+            return self.findLexicalDeclarationLegacy(name, check_catch);
+        }
+
         /// QuickJS `find_var_in_child_scope` (quickjs.c:24048).  A function
         /// `var` remains a scope-0 row, but until final scope-link rebuilding
         /// its `scope_next` field is the lexical scope where the declaration
         /// occurred.  Such rows are intentionally absent from scope.first.
-        fn findFunctionVarInChildScope(self: *State, name: Atom, scope_level: i32) ?u16 {
+        fn findFunctionVarInChildScopeLegacy(self: *State, name: Atom, scope_level: i32) ?u16 {
             for (self.cur_func().vars, 0..) |vd, idx| {
                 if (vd.var_name != name or vd.scope_level != 0) continue;
                 if (self.isChildScope(vd.scope_next, scope_level)) return @intCast(idx);
@@ -4281,8 +4713,38 @@ pub const parser_core = struct {
             return null;
         }
 
+        fn findFunctionVarInChildScope(
+            self: *State,
+            name: Atom,
+            scope_level: i32,
+        ) Error!?u16 {
+            const fd = self.cur_func();
+            if (try self.declarationConflictIndex(fd)) |index| {
+                const key = DeclarationConflictIndex.scopeNameKey(scope_level, name) orelse {
+                    index.dirty = true;
+                    return self.findFunctionVarInChildScopeLegacy(name, scope_level);
+                };
+                if (index.scope_names.get(key)) |entry| {
+                    const raw_index = entry.oldest_child_function_var;
+                    if (raw_index != no_declaration_index) {
+                        if (@as(usize, @intCast(raw_index)) >= fd.vars.len or
+                            raw_index > std.math.maxInt(u16))
+                        {
+                            index.dirty = true;
+                            return self.findFunctionVarInChildScopeLegacy(name, scope_level);
+                        }
+                        return @intCast(raw_index);
+                    }
+                }
+                return null;
+            }
+            return self.findFunctionVarInChildScopeLegacy(name, scope_level);
+        }
+
         fn appendFunctionVarAtOrigin(self: *State, name: Atom, origin_scope: i32) Error!u16 {
-            const idx = self.cur_func().appendVar(.{
+            const fd = self.cur_func();
+            const index_prepared = try self.prepareFunctionVarOriginIndexWrite(fd, name, origin_scope);
+            const idx = fd.appendVar(.{
                 .var_name = name,
                 .scope_level = 0,
                 .scope_next = origin_scope,
@@ -4290,6 +4752,7 @@ pub const parser_core = struct {
                 .is_const = false,
                 .var_kind = .normal,
             }) catch return error.OutOfMemory;
+            self.commitFunctionVarOriginIndexWrite(fd, idx, origin_scope, index_prepared);
             return @intCast(idx);
         }
 
@@ -4304,7 +4767,7 @@ pub const parser_core = struct {
                     return .{ .local = @intCast(try self.addScopeVar(name, .normal, false, false)) };
                 },
                 .let_, .const_, .function_decl, .new_function_decl => {
-                    if (self.findLexicalDeclaration(name, true)) |decl| switch (decl) {
+                    if (try self.findLexicalDeclaration(name, true)) |decl| switch (decl) {
                         .local => |idx| {
                             const existing = fd.vars[idx];
                             if (existing.scope_level == self.scope_level) {
@@ -4326,7 +4789,7 @@ pub const parser_core = struct {
                     {
                         return Error.UnexpectedToken;
                     }
-                    if (self.findFunctionVarInChildScope(name, self.scope_level) != null) {
+                    if (try self.findFunctionVarInChildScope(name, self.scope_level) != null) {
                         return Error.UnexpectedToken;
                     }
                     if (fd.is_global_var) {
@@ -4366,7 +4829,7 @@ pub const parser_core = struct {
                     return .{ .local = @intCast(try self.addScopeVar(name, .catch_, false, false)) };
                 },
                 .var_ => {
-                    if (self.findLexicalDeclaration(name, false) != null) {
+                    if (try self.findLexicalDeclaration(name, false) != null) {
                         return Error.UnexpectedToken;
                     }
                     if (fd.is_global_var) {
@@ -17638,6 +18101,17 @@ pub const compile_entry = struct {
         if (restored_any) state.in_class = true;
     }
 
+    fn elapsedNanosSince(start: u64) u64 {
+        const end = monotonicNanos();
+        return if (end > start) end - start else 0;
+    }
+
+    fn monotonicNanos() u64 {
+        var ts: std.c.timespec = undefined;
+        if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
     pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl {
         const rt = compile_context.realm.runtime;
         var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
@@ -17753,6 +18227,7 @@ pub const compile_entry = struct {
         function: *bytecode.Bytecode,
         features: *std.EnumSet(FeatureImpl),
     ) !*bytecode.FunctionBytecode {
+        const frontend_start = if (compile_context.timing != null) monotonicNanos() else 0;
         const effective_strict = options.strict;
         var lex = lexer_mod.Lexer.init(rt.memory.allocator, &rt.atoms, source);
         defer lex.deinit();
@@ -17862,6 +18337,9 @@ pub const compile_entry = struct {
                 parser_impl.functionNeedsImplicitReturn(code, atoms);
             if (needs_return) try state.emitReturnUndefined();
         }
+        if (compile_context.timing) |timing| {
+            timing.frontend_ns += elapsedNanosSince(frontend_start);
+        }
 
         // Parsing intentionally redirects the operation allocator to the
         // short-lived arena. Finalization may use that facade for scratch
@@ -17871,6 +18349,7 @@ pub const compile_entry = struct {
         // additionally prevents a future finalizer helper from accidentally
         // retaining an arena-backed allocation. Restore it before State.deinit
         // so parser scratch still unwinds under the allocator that created it.
+        const finalize_start = if (compile_context.timing != null) monotonicNanos() else 0;
         const parse_allocator = rt.memory.allocator;
         rt.memory.allocator = compile_context.artifactAllocator();
         defer rt.memory.allocator = parse_allocator;
@@ -17882,6 +18361,9 @@ pub const compile_entry = struct {
                 compile_context,
             );
         } else try bytecode.pipeline.finalize.createFunctionBytecode(&state.function_def, compile_context);
+        if (compile_context.timing) |timing| {
+            timing.finalize_ns += elapsedNanosSince(finalize_start);
+        }
         features.* = state.features;
         _ = filename_atom;
         return &root_slice[0];

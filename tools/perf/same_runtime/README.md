@@ -2,7 +2,27 @@
 
 `run_same_runtime.js` compares the retained zjs and pinned QuickJS harnesses.
 Each harness compiles a case once and calls its exported `run()` repeatedly.
-Timing samples are ABBA-interleaved and pinned with `taskset`.
+Timing samples are ABBA-interleaved. The collector never changes its own or a
+child's CPU affinity.
+
+On Linux, formal comparable runs must pin the collector externally, for
+example:
+
+```sh
+taskset -c 19 node tools/perf/same_runtime/run_same_runtime.js --cpu 19 --no-pmu
+```
+
+The collector reads its own `/proc/self/status`, launches an unwrapped Node
+probe, and verifies that both processes inherited the same single-CPU
+affinity. `--cpu` is only an assertion about that external pin; it does not
+invoke `taskset`.
+
+macOS has no supported affinity query in this collector. It runs the harnesses
+directly and records `environment.affinity` as explicitly
+`unavailable`/`unpinned`; it does not pretend the run has strict pinned
+provenance. CPU metadata is platform-specific: Linux uses `lscpu` plus
+`/proc/cpuinfo`, macOS uses `os.cpus()` plus optional read-only `sysctl`
+metadata, and other platforms use an explicit generic fallback.
 
 ## Case and phase declarations
 
@@ -24,10 +44,52 @@ sample, and must match across engines. Only an explicit
 `checksum_required: false` registry declaration can permit an absent checksum;
 there is no command-line override for this declaration.
 
-Cross-engine phase ratios use the explicit `phaseComparability` table. An
-unregistered phase preserves its raw zjs/QuickJS timing statistics but records
-`comparable: false`, a human-readable reason, and `stats: null`. It is never
-treated as comparable merely because no definition was found.
+Cross-engine phase ratios use the explicit `phaseComparability` table. The
+reviewed whitelist is:
+
+| Phase | Ratio published | Boundary |
+|---|---:|---|
+| `runtime_create_ns` | yes | Engine runtime allocation before Realm creation |
+| `realm_raw_create_ns` | no | Raw context setup differs |
+| `realm_bootstrap_ns` | no | Intrinsic work and global surfaces differ |
+| `realm_ready_ns` | no | Outer boundary aligns, but installed surfaces differ |
+| `compile_frontend_ns` | no | Engine-internal parser boundaries differ |
+| `parse_ns` | no | zjs compatibility alias of its complete `compile_ns`; QuickJS emits no peer field |
+| `compile_finalize_ns` | no | Finalize/packing boundaries differ |
+| `compile_ns` | yes | Complete ordinary-global-script compile-only boundary through function bytecode |
+| `root_function_publish_ns` | no | Closure/publication work is split differently |
+| `vm_run_ns` | no | Inner VM boundary excludes different work |
+| `first_execute_ns` | diagnostic | Publication/closure through first top-level result |
+| `promise_jobs_ns` | no | Immediate post-top-level drain |
+| `final_job_drain_ns` | no | Drain after all retained `run()` calls |
+| `job_drain_ns` | no | Sum of immediate and final drains |
+| `eval_total_ns` | diagnostic | Compile through completion release and immediate drain |
+| `engine_cold_to_first_result_ns` | no | Different immediate-drain endpoints and Realm surfaces |
+
+The two aligned-but-surface-different cold measurements are diagnostics, not
+formal parity-gate ratios. An unregistered phase preserves raw zjs/QuickJS
+timing statistics but records `comparable: false`, a human-readable reason, and
+`stats: null`. A future harness field therefore fails closed until its two
+boundaries have been reviewed.
+
+`first_execute_ns` publishes a boundary-level diagnostic for ordinary global
+scripts, but is not a hard parity gate: QuickJS `JS_CallFree` releases the root
+closure (and may free its bytecode) before returning, whereas zjs stops timing
+at the VM result and releases `root_function_value` afterward through `defer`.
+Module compilation/execution requires a separate boundary audit.
+
+For ordinary global scripts, `eval_total_ns` stops only after the immediate
+post-top-level drain finishes and the first completion value is then released.
+It is still a boundary-level diagnostic rather than a hard parity gate:
+QuickJS drains its ECMAScript pending-job queue, while zjs
+`drainPendingPromiseJobs` additionally polls host signal, I/O, timer, and
+Atomics-completion queues.
+
+Both harnesses expose the immediate drain as `promise_jobs_ns` and the drain
+after all retained `run()` invocations as `final_job_drain_ns`.
+`job_drain_ns` remains the backward-compatible aggregate and must equal their
+sum. All three drain fields are attribution-only and explicitly
+`comparable: false`.
 
 Resource ratios likewise iterate only the explicit definitions inside
 `resourceStatistics`; there is no fallback that publishes an unknown resource
@@ -52,8 +114,10 @@ provenance_comparable
   cross-engine comparison.
 - Metric covers the complete paired steady-execute ratio distribution.
 - Provenance covers pinned QuickJS HEAD/VERSION/tree cleanliness, binary hashes,
-  taskset affinity, the complete ABBA order and loop metadata, and reliable PMU
-  binding when PMU collection is requested.
+  verified inherited single-CPU affinity, the complete ABBA order and loop
+  metadata, and reliable PMU binding when PMU collection is requested. An
+  explicitly unpinned macOS artifact remains useful for diagnostics but does
+  not satisfy strict provenance comparability.
 
 Missing or unchecked evidence is false. Existing status values remain
 compatible: `mismatch` and `invalid` stay unchanged; an otherwise `ok` case
@@ -62,15 +126,22 @@ selection cannot publish it.
 
 ## PMU and exit semantics
 
-PMU collection is a separate whole-process `perf stat` invocation. It has no
-baseline subtraction, so it cannot create the direct collector's negative
-baseline-derived values. Counts remain raw non-negative process counts. The
-runner discovers the one `armv8_pmuv3_*` sysfs device containing the pinned CPU,
-requests it explicitly, retains the raw event row, and refuses to sum multiple
-counted PMU rows.
+PMU collection is disabled by default and is available only through explicit
+`--pmu`. It is a separate whole-process Linux `perf stat` invocation which
+inherits the collector's externally established affinity. Enabling it requires
+all of: Linux, verified single-CPU inherited affinity, an available `perf`
+tool, and exactly one discovered `armv8_pmuv3_*` sysfs device containing that
+CPU. A requested but unavailable PMU is recorded explicitly and cannot satisfy
+strict provenance; the runner never silently substitutes fabricated counters.
 
-`--no-pmu` explicitly disables this ancillary collection; the wall-time primary
-metric remains valid. Collector exit status is based on validity,
+PMU collection has no baseline subtraction, so it cannot create the direct
+collector's negative baseline-derived values. Counts remain raw non-negative
+process counts. The runner requests the selected PMU explicitly, retains the
+raw event row, and refuses to sum multiple counted PMU rows.
+
+`--no-pmu` explicitly disables this ancillary collection and is also the
+default behavior; the wall-time primary metric remains valid. Collector exit
+status is based on validity,
 completeness, and comparability. `aggregate.exit_line.geomean_pass` and
 `per_case_pass` are recorded results only: either may be false while a complete,
 valid run exits zero. Enforcing performance targets belongs to an opt-in

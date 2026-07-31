@@ -48,10 +48,12 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     } else core.atom.null_atom;
     defer if (module_name != core.atom.null_atom) rt.atoms.free(module_name);
 
-    const parse_start = monotonicNanos();
+    var compile_timing: bytecode.CompileTiming = .{};
+    const compile_start = monotonicNanos();
     var compiled = try parser.compile(.{
         .realm = ctx,
         .policy = .{ .runtime_strict = options.runtime_strict },
+        .timing = if (options.timing != null) &compile_timing else null,
     }, source_text, .{
         .mode = parserMode(options.mode),
         .filename = options.filename,
@@ -60,7 +62,13 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         .strict = options.parse_strict,
         .return_completion = options.mode == .script and options.return_completion,
     });
-    if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);
+    if (options.timing) |timing| {
+        const compile_ns = elapsedNanosSince(compile_start);
+        timing.parse_ns += compile_ns;
+        timing.compile_ns += compile_ns;
+        timing.compile_frontend_ns += compile_timing.frontend_ns;
+        timing.compile_finalize_ns += compile_timing.finalize_ns;
+    }
     defer compiled.deinit();
     if (compiled.syntax_error) |*err| {
         const global = try zjs_vm.contextGlobal(ctx);
@@ -74,6 +82,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     var module_record: ?*core.module.ModuleRecord = null;
     var should_evaluate_module = false;
     var function: ?*const bytecode.FunctionBytecode = null;
+    const first_execute_start = if (options.mode != .module and options.timing != null) monotonicNanos() else 0;
     if (options.mode == .module) {
         const artifact = compiled.takeModuleArtifact() orelse return error.InvalidBytecode;
         const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
@@ -115,6 +124,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // JS_EvalFunctionInternal first calls js_closure. Move the Result's sole FB
     // owner into that object. Module roots were moved as one artifact into their
     // record above and linkModule published the persistent function/captures.
+    const root_function_publish_start = if (module_record == null and options.timing != null) monotonicNanos() else 0;
     var root_function_value = core.JSValue.undefinedValue();
     defer root_function_value.free(rt);
     var root_function_object: ?*core.Object = null;
@@ -141,6 +151,11 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     };
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
+    if (module_record == null) {
+        if (options.timing) |timing| {
+            timing.root_function_publish_ns += elapsedNanosSince(root_function_publish_start);
+        }
+    }
 
     const result = if (module_record) |record| blk: {
         if (!should_evaluate_module) break :blk core.JSValue.undefinedValue();
@@ -174,7 +189,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
                 .var_refs = root_object.functionCaptures(),
                 .output = options.output,
                 .global = root_object.bytecodeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry,
-                .break_var_ref_cycles_on_exit = true,
                 .strict_unresolved_get_var = root_function.isStrictMode(),
                 .current_function_value = root_function_value,
                 .eval_global_var_bindings = options.mode == .eval_indirect,
@@ -187,6 +201,11 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
         break :blk value;
     };
+    if (module_record == null) {
+        if (options.timing) |timing| {
+            timing.first_execute_ns += elapsedNanosSince(first_execute_start);
+        }
+    }
     // The completion value is owned here while the post-run steps below can
     // still fail (e.g. OOM while draining promise jobs); release it on every
     // error exit (found by test-oom injection).
