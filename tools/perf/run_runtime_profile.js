@@ -10,6 +10,8 @@ let outputPath = null;
 let stdoutPath = null;
 let expectStdout = null;
 const opcodeMaxExpectations = [];
+const opcodeMinExpectations = [];
+let totalOpcodesMin = null;
 
 function usage() {
     console.log(`Usage: ${path.basename(process.argv[1] || 'run_runtime_profile.js')} [options] SCRIPT [-- SCRIPT_ARGS...]
@@ -25,6 +27,11 @@ Options:
   --expect-stdout TEXT    Require exact script stdout
   --expect-opcode-max NAME=COUNT
                           Require opcode NAME to execute at most COUNT times
+  --expect-opcode-min NAME=COUNT
+                          Require opcode NAME to execute at least COUNT times
+  --expect-total-opcodes-min N
+                          Require at least N opcodes executed in total (an
+                          all-zero profile must never pass)
   -h, --help              Show this help`);
 }
 
@@ -38,14 +45,14 @@ function writeFile(filePath, data) {
     fs.writeFileSync(filePath, data);
 }
 
-function parseOpcodeMax(value) {
-    if (value == null) fail('error: --expect-opcode-max requires NAME=COUNT');
+function parseOpcodeExpectation(flag, value) {
+    if (value == null) fail(`error: ${flag} requires NAME=COUNT`);
     const separator = value.indexOf('=');
-    if (separator <= 0 || separator === value.length - 1) fail('error: --expect-opcode-max requires NAME=COUNT');
+    if (separator <= 0 || separator === value.length - 1) fail(`error: ${flag} requires NAME=COUNT`);
     const name = value.slice(0, separator);
-    const max = Number(value.slice(separator + 1));
-    if (!Number.isInteger(max) || max < 0) fail('error: --expect-opcode-max COUNT must be a non-negative integer');
-    return { name, max };
+    const count = Number(value.slice(separator + 1));
+    if (!Number.isInteger(count) || count < 0) fail(`error: ${flag} COUNT must be a non-negative integer`);
+    return { name, count };
 }
 
 function opcodeCount(profile, name) {
@@ -74,8 +81,19 @@ for (let i = 0; i < args.length; i += 1) {
             expectStdout = args[++i] ?? fail('error: --expect-stdout requires text');
             break;
         case '--expect-opcode-max':
-            opcodeMaxExpectations.push(parseOpcodeMax(args[++i]));
+            opcodeMaxExpectations.push(parseOpcodeExpectation(arg, args[++i]));
             break;
+        case '--expect-opcode-min':
+            opcodeMinExpectations.push(parseOpcodeExpectation(arg, args[++i]));
+            break;
+        case '--expect-total-opcodes-min': {
+            const raw = args[++i];
+            totalOpcodesMin = Number(raw);
+            if (!Number.isInteger(totalOpcodesMin) || totalOpcodesMin < 0) {
+                fail('error: --expect-total-opcodes-min requires a non-negative integer');
+            }
+            break;
+        }
         case '-h':
         case '--help':
             usage();
@@ -127,14 +145,27 @@ try {
 if (!profile || typeof profile.file !== 'string' || !Number.isFinite(profile.total_ns) || !profile.memory) {
     fail('error: zjs --perf-json output has an unexpected shape', 1);
 }
+if (profile.opcode_profile_enabled !== true) {
+    fail('error: this zjs binary reports opcode_profile_enabled=false — run against the zjs-profile artifact (zig build zjs-profile); a zero profile is not a measurement', 1);
+}
 if (!profile.opcode_profile || !Number.isFinite(profile.opcode_profile.opcodes_executed) || !Array.isArray(profile.opcode_profile.opcodes)) {
     fail('error: zjs --perf-json output is missing opcode_profile details', 1);
+}
+if (totalOpcodesMin != null && profile.opcode_profile.opcodes_executed < totalOpcodesMin) {
+    fail(`error: opcodes_executed ${profile.opcode_profile.opcodes_executed} is below the required minimum ${totalOpcodesMin} — the profile did not actually record execution`, 1);
 }
 for (const expectation of opcodeMaxExpectations) {
     const count = opcodeCount(profile, expectation.name);
     if (count == null) fail(`error: opcode count for ${expectation.name} is missing or invalid`, 1);
-    if (count > expectation.max) {
-        fail(`error: opcode ${expectation.name} exceeded max ${expectation.max}: ${count}`, 1);
+    if (count > expectation.count) {
+        fail(`error: opcode ${expectation.name} exceeded max ${expectation.count}: ${count}`, 1);
+    }
+}
+for (const expectation of opcodeMinExpectations) {
+    const count = opcodeCount(profile, expectation.name);
+    if (count == null) fail(`error: opcode count for ${expectation.name} is missing or invalid`, 1);
+    if (count < expectation.count) {
+        fail(`error: opcode ${expectation.name} below min ${expectation.count}: ${count}`, 1);
     }
 }
 

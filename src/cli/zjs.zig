@@ -214,6 +214,10 @@ pub fn main(init: std.process.Init) !void {
     runtime.context.setTrackUnhandledRejections(commandTracksUnhandledRejections(command));
     const runtime_options = commandRuntimeOptions(command);
     if (runtime_options.profile_opcodes) {
+        if (!zjs.opcode_profile_build_enabled) {
+            try printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n", .{});
+            std.process.exit(2);
+        }
         runtime.runtime.setOpcodeProfile(&opcode_profile);
     } else if (runtime_options.perf_json) {
         _ = zjs.activateOpcodeProfile(&opcode_profile);
@@ -334,11 +338,15 @@ pub fn main(init: std.process.Init) !void {
         try stdout_writer.interface.flush();
     }
     if (commandRuntimeOptions(command).profile_opcodes) {
+        opcode_profile.flushPendingDispatch();
         try dumpOpcodeProfile(&stdout_writer.interface, runtime.runtime.opcode_profile.?);
         try stdout_writer.interface.flush();
     }
     if (commandRuntimeOptions(command).perf_json) {
-        try dumpPerfJson(io, command, &runtime, &opcode_profile, .{
+        opcode_profile.flushPendingDispatch();
+        const active_profile: ?*const zjs.OpcodeProfile =
+            if (commandRuntimeOptions(command).profile_opcodes) &opcode_profile else null;
+        try dumpPerfJson(io, command, &runtime, active_profile, .{
             .total_ns = elapsedNanosSince(total_start),
             .read_source_ns = read_source_ns,
             .runtime_create_ns = runtime_create_ns,
@@ -625,6 +633,7 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     try stderr.print("    \"create_calls\": {d},\n", .{memory.create_calls});
     try stderr.print("    \"destroy_calls\": {d}\n", .{memory.destroy_calls});
     try stderr.print("  }}", .{});
+    try stderr.print(",\n  \"opcode_profile_enabled\": {}", .{perf_profile != null});
     if (perf_profile) |profile| {
         try stderr.print(",\n", .{});
         try dumpPerfJsonOpcodeProfile(stderr, profile);
