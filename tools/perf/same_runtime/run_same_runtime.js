@@ -153,7 +153,11 @@ const config = {
     caseSources: new Map(),
     iterations: 200,
     warmup: 20,
-    samples: 5,
+    // Even by contract: the paired order alternates on sample-index parity
+    // (see the sampling loop), so an odd count leaves one treatment leading more
+    // often than the other. 6 gives 3 qjs-first and 3 zjs-first. Measurement
+    // contract #3 -- an odd count has voided headline numbers twice.
+    samples: 6,
     teardown: 'normal',
     cpu: null,
     output: path.join(
@@ -187,7 +191,7 @@ Options:
                          Override/add a case source; use --cases NAME to select a custom name
   --iterations N         Timed run() calls per harness invocation (default: 200)
   --warmup N             Untimed run() calls per invocation (default: 20)
-  --samples K            Paired harness invocations per case (default: 5)
+  --samples K            Paired harness invocations per case, must be even (default: 6)
   --teardown MODE        normal or leak-check (default: normal)
   --cpu N                Expected externally pinned CPU (Linux only; no default)
   --output PATH          Summary JSON path (default: .zig-cache/perf/qjs-align/same-runtime/summary.json)
@@ -281,6 +285,15 @@ function parseArgs() {
                     optionValue(args, i, '--samples'),
                     '--samples',
                 );
+                // Fail closed rather than rounding up: silently changing a
+                // requested sample count would change the measurement design
+                // behind the caller's back.
+                if (config.samples % 2 !== 0) {
+                    fail(
+                        `--samples must be even; ${config.samples} is odd and cannot balance the ` +
+                            'paired order (measurement contract #3)',
+                    );
+                }
                 i += 1;
                 break;
             case '--teardown':

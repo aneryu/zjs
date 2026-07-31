@@ -2591,7 +2591,26 @@ pub const JSRuntime = struct {
         return self.gc.containsHeader(&object.header);
     }
 
-    fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {
+    /// Sampling process memory costs three `openat` plus a `read` and a `close`
+    /// per call -- `/proc/self/statm`, then the cgroup v2 and v1 limit files,
+    /// the latter two normally returning ENOENT. Under a policy that sets none
+    /// of the four fields `processMemoryRequest` reads, every gate in it is
+    /// disabled and it can only return null, so the whole snapshot is
+    /// discarded. Skip it in that case.
+    ///
+    /// The gate is expanded at the call site and the sampling body kept out of
+    /// line, so a runtime with no pressure policy does not even pay a call
+    /// boundary to discover it has nothing to do. Nothing else moves: the
+    /// external-byte accounting, the allocation debt and the internal
+    /// threshold triggers in `reportExternalAlloc` all run first and unchanged,
+    /// and any policy that does consume the snapshot reaches the identical
+    /// slow path.
+    inline fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {
+        if (!self.gc.policy.needsProcessMemorySnapshot()) return;
+        self.requestGCForProcessMemoryPressureSlow();
+    }
+
+    noinline fn requestGCForProcessMemoryPressureSlow(self: *JSRuntime) void {
         const rss_bytes = currentRssBytes();
         const cgroup_limit_bytes = cgroupLimitBytes();
         if (self.gc.processMemoryRequest(rss_bytes, cgroup_limit_bytes)) |request| {

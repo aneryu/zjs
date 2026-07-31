@@ -1,0 +1,650 @@
+{
+ "collector": "tools/perf/logical_not/run_census.py",
+ "mode": "count",
+ "binary": "/home/aneryu/worktrees/zjs-p7-logicalnot/.tmp/bin/zjs-census",
+ "cpu": null,
+ "pmu": null,
+ "host_lock": "none (counting only)",
+ "entries": {
+  "microbench/array_for": {
+   "status": "ok",
+   "wall_s": 0.002349164104089141,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_for.js",
+   "group": "microbench"
+  },
+  "microbench/array_for_in": {
+   "status": "ok",
+   "wall_s": 0.001198604004457593,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_for_in.js",
+   "group": "microbench"
+  },
+  "microbench/array_for_of": {
+   "status": "ok",
+   "wall_s": 0.0016618838999420404,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_for_of.js",
+   "group": "microbench"
+  },
+  "microbench/array_hole_length_decr": {
+   "status": "ok",
+   "wall_s": 0.0012298498768359423,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_hole_length_decr.js",
+   "group": "microbench"
+  },
+  "microbench/array_length_decr": {
+   "status": "ok",
+   "wall_s": 0.0016413091216236353,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_length_decr.js",
+   "group": "microbench"
+  },
+  "microbench/array_map_callback": {
+   "status": "ok",
+   "wall_s": 0.007993666920810938,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_map_callback.js",
+   "group": "microbench"
+  },
+  "microbench/array_pop": {
+   "status": "ok",
+   "wall_s": 0.0010218489915132523,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_pop.js",
+   "group": "microbench"
+  },
+  "microbench/array_prop_create": {
+   "status": "ok",
+   "wall_s": 0.001637134002521634,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_prop_create.js",
+   "group": "microbench"
+  },
+  "microbench/array_push": {
+   "status": "ok",
+   "wall_s": 0.0008362301159650087,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_push.js",
+   "group": "microbench"
+  },
+  "microbench/array_read": {
+   "status": "ok",
+   "wall_s": 0.004687129054218531,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_read.js",
+   "group": "microbench"
+  },
+  "microbench/array_write": {
+   "status": "ok",
+   "wall_s": 0.000927886925637722,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/array_write.js",
+   "group": "microbench"
+  },
+  "microbench/arrow_call_loop": {
+   "status": "ok",
+   "wall_s": 0.03234086511656642,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/arrow_call_loop.js",
+   "group": "microbench"
+  },
+  "microbench/arrow_tail_recursion": {
+   "status": "ok",
+   "wall_s": 0.0037783770821988583,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/arrow_tail_recursion.js",
+   "group": "microbench"
+  },
+  "microbench/bigint256_arith": {
+   "status": "ok",
+   "wall_s": 0.0009250389412045479,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/bigint256_arith.js",
+   "group": "microbench"
+  },
+  "microbench/bigint64_arith": {
+   "status": "ok",
+   "wall_s": 0.0015426930040121078,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/bigint64_arith.js",
+   "group": "microbench"
+  },
+  "microbench/bigint_short_sum": {
+   "status": "ok",
+   "wall_s": 0.003185841953381896,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/bigint_short_sum.js",
+   "group": "microbench"
+  },
+  "microbench/call2_loop": {
+   "status": "ok",
+   "wall_s": 0.01764261000789702,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/call2_loop.js",
+   "group": "microbench"
+  },
+  "microbench/closure_call_loop": {
+   "status": "ok",
+   "wall_s": 0.030170217156410217,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/closure_call_loop.js",
+   "group": "microbench"
+  },
+  "microbench/closure_var": {
+   "status": "ok",
+   "wall_s": 0.0017384388484060764,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/closure_var.js",
+   "group": "microbench"
+  },
+  "microbench/date_now": {
+   "status": "ok",
+   "wall_s": 0.0011466401629149914,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/date_now.js",
+   "group": "microbench"
+  },
+  "microbench/dense_array_write_read": {
+   "status": "ok",
+   "wall_s": 0.01174052502028644,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/dense_array_write_read.js",
+   "group": "microbench"
+  },
+  "microbench/empty_loop": {
+   "status": "ok",
+   "wall_s": 0.0013644008431583643,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/empty_loop.js",
+   "group": "microbench"
+  },
+  "microbench/float_arith": {
+   "status": "ok",
+   "wall_s": 0.0009039370343089104,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/float_arith.js",
+   "group": "microbench"
+  },
+  "microbench/float_toExponential": {
+   "status": "ok",
+   "wall_s": 0.0011284009087830782,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/float_toExponential.js",
+   "group": "microbench"
+  },
+  "microbench/float_toFixed": {
+   "status": "ok",
+   "wall_s": 0.0016119519714266062,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/float_toFixed.js",
+   "group": "microbench"
+  },
+  "microbench/float_toPrecision": {
+   "status": "ok",
+   "wall_s": 0.0011089150793850422,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/float_toPrecision.js",
+   "group": "microbench"
+  },
+  "microbench/float_toString": {
+   "status": "ok",
+   "wall_s": 0.0009468940552324057,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/float_toString.js",
+   "group": "microbench"
+  },
+  "microbench/float_to_string": {
+   "status": "ok",
+   "wall_s": 0.0009066408965736628,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/float_to_string.js",
+   "group": "microbench"
+  },
+  "microbench/func_call": {
+   "status": "ok",
+   "wall_s": 0.0028738470282405615,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/func_call.js",
+   "group": "microbench"
+  },
+  "microbench/global_destruct": {
+   "status": "ok",
+   "wall_s": 0.0014911440666764975,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/global_destruct.js",
+   "group": "microbench"
+  },
+  "microbench/global_destruct_strict": {
+   "status": "ok",
+   "wall_s": 0.0017656530253589153,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/global_destruct_strict.js",
+   "group": "microbench"
+  },
+  "microbench/global_read": {
+   "status": "ok",
+   "wall_s": 0.003021853044629097,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/global_read.js",
+   "group": "microbench"
+  },
+  "microbench/global_read_loop": {
+   "status": "ok",
+   "wall_s": 0.013564125867560506,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/global_read_loop.js",
+   "group": "microbench"
+  },
+  "microbench/global_write": {
+   "status": "ok",
+   "wall_s": 0.001559459138661623,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/global_write.js",
+   "group": "microbench"
+  },
+  "microbench/global_write_strict": {
+   "status": "ok",
+   "wall_s": 0.0017251591198146343,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/global_write_strict.js",
+   "group": "microbench"
+  },
+  "microbench/int_sum": {
+   "status": "ok",
+   "wall_s": 0.003249197034165263,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/int_sum.js",
+   "group": "microbench"
+  },
+  "microbench/int_toString": {
+   "status": "ok",
+   "wall_s": 0.0024946259800344706,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/int_toString.js",
+   "group": "microbench"
+  },
+  "microbench/int_to_string": {
+   "status": "ok",
+   "wall_s": 0.0010287598706781864,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/int_to_string.js",
+   "group": "microbench"
+  },
+  "microbench/json_roundtrip": {
+   "status": "ok",
+   "wall_s": 0.0014155649114400148,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/json_roundtrip.js",
+   "group": "microbench"
+  },
+  "microbench/local_destruct": {
+   "status": "ok",
+   "wall_s": 0.0008179110009223223,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/local_destruct.js",
+   "group": "microbench"
+  },
+  "microbench/map_delete": {
+   "status": "ok",
+   "wall_s": 0.0026419279165565968,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/map_delete.js",
+   "group": "microbench"
+  },
+  "microbench/map_set": {
+   "status": "ok",
+   "wall_s": 0.0009459981229156256,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/map_set.js",
+   "group": "microbench"
+  },
+  "microbench/map_string_keys": {
+   "status": "ok",
+   "wall_s": 0.006549831014126539,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/map_string_keys.js",
+   "group": "microbench"
+  },
+  "microbench/math_min": {
+   "status": "ok",
+   "wall_s": 0.0034519510809332132,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/math_min.js",
+   "group": "microbench"
+  },
+  "microbench/object_null": {
+   "status": "ok",
+   "wall_s": 0.0016743470914661884,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/object_null.js",
+   "group": "microbench"
+  },
+  "microbench/prop_create": {
+   "status": "ok",
+   "wall_s": 0.0018184969667345285,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/prop_create.js",
+   "group": "microbench"
+  },
+  "microbench/prop_delete": {
+   "status": "ok",
+   "wall_s": 0.0015124061610549688,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/prop_delete.js",
+   "group": "microbench"
+  },
+  "microbench/prop_read": {
+   "status": "ok",
+   "wall_s": 0.0021588890813291073,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/prop_read.js",
+   "group": "microbench"
+  },
+  "microbench/prop_read_mono": {
+   "status": "ok",
+   "wall_s": 0.01717651402577758,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/prop_read_mono.js",
+   "group": "microbench"
+  },
+  "microbench/prop_read_poly3": {
+   "status": "ok",
+   "wall_s": 0.02336185984313488,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/prop_read_poly3.js",
+   "group": "microbench"
+  },
+  "microbench/prop_write": {
+   "status": "ok",
+   "wall_s": 0.0016652920749038458,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/prop_write.js",
+   "group": "microbench"
+  },
+  "microbench/proto_read": {
+   "status": "ok",
+   "wall_s": 0.01904545584693551,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/proto_read.js",
+   "group": "microbench"
+  },
+  "microbench/regexp_ascii": {
+   "status": "ok",
+   "wall_s": 0.0018267692066729069,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/regexp_ascii.js",
+   "group": "microbench"
+  },
+  "microbench/regexp_test_cached": {
+   "status": "ok",
+   "wall_s": 0.009203118039295077,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/regexp_test_cached.js",
+   "group": "microbench"
+  },
+  "microbench/regexp_utf16": {
+   "status": "ok",
+   "wall_s": 0.0010837968438863754,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/regexp_utf16.js",
+   "group": "microbench"
+  },
+  "microbench/sort_bench": {
+   "status": "ok",
+   "wall_s": 0.0015677311457693577,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/sort_bench.js",
+   "group": "microbench"
+  },
+  "microbench/string_build": {
+   "status": "ok",
+   "wall_s": 0.0012718639336526394,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_build.js",
+   "group": "microbench"
+  },
+  "microbench/string_build2": {
+   "status": "ok",
+   "wall_s": 0.0016195508651435375,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_build2.js",
+   "group": "microbench"
+  },
+  "microbench/string_concat0": {
+   "status": "ok",
+   "wall_s": 0.0017394789028912783,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_concat0.js",
+   "group": "microbench"
+  },
+  "microbench/string_concat1": {
+   "status": "ok",
+   "wall_s": 0.0014230371452867985,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_concat1.js",
+   "group": "microbench"
+  },
+  "microbench/string_concat2": {
+   "status": "ok",
+   "wall_s": 0.0010337680578231812,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_concat2.js",
+   "group": "microbench"
+  },
+  "microbench/string_concat3": {
+   "status": "ok",
+   "wall_s": 0.0013934711460024118,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_concat3.js",
+   "group": "microbench"
+  },
+  "microbench/string_concat_loop": {
+   "status": "ok",
+   "wall_s": 0.0024240389466285706,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_concat_loop.js",
+   "group": "microbench"
+  },
+  "microbench/string_slice1": {
+   "status": "ok",
+   "wall_s": 0.001111506950110197,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_slice1.js",
+   "group": "microbench"
+  },
+  "microbench/string_slice2": {
+   "status": "ok",
+   "wall_s": 0.0010122810490429401,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_slice2.js",
+   "group": "microbench"
+  },
+  "microbench/string_slice3": {
+   "status": "ok",
+   "wall_s": 0.001489895861595869,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_slice3.js",
+   "group": "microbench"
+  },
+  "microbench/string_to_float": {
+   "status": "ok",
+   "wall_s": 0.0010793479159474373,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_to_float.js",
+   "group": "microbench"
+  },
+  "microbench/string_to_int": {
+   "status": "ok",
+   "wall_s": 0.0016808419022709131,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/string_to_int.js",
+   "group": "microbench"
+  },
+  "microbench/typed_array_read": {
+   "status": "ok",
+   "wall_s": 0.0015225489623844624,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/typed_array_read.js",
+   "group": "microbench"
+  },
+  "microbench/typed_array_write": {
+   "status": "ok",
+   "wall_s": 0.001452490920200944,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/typed_array_write.js",
+   "group": "microbench"
+  },
+  "microbench/uri_component_decode_4byte": {
+   "status": "ok",
+   "wall_s": 0.01851459708996117,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/uri_component_decode_4byte.js",
+   "group": "microbench"
+  },
+  "microbench/uri_decode_4byte": {
+   "status": "ok",
+   "wall_s": 0.02416693908162415,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/uri_decode_4byte.js",
+   "group": "microbench"
+  },
+  "microbench/vm_int_sum_large": {
+   "status": "ok",
+   "wall_s": 0.03006086405366659,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/vm_int_sum_large.js",
+   "group": "microbench"
+  },
+  "microbench/weak_map_delete": {
+   "status": "ok",
+   "wall_s": 0.0012655439786612988,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/weak_map_delete.js",
+   "group": "microbench"
+  },
+  "microbench/weak_map_set": {
+   "status": "ok",
+   "wall_s": 0.0016787310596555471,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/microbench/weak_map_set.js",
+   "group": "microbench"
+  },
+  "named_eval/bootstrap": {
+   "status": "ok",
+   "wall_s": 0.001784691819921136,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/named_eval/bootstrap.js",
+   "group": "named_eval"
+  },
+  "named_eval/named_eval_assign": {
+   "status": "ok",
+   "wall_s": 0.006627938011661172,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/named_eval/named_eval_assign.js",
+   "group": "named_eval"
+  },
+  "named_eval/slot_assign": {
+   "status": "ok",
+   "wall_s": 0.010384347988292575,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/redefine_census/corpus/named_eval/slot_assign.js",
+   "group": "named_eval"
+  },
+  "bootstrap/builtin_touch": {
+   "status": "ok",
+   "wall_s": 0.0017427739221602678,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/logical_not/bootstrap/builtin_touch.js",
+   "group": "bootstrap"
+  },
+  "bootstrap/plain_runtime": {
+   "status": "ok",
+   "wall_s": 0.0018607350066304207,
+   "lnot_total": 0,
+   "tags": {},
+   "script": "tools/perf/logical_not/bootstrap/plain_runtime.js",
+   "group": "bootstrap"
+  }
+ }
+}

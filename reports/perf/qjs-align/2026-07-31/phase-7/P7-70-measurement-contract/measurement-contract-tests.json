@@ -1,0 +1,665 @@
+{
+  "tool": "zjs-measurement-contract-tests",
+  "policy": {
+    "policy_id": "qjs-align-p7-70-whole-process-measurement",
+    "policy_version": 1,
+    "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68"
+  },
+  "timestamp": "2026-07-30T18:08:06.268Z",
+  "total": 43,
+  "passed": 43,
+  "failed": 0,
+  "exitCodeMap": {
+    "ok": 0,
+    "validationFailure": 1,
+    "usage": 2,
+    "sampleBalance": 3,
+    "affinityAttestation": 4,
+    "provenanceIncomplete": 5,
+    "artifactPolicyOverride": 6,
+    "startupResolution": 7,
+    "sessionSchema": 8,
+    "attributionScope": 9,
+    "phaseSampling": 10
+  },
+  "tests": [
+    {
+      "id": "A1-01",
+      "area": "sampling",
+      "description": "samples=5 fails closed",
+      "expectation": "SampleBalanceError, rule sample-count-odd, exit 3",
+      "status": "pass",
+      "observed": {
+        "errorClass": "SampleBalanceError",
+        "exitCode": 3,
+        "rules": [
+          "sample-count-odd",
+          "first-position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance"
+        ],
+        "message": "samples=5 is odd; ABBA cannot balance an odd sample count",
+        "firstPositionCounts": {
+          "qjs": 3,
+          "zjs": 2
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "A1-02",
+      "area": "sampling",
+      "description": "samples=7 fails closed",
+      "expectation": "SampleBalanceError, rule sample-count-odd, exit 3",
+      "status": "pass",
+      "observed": {
+        "errorClass": "SampleBalanceError",
+        "exitCode": 3,
+        "rules": [
+          "sample-count-odd",
+          "first-position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance"
+        ],
+        "message": "samples=7 is odd; ABBA cannot balance an odd sample count",
+        "firstPositionCounts": {
+          "qjs": 4,
+          "zjs": 3
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "A1-03",
+      "area": "sampling",
+      "description": "samples=8 balanced passes",
+      "expectation": "ok=true, 4 qjs-first and 4 zjs-first, exit 0",
+      "status": "pass",
+      "observed": {
+        "errorClass": null,
+        "exitCode": 0,
+        "firstPositionCounts": {
+          "qjs": 4,
+          "zjs": 4
+        },
+        "positionCounts": [
+          {
+            "qjs": 4,
+            "zjs": 4
+          },
+          {
+            "qjs": 4,
+            "zjs": 4
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "id": "A1-04",
+      "area": "sampling",
+      "description": "artifact claims a balanced order but execution was not balanced",
+      "expectation": "SampleBalanceError, rule declared-order-execution-mismatch",
+      "status": "pass",
+      "observed": {
+        "errorClass": "SampleBalanceError",
+        "exitCode": 3,
+        "rules": [
+          "declared-order-execution-mismatch",
+          "first-position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance"
+        ],
+        "message": "the artifact-declared order differs from the recorded execution at 4 index(es)",
+        "firstPositionCounts": {
+          "qjs": 8,
+          "zjs": 0
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "A1-05",
+      "area": "sampling",
+      "description": "a treatment vanishes mid-run",
+      "expectation": "SampleBalanceError, rule treatment-missing",
+      "status": "pass",
+      "observed": {
+        "errorClass": "SampleBalanceError",
+        "exitCode": 3,
+        "rules": [
+          "declared-order-execution-mismatch",
+          "treatment-missing",
+          "first-position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance",
+          "position-imbalance"
+        ],
+        "message": "1 round(s) did not execute every treatment"
+      },
+      "error": null
+    },
+    {
+      "id": "A1-06",
+      "area": "sampling",
+      "description": "odd warmup fails closed in formal mode",
+      "expectation": "SampleBalanceError, rule warmup-odd",
+      "status": "pass",
+      "observed": {
+        "errorClass": "SampleBalanceError",
+        "exitCode": 3,
+        "message": "warmup=5 is odd; the warmup rounds would themselves be order-imbalanced"
+      },
+      "error": null
+    },
+    {
+      "id": "A1-07",
+      "area": "sampling",
+      "description": "even warmup passes",
+      "expectation": "ok=true",
+      "status": "pass",
+      "observed": {
+        "violations": []
+      },
+      "error": null
+    },
+    {
+      "id": "A2-01",
+      "area": "affinity",
+      "description": "fully pinned collector and children pass",
+      "expectation": "ok=true, exit 0",
+      "status": "pass",
+      "observed": {
+        "violations": []
+      },
+      "error": null
+    },
+    {
+      "id": "A2-02",
+      "area": "affinity",
+      "description": "runner allowed-list 0-19 is not pinning even though it contains 19",
+      "expectation": "AffinityAttestationError, rule collector-not-pinned, exit 4",
+      "status": "pass",
+      "observed": {
+        "errorClass": "AffinityAttestationError",
+        "exitCode": 4,
+        "rules": [
+          "collector-not-pinned"
+        ],
+        "message": "collector Cpus_allowed_list=0-19 is not exactly {19}; an allowed-list that merely contains the CPU is not pinning"
+      },
+      "error": null
+    },
+    {
+      "id": "A2-03",
+      "area": "affinity",
+      "description": "a measured child escapes the pin",
+      "expectation": "AffinityAttestationError, rule child-not-pinned",
+      "status": "pass",
+      "observed": {
+        "errorClass": "AffinityAttestationError",
+        "exitCode": 4,
+        "rules": [
+          "child-not-pinned",
+          "child-affinity-changed"
+        ],
+        "message": "measured zjs child pid=1002 (pre) has Cpus_allowed_list=0-19, expected exactly {19}"
+      },
+      "error": null
+    },
+    {
+      "id": "A2-04",
+      "area": "affinity",
+      "description": "a child is re-pinned between pre and post",
+      "expectation": "AffinityAttestationError, rules child-escaped + child-affinity-changed",
+      "status": "pass",
+      "observed": {
+        "errorClass": "AffinityAttestationError",
+        "rules": [
+          "child-escaped",
+          "child-affinity-changed"
+        ],
+        "message": "measured qjs child affinity moved from {19} to {18} across the run"
+      },
+      "error": null
+    },
+    {
+      "id": "A2-05",
+      "area": "affinity",
+      "description": "requested CPU is outside the allowed set",
+      "expectation": "AffinityAttestationError, rule requested-cpu-not-in-allowed-set",
+      "status": "pass",
+      "observed": {
+        "rules": [
+          "requested-cpu-not-in-allowed-set"
+        ],
+        "message": "requested CPU 19 is not in the collector allowed set 0-3"
+      },
+      "error": null
+    },
+    {
+      "id": "A2-06",
+      "area": "affinity",
+      "description": "collector affinity changes during the run",
+      "expectation": "AffinityAttestationError, rule collector-affinity-changed",
+      "status": "pass",
+      "observed": {
+        "rules": [
+          "collector-affinity-changed"
+        ],
+        "message": "collector affinity moved from {19} to {18,19} during the run"
+      },
+      "error": null
+    },
+    {
+      "id": "A2-07",
+      "area": "affinity",
+      "description": "PMU identity cannot be confirmed",
+      "expectation": "AffinityAttestationError, rule pmu-identity-unconfirmed",
+      "status": "pass",
+      "observed": {
+        "rules": [
+          "pmu-identity-unconfirmed"
+        ],
+        "message": "the PMU serving the pinned CPU could not be identified"
+      },
+      "error": null
+    },
+    {
+      "id": "A2-08",
+      "area": "affinity",
+      "description": "missing child attestation",
+      "expectation": "AffinityAttestationError, rule child-attestation-missing",
+      "status": "pass",
+      "observed": {
+        "rules": [
+          "child-attestation-missing",
+          "child-attestation-missing"
+        ],
+        "message": "no post-run affinity attestation for the measured qjs child"
+      },
+      "error": null
+    },
+    {
+      "id": "A3-01",
+      "area": "startup",
+      "description": "the aggregate startup-adjusted geomean is never emitted",
+      "expectation": "startupAdjustedGeometricMean === null and headlineEligible === false",
+      "status": "pass",
+      "observed": {
+        "summary": {
+          "startupAdjustedGeometricMean": null,
+          "startupAdjustedDiagnosticOnly": true,
+          "startupAdjustedHeadlineEligible": false,
+          "startupAdjustedGeometricMeanIsArbitration": false,
+          "startupAdjustedVoidReason": "P7-20/P7-70: with this suite composition the majority of denominators are at or below the noise band; unresolved cases are never aggregated and the aggregate is therefore not emitted"
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "A3-02",
+      "area": "startup",
+      "description": "residual exactly zero yields no adjusted ratio",
+      "expectation": "ratio null, status unresolved, reason residual-zero",
+      "status": "pass",
+      "observed": {
+        "ratio": null,
+        "reasons": [
+          "residual-zero",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ],
+        "resolvabilityClass": "startup-dominated"
+      },
+      "error": null
+    },
+    {
+      "id": "A3-03",
+      "area": "startup",
+      "description": "negative residual yields no adjusted ratio",
+      "expectation": "ratio null, reason residual-negative",
+      "status": "pass",
+      "observed": {
+        "ratio": null,
+        "reasons": [
+          "residual-negative",
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "error": null
+    },
+    {
+      "id": "A3-04",
+      "area": "startup",
+      "description": "residual inside the noise band yields no adjusted ratio",
+      "expectation": "ratio null, reason residual-below-startup-iqr",
+      "status": "pass",
+      "observed": {
+        "ratio": null,
+        "reasons": [
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ],
+        "resolvabilityClass": "startup-dominated"
+      },
+      "error": null
+    },
+    {
+      "id": "A3-05",
+      "area": "startup",
+      "description": "a tampered (inflated) startup baseline cannot manufacture a large ratio",
+      "expectation": "ratio null even though the naive quotient would be 10.3",
+      "status": "pass",
+      "observed": {
+        "naiveRatio": 15.121951219512225,
+        "ratio": null,
+        "reasons": [
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ]
+      },
+      "error": null
+    },
+    {
+      "id": "A3-06",
+      "area": "startup",
+      "description": "an execution-dominant case resolves and is classified",
+      "expectation": "class execution-dominant, ratio finite",
+      "status": "pass",
+      "observed": {
+        "resolvabilityClass": "execution-dominant",
+        "ratio": 1.2422360248447204,
+        "startupShareQjs": 0.042702702702702704
+      },
+      "error": null
+    },
+    {
+      "id": "A3-07",
+      "area": "startup",
+      "description": "class boundaries follow the measured startup share",
+      "expectation": "partially-resolvable at 33%, startup-dominated at 79%",
+      "status": "pass",
+      "observed": {
+        "partial": {
+          "class": "partially-resolvable",
+          "share": 0.3291666666666667
+        },
+        "dominated": {
+          "class": "startup-dominated",
+          "share": 0.79
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "A4-01",
+      "area": "provenance",
+      "description": "a complete artifact passes",
+      "expectation": "ok=true, no missing fields",
+      "status": "pass",
+      "observed": {
+        "missing": [],
+        "caseMissing": []
+      },
+      "error": null
+    },
+    {
+      "id": "A4-02",
+      "area": "provenance",
+      "description": "a missing binary SHA-256 fails closed",
+      "expectation": "ProvenanceIncompleteError, exit 5, meta.zjs.sha256 listed",
+      "status": "pass",
+      "observed": {
+        "errorClass": "ProvenanceIncompleteError",
+        "exitCode": 5,
+        "missing": [
+          "meta.zjs.sha256"
+        ],
+        "message": "missing required provenance field(s): meta.zjs.sha256"
+      },
+      "error": null
+    },
+    {
+      "id": "A4-03",
+      "area": "provenance",
+      "description": "a missing per-case source SHA fails closed",
+      "expectation": "rule case-provenance-field-missing",
+      "status": "pass",
+      "observed": {
+        "caseMissing": [
+          "int_sum.sourceSha256"
+        ],
+        "message": "missing required per-case provenance field(s): int_sum.sourceSha256"
+      },
+      "error": null
+    },
+    {
+      "id": "A4-04",
+      "area": "provenance",
+      "description": "missing lock and environment provenance fails closed",
+      "expectation": "meta.lock.mode and TMPDIR listed",
+      "status": "pass",
+      "observed": {
+        "missing": [
+          "meta.lock.mode",
+          "meta.environment.TMPDIR"
+        ]
+      },
+      "error": null
+    },
+    {
+      "id": "A4-05",
+      "area": "provenance",
+      "description": "an artifact that supplies its own thresholds is rejected",
+      "expectation": "ArtifactPolicyOverrideError, exit 6",
+      "status": "pass",
+      "observed": {
+        "errorClass": "ArtifactPolicyOverrideError",
+        "exitCode": 6,
+        "message": "artifact top-level key \"startup\" carries policy thresholds; the validator reads policy from /home/aneryu/worktrees/zjs-p7-measurement-contract/tools/compare/measurement_policy.json"
+      },
+      "error": null
+    },
+    {
+      "id": "A4-06",
+      "area": "provenance",
+      "description": "an artifact may reference the policy but not restate it",
+      "expectation": "policyRef with id/version/sha passes; extra keys rejected",
+      "status": "pass",
+      "observed": {
+        "okViolations": [],
+        "badMessage": "artifact policyRef.minimumSamples would override the repository policy; only policy_id/policy_version/sha256/path may be referenced"
+      },
+      "error": null
+    },
+    {
+      "id": "A4-06b",
+      "area": "provenance",
+      "description": "a case source SHA that disagrees with the suite table fails closed",
+      "expectation": "rule case-source-sha-mismatch",
+      "status": "pass",
+      "observed": {
+        "message": "case source SHA-256 disagreement for 1 case(s), first: int_sum row=0000000000000000000000000000000000000000000000000000000000000000 table=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "error": null
+    },
+    {
+      "id": "A4-07",
+      "area": "provenance",
+      "description": "a dirty worktree fails closed in formal mode",
+      "expectation": "ProvenanceIncompleteError, rule dirty-worktree",
+      "status": "pass",
+      "observed": {
+        "errorClass": "ProvenanceIncompleteError",
+        "exitCode": 5,
+        "message": "toolRepoCommit repository was dirty at measurement time; the recorded commit does not describe the measured binary"
+      },
+      "error": null
+    },
+    {
+      "id": "A4-08",
+      "area": "provenance",
+      "description": "a startup baseline from another generation fails closed",
+      "expectation": "rule generation-mismatch",
+      "status": "pass",
+      "observed": {
+        "message": "case int_sum generation=gen-1 differs from the startup baseline generation=phase-6-closeout"
+      },
+      "error": null
+    },
+    {
+      "id": "A4-09",
+      "area": "provenance",
+      "description": "a coherent generation passes",
+      "expectation": "ok=true when case and baseline share a generation",
+      "status": "pass",
+      "observed": {
+        "violations": []
+      },
+      "error": null
+    },
+    {
+      "id": "A5-01",
+      "area": "sessions",
+      "description": "session mode is off by default and the legacy path is unchanged",
+      "expectation": "enabled=false, legacyPathUnchanged=true, schemaVersion=2",
+      "status": "pass",
+      "observed": {
+        "defaults": {
+          "sessions": 1,
+          "interleaved": false
+        },
+        "schemaVersion": 2
+      },
+      "error": null
+    },
+    {
+      "id": "A5-02",
+      "area": "sessions",
+      "description": "an unversioned session block is rejected",
+      "expectation": "SessionSchemaError, rule session-schema-version, exit 8",
+      "status": "pass",
+      "observed": {
+        "errorClass": "SessionSchemaError",
+        "exitCode": 8,
+        "message": "session schemaVersion=1, policy requires 2"
+      },
+      "error": null
+    },
+    {
+      "id": "A5-03",
+      "area": "sessions",
+      "description": "session results may not be headline eligible",
+      "expectation": "rule session-headline-eligible",
+      "status": "pass",
+      "observed": {
+        "message": "session-mode results may not be headline eligible"
+      },
+      "error": null
+    },
+    {
+      "id": "A5-04",
+      "area": "sessions",
+      "description": "session samples may not be mixed into the legacy pool",
+      "expectation": "rule session-legacy-sample-mixing",
+      "status": "pass",
+      "observed": {
+        "message": "session-mode raw samples were mixed into the legacy one-process-per-case sample pool"
+      },
+      "error": null
+    },
+    {
+      "id": "A6-01",
+      "area": "attribution",
+      "description": "bare file:line stage attribution is rejected",
+      "expectation": "AttributionScopeError, rule bare-file-line-attribution, exit 9",
+      "status": "pass",
+      "observed": {
+        "errorClass": "AttributionScopeError",
+        "exitCode": 9,
+        "message": "stage callback-return is keyed by the bare file:line \"quickjs.c:9840\" with no symbol/call-chain/address-range qualifier"
+      },
+      "error": null
+    },
+    {
+      "id": "A6-02",
+      "area": "attribution",
+      "description": "a scoped stage attribution passes",
+      "expectation": "ok=true for symbol/callChain/addressRange scopes",
+      "status": "pass",
+      "observed": {
+        "violations": []
+      },
+      "error": null
+    },
+    {
+      "id": "A6-03",
+      "area": "attribution",
+      "description": "an unscoped stage is rejected",
+      "expectation": "rule stage-scope-not-allowed",
+      "status": "pass",
+      "observed": {
+        "message": "stage x uses scope=fileLine; allowed scopes are symbol/callChain/addressRange"
+      },
+      "error": null
+    },
+    {
+      "id": "A6-04",
+      "area": "attribution",
+      "description": "perf -F is rejected for phase attribution",
+      "expectation": "PhaseSamplingError, rule frequency-sampling-for-phase-attribution, exit 10",
+      "status": "pass",
+      "observed": {
+        "errorClass": "PhaseSamplingError",
+        "exitCode": 10,
+        "message": "perf invocation uses -F; automatic frequency aliases with the inner loop period"
+      },
+      "error": null
+    },
+    {
+      "id": "A6-05",
+      "area": "attribution",
+      "description": "a fixed co-prime recorded period passes",
+      "expectation": "ok=true for period 100003 against inner loop 100",
+      "status": "pass",
+      "observed": {
+        "violations": []
+      },
+      "error": null
+    },
+    {
+      "id": "A6-06",
+      "area": "attribution",
+      "description": "a period that shares a factor with the inner loop is rejected",
+      "expectation": "rule phase-period-not-coprime",
+      "status": "pass",
+      "observed": {
+        "message": "perf period 100000 is not co-prime with the inner loop period 100"
+      },
+      "error": null
+    },
+    {
+      "id": "A6-07",
+      "area": "attribution",
+      "description": "an unrecorded period is rejected",
+      "expectation": "rule phase-period-not-recorded",
+      "status": "pass",
+      "observed": {
+        "message": "artifact recordedPeriod=null does not match the invocation period 100003"
+      },
+      "error": null
+    }
+  ]
+}

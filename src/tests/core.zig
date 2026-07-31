@@ -5206,6 +5206,94 @@ test "gc policy presets do not enable unimplemented concurrent collectors by def
     try std.testing.expect(low_latency.callback_slice_budget_ns < default_policy.callback_slice_budget_ns);
 }
 
+test "process memory snapshot is needed exactly when a policy field consumes it" {
+    // The predicate decides whether every external allocation pays three
+    // openat plus a read and a close. It must answer true for exactly the four
+    // fields processMemoryRequest reads, so pin all of them individually rather
+    // than trusting the mode presets to stay as they are.
+    const default_policy: core.gc.Policy = .{};
+    try std.testing.expect(!default_policy.needsProcessMemorySnapshot());
+
+    try std.testing.expect(!core.gc.Policy.forMode(.balanced).needsProcessMemorySnapshot());
+    try std.testing.expect(!core.gc.Policy.forMode(.throughput).needsProcessMemorySnapshot());
+    try std.testing.expect(!core.gc.Policy.forMode(.low_latency).needsProcessMemorySnapshot());
+    try std.testing.expect(core.gc.Policy.forMode(.low_rss).needsProcessMemorySnapshot());
+
+    // Each consuming field on its own is enough, inside the default mode.
+    {
+        var policy: core.gc.Policy = .{};
+        policy.rss_soft_limit = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+    {
+        var policy: core.gc.Policy = .{};
+        policy.rss_hard_limit = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+    {
+        var policy: core.gc.Policy = .{};
+        policy.cgroup_soft_ratio_per_mille = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+    {
+        var policy: core.gc.Policy = .{};
+        policy.cgroup_hard_ratio_per_mille = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+
+    // The external limits are answered by the registry's own byte counter and
+    // must NOT drag the OS snapshot back in.
+    {
+        var policy: core.gc.Policy = .{};
+        policy.external_soft_limit = 1;
+        policy.external_hard_limit = 2;
+        try std.testing.expect(!policy.needsProcessMemorySnapshot());
+    }
+
+    // The gate reads the live policy, so flipping it on and back off again is
+    // observed both times rather than latching a stale answer.
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try std.testing.expect(!rt.gc.policy.needsProcessMemorySnapshot());
+    rt.gc.policy.rss_soft_limit = 1;
+    try std.testing.expect(rt.gc.policy.needsProcessMemorySnapshot());
+    rt.gc.policy.rss_soft_limit = null;
+    try std.testing.expect(!rt.gc.policy.needsProcessMemorySnapshot());
+}
+
+test "process memory gate preserves external accounting and still fires when consumed" {
+    // The gate sits after external accounting, so skipping the OS snapshot must
+    // not disturb the byte counter, and a policy that does consume the snapshot
+    // must still reach the identical decision.
+    if (builtin.os.tag != .linux) return;
+
+    {
+        var rt: core.JSRuntime = undefined;
+        try rt.init(std.testing.allocator, .{});
+        defer rt.deinit();
+        const before = rt.externalMemoryBytes();
+        var token = try rt.reportExternalAlloc(4096);
+        try std.testing.expectEqual(before + 4096, rt.externalMemoryBytes());
+        // Nothing consumes process memory here, so no rss request may appear.
+        try std.testing.expect(rt.gc.stats.last_request_reason != core.gc.RequestReason.rss_pressure);
+        token.release();
+    }
+
+    {
+        // An rss_soft_limit of one byte is always exceeded, so the slow path
+        // must run and raise the request exactly as before the gate existed.
+        var rt: core.JSRuntime = undefined;
+        try rt.init(std.testing.allocator, .{ .gc_policy = .{ .rss_soft_limit = 1 } });
+        defer rt.deinit();
+        const before = rt.externalMemoryBytes();
+        var token = try rt.reportExternalAlloc(4096);
+        try std.testing.expectEqual(before + 4096, rt.externalMemoryBytes());
+        try std.testing.expectEqual(core.gc.RequestReason.rss_pressure, rt.gc.stats.last_request_reason.?);
+        token.release();
+    }
+}
+
 test "gc process memory pressure policy maps rss and cgroup usage to major requests" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{

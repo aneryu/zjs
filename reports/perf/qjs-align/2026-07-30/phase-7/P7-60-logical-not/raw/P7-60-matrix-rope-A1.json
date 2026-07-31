@@ -1,0 +1,189 @@
+{
+ "collector": "tools/perf/logical_not/run_matrix.py",
+ "build_label": "A1-rope",
+ "cpu": 19,
+ "pmu": "armv8_pmuv3_1",
+ "iterations_per_case": 20000000,
+ "samples_per_case_per_engine": 6,
+ "sampling_order": "ABBA, per case, exclusive host lock held per case",
+ "first_position_counts": {
+  "qjs": 6,
+  "zjs": 6
+ },
+ "first_position_balanced": true,
+ "zjs_binary": "/home/aneryu/worktrees/zjs-p7-logicalnot/.tmp/bin/zjs-A1",
+ "qjs_binary": "/home/aneryu/quickjs/qjs",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "task-clock"
+ ],
+ "cases": {
+  "t_string_rope_k0": {
+   "case": "t_string_rope_k0",
+   "iterations": 20000000,
+   "outputs": {
+    "qjs": [
+     "1"
+    ],
+    "zjs": [
+     "1"
+    ]
+   },
+   "output_match": true,
+   "qjs": {
+    "armv8_pmuv3_1/instructions/": {
+     "median": 4107009888.0,
+     "samples": [
+      4106857584.0,
+      4107023548.0,
+      4106997924.0,
+      4107012543.0,
+      4107051574.0,
+      4107007233.0
+     ]
+    },
+    "armv8_pmuv3_1/cycles/": {
+     "median": 625095311.0,
+     "samples": [
+      626715970.0,
+      624475193.0,
+      631003030.0,
+      625715429.0,
+      624434508.0,
+      622014843.0
+     ]
+    },
+    "task-clock": {
+     "median": 160294872.0,
+     "samples": [
+      160708784.0,
+      160136864.0,
+      161808576.0,
+      160452880.0,
+      160127104.0,
+      159503264.0
+     ]
+    }
+   },
+   "zjs": {
+    "armv8_pmuv3_1/instructions/": {
+     "median": 3869973867.5,
+     "samples": [
+      3869926088.0,
+      3870003530.0,
+      3870070327.0,
+      3870046473.0,
+      3869928235.0,
+      3869944205.0
+     ]
+    },
+    "armv8_pmuv3_1/cycles/": {
+     "median": 605570986.0,
+     "samples": [
+      585701359.0,
+      605682287.0,
+      633089889.0,
+      605611023.0,
+      585442728.0,
+      605530949.0
+     ]
+    },
+    "task-clock": {
+     "median": 155288960.0,
+     "samples": [
+      150194304.0,
+      155316896.0,
+      162344624.0,
+      155301136.0,
+      150131584.0,
+      155276784.0
+     ]
+    }
+   }
+  },
+  "t_string_rope_k1": {
+   "case": "t_string_rope_k1",
+   "iterations": 20000000,
+   "outputs": {
+    "qjs": [
+     "0"
+    ],
+    "zjs": [
+     "0"
+    ]
+   },
+   "output_match": true,
+   "qjs": {
+    "armv8_pmuv3_1/instructions/": {
+     "median": 4867271061.0,
+     "samples": [
+      4867312688.0,
+      4867242468.0,
+      4867273287.0,
+      4867268835.0,
+      4867200099.0,
+      4867277360.0
+     ]
+    },
+    "armv8_pmuv3_1/cycles/": {
+     "median": 722994135.5,
+     "samples": [
+      723266002.0,
+      734815556.0,
+      722722269.0,
+      723369233.0,
+      720431091.0,
+      721318774.0
+     ]
+    },
+    "task-clock": {
+     "median": 185398032.0,
+     "samples": [
+      185468704.0,
+      188429744.0,
+      185327360.0,
+      185495584.0,
+      184741088.0,
+      184968832.0
+     ]
+    }
+   },
+   "zjs": {
+    "armv8_pmuv3_1/instructions/": {
+     "median": 6611114530.5,
+     "samples": [
+      6611140347.0,
+      6611130834.0,
+      6611010132.0,
+      6611123668.0,
+      6611105393.0,
+      6611102493.0
+     ]
+    },
+    "armv8_pmuv3_1/cycles/": {
+     "median": 1089332836.5,
+     "samples": [
+      1100107743.0,
+      1086509073.0,
+      1085265704.0,
+      1091852422.0,
+      1088930695.0,
+      1089734978.0
+     ]
+    },
+    "task-clock": {
+     "median": 279337416.0,
+     "samples": [
+      282102128.0,
+      278613648.0,
+      278293936.0,
+      279983696.0,
+      279235088.0,
+      279439744.0
+     ]
+    }
+   }
+  }
+ }
+}
