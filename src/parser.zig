@@ -3705,6 +3705,8 @@ pub const parser_core = struct {
         label_cont: i32,
         drop_count: i32,
         label_finally: i32,
+        /// QCP-1 S2-G3: v2 twin of label_finally (both unset in zjs — try uses return_finally_frames).
+        v2_label_finally: ?compiler_v2.LabelId = null,
         scope_level: i32,
         catch_marker_depth: u32,
         has_iterator: bool,
@@ -3750,7 +3752,7 @@ pub const parser_core = struct {
     };
 
     const ReturnFinallyFrame = struct {
-        finally_label: ParserLabelRef,
+        finally_label: FinallyLabel,
         scope_level: i32,
         catch_marker_depth: u32,
         break_depth: usize,
@@ -5105,7 +5107,12 @@ pub const parser_core = struct {
         }
 
         pub fn emitReturnUndefined(self: *State) Error!void {
-            try self.emitOp(opcode.op.return_undef);
+            if (v2_available and self.emit_v2) {
+                // qjs js_parse_program/function tail (quickjs.c:31459/36946): emit the implicit return_undef terminal.
+                try v2FEmitOp(self, opcode.op.return_undef);
+            } else {
+                try self.emitOp(opcode.op.return_undef);
+            }
         }
 
         /// Advance one token. Frees the payload of the consumed token.
@@ -10568,6 +10575,14 @@ pub const parser_core = struct {
         v2: compiler_v2.LabelId,
     };
 
+    /// QCP-1 S2-G3: finally-target identity for gosub emission — a legacy parser
+    /// label or a v2 LabelId depending on the emission backend of the parse
+    /// (same shape as OptionalChainLabel).
+    const FinallyLabel = union(enum) {
+        legacy: ParserLabelRef,
+        v2: compiler_v2.LabelId,
+    };
+
     fn newParserLabel(s: *State) ParserLabelRef {
         const count = s.currentParserLabelCount();
         std.debug.assert(count < opcode.op.parser_label_tag - 1);
@@ -10899,7 +10914,12 @@ pub const parser_core = struct {
     fn emitCatchMarkerDropsFromDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
         if (current_depth.* < target_depth) return Error.UnexpectedToken;
         while (current_depth.* > target_depth) {
-            try s.emitOpNoSource(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                // qjs abrupt cleanup (quickjs.c:28371-28377): drop each crossed catch-marker slot without a source marker.
+                try v2FEmitOpNoSource(s, opcode.op.drop);
+            } else {
+                try s.emitOpNoSource(opcode.op.drop);
+            }
             try emitUsingDisposesForCatchMarkerDepth(s, current_depth.*);
             current_depth.* -= 1;
         }
@@ -11028,9 +11048,55 @@ pub const parser_core = struct {
         };
     }
 
+    /// QCP-1 S2-G3: v2 twin of `isLiveCode` — qjs js_is_live_code
+    /// (quickjs.c:23816) over the v2 temp stream: get_prev_opcode is
+    /// Builder.last_opcode_pos (every v2FBindLabel invalidated it, so any merge
+    /// bound at the current end already answers live, exactly like qjs OP_label
+    /// being the visible prev opcode). The ref_count scan covers raw binds
+    /// (v2FBindLabelRaw keeps call/delete provenance): a referenced label BOUND
+    /// exactly at the current end is an incoming edge (the legacy
+    /// max_absolute_target >= tail_start answer). Labels not yet bound are
+    /// future handler/exit targets and are NOT incoming edges — the twin of the
+    /// legacy tagged-parser-label exclusion.
+    pub fn v2IsLiveCode(s: *State) bool {
+        const v2b = s.v2Builder();
+        const live = blk: {
+            if (v2b.last_opcode_pos < 0) break :blk true;
+            break :blk switch (v2b.code[@intCast(v2b.last_opcode_pos)]) {
+                opcode.op.goto,
+                opcode.op.@"return",
+                opcode.op.return_undef,
+                opcode.op.return_async,
+                opcode.op.tail_call,
+                opcode.op.tail_call_method,
+                opcode.op.throw,
+                opcode.op.throw_error,
+                opcode.op.ret,
+                => false,
+                else => true,
+            };
+        };
+        if (live) return true;
+        var label_index: u32 = 0;
+        while (label_index < v2b.label_len) : (label_index += 1) {
+            const slot = v2b.label_slots[label_index];
+            if (slot.flags.bound and slot.bound_offset == v2b.code_len and slot.ref_count > 0) return true;
+        }
+        return false;
+    }
+
+    /// QCP-1 S2-G3 TEST HOOK: the script/plain-function epilogue tail under v2
+    /// (decision + terminal), callable from the emission harness exactly as the
+    /// script epilogue runs it.
+    pub fn v2EmitPlainTailForTest(s: *State) Error!void {
+        std.debug.assert(v2_available and s.emit_v2);
+        if (v2IsLiveCode(s)) try s.emitReturnUndefined();
+    }
+
     /// QuickJS `js_is_live_code`: only the straight-line predecessor matters
     /// while constructing a statement's fixed control-flow topology.
     fn isLiveCode(s: *State) bool {
+        if (v2_available and s.emit_v2) return v2IsLiveCode(s);
         const ft = s.flowSummary();
         const op_id = ft.last_non_cleanup_op orelse return true;
         const terminal = switch (op_id) {
@@ -12106,7 +12172,12 @@ pub const parser_core = struct {
                 const saved_source_override = s.opcode_source_override;
                 s.opcode_source_override = statement_source;
                 defer s.opcode_source_override = saved_source_override;
-                try s.emitOp(opcode.op.throw);
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_THROW (quickjs.c:28596): emit_op(OP_throw) with the throw-keyword source override.
+                    try v2FEmitOp(s, opcode.op.throw);
+                } else {
+                    try s.emitOp(opcode.op.throw);
+                }
                 _ = try s.expectSemicolon();
             },
             tok.TOK_VAR, tok.TOK_LET, tok.TOK_CONST => {
@@ -12886,15 +12957,43 @@ pub const parser_core = struct {
                 try s.advance();
                 try s.setEvalReturnUndefined();
 
-                const label_catch = newParserLabel(s);
-                const label_catch2 = newParserLabel(s);
-                const label_finally = newParserLabel(s);
-                const label_end = newParserLabel(s);
+                var v2_label_catch: compiler_v2.LabelId = undefined;
+                var v2_label_catch2: compiler_v2.LabelId = undefined;
+                var v2_label_finally: compiler_v2.LabelId = undefined;
+                var v2_label_end: compiler_v2.LabelId = undefined;
+                var label_catch: ParserLabelRef = undefined;
+                var label_catch2: ParserLabelRef = undefined;
+                var label_finally: ParserLabelRef = undefined;
+                var label_end: ParserLabelRef = undefined;
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_TRY (quickjs.c:29396-29400) creates all four labels upfront;
+                    // v2 label discipline requires every created label to end up bound, and
+                    // a no-catch try never binds catch2 — so catch2 is created at its first
+                    // use in the catch clause (id order differs from qjs; resolved output
+                    // is unaffected because ids are per-function creation indices).
+                    v2_label_catch = try v2FNewLabel(s);
+                    v2_label_finally = try v2FNewLabel(s);
+                    v2_label_end = try v2FNewLabel(s);
+                } else {
+                    label_catch = newParserLabel(s);
+                    label_catch2 = newParserLabel(s);
+                    label_finally = newParserLabel(s);
+                    label_end = newParserLabel(s);
+                }
+                const finally_ref: FinallyLabel = if (v2_available and s.emit_v2)
+                    .{ .v2 = v2_label_finally }
+                else
+                    .{ .legacy = label_finally };
 
-                try emitParserLabelJump(s, opcode.op.@"catch", label_catch);
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_TRY (quickjs.c:29401): emit_goto(OP_catch, label_catch) — the handler target is born as a LabelId.
+                    try v2FEmitJump(s, opcode.op.@"catch", v2_label_catch);
+                } else {
+                    try emitParserLabelJump(s, opcode.op.@"catch", label_catch);
+                }
                 const outer_catch_depth = s.active_catch_marker_depth;
                 s.active_catch_marker_depth += 1;
-                const try_frame = try pushReturnFinallyFrame(s, label_finally, outer_catch_depth);
+                const try_frame = try pushReturnFinallyFrame(s, finally_ref, outer_catch_depth);
                 var try_frame_active = true;
                 errdefer {
                     if (try_frame_active) popReturnFinallyFrame(s, try_frame);
@@ -12908,22 +13007,41 @@ pub const parser_core = struct {
                 s.active_catch_marker_depth = outer_catch_depth;
 
                 if (isLiveCode(s)) {
-                    try s.emitOpNoSource(opcode.op.drop);
-                    try s.emitOpNoSource(opcode.op.undefined);
-                    try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
-                    try s.emitOpNoSource(opcode.op.drop);
-                    try emitParserLabelJumpNoSource(s, opcode.op.goto, label_end);
+                    if (v2_available and s.emit_v2) {
+                        // qjs TOK_TRY live try tail (quickjs.c:29412-29420): drop, undefined, gosub finally, drop, goto end.
+                        try v2FEmitOpNoSource(s, opcode.op.drop);
+                        try v2FEmitOpNoSource(s, opcode.op.undefined);
+                        try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
+                        try v2FEmitOpNoSource(s, opcode.op.drop);
+                        try v2FEmitJumpNoSource(s, opcode.op.goto, v2_label_end);
+                    } else {
+                        try s.emitOpNoSource(opcode.op.drop);
+                        try s.emitOpNoSource(opcode.op.undefined);
+                        try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                        try s.emitOpNoSource(opcode.op.drop);
+                        try emitParserLabelJumpNoSource(s, opcode.op.goto, label_end);
+                    }
                 }
 
                 if (s.peekKind() == tok.TOK_CATCH) {
                     try s.advance();
-                    try emitParserLabelNoSource(s, label_catch);
+                    if (v2_available and s.emit_v2) {
+                        // qjs TOK_TRY catch entry (quickjs.c:29427-29428): bind label_catch at the handler entry.
+                        try v2FBindLabel(s, v2_label_catch);
+                    } else {
+                        try emitParserLabelNoSource(s, label_catch);
+                    }
 
                     try s.pushScope();
                     var catch_binding_scope_active = true;
                     errdefer if (catch_binding_scope_active) s.popScopeIdentity();
                     if (s.peekKind() == '{') {
-                        try s.emitOpNoSource(opcode.op.drop);
+                        if (v2_available and s.emit_v2) {
+                            // qjs TOK_TRY optional catch binding (quickjs.c:29430-29432): drop the exception object.
+                            try v2FEmitOpNoSource(s, opcode.op.drop);
+                        } else {
+                            try s.emitOpNoSource(opcode.op.drop);
+                        }
                     } else {
                         try s.expectToken('(');
                         if (s.peekKind() == '[' or s.peekKind() == '{') {
@@ -12956,10 +13074,16 @@ pub const parser_core = struct {
                         try s.expectToken(')');
                     }
 
-                    try emitParserLabelJump(s, opcode.op.@"catch", label_catch2);
+                    if (v2_available and s.emit_v2) {
+                        // qjs TOK_TRY catch body (quickjs.c:29460-29461): create and target the second catch handler.
+                        v2_label_catch2 = try v2FNewLabel(s);
+                        try v2FEmitJump(s, opcode.op.@"catch", v2_label_catch2);
+                    } else {
+                        try emitParserLabelJump(s, opcode.op.@"catch", label_catch2);
+                    }
                     const catch_body_outer_depth = s.active_catch_marker_depth;
                     s.active_catch_marker_depth += 1;
-                    const catch_frame = try pushReturnFinallyFrame(s, label_finally, catch_body_outer_depth);
+                    const catch_frame = try pushReturnFinallyFrame(s, finally_ref, catch_body_outer_depth);
                     var catch_frame_active = true;
                     errdefer {
                         if (catch_frame_active) popReturnFinallyFrame(s, catch_frame);
@@ -12983,31 +13107,69 @@ pub const parser_core = struct {
                     catch_binding_scope_active = false;
 
                     if (isLiveCode(s)) {
-                        try s.emitOpNoSource(opcode.op.drop);
-                        try s.emitOpNoSource(opcode.op.undefined);
-                        try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
-                        try s.emitOpNoSource(opcode.op.drop);
-                        try emitParserLabelJumpNoSource(s, opcode.op.goto, label_end);
+                        if (v2_available and s.emit_v2) {
+                            // qjs TOK_TRY live catch tail (quickjs.c:29475-29483): drop, undefined, gosub finally, drop, goto end.
+                            try v2FEmitOpNoSource(s, opcode.op.drop);
+                            try v2FEmitOpNoSource(s, opcode.op.undefined);
+                            try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
+                            try v2FEmitOpNoSource(s, opcode.op.drop);
+                            try v2FEmitJumpNoSource(s, opcode.op.goto, v2_label_end);
+                        } else {
+                            try s.emitOpNoSource(opcode.op.drop);
+                            try s.emitOpNoSource(opcode.op.undefined);
+                            try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                            try s.emitOpNoSource(opcode.op.drop);
+                            try emitParserLabelJumpNoSource(s, opcode.op.goto, label_end);
+                        }
                     }
 
-                    try emitParserLabelNoSource(s, label_catch2);
-                    try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
-                    try s.emitOpNoSource(opcode.op.throw);
+                    if (v2_available and s.emit_v2) {
+                        // qjs TOK_TRY catch rethrow (quickjs.c:29485-29490): bind catch2, gosub finally, then throw.
+                        try v2FBindLabel(s, v2_label_catch2);
+                        try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
+                        try v2FEmitOpNoSource(s, opcode.op.throw);
+                    } else {
+                        try emitParserLabelNoSource(s, label_catch2);
+                        try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                        try s.emitOpNoSource(opcode.op.throw);
+                    }
                 } else if (s.peekKind() == tok.TOK_FINALLY) {
-                    try emitParserLabelNoSource(s, label_catch);
-                    try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
-                    try s.emitOpNoSource(opcode.op.throw);
+                    if (v2_available and s.emit_v2) {
+                        // qjs TOK_TRY finally-only rethrow (quickjs.c:29492-29498): bind catch, gosub finally, then throw.
+                        try v2FBindLabel(s, v2_label_catch);
+                        try v2FEmitJumpNoSource(s, opcode.op.gosub, v2_label_finally);
+                        try v2FEmitOpNoSource(s, opcode.op.throw);
+                    } else {
+                        try emitParserLabelNoSource(s, label_catch);
+                        try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                        try s.emitOpNoSource(opcode.op.throw);
+                    }
                 } else {
                     return Error.UnexpectedToken;
                 }
 
-                try emitParserLabelNoSource(s, label_finally);
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_TRY finally entry (quickjs.c:29503): bind label_finally.
+                    try v2FBindLabel(s, v2_label_finally);
+                } else {
+                    try emitParserLabelNoSource(s, label_finally);
+                }
                 if (s.peekKind() == tok.TOK_FINALLY) {
                     try s.advance();
                     try parseSharedFinallyBlock(s);
                 }
-                try s.emitOpNoSource(opcode.op.ret);
-                try emitParserLabelNoSource(s, label_end);
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_TRY finally return (quickjs.c:29538): emit OP_ret.
+                    try v2FEmitOpNoSource(s, opcode.op.ret);
+                } else {
+                    try s.emitOpNoSource(opcode.op.ret);
+                }
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_TRY exit (quickjs.c:29539): bind label_end.
+                    try v2FBindLabel(s, v2_label_end);
+                } else {
+                    try emitParserLabelNoSource(s, label_end);
+                }
             },
             tok.TOK_DEBUGGER => {
                 try s.advance();
@@ -13172,7 +13334,7 @@ pub const parser_core = struct {
 
     fn pushReturnFinallyFrame(
         s: *State,
-        finally_label: ParserLabelRef,
+        finally_label: FinallyLabel,
         catch_marker_depth: u32,
     ) Error!usize {
         if (catch_marker_depth > s.active_catch_marker_depth) return Error.UnexpectedToken;
@@ -13292,7 +13454,14 @@ pub const parser_core = struct {
     /// catch cursors ensure each iterator/catch record is unwound once while
     /// all active finalizers share the same gosub target.
     fn emitReturnValue(s: *State, await_before_unwind: bool) Error!void {
-        if (await_before_unwind) try s.emitOp(opcode.op.await);
+        if (await_before_unwind) {
+            if (v2_available and s.emit_v2) {
+                // qjs emit_return (quickjs.c:28401-28405): await an async-generator value before unwinding.
+                try v2FEmitOp(s, opcode.op.await);
+            } else {
+                try s.emitOp(opcode.op.await);
+            }
+        }
 
         var block_cursor = s.top_break;
         var catch_marker_depth = s.active_catch_marker_depth;
@@ -13302,7 +13471,11 @@ pub const parser_core = struct {
             const frame = s.return_finally_frames.items[frame_index];
             try emitBlockEnvReturnCleanupUntil(s, &block_cursor, frame.block_boundary, &catch_marker_depth);
             try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, frame.catch_marker_depth);
-            try emitParserLabelJumpNoSource(s, opcode.op.gosub, frame.finally_label);
+            // qjs emit_return (quickjs.c:28447-28449): execute each crossed finally via gosub.
+            switch (frame.finally_label) {
+                .legacy => |label| try emitParserLabelJumpNoSource(s, opcode.op.gosub, label),
+                .v2 => |label| try v2FEmitJumpNoSource(s, opcode.op.gosub, label),
+            }
         }
         try emitBlockEnvReturnCleanupUntil(s, &block_cursor, null, &catch_marker_depth);
         try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, 0);
@@ -13327,6 +13500,9 @@ pub const parser_core = struct {
     }
 
     fn reattributeReturnTailCallSource(s: *State, has_expr: bool, source: SourcePosition) Error!?UpdatedSourceLoc {
+        // QCP-1 S2-G3: v2 pc2line derives from Builder source slots at final
+        // emission (qjs resolve_labels owns this attribution); nothing to remap.
+        if (v2_available and s.emit_v2) return null;
         if (!has_expr or s.in_async or s.in_generator or (s.in_constructor and s.class_has_extends)) return null;
         if (s.return_finally_frames.items.len != 0 or
             s.finally_body_control_frames.items.len != 0 or
@@ -13384,32 +13560,69 @@ pub const parser_core = struct {
             try emitFunctionReturn(s, false);
             return;
         }
-        if (!has_expr) try s.emitOp(opcode.op.undefined);
+        if (!has_expr) {
+            if (v2_available and s.emit_v2) {
+                // qjs emit_return (quickjs.c:28411-28414): materialize the missing return value before cleanup.
+                try v2FEmitOp(s, opcode.op.undefined);
+            } else {
+                try s.emitOp(opcode.op.undefined);
+            }
+        }
         try emitReturnValue(s, has_expr and s.in_async and s.in_generator);
     }
 
     fn emitFunctionReturn(s: *State, has_value: bool) Error!void {
         var value_on_stack = has_value;
         if (!value_on_stack and (s.in_async or s.in_generator)) {
-            try s.emitOp(opcode.op.undefined);
+            if (v2_available and s.emit_v2) {
+                // qjs emit_return (quickjs.c:28396-28400): synthesize undefined for async/generator returns.
+                try v2FEmitOp(s, opcode.op.undefined);
+            } else {
+                try s.emitOp(opcode.op.undefined);
+            }
             value_on_stack = true;
         }
 
         if (s.in_constructor and s.class_has_extends) {
             if (value_on_stack) {
-                try s.emitOp(opcode.op.check_ctor_return);
-                const return_value = try emitForwardJump(s, opcode.op.if_false);
-                try s.emitOp(opcode.op.drop);
-                try s.emitScopeGetVarCheckThis(atom_this);
-                try patchForwardJump(s, return_value);
+                if (v2_available and s.emit_v2) {
+                    // qjs emit_return derived constructor (quickjs.c:28453-28472): if_false skips this substitution.
+                    try v2FEmitOp(s, opcode.op.check_ctor_return);
+                    const v2_return_value = try v2FNewLabel(s);
+                    try v2FEmitJump(s, opcode.op.if_false, v2_return_value);
+                    try v2FEmitOp(s, opcode.op.drop);
+                    try s.emitScopeGetVarCheckThis(atom_this);
+                    try v2FBindLabel(s, v2_return_value);
+                } else {
+                    try s.emitOp(opcode.op.check_ctor_return);
+                    const return_value = try emitForwardJump(s, opcode.op.if_false);
+                    try s.emitOp(opcode.op.drop);
+                    try s.emitScopeGetVarCheckThis(atom_this);
+                    try patchForwardJump(s, return_value);
+                }
             } else {
                 try s.emitScopeGetVarCheckThis(atom_this);
             }
-            try s.emitOp(opcode.op.@"return");
+            if (v2_available and s.emit_v2) {
+                // qjs emit_return derived constructor terminal (quickjs.c:28472-28473): OP_return.
+                try v2FEmitOp(s, opcode.op.@"return");
+            } else {
+                try s.emitOp(opcode.op.@"return");
+            }
         } else if (s.in_async or s.in_generator) {
-            try s.emitOp(opcode.op.return_async);
+            if (v2_available and s.emit_v2) {
+                // qjs emit_return (quickjs.c:28474-28475): non-normal functions use OP_return_async.
+                try v2FEmitOp(s, opcode.op.return_async);
+            } else {
+                try s.emitOp(opcode.op.return_async);
+            }
         } else {
-            try s.emitOp(if (value_on_stack) opcode.op.@"return" else opcode.op.return_undef);
+            if (v2_available and s.emit_v2) {
+                // qjs emit_return (quickjs.c:28476-28477): select value return versus return_undef.
+                try v2FEmitOp(s, if (value_on_stack) opcode.op.@"return" else opcode.op.return_undef);
+            } else {
+                try s.emitOp(if (value_on_stack) opcode.op.@"return" else opcode.op.return_undef);
+            }
         }
     }
 
@@ -13557,7 +13770,14 @@ pub const parser_core = struct {
                 try s.emitOpNoSource(opcode.op.drop);
             }
         }
-        if (block.label_finally >= 0) {
+        if (v2_available and s.emit_v2) {
+            if (block.v2_label_finally) |label| {
+                // qjs emit_break (quickjs.c:28373-28377): undefined, gosub crossed finally, then drop.
+                try v2FEmitOpNoSource(s, opcode.op.undefined);
+                try v2FEmitJumpNoSource(s, opcode.op.gosub, label);
+                try v2FEmitOpNoSource(s, opcode.op.drop);
+            }
+        } else if (block.label_finally >= 0) {
             try s.emitOpNoSource(opcode.op.undefined);
             try emitParserLabelJumpNoSource(
                 s,
@@ -13631,9 +13851,22 @@ pub const parser_core = struct {
             try s.closeScopes(scope_cursor, return_frame.scope_level);
             scope_cursor = return_frame.scope_level;
             try emitCatchMarkerDropsFromDepth(s, &catch_marker_depth, return_frame.catch_marker_depth);
-            try s.emitOpNoSource(opcode.op.undefined);
-            try emitParserLabelJumpNoSource(s, opcode.op.gosub, return_frame.finally_label);
-            try s.emitOpNoSource(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                // qjs emit_break/emit_return (quickjs.c:28373-28377/28447-28449): keep stack depth across a crossed finally.
+                try v2FEmitOpNoSource(s, opcode.op.undefined);
+            } else {
+                try s.emitOpNoSource(opcode.op.undefined);
+            }
+            switch (return_frame.finally_label) {
+                .legacy => |label| try emitParserLabelJumpNoSource(s, opcode.op.gosub, label),
+                .v2 => |label| try v2FEmitJumpNoSource(s, opcode.op.gosub, label),
+            }
+            if (v2_available and s.emit_v2) {
+                // qjs emit_break (quickjs.c:28376-28377): discard the crossed finalizer completion.
+                try v2FEmitOpNoSource(s, opcode.op.drop);
+            } else {
+                try s.emitOpNoSource(opcode.op.drop);
+            }
         }
 
         if (try emitControlBlocksUntil(
@@ -15268,27 +15501,56 @@ pub const parser_core = struct {
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
         if (capture_child) {
-            // A jump targeting the current end (post-lowering `code_end`) needs
-            // a real terminator to land on — the dispatch has no fall-off
-            // bounds check (qjs-aligned; qjs functions always end in a return).
-            const ft = s.flowSummary();
-            const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
-            const needs_return = jump_to_end or flowNeedsImplicitReturn(ft);
+            const needs_return = if (v2_available and s.emit_v2)
+                // qjs js_parse_function_decl2 tail (quickjs.c:36946): js_is_live_code
+                // alone decides — every construct epilogue bound its merge labels at
+                // the end, which invalidated last_opcode_pos exactly like qjs OP_label.
+                v2IsLiveCode(s)
+            else blk: {
+                // A jump targeting the current end (post-lowering `code_end`) needs
+                // a real terminator to land on — the dispatch has no fall-off
+                // bounds check (qjs-aligned; qjs functions always end in a return).
+                const ft = s.flowSummary();
+                const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
+                break :blk jump_to_end or flowNeedsImplicitReturn(ft);
+            };
             if (needs_return) {
                 if (func_kind == .async) {
-                    try s.emitOp(opcode.op.undefined);
-                    try s.emitOp(opcode.op.return_async);
+                    if (v2_available and s.emit_v2) {
+                        // qjs function tail via emit_return(FALSE) (quickjs.c:36946-36947/28396-28400): undefined then return_async.
+                        try v2FEmitOp(s, opcode.op.undefined);
+                        try v2FEmitOp(s, opcode.op.return_async);
+                    } else {
+                        try s.emitOp(opcode.op.undefined);
+                        try s.emitOp(opcode.op.return_async);
+                    }
                 } else if (func_kind == .generator or func_kind == .async_generator) {
-                    try s.emitOp(opcode.op.undefined);
-                    try s.emitOp(opcode.op.return_async);
+                    if (v2_available and s.emit_v2) {
+                        // qjs function tail via emit_return(FALSE) (quickjs.c:36946-36947/28396-28400): undefined then return_async.
+                        try v2FEmitOp(s, opcode.op.undefined);
+                        try v2FEmitOp(s, opcode.op.return_async);
+                    } else {
+                        try s.emitOp(opcode.op.undefined);
+                        try s.emitOp(opcode.op.return_async);
+                    }
                 } else if (func_kind == .derived_class_constructor) {
                     try s.emitScopeGetVarCheckThis(atom_this);
-                    try s.emitOp(opcode.op.@"return");
+                    if (v2_available and s.emit_v2) {
+                        // qjs derived-constructor function tail (quickjs.c:28466-28473): checked this then OP_return.
+                        try v2FEmitOp(s, opcode.op.@"return");
+                    } else {
+                        try s.emitOp(opcode.op.@"return");
+                    }
                 } else {
                     // Keep QuickJS's parser shape: the expression-statement
                     // drop remains before the appended terminator. Final
                     // bytecode rules decide whether that drop can disappear.
-                    try s.emitOp(opcode.op.return_undef);
+                    if (v2_available and s.emit_v2) {
+                        // qjs plain function tail (quickjs.c:36946-36947/28476-28477): OP_return_undef.
+                        try v2FEmitOp(s, opcode.op.return_undef);
+                    } else {
+                        try s.emitOp(opcode.op.return_undef);
+                    }
                 }
             }
         }
@@ -15748,17 +16010,33 @@ pub const parser_core = struct {
             try parseFunctionBodyBlock(s);
             if (has_non_simple_params and s.cur_func().has_use_strict) return Error.UnexpectedToken;
             if (capture_child) {
-                // See the function-body epilogue: an end-targeting jump must
-                // land on a real terminator (no dispatch fall-off check).
-                const ft = s.flowSummary();
-                const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
-                const needs_return = jump_to_end or flowNeedsImplicitReturn(ft);
+                const needs_return = if (v2_available and s.emit_v2)
+                    // qjs arrow function tail (quickjs.c:36946): js_is_live_code alone decides.
+                    v2IsLiveCode(s)
+                else blk: {
+                    // See the function-body epilogue: an end-targeting jump must
+                    // land on a real terminator (no dispatch fall-off check).
+                    const ft = s.flowSummary();
+                    const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
+                    break :blk jump_to_end or flowNeedsImplicitReturn(ft);
+                };
                 if (needs_return) {
                     if (is_async) {
-                        try s.emitOp(opcode.op.undefined);
-                        try s.emitOp(opcode.op.return_async);
+                        if (v2_available and s.emit_v2) {
+                            // qjs arrow tail via emit_return(FALSE) (quickjs.c:36946-36947/28396-28400): undefined then return_async.
+                            try v2FEmitOp(s, opcode.op.undefined);
+                            try v2FEmitOp(s, opcode.op.return_async);
+                        } else {
+                            try s.emitOp(opcode.op.undefined);
+                            try s.emitOp(opcode.op.return_async);
+                        }
                     } else {
-                        try s.emitOp(opcode.op.return_undef);
+                        if (v2_available and s.emit_v2) {
+                            // qjs plain arrow tail (quickjs.c:36946-36947/28476-28477): OP_return_undef.
+                            try v2FEmitOp(s, opcode.op.return_undef);
+                        } else {
+                            try s.emitOp(opcode.op.return_undef);
+                        }
                     }
                 }
             }
@@ -15772,7 +16050,12 @@ pub const parser_core = struct {
             // qjs parses arrow bodies with `js_parse_assign_expr`
             // (PF_IN_ACCEPTED, quickjs.c:31829) and accepts it.
             try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
-            try s.emitOp(if (is_async) opcode.op.return_async else opcode.op.@"return");
+            if (v2_available and s.emit_v2) {
+                // qjs arrow expression body (quickjs.c:31831-31834): terminate with return_async or return.
+                try v2FEmitOp(s, if (is_async) opcode.op.return_async else opcode.op.@"return");
+            } else {
+                try s.emitOp(if (is_async) opcode.op.return_async else opcode.op.@"return");
+            }
             s.finishFunctionBody();
         }
         s.leaveControlBoundary(saved_control_frames);
@@ -16163,7 +16446,12 @@ pub const parser_core = struct {
     fn emitStackTopCatchMarkerDropsToDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
         if (current_depth.* < target_depth) return Error.UnexpectedToken;
         while (current_depth.* > target_depth) {
-            try s.emitOp(opcode.op.nip_catch);
+            if (v2_available and s.emit_v2) {
+                // qjs emit_return (quickjs.c:28415-28419): preserve TOS while removing a catch record.
+                try v2FEmitOp(s, opcode.op.nip_catch);
+            } else {
+                try s.emitOp(opcode.op.nip_catch);
+            }
             try emitUsingDisposesForCatchMarkerDepth(s, current_depth.*);
             current_depth.* -= 1;
         }
@@ -16197,14 +16485,27 @@ pub const parser_core = struct {
             if (is_finally_body) {
                 // Preserve the return completion while discarding this
                 // finalizer's completion and gosub return-PC slots.
-                try s.emitOp(opcode.op.nip);
-                try s.emitOp(opcode.op.nip);
+                if (v2_available and s.emit_v2) {
+                    // qjs emit_return finally walk (quickjs.c:28408-28419): preserve the injected return completion during cleanup.
+                    try v2FEmitOp(s, opcode.op.nip);
+                    try v2FEmitOp(s, opcode.op.nip);
+                } else {
+                    try s.emitOp(opcode.op.nip);
+                    try s.emitOp(opcode.op.nip);
+                }
                 continue;
             }
             if (current.has_iterator) {
                 try emitStackTopCatchMarkerDropsToDepth(s, catch_marker_depth, current.catch_marker_depth);
-                try s.emitOp(opcode.op.nip_catch);
+                if (v2_available and s.emit_v2) {
+                    // qjs emit_return iterator cleanup (quickjs.c:28415-28421): remove the iterator catch record under TOS.
+                    try v2FEmitOp(s, opcode.op.nip_catch);
+                } else {
+                    try s.emitOp(opcode.op.nip_catch);
+                }
                 if (async_generator) {
+                    // QCP-1 S2-G3: async-generator return()-close is the generator group; fail loud under v2.
+                    std.debug.assert(!(v2_available and s.emit_v2));
                     // QuickJS emit_return (quickjs.c:28422-28440): discard the
                     // cached next method, call iterator.return(), require an
                     // Object result, await it, then restore the injected return
@@ -16224,9 +16525,16 @@ pub const parser_core = struct {
                     try patchForwardJump(s, closed);
                     try s.emitOp(opcode.op.drop);
                 } else {
-                    try s.emitOp(opcode.op.rot3r);
-                    try s.emitOp(opcode.op.undefined);
-                    try s.emitOp(opcode.op.iterator_close);
+                    if (v2_available and s.emit_v2) {
+                        // qjs emit_return iterator cleanup (quickjs.c:28441-28444): rotate value, add dummy catch offset, close.
+                        try v2FEmitOp(s, opcode.op.rot3r);
+                        try v2FEmitOp(s, opcode.op.undefined);
+                        try v2FEmitOp(s, opcode.op.iterator_close);
+                    } else {
+                        try s.emitOp(opcode.op.rot3r);
+                        try s.emitOp(opcode.op.undefined);
+                        try s.emitOp(opcode.op.iterator_close);
+                    }
                 }
             }
         }
@@ -19337,8 +19645,12 @@ pub const compile_entry = struct {
             // could alias an operand of a multi-byte instruction.
             const code = function.code;
             const atoms = function.atom_operands;
-            const needs_return = parser_impl.hasJumpToCurrentEnd(code, atoms) or
-                parser_impl.functionNeedsImplicitReturn(code, atoms);
+            const needs_return = if (parser_core.v2_available and state.emit_v2)
+                // qjs js_parse_program tail (quickjs.c:31459): js_is_live_code decides the implicit terminal.
+                parser_core.v2IsLiveCode(&state)
+            else
+                parser_impl.hasJumpToCurrentEnd(code, atoms) or
+                    parser_impl.functionNeedsImplicitReturn(code, atoms);
             if (needs_return) try state.emitReturnUndefined();
         }
         if (compile_context.timing) |timing| {

@@ -1345,3 +1345,355 @@ test "compiler_v2.s2g2: switch break suppresses fallthrough" {
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
+
+test "compiler_v2.s2g3: try finally live tail" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("try { null; } finally { false; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.ret, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 1, 2, 26);
+    try expectLabel(b, 2, 1, 29);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 26 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: try catch optional binding live tails" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("try { null; } catch { false; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.@"catch", .size = 5, .label = 3 },
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.ret, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 48), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 1, 3, 47);
+    try expectLabel(b, 2, 2, 48);
+    try expectLabel(b, 3, 1, 41);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 21, 26 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: try catch binding after throw" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("try { throw true; } catch (e) { }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.@"catch", .size = 5, .label = 3 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.ret, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 35), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 7);
+    try expectLabel(b, 1, 2, 34);
+    try expectLabel(b, 2, 1, 35);
+    try expectLabel(b, 3, 1, 28);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 6, 7, 10 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: return through finally" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("try { return; } finally { null; }");
+    // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
+    h.state.return_depth = 1;
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.nip_catch, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.@"return", .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.ret, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 22), b.code_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try expectLabel(b, 0, 1, 13);
+    try expectLabel(b, 1, 2, 19);
+    try expectLabel(b, 2, 0, 22);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 6, 12, 19 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: break through finally inside loop" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("while (true) { try { break; } finally { null; } }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.@"catch", .size = 5, .label = 4 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 5 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.gosub, .size = 5, .label = 5 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.ret, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try std.testing.expectEqual(@as(u32, 38), b.code_len);
+    try std.testing.expectEqual(@as(u32, 7), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 1, 38);
+    try expectLabel(b, 2, 0, 33);
+    try expectLabel(b, 3, 1, 38);
+    try expectLabel(b, 4, 1, 24);
+    try expectLabel(b, 5, 2, 30);
+    try expectLabel(b, 6, 0, 33);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 6, 30, 33 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: epilogue after plain statement" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("null;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try P.v2EmitPlainTailForTest(&h.state);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.return_undef, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 3), b.code_len);
+    try std.testing.expectEqual(@as(u32, 0), b.label_len);
+    try std.testing.expectEqual(@as(i64, 2), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 2 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: epilogue after terminal" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("throw null;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try P.v2EmitPlainTailForTest(&h.state);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.throw, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 2), b.code_len);
+    try std.testing.expectEqual(@as(u32, 0), b.label_len);
+    try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: epilogue after loop merge" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("while (true) ;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try P.v2EmitPlainTailForTest(&h.state);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.return_undef, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 12), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 1, 11);
+    try expectLabel(b, 2, 0, 6);
+    try expectLabel(b, 3, 0, 11);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 6, 11 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: plain return dead epilogue" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("return;");
+    // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
+    h.state.return_depth = 1;
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try std.testing.expectEqual(@as(u32, 1), b.code_len);
+    try P.v2EmitPlainTailForTest(&h.state);
+
+    try expectV2Stream(b, &.{
+        .{ .op = qop.return_undef, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 1), b.code_len);
+    try std.testing.expectEqual(@as(u32, 0), b.label_len);
+    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g3: return with value" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("return null;");
+    // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
+    h.state.return_depth = 1;
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.@"return", .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 2), b.code_len);
+    try std.testing.expectEqual(@as(u32, 0), b.label_len);
+    try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
