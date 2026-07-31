@@ -328,7 +328,7 @@
   "carrier_unit_tests_and_fault_injection": "pass; injection aborts"
  },
  "preexisting_divergence": {
-  "BigInt.asUintN": "pinned qjs 04be2460 returns a signed value (asUintN(64,-1n) gives -1); zjs returns the spec-correct 18446744073709551615. Intentional per docs/qjs-align/FIX-PLAN-2026-07-02.md D10, present on P0 too, excluded from the differential as a known divergence rather than counted as a regression."
+  "BigInt.asUintN": "pinned qjs 04be2460 returns a signed value (asUintN(64,-1n) gives -1); zjs returns the spec-correct 18446744073709551615. This existing spec correction was recorded by the retired D10 phase plan and is recoverable from git history; it is present on P0 too and excluded from the differential as a known divergence rather than counted as a regression."
  },
  "gates": {
   "wrapper_size_and_slab_class_unchanged": true,

@@ -113,7 +113,7 @@ stack-map 系统。
 
 ## 4. VM Execution
 
-当前 VM dispatcher 是 `src/exec/zjs_vm.zig`。Phase 1 执行模型改进已落地：
+当前 VM dispatcher 是 `src/exec/zjs_vm.zig`。当前执行模型：
 
 - **连续 VM 栈**：`JSRuntime.vm_stack`（`VmStackArena`）为 `[args | locals | operand]` 提供
   arena 窗口；普通字节码调用的 operand stack 与 frame locals/args 优先从 arena 雕刻，
@@ -124,7 +124,7 @@ stack-map 系统。
   的唯一方案（挂起拷出/恢复拷回）会把成本从「每 generator 一次分配」搬到
   「每次 yield 两趟 memcpy + 全部按地址持有的根重定向」——负优化，不做。
   若未来 profile 证明 generator 帧分配是瓶颈，处方是 size-class 帧池，仍非
-  arena。同理 `parser.zig`（15.5K 行单体 parser/emitter）是参照形态——
+  arena。同理 `parser.zig` 的单体 parser/emitter 是参照形态——
   QuickJS 的 parser 同为单体且 `ParseState` 贯穿全部产生式，强拆只会重新
   制造跨文件状态穿线。
 - **同循环内联调用**：`src/exec/inline_calls.zig` 的 `Machine` 在 `dispatchLoop` 内
@@ -132,8 +132,10 @@ stack-map 系统。
 - **零拷贝参数**：`Frame.initArgumentsFromStack` 从 operand stack 转移参数所有权，
   仅 `argc < arg_count` 时补 `undefined`。
 - **CallEnv**：`runWithCallEnv` 收敛原 25 参数 `runWithArgsState` 入口面。
-- **热路径门控**：`-Dzjs_enable_opcode_profile=true` 才编译 per-opcode profile scope；
-  `stopBeforePc` 仅在 generator resume 外壳生效；backtrace 使用 lazy name 解析。
+- **热路径门控**：`stopBeforePc` 仅在 generator resume 外壳生效；backtrace
+  使用 lazy name 解析。`-Dzjs_enable_opcode_profile=true` 与
+  `--profile-opcodes` 入口仍存在，但当前 dispatcher 没有接入 per-opcode
+  scope，计数保持为零；修复并加入端到端门禁前不得把它当作可用 profiler。
 
 - **尾调用字节码 ABI**：VM 仍支持手写/内部路径产生的 `op.tail_call` 与
   `op.tail_call_method`，inline 帧可经 `Machine.tailCallReuse` 替换当前帧；但默认源码
@@ -163,17 +165,15 @@ Opcode family 仍拆到 `src/exec/vm_*.zig`：
 - property opcodes: `vm_property.zig`
 - regexp: `vm_regexp.zig`
 - value operations: `vm_value.zig`
-- opcode profiling helper: `vm_profile.zig`
 
 The VM call runtime lives in `src/exec/call_runtime.zig`（原 `shared.zig`，
 已改名并删除其转发别名层；调用点直接引用归属模块）。Splits
 so far: `regexp_fastpath.zig`（RegExp 快路径）、`slot_ops.zig`（槽位操作）、
 `builtin_glue.zig`（Math/Number/URI/JSON/collections/weak/Symbol/DataView
 glue）、`error_stack_ops.zig`、`forof_ops.zig`（迭代器记录与关闭路径）；
-`vm_property.zig` 按 globals/locals/field/ref/private 拆为五个子模块
-（13135 → 2125 行，达成 <3K 目标）。call_runtime.zig 当前约 8.3K 行（自
-15.3K），剩余大簇为 call runtime 核心、direct-eval 支撑、generator 恢复
-与 Atomics 等待机制，继续按域收敛。
+`vm_property.zig` 按 globals/locals/field/ref/private 拆为五个子模块。
+`call_runtime.zig` 当前约 7.9K 行，剩余大簇为 call runtime 核心、
+direct-eval 支撑、generator 恢复与 Atomics 等待机制，继续按域收敛。
 
 RegExp 语义状态：duplicate named groups（alternation 路径验证 + `\k` 多发射 +
 groups matched 优先）、quantifier 每迭代 capture 清零（对齐 RepeatMatcher，

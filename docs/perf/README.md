@@ -255,47 +255,20 @@ For coarse internal stage timing:
 zig-out/bin/zjs --perf-json -e "for(var i=0; i<100000; i++) {}" 2> .zig-cache/perf/current/perf.json
 ```
 
-The JSON is written to stderr so script stdout remains comparable. Use the
-checked runtime-profile helper below when you need opcode rows in the artifact.
+The JSON is written to stderr so script stdout remains comparable. Its stage
+timings and memory counters remain usable.
 
-For a checked runtime-profile artifact that keeps script stdout separate and is
-not confused with `zjs-microbench` multi-case reports:
+Per-opcode profiling is temporarily unavailable. The build option
+`-Dzjs_enable_opcode_profile=true`, CLI `--profile-opcodes`,
+`tools/perf/run_runtime_profile.js`, and the `perf-*-profile` build shortcuts
+still exist, but the dispatcher no longer imports the profiling scope. A real
+script therefore reports zero executed opcodes. Do not refresh checked runtime
+profile artifacts or use opcode rows for attribution until the scope is
+restored and an end-to-end non-zero-count test is part of the gate.
 
-```sh
-node tools/perf/run_runtime_profile.js \
-  --output reports/perf/current/runtime/uri_decode_4byte.json \
-  --stdout reports/perf/current/runtime/uri_decode_4byte.stdout \
-  --expect-stdout $'65536\n' \
-  --expect-opcode-max get_var=67626 \
-  --expect-opcode-max get_var_ref0=0 \
-  --expect-opcode-max put_var=1042 \
-  --expect-opcode-max push_i16=1040 \
-  --expect-opcode-max goto16=0 \
-  --expect-opcode-max add=0 \
-  --expect-opcode-max if_false8=1 \
-  reports/perf/current/scripts/uri_decode_4byte.js
-```
-
-The helper runs `--perf-json --profile-opcodes`, strips the textual opcode dump
-from stdout, and stores stage timings, memory counters, IC counters, and sorted
-opcode rows in one JSON artifact. Opcode-count expectations are deterministic
-guards for focused hot-path regressions; use max thresholds so later reductions
-continue to pass.
-
-Focused runtime-profile shortcuts are also available:
-
-```sh
-zig build perf-uri-profile --seed 0 --summary all
-zig build perf-uri-component-profile --seed 0 --summary all
-zig build perf-prop-global-profile --seed 0 --summary all
-zig build perf-proto-global-profile --seed 0 --summary all
-zig build perf-prop-poly3-profile --seed 0 --summary all
-zig build perf-call2-global-profile --seed 0 --summary all
-zig build perf-closure-call-global-profile --seed 0 --summary all
-zig build perf-string-loop-profile --seed 0 --summary all
-zig build perf-empty-loop-profile --seed 0 --summary all
-zig build perf-runtime-profiles --seed 0 --summary all
-```
+Existing files under `reports/perf/current/runtime/` are historical evidence
+from builds where opcode instrumentation was connected. They are not a
+description of the current binary.
 
 Compare two runtime-profile artifacts:
 
@@ -306,17 +279,10 @@ node tools/perf/diff_runtime_profile.js \
   NEW-runtime-profile.json
 ```
 
-Opcode-specific improvement gates are also supported:
-
-```sh
-node tools/perf/diff_runtime_profile.js \
-  --require-improvement opcode_count:get_var_ref0:0.1 \
-  OLD-runtime-profile.json \
-  NEW-runtime-profile.json
-```
-
-Use `--warn-regressions` for noisy exploratory runs and keep strict thresholds
-for evidence attached to a performance-sensitive change.
+`diff_runtime_profile.js` can still compare non-opcode fields in existing
+artifacts. Its opcode-specific gates are historical-only until profiling is
+restored. Use `--warn-regressions` for noisy exploratory runs and keep strict
+thresholds for evidence attached to a performance-sensitive change.
 
 Linux sampling:
 

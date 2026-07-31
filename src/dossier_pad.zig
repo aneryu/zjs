@@ -6,11 +6,9 @@
 //! *layout lineages* and treats layout as a blocking factor, so that candidate
 //! effect and codegen effect are estimated separately.
 //!
-//! This is the opposite of the practice ruled out in
-//! `docs/qjs-align/OPT-ROADMAP-2026-07-19.md`: that prohibition targets padding
-//! added to *shape a single favourable hot layout*. Here padding exists to
-//! sample many layouts and average the lottery out. It is never enabled in a
-//! shipped configuration.
+//! This does not permit padding added to shape one favourable hot layout.
+//! Here padding exists only to sample many layout lineages and average the
+//! lottery out. It is never enabled in a shipped configuration.
 //!
 //! At `zjs_dossier_layout_pad == 0` this file emits nothing whatsoever, so the
 //! default binary is bit-for-bit what it would be without it.

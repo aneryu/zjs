@@ -1,4 +1,6 @@
-//! Tail-call dispatch — terminal-state rewrite (docs/qjs-align/CALL-MACHINERY-FAITHFUL-FRONTIER.md).
+//! Tail-call dispatch. The active architecture boundary is documented in
+//! `docs/stack_bytecode_vm_design.md`; the handler-level invariants are
+//! self-contained below.
 //!
 //! Every opcode is its own handler `fn(pc, sp, var_buf, vm) callconv(.c) Outcome`;
 //! dispatch is `@call(.always_tail) dispatch_table[pc[0]]` through a static 256-entry table.

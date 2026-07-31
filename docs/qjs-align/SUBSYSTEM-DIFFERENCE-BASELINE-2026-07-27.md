@@ -1050,8 +1050,8 @@ taskset -c 19 bun tools/compare/run_microbench.js \
 
 ### 20.4 2026-07-26 Octane 快照（历史 M，不代表当前 HEAD）
 
-`OPT-OCTANE-EXEC-2026-07-26.md` 的 CPU19/PMU 快照中，分数比 zjs/qjs（越大
-越快）为：
+已退役的 2026-07-26 Octane 执行记录（可从 git 历史恢复）包含一份
+CPU19/PMU 快照；分数比 zjs/qjs（越大越快）为：
 
 | crypto | earley | raytrace | gbemu | richards | deltablue | navier | splay | box2d |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

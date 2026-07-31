@@ -80,6 +80,12 @@ self-baseline regression check, and single-script/runtime-profile artifacts are
 diagnostic. Do not treat external-process microbench timings as a semantic
 compatibility signal.
 
+Per-opcode profiling is currently unavailable: the build/CLI options remain,
+but the VM dispatcher does not populate opcode counts or timings. Historical
+runtime-profile artifacts remain evidence for their recorded binaries; do not
+refresh or use them for current attribution until an end-to-end non-zero-count
+test guards the restored scope.
+
 ## Documentation Scope
 
 Historical phase plans, snapshot ledgers, and one-off audits are not active

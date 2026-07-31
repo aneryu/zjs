@@ -46,6 +46,11 @@ script、eval、nested function 和 module root 都执行 canonical
 - `src/exec/tailcall_dispatch.zig`: threaded/tail-called opcode handlers；
 - `src/exec/call_runtime.zig`: call/eval/generator/Atomics shared runtime glue。
 
+tail-call handler 拆分是当前代码生成约束，不是文件组织偏好：每个 opcode
+handler 以 tail dispatch 结束，热臂在 handler 内完成，可能产生普通调用的冷工作
+先 outline 到 `vm_*.zig`。把这些 handler 合回一个大 switch 会重新扩大共享栈帧；
+没有固定二进制、反汇编和多 build PMU 证据时不得这样合并。
+
 普通同步 bytecode frame 优先从 runtime arena carve
 `[args | locals | operand | var-ref metadata]`。generator/async frame 必须在
 suspend 后继续存活，所以拥有可转移的 resident storage，而不是借用 arena。
@@ -106,8 +111,13 @@ QuickJS-faithful policy 的审计对象，不能继续以 microbenchmark 结果�
 - explicit generator/async resident-frame ownership；
 - direct and indirect eval entry；
 - catch/finally and pending JS exception propagation；
-- optional opcode profiling；
 - four zjs-only explicit-resource-management opcodes。
+
+临时不可用：
+
+- `-Dzjs_enable_opcode_profile=true` 和 CLI `--profile-opcodes` 仍有入口，但
+  dispatcher 当前未接入 `vm_profile.zig`，所以逐 opcode count/time 保持为零。
+  修复并加入真实脚本端到端测试前，不得把该输出用于性能归因。
 
 未实现：
 
