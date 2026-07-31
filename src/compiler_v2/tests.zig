@@ -802,3 +802,546 @@ test "compiler_v2.s2g1: optional chain atom ownership" {
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
+
+test "compiler_v2.s2g2: while" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("while (true) ;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try std.testing.expectEqual(@as(u32, 11), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 1, 11);
+    try expectLabel(b, 2, 0, 6);
+    try expectLabel(b, 3, 0, 11);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 6 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: while continue" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("while (true) continue;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try std.testing.expectEqual(@as(u32, 16), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 1, 16);
+    try expectLabel(b, 2, 1, 11);
+    try expectLabel(b, 3, 0, 16);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 11 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: labeled while continue" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("L: while (true) continue L;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 4 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try std.testing.expectEqual(@as(u32, 16), b.code_len);
+    try std.testing.expectEqual(@as(u32, 6), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 1, 16);
+    try expectLabel(b, 2, 0, 11);
+    try expectLabel(b, 3, 0, 16);
+    try expectLabel(b, 4, 1, 11);
+    try expectLabel(b, 5, 0, 16);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 11 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: do while" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("do ; while (false);");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.if_true, .size = 5, .label = 0 },
+    });
+    try std.testing.expectEqual(@as(u32, 6), b.code_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 0, 0);
+    try expectLabel(b, 2, 0, 6);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: classic for empty head" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("for (;;) ;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try std.testing.expectEqual(@as(u32, 11), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 1, 11);
+    try expectLabel(b, 2, 0, 6);
+    try expectLabel(b, 3, 0, 11);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 6 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: classic for test break" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("for (; false; ) break;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try std.testing.expectEqual(@as(u32, 16), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 0);
+    try expectLabel(b, 1, 1, 16);
+    try expectLabel(b, 2, 0, 11);
+    try expectLabel(b, 3, 1, 16);
+    try std.testing.expect(b.label_slots[0].flags.backward_target);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 11 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: for in" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("for (var x in null) ;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.for_in_start, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.for_in_next, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 28), b.code_len);
+    try std.testing.expectEqual(@as(u32, 6), b.label_len);
+    try expectLabel(b, 0, 1, 13);
+    try expectLabel(b, 1, 1, 5);
+    try expectLabel(b, 2, 1, 20);
+    try expectLabel(b, 3, 1, 20);
+    try expectLabel(b, 4, 0, 20);
+    try expectLabel(b, 5, 0, 28);
+    try std.testing.expect(b.label_slots[1].flags.backward_target);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 20, 21, 26, 27 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: for in break cleanup" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("for (var x in null) break;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.for_in_start, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 5 },
+        .{ .op = qop.for_in_next, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 34), b.code_len);
+    try std.testing.expectEqual(@as(u32, 6), b.label_len);
+    try expectLabel(b, 0, 1, 13);
+    try expectLabel(b, 1, 1, 5);
+    try expectLabel(b, 2, 1, 20);
+    try expectLabel(b, 3, 1, 26);
+    try expectLabel(b, 4, 0, 26);
+    try expectLabel(b, 5, 1, 34);
+    try std.testing.expect(b.label_slots[1].flags.backward_target);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 26, 27, 32, 33 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: for of" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("for (var x of null) ;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.for_of_start, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.for_of_next, .size = 2 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.iterator_close, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 6), b.label_len);
+    try expectLabel(b, 0, 1, 13);
+    try expectLabel(b, 1, 1, 5);
+    try expectLabel(b, 2, 1, 20);
+    try expectLabel(b, 3, 1, 20);
+    try expectLabel(b, 4, 0, 20);
+    try expectLabel(b, 5, 0, 29);
+    try std.testing.expect(b.label_slots[1].flags.backward_target);
+    try std.testing.expectEqual(@as(u8, 0), b.code[21]);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 20, 22, 27, 28 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: for of break cleanup" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("for (var x of null) break;");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.for_of_start, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.iterator_close, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 5 },
+        .{ .op = qop.for_of_next, .size = 2 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.iterator_close, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 35), b.code_len);
+    try std.testing.expectEqual(@as(u32, 6), b.label_len);
+    try expectLabel(b, 0, 1, 13);
+    try expectLabel(b, 1, 1, 5);
+    try expectLabel(b, 2, 1, 20);
+    try expectLabel(b, 3, 1, 26);
+    try expectLabel(b, 4, 0, 26);
+    try expectLabel(b, 5, 1, 35);
+    try std.testing.expect(b.label_slots[1].flags.backward_target);
+    try std.testing.expectEqual(@as(u8, 0), b.code[27]);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 26, 28, 33, 34 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: switch single case" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("switch (true) { case false: null; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.dup, .size = 1 },
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.strict_eq, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 12), b.code_len);
+    try std.testing.expectEqual(@as(u32, 2), b.label_len);
+    try expectLabel(b, 0, 0, 11);
+    try expectLabel(b, 1, 1, 11);
+    try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 9, 11 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: switch break default" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("switch (true) { case false: break; default: null; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.dup, .size = 1 },
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.strict_eq, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.drop, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 27), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 1, 26);
+    try expectLabel(b, 1, 1, 21);
+    try expectLabel(b, 2, 1, 14);
+    try expectLabel(b, 3, 1, 26);
+    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 14, 26 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: switch case fallthrough" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("switch (true) { case false: null; case null: false; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.dup, .size = 1 },
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.strict_eq, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.dup, .size = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.strict_eq, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 3 },
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 27), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 0, 26);
+    try expectLabel(b, 1, 1, 16);
+    try expectLabel(b, 2, 1, 24);
+    try expectLabel(b, 3, 1, 26);
+    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 9, 11, 16, 17, 18, 19, 24, 26 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: switch default only" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("switch (true) { default: null; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.drop, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 19), b.code_len);
+    try std.testing.expectEqual(@as(u32, 4), b.label_len);
+    try expectLabel(b, 0, 0, 18);
+    try expectLabel(b, 1, 1, 13);
+    try expectLabel(b, 2, 1, 6);
+    try expectLabel(b, 3, 1, 18);
+    try std.testing.expectEqual(@as(i64, 18), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 6, 18 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}
+
+test "compiler_v2.s2g2: switch break suppresses fallthrough" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("switch (true) { case false: break; case null: ; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const b = h.builder();
+    try expectV2Stream(b, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.dup, .size = 1 },
+        .{ .op = qop.push_false, .size = 1 },
+        .{ .op = qop.strict_eq, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.dup, .size = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.strict_eq, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 2 },
+        .{ .op = qop.drop, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 23), b.code_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try expectLabel(b, 0, 1, 22);
+    try expectLabel(b, 1, 1, 14);
+    try expectLabel(b, 2, 1, 22);
+    try std.testing.expectEqual(@as(i64, 22), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 14, 15, 16, 17, 22 });
+    try expectRelocIntegrity(b);
+    try expectSourceOrder(b);
+}

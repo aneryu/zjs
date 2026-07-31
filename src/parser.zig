@@ -6530,12 +6530,22 @@ pub const parser_core = struct {
 
         fn emitGlobalVarOp(self: *State, op_id: u8, atom_id: Atom) Error!void {
             const ref_idx = try self.ensureGlobalClosureVarIndex(atom_id);
-            try self.emitOpU16(op_id, ref_idx);
+            if (v2_available and self.emit_v2) {
+                // QCP-1 S2-G2 harness leaf: non-temp global var lowering, same
+                // op + u16 closure-var-index temp encoding.
+                try v2FEmitOpU16(self, op_id, ref_idx);
+            } else {
+                try self.emitOpU16(op_id, ref_idx);
+            }
         }
 
         fn emitGlobalVarOpNoSource(self: *State, op_id: u8, atom_id: Atom) Error!void {
             const ref_idx = try self.ensureGlobalClosureVarIndex(atom_id);
-            try self.emitOpU16NoSource(op_id, ref_idx);
+            if (v2_available and self.emit_v2) {
+                try v2FEmitOpU16NoSource(self, op_id, ref_idx);
+            } else {
+                try self.emitOpU16NoSource(op_id, ref_idx);
+            }
         }
 
         fn scopeChainContains(fd: *const function_def_mod.FunctionDef, start_scope: i32, target_scope: i32) bool {
@@ -6817,6 +6827,20 @@ pub const parser_core = struct {
             const loc = self.currentSourcePosition();
             try self.v2AddSourceMarker(loc.line_num, loc.col_num);
             try self.v2Builder().emitOp(op_id);
+        }
+
+        /// v2 mirror of `emitOpU8` (marker'd).
+        pub fn v2EmitOpU8(self: *State, op_id: u8, val: u8) compiler_v2.builder.Error!void {
+            const loc = self.currentSourcePosition();
+            try self.v2AddSourceMarker(loc.line_num, loc.col_num);
+            try self.v2Builder().emitOpU8(op_id, val);
+        }
+
+        /// v2 mirror of `emitOpU16` (marker'd).
+        pub fn v2EmitOpU16(self: *State, op_id: u8, val: u16) compiler_v2.builder.Error!void {
+            const loc = self.currentSourcePosition();
+            try self.v2AddSourceMarker(loc.line_num, loc.col_num);
+            try self.v2Builder().emitOpU16(op_id, val);
         }
 
         /// v2 mirror of the owned-atom emitters: marker first, then the
@@ -10483,6 +10507,21 @@ pub const parser_core = struct {
         s.v2EmitAtomOpOwned(op_id, atom_id) catch |err| return v2MapBuilderError(err);
     }
 
+    /// v2 mirror of `State.emitOpU8` (marker'd).
+    fn v2FEmitOpU8(s: *State, op_id: u8, val: u8) Error!void {
+        s.v2EmitOpU8(op_id, val) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `State.emitOpU16` (marker'd).
+    fn v2FEmitOpU16(s: *State, op_id: u8, val: u16) Error!void {
+        s.v2EmitOpU16(op_id, val) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `State.emitOpU16NoSource`.
+    fn v2FEmitOpU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
+        s.v2Builder().emitOpU16(op_id, val) catch |err| return v2MapBuilderError(err);
+    }
+
     /// v2 mirror of `patchForwardJump` / `emitParserLabelNoSource`: bind at the
     /// current position AND forget the last opcode (control-flow merge).
     fn v2FBindLabel(s: *State, label: compiler_v2.LabelId) Error!void {
@@ -10840,12 +10879,20 @@ pub const parser_core = struct {
 
     fn emitCrossFrameCleanup(s: *State, cleanup_drops: u8) Error!void {
         if (cleanup_drops == shared_iterator_close_marker or cleanup_drops == direct_iterator_close_marker) {
-            try s.emitOpNoSource(opcode.op.iterator_close);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOpNoSource(s, opcode.op.iterator_close);
+            } else {
+                try s.emitOpNoSource(opcode.op.iterator_close);
+            }
             return;
         }
         var remaining = cleanup_drops;
         while (remaining > 0) : (remaining -= 1) {
-            try s.emitOpNoSource(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOpNoSource(s, opcode.op.drop);
+            } else {
+                try s.emitOpNoSource(opcode.op.drop);
+            }
         }
     }
 
@@ -10932,6 +10979,44 @@ pub const parser_core = struct {
 
     fn caseCanFallthrough(s: *State) bool {
         const op_id = s.flowSummary().last_non_line_op orelse return true;
+        return switch (op_id) {
+            opcode.op.goto,
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.return_async,
+            opcode.op.throw,
+            => false,
+            else => true,
+        };
+    }
+
+    /// QCP-1 S2-G2: v2 twin of the switch `break_fixups` growth check — an
+    /// unlabelled break against the switch's own break frame bumps the frame
+    /// label's ref_count (labelled breaks ride the label frame's label, exactly
+    /// like legacy labelled fixups bypass `break_fixups`).
+    fn v2SwitchBreakRefCount(s: *State) u32 {
+        const label = s.v2_break_frame_labels.getLast();
+        return s.v2Builder().label_slots[label.index()].ref_count;
+    }
+
+    /// QCP-1 S2-G2: v2 twin of `caseCanFallthrough` — the v2 temp stream carries
+    /// no line_num pseudo-ops, so the last opcode of the case body (bounded
+    /// forward scan from the body start) is the flowSummary answer. Terminator
+    /// set identical to `caseCanFallthrough`.
+    fn v2CaseTailCanFallthrough(s: *State, body_start: u32) bool {
+        const v2b = s.v2Builder();
+        var pc: usize = body_start;
+        var last: ?u8 = null;
+        while (pc < v2b.code_len) {
+            const op_id = v2b.code[pc];
+            const size: usize = @intCast(opcode.sizeOfPhase1(op_id));
+            std.debug.assert(size != 0);
+            if (size == 0) break;
+            last = op_id;
+            pc += size;
+        }
+        std.debug.assert(pc == v2b.code_len);
+        const op_id = last orelse return true;
         return switch (op_id) {
             opcode.op.goto,
             opcode.op.@"return",
@@ -12209,10 +12294,26 @@ pub const parser_core = struct {
                 s.pending_label_atom = null;
                 try s.setEvalReturnUndefined();
                 try s.expectToken('(');
-                // Loop top: condition is evaluated each iteration.
-                const top_pc: u32 = @intCast(s.currentCodeLen());
+                var v2_top_label: compiler_v2.LabelId = undefined;
+                var top_pc: u32 = undefined;
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_WHILE: label_cont bound at the test; the back edge is
+                    // emit_goto against the bound label.
+                    v2_top_label = try v2FNewLabel(s);
+                    try v2FBindLabel(s, v2_top_label);
+                } else {
+                    // Loop top: condition is evaluated each iteration.
+                    top_pc = @intCast(s.currentCodeLen());
+                }
                 try parseExpr(s);
-                const exit_off = try emitForwardJump(s, opcode.op.if_false);
+                var v2_exit_label: compiler_v2.LabelId = undefined;
+                var exit_off: usize = undefined;
+                if (v2_available and s.emit_v2) {
+                    v2_exit_label = try v2FNewLabel(s);
+                    try v2FEmitJump(s, opcode.op.if_false, v2_exit_label);
+                } else {
+                    exit_off = try emitForwardJump(s, opcode.op.if_false);
+                }
                 try s.expectToken(')');
                 try pushBreakFrame(s);
                 const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
@@ -12223,10 +12324,15 @@ pub const parser_core = struct {
                 try parseStatementOrDecl(s, DeclMask{});
                 try patchContinueFrame(s);
                 if (label_frame) |idx| try s.patchLabelContinues(idx);
-                // Back-edge to the top to re-test the condition.
-                try emitBackwardJump(s, opcode.op.goto, top_pc);
-                // Patch the if_false exit to land here.
-                try patchForwardJump(s, exit_off);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitJump(s, opcode.op.goto, v2_top_label);
+                    try v2FBindLabel(s, v2_exit_label);
+                } else {
+                    // Back-edge to the top to re-test the condition.
+                    try emitBackwardJump(s, opcode.op.goto, top_pc);
+                    // Patch the if_false exit to land here.
+                    try patchForwardJump(s, exit_off);
+                }
                 popControlBlock(s, &loop_block);
                 loop_block_active = false;
                 try popBreakFrameAndPatch(s);
@@ -12241,8 +12347,16 @@ pub const parser_core = struct {
                 const loop_label = s.pending_label_atom;
                 s.pending_label_atom = null;
                 try s.setEvalReturnUndefined();
-                // Body starts at this pc; if_true at the bottom branches back here.
-                const body_pc: u32 = @intCast(s.currentCodeLen());
+                var v2_body_label: compiler_v2.LabelId = undefined;
+                var body_pc: u32 = undefined;
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_DO: label1 bound at the body; if_true back edge re-enters it.
+                    v2_body_label = try v2FNewLabel(s);
+                    try v2FBindLabel(s, v2_body_label);
+                } else {
+                    // Body starts at this pc; if_true at the bottom branches back here.
+                    body_pc = @intCast(s.currentCodeLen());
+                }
                 try pushBreakFrame(s);
                 const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
                 var loop_block: BlockEnv = undefined;
@@ -12256,8 +12370,12 @@ pub const parser_core = struct {
                 try s.expectToken('(');
                 try parseExpr(s);
                 try s.expectToken(')');
-                // Back-edge: re-enter body when the test is truthy.
-                try emitBackwardJump(s, opcode.op.if_true, body_pc);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitJump(s, opcode.op.if_true, v2_body_label);
+                } else {
+                    // Back-edge: re-enter body when the test is truthy.
+                    try emitBackwardJump(s, opcode.op.if_true, body_pc);
+                }
                 if (s.isPunct(';')) try s.advance();
                 popControlBlock(s, &loop_block);
                 loop_block_active = false;
@@ -12337,32 +12455,58 @@ pub const parser_core = struct {
                     } else if (s.peekKind() != ';') {
                         for_has_initializer = true;
                         try parseExpr2(s, ParseFlags{ .in_accepted = false });
-                        try s.emitOp(opcode.op.drop);
+                        if (v2_available and s.emit_v2) {
+                            try v2FEmitOp(s, opcode.op.drop);
+                        } else {
+                            try s.emitOp(opcode.op.drop);
+                        }
                         try s.expectToken(';');
                     } else {
                         try s.advance(); // consume ';'
                     }
                     if (for_has_initializer) try s.closeScopes(s.scope_level, block_scope_level);
 
-                    // Top of the loop — re-tested each iteration.
-                    try s.emitOpU32(opcode.op.label, 0);
-                    const top_pc: u32 = @intCast(s.currentCodeLen());
+                    var v2_top_label: compiler_v2.LabelId = undefined;
+                    var top_pc: u32 = undefined;
+                    if (v2_available and s.emit_v2) {
+                        // qjs TOK_FOR: label_test bound before the test expression; legacy's
+                        // in-stream anonymous `label 0` marker is subsumed by the bind slot.
+                        v2_top_label = try v2FNewLabel(s);
+                        try v2FBindLabel(s, v2_top_label);
+                    } else {
+                        // Top of the loop — re-tested each iteration.
+                        try s.emitOpU32(opcode.op.label, 0);
+                        top_pc = @intCast(s.currentCodeLen());
+                    }
 
                     // Test condition.
                     if (s.peekKind() != ';') {
                         try parseExpr(s);
                     } else {
-                        try s.emitOp(opcode.op.push_true);
+                        if (v2_available and s.emit_v2) {
+                            try v2FEmitOp(s, opcode.op.push_true);
+                        } else {
+                            try s.emitOp(opcode.op.push_true);
+                        }
                     }
                     try s.expectToken(';');
 
-                    const exit_off = try emitForwardJump(s, opcode.op.if_false);
+                    var v2_exit_label: compiler_v2.LabelId = undefined;
+                    var exit_off: usize = undefined;
+                    if (v2_available and s.emit_v2) {
+                        v2_exit_label = try v2FNewLabel(s);
+                        try v2FEmitJump(s, opcode.op.if_false, v2_exit_label);
+                    } else {
+                        exit_off = try emitForwardJump(s, opcode.op.if_false);
+                    }
 
                     // Parse the update while still inside the parenthesized
                     // for-head, then move its emitted bytes after the body.
                     const update_start = s.currentCodeLen();
                     const update_atom_start = s.currentAtomOperandLen();
                     if (s.peekKind() != ')') {
+                        // QCP-1 S2-G2: the for-update detach/splice is stage G4; fail loud under v2.
+                        std.debug.assert(!(v2_available and s.emit_v2));
                         // Phase 1 keeps the normal expression result and emits
                         // the discard explicitly, like QuickJS. The final pass
                         // owns the `post_inc; put; drop` -> `inc_loc` rewrite.
@@ -12388,8 +12532,13 @@ pub const parser_core = struct {
                         for (saved_update_atoms) |atom_id| s.function.atoms.free(atom_id);
                         s.function.memory.free(Atom, saved_update_atoms);
                     };
-                    try s.truncateCode(update_start);
-                    try s.truncateAtomOperands(update_atom_start);
+                    if (v2_available and s.emit_v2) {
+                        // QCP-1 S2-G2: nothing was detached (G4 owns the update splice).
+                        std.debug.assert(update_code.len == 0);
+                    } else {
+                        try s.truncateCode(update_start);
+                        try s.truncateAtomOperands(update_atom_start);
+                    }
                     try s.expectToken(')');
                     // Body.
                     try pushBreakFrame(s);
@@ -12408,11 +12557,16 @@ pub const parser_core = struct {
                         try s.appendMovedCodeWithAtoms(saved_update, saved_update_atoms, update_start);
                     }
 
-                    // Back-edge to the top.
-                    try emitBackwardJump(s, opcode.op.goto, top_pc);
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitJump(s, opcode.op.goto, v2_top_label);
+                        try v2FBindLabel(s, v2_exit_label);
+                    } else {
+                        // Back-edge to the top.
+                        try emitBackwardJump(s, opcode.op.goto, top_pc);
 
-                    // Patch the `if_false` exit to land here.
-                    try patchForwardJump(s, exit_off);
+                        // Patch the `if_false` exit to land here.
+                        try patchForwardJump(s, exit_off);
+                    }
                     popControlBlock(s, &loop_block);
                     loop_block_active = false;
                     try popBreakFrameAndPatch(s);
@@ -12489,46 +12643,90 @@ pub const parser_core = struct {
                 // fallthrough jumps: once a case has matched, later case tests
                 // are skipped and only their bodies run.
                 var no_match_jumps: [64]usize = undefined;
+                var v2_no_match_labels: [64]compiler_v2.LabelId = undefined;
                 var no_match_jumps_count: usize = 0;
                 var fallthrough_jump: ?usize = null;
+                var v2_fallthrough_label: ?compiler_v2.LabelId = null;
                 var has_default = false;
                 var default_body_start: ?u32 = null;
+                var v2_default_label: ?compiler_v2.LabelId = null;
                 var default_waiting_for_body = false;
 
                 while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
                     if (s.peekKind() == tok.TOK_CASE) {
-                        for (no_match_jumps[0..no_match_jumps_count]) |off| {
-                            try patchForwardJump(s, off);
+                        if (v2_available and s.emit_v2) {
+                            // qjs TOK_SWITCH (quickjs.c:29305): label_case binds at
+                            // the next case test before dispatch continues.
+                            for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
+                                try v2FBindLabel(s, label);
+                            }
+                        } else {
+                            for (no_match_jumps[0..no_match_jumps_count]) |off| {
+                                try patchForwardJump(s, off);
+                            }
                         }
                         no_match_jumps_count = 0;
 
                         try s.advance();
                         // dup ; case_expr ; strict_eq ; if_false → next_case
-                        try s.emitOp(opcode.op.dup);
+                        if (v2_available and s.emit_v2) {
+                            try v2FEmitOp(s, opcode.op.dup);
+                        } else {
+                            try s.emitOp(opcode.op.dup);
+                        }
                         try parseExpr(s);
                         try s.expectToken(':');
-                        try s.emitOp(opcode.op.strict_eq);
-                        const next_case_off = try emitForwardJump(s, opcode.op.if_false);
-                        if (no_match_jumps_count >= no_match_jumps.len) return Error.UnexpectedToken;
-                        no_match_jumps[no_match_jumps_count] = next_case_off;
-                        no_match_jumps_count += 1;
-                        if (fallthrough_jump) |off| {
-                            try patchForwardJump(s, off);
-                            fallthrough_jump = null;
+                        if (v2_available and s.emit_v2) {
+                            try v2FEmitOp(s, opcode.op.strict_eq);
+                        } else {
+                            try s.emitOp(opcode.op.strict_eq);
+                        }
+                        if (v2_available and s.emit_v2) {
+                            const next_case_label = try v2FNewLabel(s);
+                            try v2FEmitJump(s, opcode.op.if_false, next_case_label);
+                            if (no_match_jumps_count >= no_match_jumps.len) return Error.UnexpectedToken;
+                            v2_no_match_labels[no_match_jumps_count] = next_case_label;
+                            no_match_jumps_count += 1;
+                        } else {
+                            const next_case_off = try emitForwardJump(s, opcode.op.if_false);
+                            if (no_match_jumps_count >= no_match_jumps.len) return Error.UnexpectedToken;
+                            no_match_jumps[no_match_jumps_count] = next_case_off;
+                            no_match_jumps_count += 1;
+                        }
+                        if (v2_available and s.emit_v2) {
+                            if (v2_fallthrough_label) |label| {
+                                try v2FBindLabel(s, label);
+                                v2_fallthrough_label = null;
+                            }
+                        } else {
+                            if (fallthrough_jump) |off| {
+                                try patchForwardJump(s, off);
+                                fallthrough_jump = null;
+                            }
                         }
 
                         // Matched: keep the discriminant on stack until the
                         // common switch epilogue, matching QuickJS's case shape.
                         const body_start = s.currentCodeLen();
+                        var v2_body_start: u32 = undefined;
+                        if (v2_available and s.emit_v2) v2_body_start = s.v2Builder().code_len;
                         const has_case_body = s.peekKind() != tok.TOK_CASE and
                             s.peekKind() != tok.TOK_DEFAULT and
                             s.peekKind() != '}' and
                             s.peekKind() != tok.TOK_EOF;
                         if (default_waiting_for_body and has_case_body) {
-                            default_body_start = @intCast(body_start);
+                            if (v2_available and s.emit_v2) {
+                                const default_label = try v2FNewLabel(s);
+                                try v2FBindLabel(s, default_label);
+                                v2_default_label = default_label;
+                            } else {
+                                default_body_start = @intCast(body_start);
+                            }
                             default_waiting_for_body = false;
                         }
                         const break_count_before_body = s.break_fixups.items.len;
+                        var v2_break_refs_before_body: u32 = undefined;
+                        if (v2_available and s.emit_v2) v2_break_refs_before_body = v2SwitchBreakRefCount(s);
                         while (s.peekKind() != tok.TOK_CASE and
                             s.peekKind() != tok.TOK_DEFAULT and
                             s.peekKind() != '}' and
@@ -12536,11 +12734,20 @@ pub const parser_core = struct {
                         {
                             try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
                         }
+                        const case_tail_can_fallthrough = if (v2_available and s.emit_v2)
+                            v2SwitchBreakRefCount(s) == v2_break_refs_before_body and v2CaseTailCanFallthrough(s, v2_body_start)
+                        else
+                            s.break_fixups.items.len == break_count_before_body and caseCanFallthrough(s);
                         if ((s.peekKind() == tok.TOK_CASE or s.peekKind() == tok.TOK_DEFAULT) and
-                            s.break_fixups.items.len == break_count_before_body and
-                            caseCanFallthrough(s))
+                            case_tail_can_fallthrough)
                         {
-                            fallthrough_jump = try emitForwardJump(s, opcode.op.goto);
+                            if (v2_available and s.emit_v2) {
+                                const fallthrough_label = try v2FNewLabel(s);
+                                try v2FEmitJump(s, opcode.op.goto, fallthrough_label);
+                                v2_fallthrough_label = fallthrough_label;
+                            } else {
+                                fallthrough_jump = try emitForwardJump(s, opcode.op.goto);
+                            }
                         }
                     } else if (s.peekKind() == tok.TOK_DEFAULT) {
                         if (has_default) return Error.UnexpectedToken;
@@ -12548,18 +12755,42 @@ pub const parser_core = struct {
                         try s.expectToken(':');
                         if (no_match_jumps_count == 0) {
                             if (no_match_jumps_count >= no_match_jumps.len) return Error.UnexpectedToken;
-                            no_match_jumps[no_match_jumps_count] = try emitForwardJump(s, opcode.op.goto);
+                            if (v2_available and s.emit_v2) {
+                                const no_match_label = try v2FNewLabel(s);
+                                try v2FEmitJump(s, opcode.op.goto, no_match_label);
+                                v2_no_match_labels[no_match_jumps_count] = no_match_label;
+                            } else {
+                                no_match_jumps[no_match_jumps_count] = try emitForwardJump(s, opcode.op.goto);
+                            }
                             no_match_jumps_count += 1;
                         }
                         const body_start = s.currentCodeLen();
-                        if (fallthrough_jump) |off| {
-                            try patchForwardJump(s, off);
-                            fallthrough_jump = null;
+                        var v2_body_start: u32 = undefined;
+                        if (v2_available and s.emit_v2) v2_body_start = s.v2Builder().code_len;
+                        if (v2_available and s.emit_v2) {
+                            if (v2_fallthrough_label) |label| {
+                                try v2FBindLabel(s, label);
+                                v2_fallthrough_label = null;
+                            }
+                        } else {
+                            if (fallthrough_jump) |off| {
+                                try patchForwardJump(s, off);
+                                fallthrough_jump = null;
+                            }
                         }
 
                         // Default body label.
+                        var v2_default_candidate: compiler_v2.LabelId = undefined;
+                        if (v2_available and s.emit_v2) {
+                            // Eager candidate: legacy decides default_body_start after parsing the
+                            // body; the v2 bind must happen at the body-start position itself.
+                            v2_default_candidate = try v2FNewLabel(s);
+                            try v2FBindLabel(s, v2_default_candidate);
+                        }
                         has_default = true;
                         const break_count_before_body = s.break_fixups.items.len;
+                        var v2_break_refs_before_body: u32 = undefined;
+                        if (v2_available and s.emit_v2) v2_break_refs_before_body = v2SwitchBreakRefCount(s);
                         while (s.peekKind() != tok.TOK_CASE and
                             s.peekKind() != tok.TOK_DEFAULT and
                             s.peekKind() != '}' and
@@ -12567,17 +12798,33 @@ pub const parser_core = struct {
                         {
                             try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
                         }
-                        if (s.currentCodeLen() == body_start and s.peekKind() == tok.TOK_CASE) {
-                            default_waiting_for_body = true;
+                        if (v2_available and s.emit_v2) {
+                            if (s.v2Builder().code_len == v2_body_start and s.peekKind() == tok.TOK_CASE) {
+                                default_waiting_for_body = true;
+                            } else {
+                                v2_default_label = v2_default_candidate;
+                                default_waiting_for_body = false;
+                            }
                         } else {
-                            default_body_start = @intCast(body_start);
-                            default_waiting_for_body = false;
+                            if (s.currentCodeLen() == body_start and s.peekKind() == tok.TOK_CASE) {
+                                default_waiting_for_body = true;
+                            } else {
+                                default_body_start = @intCast(body_start);
+                                default_waiting_for_body = false;
+                            }
                         }
-                        if (s.peekKind() == tok.TOK_CASE and
-                            s.break_fixups.items.len == break_count_before_body and
-                            caseCanFallthrough(s))
-                        {
-                            fallthrough_jump = try emitForwardJump(s, opcode.op.goto);
+                        const case_tail_can_fallthrough = if (v2_available and s.emit_v2)
+                            v2SwitchBreakRefCount(s) == v2_break_refs_before_body and v2CaseTailCanFallthrough(s, v2_body_start)
+                        else
+                            s.break_fixups.items.len == break_count_before_body and caseCanFallthrough(s);
+                        if (s.peekKind() == tok.TOK_CASE and case_tail_can_fallthrough) {
+                            if (v2_available and s.emit_v2) {
+                                const fallthrough_label = try v2FNewLabel(s);
+                                try v2FEmitJump(s, opcode.op.goto, fallthrough_label);
+                                v2_fallthrough_label = fallthrough_label;
+                            } else {
+                                fallthrough_jump = try emitForwardJump(s, opcode.op.goto);
+                            }
                         }
                     } else {
                         return Error.UnexpectedToken;
@@ -12585,16 +12832,42 @@ pub const parser_core = struct {
                 }
                 try s.expectToken('}');
 
-                // No case matched — jump to default if it exists, otherwise fall
-                // through to the common discriminant drop.
-                for (no_match_jumps[0..no_match_jumps_count]) |off| {
-                    if (default_body_start) |target| {
-                        try patchJumpTarget(s, off, target);
-                    } else {
-                        try patchForwardJump(s, off);
+                if (v2_available and s.emit_v2) {
+                    // qjs binds the default label backwards with an in-stream patch (the
+                    // "ugly patch", quickjs.c ~29365); v2 label discipline forbids
+                    // patching, so unmatched dispatch is routed through an epilogue goto,
+                    // shielded from straight-line fallthrough of the last clause body.
+                    if (no_match_jumps_count != 0) {
+                        if (v2_default_label) |default_label| {
+                            const skip_label = try v2FNewLabel(s);
+                            try v2FEmitJumpNoSource(s, opcode.op.goto, skip_label);
+                            for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
+                                try v2FBindLabel(s, label);
+                            }
+                            try v2FEmitJumpNoSource(s, opcode.op.goto, default_label);
+                            try v2FBindLabel(s, skip_label);
+                        } else {
+                            for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
+                                try v2FBindLabel(s, label);
+                            }
+                        }
+                    }
+                } else {
+                    // No case matched — jump to default if it exists, otherwise fall
+                    // through to the common discriminant drop.
+                    for (no_match_jumps[0..no_match_jumps_count]) |off| {
+                        if (default_body_start) |target| {
+                            try patchJumpTarget(s, off, target);
+                        } else {
+                            try patchForwardJump(s, off);
+                        }
                     }
                 }
-                if (fallthrough_jump) |off| try patchForwardJump(s, off);
+                if (v2_available and s.emit_v2) {
+                    if (v2_fallthrough_label) |label| try v2FBindLabel(s, label);
+                } else {
+                    if (fallthrough_jump) |off| try patchForwardJump(s, off);
+                }
                 popControlBlock(s, &switch_block);
                 switch_block_active = false;
                 try popBreakOnlyFrameAndPatch(s);
@@ -12602,7 +12875,11 @@ pub const parser_core = struct {
                     try s.patchLabelBreaks(idx);
                     s.popLabelFrame(idx);
                 }
-                try s.emitOp(opcode.op.drop);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOp(s, opcode.op.drop);
+                } else {
+                    try s.emitOp(opcode.op.drop);
+                }
                 try s.popScope();
             },
             tok.TOK_TRY => {
@@ -13266,11 +13543,19 @@ pub const parser_core = struct {
     fn emitCrossedControlBlockCleanup(s: *State, block: *const BlockEnv) Error!void {
         var dropped: i32 = 0;
         if (block.has_iterator) {
-            try s.emitOpNoSource(opcode.op.iterator_close);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOpNoSource(s, opcode.op.iterator_close);
+            } else {
+                try s.emitOpNoSource(opcode.op.iterator_close);
+            }
             dropped = 3;
         }
         while (dropped < block.drop_count) : (dropped += 1) {
-            try s.emitOpNoSource(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOpNoSource(s, opcode.op.drop);
+            } else {
+                try s.emitOpNoSource(opcode.op.drop);
+            }
         }
         if (block.label_finally >= 0) {
             try s.emitOpNoSource(opcode.op.undefined);
@@ -13654,10 +13939,23 @@ pub const parser_core = struct {
         try s.pushScope();
         pushed_for_scope = true;
 
-        // Initial entry skips the target. Each successful iterator step later
-        // branches to this exact one-pass target block with its value on TOS.
-        const expression_jump_offset = try emitForwardJump(s, opcode.op.goto);
-        const assignment_pc: u32 = @intCast(s.currentCodeLen());
+        var v2_expr_label: compiler_v2.LabelId = undefined;
+        var v2_assign_label: compiler_v2.LabelId = undefined;
+        var expression_jump_offset: usize = undefined;
+        var assignment_pc: u32 = undefined;
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_for_in_of: goto label_expr; label_assign bound at the
+            // one-pass target block (backward if_false re-enters it).
+            v2_expr_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.goto, v2_expr_label);
+            v2_assign_label = try v2FNewLabel(s);
+            try v2FBindLabel(s, v2_assign_label);
+        } else {
+            // Initial entry skips the target. Each successful iterator step later
+            // branches to this exact one-pass target block with its value on TOS.
+            expression_jump_offset = try emitForwardJump(s, opcode.op.goto);
+            assignment_pc = @intCast(s.currentCodeLen());
+        }
 
         const let_as_identifier = var_tok == tok.TOK_LET and
             !s.is_strict and !s.cur_func().is_strict_mode and
@@ -13788,8 +14086,16 @@ pub const parser_core = struct {
             }
         }
 
-        const body_jump_offset = try emitForwardJump(s, opcode.op.goto);
-        try patchForwardJump(s, expression_jump_offset);
+        var v2_body_label: compiler_v2.LabelId = undefined;
+        var body_jump_offset: usize = undefined;
+        if (v2_available and s.emit_v2) {
+            v2_body_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.goto, v2_body_label);
+            try v2FBindLabel(s, v2_expr_label);
+        } else {
+            body_jump_offset = try emitForwardJump(s, opcode.op.goto);
+            try patchForwardJump(s, expression_jump_offset);
+        }
 
         // Annex-B legacy initializer: only sloppy non-lexical simple
         // for-in declarations accept it.
@@ -13823,13 +14129,29 @@ pub const parser_core = struct {
         try s.expectToken(')');
 
         if (is_for_of) {
-            try s.emitOp(if (is_for_await) opcode.op.for_await_of_start else opcode.op.for_of_start);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOp(s, if (is_for_await) opcode.op.for_await_of_start else opcode.op.for_of_start);
+            } else {
+                try s.emitOp(if (is_for_await) opcode.op.for_await_of_start else opcode.op.for_of_start);
+            }
         } else {
-            try s.emitOp(opcode.op.for_in_start);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOp(s, opcode.op.for_in_start);
+            } else {
+                try s.emitOp(opcode.op.for_in_start);
+            }
         }
 
-        const next_jump_off = try emitForwardJump(s, opcode.op.goto);
-        try patchForwardJump(s, body_jump_offset);
+        var v2_next_label: compiler_v2.LabelId = undefined;
+        var next_jump_off: usize = undefined;
+        if (v2_available and s.emit_v2) {
+            v2_next_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.goto, v2_next_label);
+            try v2FBindLabel(s, v2_body_label);
+        } else {
+            next_jump_off = try emitForwardJump(s, opcode.op.goto);
+            try patchForwardJump(s, body_jump_offset);
+        }
 
         const loop_label = s.pending_label_atom;
         s.pending_label_atom = null;
@@ -13892,36 +14214,92 @@ pub const parser_core = struct {
         try s.closeScopes(s.scope_level, block_scope_level);
         try patchContinueFrame(s);
         if (label_frame) |idx| try s.patchLabelContinues(idx);
-        try patchForwardJump(s, next_jump_off);
+        if (v2_available and s.emit_v2) {
+            try v2FBindLabel(s, v2_next_label);
+        } else {
+            try patchForwardJump(s, next_jump_off);
+        }
         if (is_for_of) {
             if (is_for_await) {
-                try s.emitOpNoSource(opcode.op.for_await_of_next);
-                try s.emitOpNoSource(opcode.op.await);
-                try s.emitOpNoSource(opcode.op.iterator_get_value_done);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOpNoSource(s, opcode.op.for_await_of_next);
+                } else {
+                    try s.emitOpNoSource(opcode.op.for_await_of_next);
+                }
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOpNoSource(s, opcode.op.await);
+                } else {
+                    try s.emitOpNoSource(opcode.op.await);
+                }
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOpNoSource(s, opcode.op.iterator_get_value_done);
+                } else {
+                    try s.emitOpNoSource(opcode.op.iterator_get_value_done);
+                }
             } else {
-                try s.emitOpU8(opcode.op.for_of_next, 0);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOpU8(s, opcode.op.for_of_next, 0);
+                } else {
+                    try s.emitOpU8(opcode.op.for_of_next, 0);
+                }
             }
         } else {
-            try s.emitOp(opcode.op.for_in_next);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOp(s, opcode.op.for_in_next);
+            } else {
+                try s.emitOp(opcode.op.for_in_next);
+            }
         }
 
         if (is_for_await) {
-            try emitBackwardJumpNoSource(s, opcode.op.if_false, assignment_pc);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitJumpNoSource(s, opcode.op.if_false, v2_assign_label);
+            } else {
+                try emitBackwardJumpNoSource(s, opcode.op.if_false, assignment_pc);
+            }
         } else {
-            try emitBackwardJump(s, opcode.op.if_false, assignment_pc);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitJump(s, opcode.op.if_false, v2_assign_label);
+            } else {
+                try emitBackwardJump(s, opcode.op.if_false, assignment_pc);
+            }
         }
 
         if (is_for_await) {
-            try s.emitOpNoSource(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOpNoSource(s, opcode.op.drop);
+            } else {
+                try s.emitOpNoSource(opcode.op.drop);
+            }
             try popBreakFrameAndPatch(s);
-            try s.emitOpNoSource(opcode.op.iterator_close);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOpNoSource(s, opcode.op.iterator_close);
+            } else {
+                try s.emitOpNoSource(opcode.op.iterator_close);
+            }
         } else if (is_for_of) {
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.iterator_close);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOp(s, opcode.op.iterator_close);
+            } else {
+                try s.emitOp(opcode.op.iterator_close);
+            }
             try popBreakFrameAndPatch(s);
         } else {
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
             try popBreakFrameAndPatch(s);
         }
         if (label_frame) |idx| {

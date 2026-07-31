@@ -235,6 +235,30 @@ pub const Builder = struct {
         self.code_len += 1;
     }
 
+    /// Emit an opcode with a u8 immediate operand (compact temp encoding).
+    pub fn emitOpU8(self: *Builder, op_id: u8, val: u8) Error!void {
+        try self.reserveCode(2);
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        self.code[opcode_index] = op_id;
+        self.code[opcode_index + 1] = val;
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 2;
+    }
+
+    /// Emit an opcode with a u16 immediate operand (compact temp encoding).
+    pub fn emitOpU16(self: *Builder, op_id: u8, val: u16) Error!void {
+        try self.reserveCode(3);
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(u16, self.code[opcode_index + 1 ..][0..2], val, .little);
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 3;
+    }
+
     /// Emit an atom-bearing opcode; `atom_id` ownership (one retain)
     /// transfers into the builder ledger.
     pub fn emitAtomOpOwned(self: *Builder, op_id: u8, atom_id: core.atom.Atom) Error!void {
@@ -416,6 +440,33 @@ test "compiler_v2.builder: jump emission, bind, reloc chains" {
     try std.testing.expect(b.label_slots[label.index()].flags.backward_target);
 
     try std.testing.expectError(error.InvalidBytecode, b.emitJump(0x21, @enumFromInt(99)));
+}
+
+test "compiler_v2.builder: compact immediate emission and rollback" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    const empty = b.snapshot();
+
+    try b.emitOpU8(0xa1, 0x7f);
+    try std.testing.expectEqual(@as(u32, 2), b.code_len);
+    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqualSlices(u8, &.{ 0xa1, 0x7f }, b.code[0..2]);
+    b.rollback(empty);
+    try std.testing.expectEqual(empty.code_len, b.code_len);
+    try std.testing.expectEqual(empty.last_opcode_pos, b.last_opcode_pos);
+
+    try b.emitOpU16(0xb2, 0x1234);
+    try std.testing.expectEqual(@as(u32, 3), b.code_len);
+    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqualSlices(u8, &.{ 0xb2, 0x34, 0x12 }, b.code[0..3]);
+    b.rollback(empty);
+    try std.testing.expectEqual(empty.code_len, b.code_len);
+    try std.testing.expectEqual(empty.last_opcode_pos, b.last_opcode_pos);
 }
 
 test "compiler_v2.builder: snapshot rollback restores chains, atoms, markers" {
