@@ -2989,6 +2989,10 @@ pub const function_def = struct {
         atom_operands: []atom.Atom = &.{},
         atom_operands_capacity: usize = 0,
         last_opcode_pos: i32 = -1,
+        /// See `FlowTailSummary`. Born valid-empty; the class machinery's
+        /// direct byte injections invalidate at their sites and the next
+        /// query rebuilds from whatever is present.
+        flow_tail: FlowTailSummary = .{},
 
         // Labels
         label_slots: []LabelSlot = &.{},
@@ -3611,6 +3615,41 @@ pub const function_def = struct {
     };
 
     pub const FunctionDef = FunctionDefImpl;
+};
+
+/// Incrementally-maintained parser flow-tail summary backing the O(1)
+/// last-opcode / end-jump queries (mirrors the qjs `fd->last_opcode_pos`
+/// discipline, quickjs.c:22067/23809, extended to zjs's absolute-target
+/// patching of loop/branch exits). `valid=false` means the summary must be
+/// rebuilt from the code before use; every mutation path that is not routed
+/// through the parser's unified emission/publish primitives (moved-bytecode
+/// splices, direct FunctionDef appends by the class machinery,
+/// watermark-lowering operand rewrites) invalidates instead of tracking.
+pub const FlowTailSummary = struct {
+    /// Last opcode ignoring only line_num markers.
+    last_non_line_op: ?u8 = null,
+    /// Last opcode ignoring line_num / leave_scope / close_loc.
+    last_non_cleanup_op: ?u8 = null,
+    /// End offset of the last non-cleanup opcode (== `trailingCleanupStart`).
+    tail_start: u32 = 0,
+    /// Maximum untagged absolute label-operand value currently in the code.
+    max_absolute_target: u32 = 0,
+    /// Number of label operands currently holding tagged parser-label ids.
+    tagged_target_count: u32 = 0,
+    /// One-deep history so `truncateCode` rolling back exactly the most
+    /// recent single-instruction emission (speculative LHS -> put form)
+    /// restores precisely instead of invalidating on the hot path.
+    prev_last_non_line_op: ?u8 = null,
+    prev_last_non_cleanup_op: ?u8 = null,
+    prev_tail_start: u32 = 0,
+    prev_op_pos: u32 = 0,
+    has_prev: bool = false,
+    /// The most recent note changed tagged/watermark bookkeeping, so the
+    /// one-deep rollback cannot restore it; truncation must invalidate.
+    last_note_had_label: bool = false,
+    /// Streams are born empty and valid; every mutation path that bypasses
+    /// the parser's unified emission/publish primitives must set this false.
+    valid: bool = true,
 };
 
 pub const pipeline_pc2line = struct {

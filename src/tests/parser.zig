@@ -11589,3 +11589,51 @@ test "bytecode constants retain values through Phase 4 structures" {
 }
 
 // F1 — QuickJS-aligned lexer tests (separate file)
+
+// Cut A pin: the parser's O(1) FlowTailSummary must stay equivalent to the
+// legacy full scans on every construct that mutates label operands or the
+// code tail. The Debug build's `flowSummary` oracle re-derives the summary
+// by scan on every query, so compiling these snippets IS the assertion; the
+// explicit checks only pin that each compile kept succeeding.
+test "flow-tail summary: label/patch/move/truncate corpus compiles under the Debug oracle" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const cases = [_][]const u8{
+        // end-targeting loop exit: epilogue must append a landing terminator
+        "function f(){ while(1){ break; } } f();",
+        // tagged parser label reaches only the whole-function query
+        "function f(){ L: { break L; } return 1 } f();",
+        // lower-than-watermark patch order: inner break targets outer exit
+        "function f(){ outer: while(1){ while(1){ break outer; } } return 4 } f();",
+        // placeholder emission + patch (if/else join)
+        "function f(x){ if (x) return 2; return 3 } f(1);",
+        // both arms terminal, merge reachable only via patched exits
+        "function f(x){ if (x) { return 1 } else { return 2 } } f(0);",
+        // moved bytecode: for-update clause splice
+        "function f(){ for (var i = 0, j = 9; i < 3; i++, j--) {} return j } f();",
+        // moved bytecode + direct FunctionDef appends: class field machinery
+        "class C { x = 1; static y = 2; m(){ return this.x } } new C().m();",
+        // scope_make_ref label operands (captured binding)
+        "function f(){ let x = 1; return (function(){ return x })() } f();",
+        // gosub/ret (try-finally) and catch operands
+        "function f(){ try { return 5 } finally { f.done = 1 } } f();",
+        "function f(){ try { throw 1 } catch (e) { return 6 } } f();",
+        // raw-label call/delete provenance + optional chain short-circuit
+        "function f(a){ return delete a[0] } f([1]);",
+        "function f(a){ return a?.b?.() } f(null);",
+        // cleanup-only tail (leave_scope/close_loc after the last real op)
+        "function f(){ { let x = 1; } } f();",
+        // speculative LHS truncation: member/element/compound assignment
+        "function f(){ var o = {}; o.a = 7; o[0] = 8; o.a += 1; return o.a } f();",
+        // switch fallthrough decisions consult the last-opcode summary
+        "function f(x){ switch(x){ case 1: x += 1; case 2: return x; default: return -1 } } f(1);",
+        // generator/async epilogues take the jump-aware terminator path
+        "function *g(){ while(1){ break; } yield 1; } g();",
+        "async function h(){ while(1){ break; } } h();",
+    };
+    for (cases) |src| {
+        var parsed = try compileForTest(rt, src, .{ .mode = .eval_direct, .filename = "flowtail.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}

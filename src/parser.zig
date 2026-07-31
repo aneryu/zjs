@@ -3955,6 +3955,9 @@ pub const parser_core = struct {
         /// Root-bytecode label identity counter. Nested FunctionDefs use their
         /// own `label_count`, matching QuickJS's per-function label namespace.
         root_parser_label_count: u32 = 0,
+        /// Flow-tail summary for the root (non-FunctionDef) emission stream;
+        /// FunctionDef streams carry their own in `FunctionDef.flow_tail`.
+        root_flow_tail: bytecode.FlowTailSummary = .{},
         /// Function bodies currently anchor hoist/TDZ work in the finalizer
         /// instead of emitting their QuickJS `enter_scope` marker here. The
         /// body-event unification is tracked separately from ordinary blocks.
@@ -5620,6 +5623,11 @@ pub const parser_core = struct {
             self.setParserLabelCount(snapshot.label_count);
             self.cur_func().last_opcode_pos = snapshot.last_opcode_pos;
             self.last_opcode_source_offset = snapshot.last_opcode_source_offset;
+            // Emission rollback is an OOM-abort path (measured zero hits on
+            // the compile corpus): a per-emission summary copy in
+            // takeEmissionSnapshot costs ~0.8% of all compile instructions,
+            // so invalidate instead — the next query rebuilds exactly.
+            self.flowTail().valid = false;
         }
 
         fn commitLastOpcode(self: *State, opcode_pos: usize) void {
@@ -5663,11 +5671,13 @@ pub const parser_core = struct {
         }
 
         fn appendBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
+            const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 self.cur_func().appendByteCodeAssumeCapacity(bytes);
             } else {
                 self.function.appendCodeAssumeCapacity(bytes);
             }
+            if (bytes.len != 0) self.noteEmittedOp(bytes[0], pos, bytes.len);
         }
 
         fn appendAtomOperandAssumeCapacity(self: *State, atom_id: Atom) void {
@@ -6006,6 +6016,7 @@ pub const parser_core = struct {
             _ = try self.emitSourcePosAndLoc(loc.line_num, loc.col_num);
             const label_offset = self.currentCodeLen() + 5;
             try self.emitOpcodeBytesNoSource(&bytes);
+            self.noteEmittedLabelOperand(label);
             return label_offset;
         }
 
@@ -6549,12 +6560,143 @@ pub const parser_core = struct {
             self.cur_func().last_opcode_pos = -1;
         }
 
+        fn flowTail(self: *State) *bytecode.FlowTailSummary {
+            if (self.emit_to_function_def) return &self.cur_func().flow_tail;
+            return &self.root_flow_tail;
+        }
+
+        /// Incremental note for one appended instruction (`bytes[0]` is the
+        /// op). Every parser-phase code append funnels through
+        /// `appendBytesNoSource` / `appendBytesNoSourceAssumeCapacity`, each
+        /// carrying exactly one instruction; the one multi-instruction
+        /// caller (`appendMovedCodeWithAtoms`) invalidates first, and a note
+        /// on an invalid summary is a no-op. The Debug oracle in
+        /// `flowSummary` cross-checks this contract on every query.
+        fn noteEmittedOp(self: *State, op_id: u8, pos: usize, len: usize) void {
+            const ft = self.flowTail();
+            if (!ft.valid) return;
+            if (pos + len > std.math.maxInt(u32)) {
+                ft.valid = false;
+                return;
+            }
+            ft.prev_last_non_line_op = ft.last_non_line_op;
+            ft.prev_last_non_cleanup_op = ft.last_non_cleanup_op;
+            ft.prev_tail_start = ft.tail_start;
+            ft.prev_op_pos = @intCast(pos);
+            ft.has_prev = true;
+            ft.last_note_had_label = false;
+            if (op_id == opcode.op.line_num) return;
+            ft.last_non_line_op = op_id;
+            if (op_id == opcode.op.leave_scope or op_id == opcode.op.close_loc) return;
+            ft.last_non_cleanup_op = op_id;
+            ft.tail_start = @intCast(pos + len);
+        }
+
+        /// Record the initial value of a label operand just emitted (tagged
+        /// parser label, forward placeholder 0, or known absolute target).
+        fn noteEmittedLabelOperand(self: *State, value: u32) void {
+            const ft = self.flowTail();
+            if (!ft.valid) return;
+            if ((value & opcode.op.parser_label_tag) != 0) {
+                ft.tagged_target_count += 1;
+                ft.last_note_had_label = true;
+            } else if (value > ft.max_absolute_target) {
+                ft.max_absolute_target = value;
+                ft.last_note_had_label = true;
+            }
+        }
+
+        /// The single mutation primitive for an already-emitted label
+        /// operand. Reads the old value so tagged/absolute bookkeeping stays
+        /// exact; a rewrite that could lower the current absolute watermark
+        /// falls back to lazy invalidation (the next query rebuilds).
+        fn publishParserLabelTarget(self: *State, operand_offset: usize, target: u32) Error!void {
+            var code = self.currentCode();
+            if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
+            const ft = self.flowTail();
+            if (ft.valid) {
+                const old = std.mem.readInt(u32, code[operand_offset..][0..4], .little);
+                if ((old & opcode.op.parser_label_tag) != 0) {
+                    std.debug.assert(ft.tagged_target_count > 0);
+                    ft.tagged_target_count -= 1;
+                } else if (old != 0 and old == ft.max_absolute_target and target < old) {
+                    ft.valid = false;
+                }
+            }
+            std.mem.writeInt(u32, code[operand_offset..][0..4], target, .little);
+            if (ft.valid) {
+                if ((target & opcode.op.parser_label_tag) != 0) {
+                    ft.tagged_target_count += 1;
+                } else if (target > ft.max_absolute_target) {
+                    ft.max_absolute_target = target;
+                }
+            }
+        }
+
+        /// Recompute the summary by scanning, using the same decode the
+        /// legacy query scans use. Also the Debug oracle's reference.
+        fn rebuildFlowTail(ft: *bytecode.FlowTailSummary, code: []const u8, atoms: []const Atom) void {
+            ft.* = .{ .valid = true };
+            var pc: usize = 0;
+            var atom_index: usize = 0;
+            while (pc < code.len) {
+                const op_id = code[pc];
+                const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+                const size: usize = instr.size;
+                if (size == 0 or pc + size > code.len or pc + size > std.math.maxInt(u32)) {
+                    // Malformed suffix: poison to the conservative answers the
+                    // legacy scans produced (jump-to-end true, no last op).
+                    ft.* = .{ .valid = true, .tagged_target_count = 1 };
+                    return;
+                }
+                if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
+                    if (offset + 4 <= code.len) {
+                        const target = std.mem.readInt(u32, code[offset..][0..4], .little);
+                        if ((target & opcode.op.parser_label_tag) != 0) {
+                            ft.tagged_target_count += 1;
+                        } else if (target > ft.max_absolute_target) {
+                            ft.max_absolute_target = target;
+                        }
+                    }
+                }
+                if (op_id != opcode.op.line_num) {
+                    ft.last_non_line_op = op_id;
+                    if (op_id != opcode.op.leave_scope and op_id != opcode.op.close_loc) {
+                        ft.last_non_cleanup_op = op_id;
+                        ft.tail_start = @intCast(pc + size);
+                    }
+                }
+                if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+                pc += size;
+            }
+        }
+
+        /// Valid, oracle-checked summary for the current emission stream.
+        fn flowSummary(self: *State) *bytecode.FlowTailSummary {
+            const ft = self.flowTail();
+            if (!ft.valid) {
+                rebuildFlowTail(ft, self.currentCode(), self.currentAtomOperands());
+            }
+            if (comptime @import("builtin").mode == .Debug) {
+                var check: bytecode.FlowTailSummary = .{};
+                rebuildFlowTail(&check, self.currentCode(), self.currentAtomOperands());
+                std.debug.assert(check.last_non_line_op == ft.last_non_line_op);
+                std.debug.assert(check.last_non_cleanup_op == ft.last_non_cleanup_op);
+                std.debug.assert(check.tail_start == ft.tail_start);
+                std.debug.assert(check.max_absolute_target == ft.max_absolute_target);
+                std.debug.assert(check.tagged_target_count == ft.tagged_target_count);
+            }
+            return ft;
+        }
+
         fn appendBytesNoSource(self: *State, bytes: []const u8) Error!void {
+            const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 try self.cur_func().appendByteCode(bytes);
             } else {
                 try self.function.appendCode(bytes);
             }
+            if (bytes.len != 0) self.noteEmittedOp(bytes[0], pos, bytes.len);
         }
 
         fn emitSourcePosAndLoc(self: *State, line_num: u32, col_num: u32) Error!usize {
@@ -6607,6 +6749,9 @@ pub const parser_core = struct {
             try validateMovedBytecodeLabels(code, atoms, old_base, new_base);
             try self.reserveEmission(code.len, atoms.len);
             rebaseMovedBytecodeLabelsAssumeValidated(code, atoms, old_base, new_base);
+            // Multi-instruction splice with rebased label operands: outside
+            // the single-op incremental contract, so rebuild lazily.
+            self.flowTail().valid = false;
             self.appendBytesNoSourceAssumeCapacity(code);
             for (atoms) |atom_id| self.appendAtomOperandAssumeCapacity(atom_id);
             // A splice is a control-flow construction boundary.  QuickJS
@@ -6629,6 +6774,19 @@ pub const parser_core = struct {
                 @as(usize, @intCast(self.cur_func().last_opcode_pos)) >= target_len)
             {
                 self.invalidateLastOpcode();
+            }
+            const ft = self.flowTail();
+            if (ft.valid) {
+                if (ft.has_prev and !ft.last_note_had_label and ft.prev_op_pos == target_len) {
+                    // Rolling back exactly the most recent single-instruction
+                    // emission: restore the one-deep history precisely.
+                    ft.last_non_line_op = ft.prev_last_non_line_op;
+                    ft.last_non_cleanup_op = ft.prev_last_non_cleanup_op;
+                    ft.tail_start = ft.prev_tail_start;
+                    ft.has_prev = false;
+                } else {
+                    ft.valid = false;
+                }
             }
             if (self.emit_to_function_def) {
                 self.cur_func().truncateByteCode(target_len);
@@ -7322,10 +7480,7 @@ pub const parser_core = struct {
             .super_value => emitOpNoSourceAssumeCapacity(s, opcode.op.put_super_value),
         }
         if (ref_label_target) |target| {
-            var code = s.currentCode();
-            const offset = lvalue.label_offset.?;
-            std.debug.assert(offset + 4 <= code.len);
-            std.mem.writeInt(u32, code[offset..][0..4], target, .little);
+            try s.publishParserLabelTarget(lvalue.label_offset.?, target);
         }
     }
 
@@ -10020,6 +10175,7 @@ pub const parser_core = struct {
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         const loc = s.currentSourcePosition();
         try s.appendBytesAt(&bytes, loc.line_num, loc.col_num);
+        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
     }
 
     fn emitParserLabelJumpNoSource(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
@@ -10028,6 +10184,7 @@ pub const parser_core = struct {
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         try s.emitOpcodeBytesNoSource(&bytes);
+        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
     }
 
     fn emitParserLabelJumpNoSourceAssumeCapacity(s: *State, op_id: u8, label: ParserLabelRef) void {
@@ -10036,6 +10193,7 @@ pub const parser_core = struct {
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
+        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
     }
 
     fn emitGotoParserLabelNoSource(s: *State, label: ParserLabelRef) Error!void {
@@ -10083,6 +10241,7 @@ pub const parser_core = struct {
         std.mem.writeInt(u32, bytes[1..5], target, .little);
         const loc = s.currentSourcePosition();
         try s.appendBytesAt(&bytes, loc.line_num, loc.col_num);
+        s.noteEmittedLabelOperand(target);
     }
 
     fn emitBackwardJumpNoSource(s: *State, op_id: u8, target: u32) Error!void {
@@ -10090,6 +10249,7 @@ pub const parser_core = struct {
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], target, .little);
         try s.emitOpcodeBytesNoSource(&bytes);
+        s.noteEmittedLabelOperand(target);
     }
 
     const ParserPhaseInstruction = struct {
@@ -10394,7 +10554,7 @@ pub const parser_core = struct {
     }
 
     fn caseCanFallthrough(s: *State) bool {
-        const op_id = lastOpcode(s.currentCode(), s.currentAtomOperands()) orelse return true;
+        const op_id = s.flowSummary().last_non_line_op orelse return true;
         return switch (op_id) {
             opcode.op.goto,
             opcode.op.@"return",
@@ -10409,7 +10569,8 @@ pub const parser_core = struct {
     /// QuickJS `js_is_live_code`: only the straight-line predecessor matters
     /// while constructing a statement's fixed control-flow topology.
     fn isLiveCode(s: *State) bool {
-        const op_id = lastNonCleanupOpcode(s.currentCode(), s.currentAtomOperands()) orelse return true;
+        const ft = s.flowSummary();
+        const op_id = ft.last_non_cleanup_op orelse return true;
         const terminal = switch (op_id) {
             opcode.op.goto,
             opcode.op.@"return",
@@ -10427,8 +10588,10 @@ pub const parser_core = struct {
         // zjs patches loop/branch exits to the current absolute byte offset
         // instead of emitting a physical OP_label at every merge. Such an
         // incoming edge makes the merge live even when the preceding linear
-        // instruction is a back-edge or return.
-        return hasAbsoluteJumpToCurrentEnd(s.currentCode(), s.currentAtomOperands());
+        // instruction is a back-edge or return. Tagged parser labels are
+        // deliberately excluded here (statement-local view), matching the
+        // legacy hasAbsoluteJumpToCurrentEnd mask.
+        return ft.max_absolute_target >= ft.tail_start;
     }
 
     fn lastOpcode(code: []const u8, atoms: []const Atom) ?u8 {
@@ -10541,6 +10704,21 @@ pub const parser_core = struct {
     /// separate `hasJumpToCurrentEnd` OR — a body whose last real op is a
     /// terminator can still be entered at its end by a finished-construct
     /// jump (if/else arm, break), and that path needs a landing terminator.
+    /// Summary-backed equivalent of `functionNeedsImplicitReturn`.
+    fn flowNeedsImplicitReturn(ft: *const bytecode.FlowTailSummary) bool {
+        const op_id = ft.last_non_cleanup_op orelse return true;
+        return switch (op_id) {
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.return_async,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.throw,
+            => false,
+            else => true,
+        };
+    }
+
     pub fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
         const op_id = lastNonCleanupOpcode(code, atoms) orelse return true;
         return switch (op_id) {
@@ -12741,25 +12919,19 @@ pub const parser_core = struct {
     }
 
     fn patchForwardJump(s: *State, operand_offset: usize) Error!void {
-        var code = s.currentCode();
-        if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
-        const target: u32 = @intCast(code.len);
-        std.mem.writeInt(u32, code[operand_offset..][0..4], target, .little);
+        const target: u32 = @intCast(s.currentCodeLen());
+        try s.publishParserLabelTarget(operand_offset, target);
         // Patching to the current position represents a normal QuickJS label.
         // A control-flow merge cannot inherit an lvalue from one predecessor.
         s.invalidateLastOpcode();
     }
 
     fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
-        var code = s.currentCode();
-        if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
-        std.mem.writeInt(u32, code[operand_offset..][0..4], target, .little);
+        try s.publishParserLabelTarget(operand_offset, target);
     }
 
     fn patchAbsoluteTarget(s: *State, operand_offset: usize) Error!void {
-        var code = s.currentCode();
-        if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
-        std.mem.writeInt(u32, code[operand_offset..][0..4], @intCast(code.len), .little);
+        try s.publishParserLabelTarget(operand_offset, @intCast(s.currentCodeLen()));
         s.invalidateLastOpcode();
     }
 
@@ -14270,13 +14442,12 @@ pub const parser_core = struct {
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
         if (capture_child) {
-            const code = s.currentCode();
-            const atoms = s.currentAtomOperands();
             // A jump targeting the current end (post-lowering `code_end`) needs
             // a real terminator to land on — the dispatch has no fall-off
             // bounds check (qjs-aligned; qjs functions always end in a return).
-            const jump_to_end = hasJumpToCurrentEnd(code, atoms);
-            const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
+            const ft = s.flowSummary();
+            const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
+            const needs_return = jump_to_end or flowNeedsImplicitReturn(ft);
             if (needs_return) {
                 if (func_kind == .async) {
                     try s.emitOp(opcode.op.undefined);
@@ -14751,12 +14922,11 @@ pub const parser_core = struct {
             try parseFunctionBodyBlock(s);
             if (has_non_simple_params and s.cur_func().has_use_strict) return Error.UnexpectedToken;
             if (capture_child) {
-                const code = s.currentCode();
-                const atoms = s.currentAtomOperands();
                 // See the function-body epilogue: an end-targeting jump must
                 // land on a real terminator (no dispatch fall-off check).
-                const jump_to_end = hasJumpToCurrentEnd(code, atoms);
-                const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
+                const ft = s.flowSummary();
+                const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
+                const needs_return = jump_to_end or flowNeedsImplicitReturn(ft);
                 if (needs_return) {
                     if (is_async) {
                         try s.emitOp(opcode.op.undefined);
@@ -16340,6 +16510,7 @@ pub const parser_core = struct {
             std.mem.writeInt(u32, brand_prefix[8..12], atom_module.ids.home_object, .little);
             std.mem.writeInt(u16, brand_prefix[12..14], 0, .little);
             brand_prefix[14] = opcode.op.add_brand;
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&brand_prefix);
             try child_fd.appendAtomOperand(atom_module.ids.home_object);
         }
@@ -16371,6 +16542,7 @@ pub const parser_core = struct {
             else => true,
         };
         if (!needs_return) return;
+        init_fd.flow_tail.valid = false;
         try init_fd.appendByteCode(&.{opcode.op.return_undef});
     }
 
@@ -17133,6 +17305,7 @@ pub const parser_core = struct {
         std.mem.writeInt(u16, code[18..20], 0, .little);
         code[20] = opcode.op.drop;
         try fd.appendAtomOperand(atom_class_fields_init);
+        fd.flow_tail.valid = false;
         try fd.appendByteCode(&code);
     }
 
@@ -17171,16 +17344,19 @@ pub const parser_core = struct {
         // Default derived constructors use OP_init_ctor below, whose handler
         // performs the new.target gate while initializing derived state.
         if (!s.class_has_extends) {
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{opcode.op.check_ctor});
         }
         var body_marker: [3]u8 = undefined;
         body_marker[0] = opcode.op.enter_scope;
         std.mem.writeInt(u16, body_marker[1..3], @intCast(body_scope), .little);
+        child_fd.flow_tail.valid = false;
         try child_fd.appendByteCode(&body_marker);
         const this_idx_i32 = child_fd.ensureThisBinding() catch return error.OutOfMemory;
         if (this_idx_i32 < 0 or this_idx_i32 > std.math.maxInt(u16)) return Error.UnexpectedToken;
         const this_idx: u16 = @intCast(this_idx_i32);
         if (s.class_has_extends) {
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{
                 opcode.op.init_ctor,
                 opcode.op.put_loc_check_init,
@@ -17193,6 +17369,7 @@ pub const parser_core = struct {
             // reads `this` with scope_get_var_checkthis so an uninitialized
             // ReferenceError is raised in the caller context, lowered to
             // get_loc_checkthis (quickjs.c:33073-33077).
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{
                 opcode.op.get_loc_checkthis,
                 @truncate(this_idx),
@@ -17201,6 +17378,7 @@ pub const parser_core = struct {
             });
         } else {
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{opcode.op.return_undef});
         }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
