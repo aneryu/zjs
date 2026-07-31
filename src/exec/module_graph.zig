@@ -50,7 +50,7 @@ pub const ModuleContinuation = struct {
     awaited_normalized: bool = false,
     ready: bool = false,
 
-    fn replaceAwaited(self: *ModuleContinuation, runtime: *core.JSRuntime, replacement: core.JSValue) !void {
+    fn replaceAwaited(self: *ModuleContinuation, runtime: *core.JSRuntime, replacement: core.JSValue) void {
         const old = self.awaited;
         self.awaited = replacement;
         old.free(runtime);
@@ -1234,7 +1234,7 @@ fn prepareModuleContinuationAwait(
     const global_object = try exec.zjs_vm.contextGlobal(context);
     if (!continuation.awaited_normalized) {
         const reaction_promise = try createModuleAwaitReactionPromise(runtime, context, output, global_object, continuation.awaited);
-        try continuation.replaceAwaited(runtime, reaction_promise);
+        continuation.replaceAwaited(runtime, reaction_promise);
         continuation.awaited_normalized = true;
     }
 

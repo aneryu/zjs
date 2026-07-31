@@ -152,14 +152,12 @@ pub const Job = struct {
         return job;
     }
 
-    pub fn initPromise(context: *core.JSContext, value: core.JSValue) !Job {
-        var job = Job{
+    pub fn initPromise(context: *core.JSContext, value: core.JSValue) Job {
+        return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .promise = .{ .value = value.dup() } },
         };
-        errdefer job.deinit();
-        return job;
     }
 
     /// Build a no-fail commit entry from a caller-owned object value after the
@@ -174,22 +172,11 @@ pub const Job = struct {
         };
     }
 
+    /// Promise reaction entry construction. S2 JSValues own their symbol
+    /// bodies directly, so duplication and RealmRef retain are the complete,
+    /// no-fail root transaction (D1b: the fallible wrapper whose only `try`
+    /// was the retired symbol-root registration is gone).
     pub fn initPromiseReaction(
-        context: *core.JSContext,
-        reaction: core.JSValue,
-        value: core.JSValue,
-        rejected: bool,
-    ) !Job {
-        var job = initPromiseReactionNoFail(context, reaction, value, rejected);
-        errdefer job.deinit();
-        return job;
-    }
-
-    /// Allocation-free Promise reaction entry construction after the caller
-    /// has reserved both payload storage and a queue slot. S2 JSValues own
-    /// their symbol bodies directly, so duplication and RealmRef retain are
-    /// the complete root transaction.
-    pub fn initPromiseReactionNoFail(
         context: *core.JSContext,
         reaction: core.JSValue,
         value: core.JSValue,
@@ -206,21 +193,10 @@ pub const Job = struct {
         };
     }
 
+    /// Thenable entry construction for a pre-reserved FIFO slot; no-fail
+    /// (D1b). The execution-time resolving pair remains fallible and is
+    /// tracked by PromiseThenablePhase before any user callback runs.
     pub fn initPromiseThenable(
-        context: *core.JSContext,
-        target: core.JSValue,
-        thenable: core.JSValue,
-        then_function: core.JSValue,
-    ) !Job {
-        var job = initPromiseThenableNoFail(context, target, thenable, then_function);
-        errdefer job.deinit();
-        return job;
-    }
-
-    /// Allocation-free thenable entry construction for a pre-reserved FIFO
-    /// slot. The execution-time resolving pair remains fallible and is tracked
-    /// by PromiseThenablePhase before any user callback runs.
-    pub fn initPromiseThenableNoFail(
         context: *core.JSContext,
         target: core.JSValue,
         thenable: core.JSValue,
@@ -266,8 +242,8 @@ pub const Job = struct {
         basename: core.JSValue,
         specifier: core.JSValue,
         attributes: core.JSValue,
-    ) !Job {
-        var job = Job{
+    ) Job {
+        return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .dynamic_import = .{
@@ -279,8 +255,6 @@ pub const Job = struct {
                 .attributes = attributes.dup(),
             } },
         };
-        errdefer job.deinit();
-        return job;
     }
 
     pub fn initAtomicsWaiter(
@@ -307,8 +281,8 @@ pub const Job = struct {
         realm: *core.JSContext,
         callback: core.JSValue,
         held_value: core.JSValue,
-    ) !Job {
-        var job = Job{
+    ) Job {
+        return .{
             .runtime = realm.runtime,
             .realm = core.RealmRef.retain(realm),
             .payload = .{ .finalization = .{
@@ -316,8 +290,6 @@ pub const Job = struct {
                 .held_value = held_value.dup(),
             } },
         };
-        errdefer job.deinit();
-        return job;
     }
 
     pub fn deinit(self: *Job) void {
@@ -535,9 +507,7 @@ pub const Queue = struct {
 
     pub fn enqueuePromise(self: *Queue, context: *core.JSContext, value: core.JSValue) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initPromise(context, value);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initPromise(context, value));
     }
 
     /// Transfer an owned object payload into an already-reserved Promise job.
@@ -551,7 +521,7 @@ pub const Queue = struct {
         reaction: core.JSValue,
         value: core.JSValue,
         rejected: bool,
-    ) !Job {
+    ) Job {
         _ = self;
         return Job.initPromiseReaction(context, reaction, value, rejected);
     }
@@ -564,9 +534,7 @@ pub const Queue = struct {
         rejected: bool,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initPromiseReaction(context, reaction, value, rejected);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initPromiseReaction(context, reaction, value, rejected));
     }
 
     pub fn enqueuePromiseThenable(
@@ -577,9 +545,7 @@ pub const Queue = struct {
         then_function: core.JSValue,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initPromiseThenable(context, target, thenable, then_function);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initPromiseThenable(context, target, thenable, then_function));
     }
 
     pub fn enqueueDynamicImport(
@@ -593,9 +559,7 @@ pub const Queue = struct {
         attributes: core.JSValue,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initDynamicImport(context, runner, resolve, reject, basename, specifier, attributes);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initDynamicImport(context, runner, resolve, reject, basename, specifier, attributes));
     }
 
     pub fn enqueueAtomicsWaiter(
@@ -617,9 +581,7 @@ pub const Queue = struct {
         held_value: core.JSValue,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initFinalization(realm, callback, held_value);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initFinalization(realm, callback, held_value));
     }
 
     pub fn hasJobs(self: Queue) bool {
