@@ -774,14 +774,22 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
 }
 
 // D1a size pins (2026-07-31): removing the obsolete symbol-root protocol
-// state must not silently regress; before-values were Job=128 Generic=96
-// Promise=24 Reaction=40 Thenable=104 DynamicImport=96 Finalization=40.
+// state must not silently regress. Pinned per JSValue representation
+// (16-byte tag+payload default / 8-byte nan-boxing under test-altrepr);
+// D1a's before-values in the default representation were Job=128
+// Generic=96 Promise=24 Reaction=40 Thenable=104 DynImport=96
+// Finalization=40.
 comptime {
-    if (@sizeOf(Job) != 128) @compileError("Job size drifted from the D1a pin");
-    if (@sizeOf(GenericPayload) != 96) @compileError("GenericPayload size drifted from the D1a pin");
-    if (@sizeOf(PromisePayload) != 16) @compileError("PromisePayload size drifted from the D1a pin");
-    if (@sizeOf(PromiseReactionPayload) != 40) @compileError("PromiseReactionPayload size drifted from the D1a pin");
-    if (@sizeOf(PromiseThenablePayload) != 104) @compileError("PromiseThenablePayload size drifted from the D1a pin");
-    if (@sizeOf(DynamicImportPayload) != 88) @compileError("DynamicImportPayload size drifted from the D1a pin");
-    if (@sizeOf(FinalizationPayload) != 32) @compileError("FinalizationPayload size drifted from the D1a pin");
+    const wide = @sizeOf(core.JSValue) == 16;
+    const pins = if (wide)
+        .{ 128, 96, 16, 40, 104, 88, 32 }
+    else
+        .{ 80, 56, 8, 24, 56, 48, 16 };
+    if (@sizeOf(Job) != pins[0]) @compileError("Job size drifted from the D1a pin");
+    if (@sizeOf(GenericPayload) != pins[1]) @compileError("GenericPayload size drifted from the D1a pin");
+    if (@sizeOf(PromisePayload) != pins[2]) @compileError("PromisePayload size drifted from the D1a pin");
+    if (@sizeOf(PromiseReactionPayload) != pins[3]) @compileError("PromiseReactionPayload size drifted from the D1a pin");
+    if (@sizeOf(PromiseThenablePayload) != pins[4]) @compileError("PromiseThenablePayload size drifted from the D1a pin");
+    if (@sizeOf(DynamicImportPayload) != pins[5]) @compileError("DynamicImportPayload size drifted from the D1a pin");
+    if (@sizeOf(FinalizationPayload) != pins[6]) @compileError("FinalizationPayload size drifted from the D1a pin");
 }
