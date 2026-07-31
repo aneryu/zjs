@@ -5,6 +5,7 @@
 // Every assertion is specific: exit code, error class, the offending rule id,
 // and the message text. "It threw something" is not an accepted outcome.
 
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -697,6 +698,72 @@ record('A6-07', 'attribution', 'an unrecorded period is rejected', 'rule phase-p
     return {
         pass: result.ok === false && rules(result).includes('phase-period-not-recorded'),
         message: detailFor(result, 'phase-period-not-recorded'),
+    };
+});
+
+// ---------------------------------------------------------------------------
+// A7 - the same-runtime runner's own sampling defaults
+//
+// These spawn the real runner. Its --samples handling is rejected during
+// argument parsing, before any harness is required, so these run anywhere.
+// The *default* value is asserted empirically from the sentinel artifact in
+// the closeout gate run rather than here, because observing it requires a
+// full sampling pass.
+// ---------------------------------------------------------------------------
+
+const sameRuntimeRunner = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname),
+    '../perf/same_runtime/run_same_runtime.js',
+);
+
+function runSameRuntime(args) {
+    return spawnSync('node', [sameRuntimeRunner, ...args], { encoding: 'utf8' });
+}
+
+record('A7-01', 'sampling', 'the same-runtime runner rejects an odd --samples', 'exit 2 naming measurement contract #3', () => {
+    const r = runSameRuntime(['--samples', '5']);
+    const text = `${r.stderr || ''}${r.stdout || ''}`;
+    return {
+        pass:
+            r.status === 2 &&
+            /--samples must be even/.test(text) &&
+            /5 is odd/.test(text) &&
+            /measurement contract #3/.test(text),
+        exitCode: r.status,
+        message: text.trim().split('\n')[0],
+    };
+});
+
+record('A7-02', 'sampling', 'the same-runtime runner rejects --samples 7 as well', 'exit 2, not special-cased to 5', () => {
+    const r = runSameRuntime(['--samples', '7']);
+    const text = `${r.stderr || ''}${r.stdout || ''}`;
+    return {
+        pass: r.status === 2 && /7 is odd/.test(text),
+        exitCode: r.status,
+        message: text.trim().split('\n')[0],
+    };
+});
+
+record('A7-03', 'sampling', 'an odd --samples is refused rather than rounded up', 'the error text must not claim an adjustment', () => {
+    const r = runSameRuntime(['--samples', '5']);
+    const text = `${r.stderr || ''}${r.stdout || ''}`;
+    // Rounding an odd request up to even would silently change the measurement
+    // design behind the caller's back, so the contract is refusal.
+    return {
+        pass: r.status === 2 && !/round|adjust|using 6|coerc/i.test(text),
+        exitCode: r.status,
+        message: text.trim().split('\n')[0],
+    };
+});
+
+record('A7-04', 'sampling', 'the documented default is even', '--help advertises an even default', () => {
+    const r = runSameRuntime(['--help']);
+    const text = `${r.stdout || ''}${r.stderr || ''}`;
+    const m = /--samples K\s+Paired harness invocations per case, must be even \(default: (\d+)\)/.exec(text);
+    return {
+        pass: Boolean(m) && Number(m[1]) % 2 === 0,
+        exitCode: r.status,
+        message: m ? `documented default ${m[1]}` : 'usage line not found',
     };
 });
 
