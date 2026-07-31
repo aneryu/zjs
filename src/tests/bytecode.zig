@@ -10164,3 +10164,333 @@ test "Phase2Builder grows geometrically, moves atom ownership with the backing, 
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
     try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
 }
+
+fn phase2ProbeBranchGrowRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-grow-x");
+    defer rt.atoms.free(x);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Mirror addEvalVariables' demand-created dynamic environment objects: these
+    // rows live outside the scope chain, so probe eligibility comes solely from
+    // the recorded indices.
+    fd.var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    fd.arg_var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{0} ** 19;
+    code[0] = op.push_i32;
+    std.mem.writeInt(i32, code[1..5], 1, .little);
+    code[5] = op.if_true;
+    std.mem.writeInt(u32, code[6..10], 18, .little);
+    code[10] = op.scope_get_var;
+    std.mem.writeInt(u32, code[11..15], x, .little);
+    std.mem.writeInt(u16, code[15..17], 0, .little);
+    code[17] = op.drop;
+    code[18] = op.return_undef;
+    try bc.setCode(&code);
+    try bc.retainAtomOperand(x);
+    try bc.appendSourceLoc(0, 1, 1);
+    try bc.appendSourceLoc(10, 2, 1);
+    try bc.appendSourceLoc(18, 3, 1);
+
+    var original_code: [19]u8 = undefined;
+    @memcpy(&original_code, bc.code);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    const original_atom_operands = [_]core.atom.Atom{bc.atom_operands[0]};
+    try std.testing.expectEqual(@as(usize, 3), bc.source_loc_slots.len);
+    const original_slot_pcs = [_]u32{
+        bc.source_loc_slots[0].pc,
+        bc.source_loc_slots[1].pc,
+        bc.source_loc_slots[2].pc,
+    };
+    try std.testing.expectEqualSlices(u32, &.{ 0, 10, 18 }, &original_slot_pcs);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    pipeline.resolve_variables.run(&ctx) catch |err| {
+        // P2-S1 transactional contract: any injected failure — including one
+        // landing after the builder has already grown past the input capacity —
+        // leaves the input artifacts item-identical and every initialized
+        // output atom prefix released.
+        try std.testing.expectEqualSlices(u8, &original_code, bc.code);
+        try std.testing.expectEqualSlices(core.atom.Atom, &original_atom_operands, bc.atom_operands);
+        try std.testing.expectEqual(original_slot_pcs.len, bc.source_loc_slots.len);
+        for (bc.source_loc_slots, original_slot_pcs) |slot, expected_pc| {
+            try std.testing.expectEqual(expected_pc, slot.pc);
+        }
+        try std.testing.expectEqual(pre_run_refs, rt.atoms.refCount(x).?);
+        return err;
+    };
+
+    var expected = [_]u8{0} ** 41;
+    expected[0] = op.push_i32;
+    std.mem.writeInt(i32, expected[1..5], 1, .little);
+    expected[5] = op.if_true;
+    std.mem.writeInt(u32, expected[6..10], 40, .little);
+    expected[10] = op.get_loc;
+    std.mem.writeInt(u16, expected[11..13], 0, .little);
+    expected[13] = op.with_get_var;
+    std.mem.writeInt(u32, expected[14..18], x, .little);
+    std.mem.writeInt(u32, expected[18..22], 39, .little);
+    expected[22] = 0;
+    expected[23] = op.get_loc;
+    std.mem.writeInt(u16, expected[24..26], 1, .little);
+    expected[26] = op.with_get_var;
+    std.mem.writeInt(u32, expected[27..31], x, .little);
+    std.mem.writeInt(u32, expected[31..35], 39, .little);
+    expected[35] = 0;
+    expected[36] = op.get_var;
+    std.mem.writeInt(u16, expected[37..39], 0, .little);
+    expected[39] = op.drop;
+    expected[40] = op.return_undef;
+
+    try std.testing.expectEqual(@as(usize, 41), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > code.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expect(bc.atom_operands.len > original_atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(x, bc.atom_operands[1]);
+    // The output carries three label operands instead of the input's one: the
+    // patched branch plus two probes whose shared done_pc is already final in
+    // output pc space, so those probe labels are not patchable jump sites.
+    try std.testing.expectEqual(@as(u32, 40), std.mem.readInt(u32, bc.code[6..10], .little));
+    try std.testing.expectEqual(@as(u32, 39), std.mem.readInt(u32, bc.code[18..22], .little));
+    try std.testing.expectEqual(@as(u32, 39), std.mem.readInt(u32, bc.code[31..35], .little));
+    const expected_slot_pcs = [_]u32{ 0, 10, 40 };
+    try std.testing.expectEqual(expected_slot_pcs.len, bc.source_loc_slots.len);
+    for (bc.source_loc_slots, expected_slot_pcs) |slot, expected_pc| {
+        try std.testing.expectEqual(expected_pc, slot.pc);
+    }
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+}
+
+fn phase2DirectEvalConflictGrowRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-conflict-x");
+    defer rt.atoms.free(x);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.is_eval = true;
+    fd.is_direct_eval = true;
+    // The outer lexical binding the direct eval's `var x` collides with.
+    _ = try fd.addClosureVar(.{
+        .closure_type = .ref,
+        .is_lexical = true,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+    try fd.appendGlobalVar(.{
+        .cpool_idx = -1,
+        .scope_level = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    defer bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    const code = [_]u8{op.return_undef};
+    try bc.setCode(&code);
+
+    const original_code = [1]u8{bc.code[0]};
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    pipeline.resolve_variables.run(&ctx) catch |err| {
+        try std.testing.expectEqualSlices(u8, &original_code, bc.code);
+        try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+        try std.testing.expectEqual(pre_run_refs, rt.atoms.refCount(x).?);
+        return err;
+    };
+
+    var expected = [_]u8{0} ** 7;
+    expected[0] = op.throw_error;
+    std.mem.writeInt(u32, expected[1..5], x, .little);
+    expected[5] = 1; // JS_THROW_VAR_REDECL
+    expected[6] = op.return_undef;
+    try std.testing.expectEqual(@as(usize, 7), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > code.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+}
+
+test "P2-S1 grow: dynamic-env probes grow phase-2 output beyond the input" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-grow-x");
+    defer rt.atoms.free(x);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(x).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    var fd_live = true;
+    defer if (fd_live) fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Mirror addEvalVariables' demand-created dynamic environment objects: these
+    // rows live outside the scope chain, so probe eligibility comes solely from
+    // the recorded indices.
+    fd.var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    fd.arg_var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    var expected = [_]u8{0} ** 30;
+    expected[0] = op.get_loc;
+    std.mem.writeInt(u16, expected[1..3], 0, .little);
+    expected[3] = op.with_get_var;
+    std.mem.writeInt(u32, expected[4..8], x, .little);
+    std.mem.writeInt(u32, expected[8..12], 29, .little);
+    expected[12] = 0;
+    expected[13] = op.get_loc;
+    std.mem.writeInt(u16, expected[14..16], 1, .little);
+    expected[16] = op.with_get_var;
+    std.mem.writeInt(u32, expected[17..21], x, .little);
+    std.mem.writeInt(u32, expected[21..25], 29, .little);
+    expected[25] = 0;
+    expected[26] = op.get_var;
+    std.mem.writeInt(u16, expected[27..29], 0, .little);
+    expected[29] = op.return_undef;
+    try std.testing.expectEqual(@as(usize, 30), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > input.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expect(bc.atom_operands.len > 1);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(x, bc.atom_operands[1]);
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+
+    // The phase-2 builder carries its oversized growth backing into Bytecode;
+    // explicit teardown proves that backing and its atom prefix free once.
+    bc.deinit(rt);
+    bc_live = false;
+    fd.deinit(rt);
+    fd_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(x).?);
+}
+
+test "P2-S1 grow: direct-eval lexical redeclaration prepends throw and grows atom operands" {
+    try phase2DirectEvalConflictGrowRun(std.testing.allocator);
+}
+
+test "P2-S1 grow: probe labels and patched branch survive single-pass growth" {
+    // This covers jump-operand growth in emitted code (one input label operand
+    // becomes three output label operands) and patches a branch across a grown
+    // buffer. Patchable sites are bounded by the input label census because
+    // probe labels are finalized output-space operands; Phase2Builder's unit
+    // test above covers jump-array growth mechanics directly.
+    try phase2ProbeBranchGrowRun(std.testing.allocator);
+}
+
+test "P2-S1 grow OOM matrix: probe/branch fixture is transactional across every allocation failure" {
+    // The sweep reaches post-growth allocation indices, so a later OOM also
+    // proves rollback releases every already-initialized output atom prefix.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2ProbeBranchGrowRun, .{});
+}
+
+test "P2-S1 grow OOM matrix: direct-eval conflict fixture is transactional across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2DirectEvalConflictGrowRun, .{});
+}
+
+test "P2-S1: line_num-only input shrinks to a zero-used capacity-carried backing through phase 2" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 5;
+    input[0] = op.line_num;
+    std.mem.writeInt(u32, input[1..5], 1, .little);
+    try bc.setCode(&input);
+
+    // line_num is dropped without consuming the input-sized initial backing,
+    // exercising the production used=0/capacity>0 install and free path.
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+    try pipeline.resolve_variables.run(&ctx);
+    try std.testing.expectEqual(@as(usize, 0), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 5), bc.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+}
