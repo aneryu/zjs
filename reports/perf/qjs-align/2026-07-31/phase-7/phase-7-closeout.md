@@ -98,9 +98,48 @@ worktree 缺 test262 submodule 但门禁响亮失败不会假绿、`zjs_nan_boxi
 `logicalNot` 线永久关闭，不再尝试 register-resident complex ToBoolean、object-only 第二快路、
 调整 tag 集合、或拿 complex 合成回退换产品收益。
 
-## 4. 收口门禁
+## 4. 提交身份
+
+```text
+phase7_analysis_closeout_commit = 1fdafc62
+phase7_release_source_commit    = 21e24085   (same-runtime 默认样本数修复)
+main_merge_commit               = a5ec858a   (--no-ff merge; 全部 pre-tag 门禁在此树上运行)
+main_head_at_tag                = 本提交本身（在 merge 之上仅追加本档案，无代码变更；
+                                  其 SHA 即标签所指，故不在此自引用）
+tag                             = qjs-align-phase-7-closeout  (打在 main_head_at_tag)
+phase6_closeout_commit          = c95e574d
+Phase 0 baseline                = frozen / unchanged
+P7-70 authoritative snapshot    = 89fa82d5 generation
+```
+
+`1fdafc62` 是分析收口点；其后追加了一笔 `21e24085` —— `same-runtime` 运行器的默认
+`--samples` 原为 **5**，而其配对顺序按样本序号奇偶交替，因此默认调用必然产出 3 qjs-first
+对 2 zjs-first，**与测量合同第 3 条自相矛盾**。一个注定违反自身合同的默认值不应被固化进
+Phase 7 标签。默认改为 6（奇偶规则下即 3/3）；显式传入奇数**拒绝并退出 2 而非向上取偶**，
+因为静默调整会在调用者背后改变测量设计。新增 4 项合同测试（A7-01…04），总数 43 → **47**。
+
+## 5. 收口门禁
 
 因本阶段除 P7-31 外无生产代码变更，且 P7-31 在其自身线上已跑过完整门禁
 （含 test262 0/49775、ReleaseSafe、force-GC、altrepr），收口只跑轻量集成门禁：
 `git diff --check`、`zig fmt --check .`、`perf-self-check`、same-runtime P0 sentinel、
 P7-70 measurement-contract tests。结果见 `phase-7-closeout-gates.txt`。
+
+**打标签前在 `main` 集成树 `a5ec858a` 上重跑的完整门禁：**
+
+```text
+zig fmt --check .              clean
+git diff --check               clean
+measurement contract tests     47/47
+red-team attacks               21/21 held
+perf-self-check                75/75 compatible, 0 validation failures, paired geomean 0.99
+same-runtime P0 sentinel       不传 --samples，artifact 记录 samples=6
+                               七个 case 全部 3/3 平衡，geomean 1.0612 <= 1.10 PASS
+                               fib_rec 1.2992 为既有 per-case 例外（Phase 1-6 合入时已存在）
+test-runner                    43 passed
+test262-smoke                  0/12 errors
+```
+
+红队本次**重跑**而非沿用 P7-70 的旧结果，因为默认采样行为正是本轮修改对象。
+一处值得记录：红队套件最初拒绝运行，理由是工作区不干净（我的临时缓存目录），
+**这正是它自身 dirty-worktree 合同生效**——把缓存移出仓库后 21/21 全挡。
