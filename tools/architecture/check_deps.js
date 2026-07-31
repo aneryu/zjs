@@ -285,6 +285,13 @@ for (const retiredRegistryToken of ['ConstructorSpec', 'constructor_specs']) {
   }
 }
 
+const propertyIcSource = fs.readFileSync(path.join(repoRoot, 'src/exec/property_ic.zig'), 'utf8');
+for (const retiredFacadeToken of ['cachedDataPropertyValueForFastPath']) {
+  if (propertyIcSource.includes(retiredFacadeToken)) {
+    fail(`proven-dead IC facade reintroduced in src/exec/property_ic.zig: ${retiredFacadeToken} (removed in D2; the inline cache is gone and qjs has none)`);
+  }
+}
+
 const internalBuiltinsSource = fs.readFileSync(path.join(repoRoot, 'src/exec/internal_builtins.zig'), 'utf8');
 for (const completedDomain of ['atomics', 'performance', 'promise']) {
   const tableContribution = `NativeBuiltinDomain.${completedDomain})] = denseRecords`;
