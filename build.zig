@@ -20,6 +20,18 @@ pub fn build(b: *std.Build) void {
     // the target default.
     const target_default_nan_boxing = target.result.ptrBitWidth() < 64;
     const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse target_default_nan_boxing;
+    // QCP-1: compiler selection. legacy = the shipping Phase 1/2/3 pipeline;
+    // v2 = the QuickJS-model compiler-v2; dual = compile with both, compare,
+    // execute the v2 product. Default stays legacy until the final gate
+    // (code-load >= 0.58) passes.
+    const zjs_compiler = b.option([]const u8, "zjs_compiler", "Compiler selection: legacy, v2, or dual") orelse "legacy";
+    if (!std.mem.eql(u8, zjs_compiler, "legacy") and
+        !std.mem.eql(u8, zjs_compiler, "v2") and
+        !std.mem.eql(u8, zjs_compiler, "dual"))
+    {
+        std.debug.print("error: invalid -Dzjs_compiler value '{s}': expected legacy, v2, or dual\n", .{zjs_compiler});
+        std.process.exit(1);
+    }
     // OOM-injection coverage instrumentation (v1): records deduplicated
     // allocation call sites in core/memory.zig. Default off and comptime
     // gated, so the default build's allocation hot path is unchanged.
@@ -47,6 +59,7 @@ pub fn build(b: *std.Build) void {
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    engine_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     engine_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
@@ -63,6 +76,7 @@ pub fn build(b: *std.Build) void {
     const plugin_fixture_options = b.addOptions();
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    plugin_fixture_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     plugin_fixture_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     plugin_fixture_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
@@ -143,6 +157,7 @@ pub fn build(b: *std.Build) void {
     const profile_engine_options = b.addOptions();
     profile_engine_options.addOption(bool, "zjs_enable_opcode_profile", true);
     profile_engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    profile_engine_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
     profile_engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     profile_engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     profile_engine_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
@@ -730,6 +745,7 @@ pub fn build(b: *std.Build) void {
     const test_options = b.addOptions();
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    test_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     test_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);

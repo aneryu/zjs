@@ -10,6 +10,7 @@ pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
 pub const runtime = @import("runtime/root.zig");
+pub const compiler_v2 = @import("compiler_v2/root.zig");
 pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;
 pub const JSRuntime = kernel_api.JSRuntime;
