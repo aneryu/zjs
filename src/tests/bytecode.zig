@@ -8290,7 +8290,9 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     body[10] = op.drop;
     body[11] = op.return_undef;
     try fd.appendByteCode(&body);
-    try fd.appendSourceLoc(2, 8, 5);
+    // pc 5 is an instruction boundary (just past the 5-byte push_atom_value):
+    // the P2-R1T source-loc entry contract rejects mid-instruction pcs.
+    try fd.appendSourceLoc(5, 8, 5);
     try fd.appendAtomOperand(name);
     _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{
@@ -9627,7 +9629,9 @@ fn populateFunctionDefForFinalizeFailure(
     body[9] = op.drop;
     body[10] = op.return_undef;
     try fd.appendByteCode(&body);
-    try fd.appendSourceLoc(2, 8, 5);
+    // pc 5 is an instruction boundary (just past the 5-byte push_atom_value):
+    // the P2-R1T source-loc entry contract rejects mid-instruction pcs.
+    try fd.appendSourceLoc(5, 8, 5);
     try fd.appendAtomOperand(name);
     _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{ .var_name = arg_name, .scope_level = 0, .is_lexical = false });
@@ -9729,9 +9733,9 @@ fn phase2SourceSlotInvariantRun(allocator: std.mem.Allocator) !void {
     // exact-fit trim allocation) | goto@10 -> 16 (terminal one-past-the-end
     // relocation) | return_undef@15 (unreachable -> dead-range publish).
     var code = [_]u8{
-        op.push_i32, 1, 0, 0, 0,
-        op.line_num, 7, 0, 0, 0,
-        op.goto,     16, 0, 0, 0,
+        op.push_i32,     1,  0, 0, 0,
+        op.line_num,     7,  0, 0, 0,
+        op.goto,         16, 0, 0, 0,
         op.return_undef,
     };
     try function.appendCode(&code);

@@ -6411,6 +6411,16 @@ pub const pipeline_resolve_variables = struct {
         }
 
         fn lookupTarget(self: *const SparseRelocation, old_pc: usize) ?u32 {
+            // Typical functions have few jump targets: scan small tables
+            // linearly, early-exiting once a key passes `old_pc` (the table
+            // is strictly increasing, see the appendTarget assert).
+            if (self.target_len <= 8) {
+                for (self.target_old_pcs[0..self.target_len], 0..) |key, i| {
+                    if (key == old_pc) return self.target_new_pcs[i];
+                    if (key > old_pc) return null;
+                }
+                return null;
+            }
             var lo: usize = 0;
             var hi: usize = self.target_len;
             while (lo < hi) {
@@ -7698,22 +7708,33 @@ pub const pipeline_resolve_variables = struct {
         if (atom_index != atoms.len) return error.InvalidBytecode;
     }
 
+    /// P2-R1T entry contract for the streaming source remap: slot pcs must be
+    /// in bounds, non-decreasing, and (except the code.len terminal) sit on a
+    /// phase-1 instruction boundary. Producers append at the emission end, so
+    /// a violation is a producer bug; fail closed rather than repairing.
+    fn validateSourceLocOrder(
+        slots: []const pipeline_pc2line.SourceLocSlot,
+        code_len: usize,
+        nodes: []const Phase1CfgNode,
+    ) Error!void {
+        var previous_pc: u32 = 0;
+        for (slots) |slot| {
+            if (slot.pc > code_len) return error.InvalidBytecode;
+            if (slot.pc < previous_pc) return error.InvalidBytecode;
+            if (slot.pc != code_len and nodes[slot.pc].size == 0) return error.InvalidBytecode;
+            previous_pc = slot.pc;
+        }
+    }
+
     pub fn run(ctx: *JSContext) !void {
         const func = ctx.function;
         // P2-R1T: relocation and the source commit run in u32 pc space.
         if (func.code.len >= std.math.maxInt(u32)) return error.BytecodeOverflow;
-        // The streaming source remap requires non-decreasing slot pcs. The
-        // producers append at the current emission end, so a violation is a
-        // producer bug; fail closed rather than sorting on the hot path.
-        if (func.source_loc_slots.len > 1) {
-            for (func.source_loc_slots[1..], func.source_loc_slots[0 .. func.source_loc_slots.len - 1]) |current, previous| {
-                if (current.pc < previous.pc) return error.InvalidBytecode;
-            }
-        }
         try bindParserLabels(ctx);
         const phase1_topology = try computePhase1Topology(ctx);
         const phase1_reachability = phase1_topology.nodes;
         defer ctx.memory.free(Phase1CfgNode, phase1_reachability);
+        try validateSourceLocOrder(func.source_loc_slots, func.code.len, phase1_reachability);
         var inline_scope_var_plans: [inline_scope_var_plan_capacity]ScopeVarLoweringPlan = undefined;
         const scope_var_plans: []ScopeVarLoweringPlan = if (phase1_topology.scope_var_count <= inline_scope_var_plans.len)
             inline_scope_var_plans[0..phase1_topology.scope_var_count]
