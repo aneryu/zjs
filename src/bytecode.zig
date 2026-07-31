@@ -2721,6 +2721,12 @@ pub const function_def = struct {
     const function_bytecode_mod = function_bytecode;
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
+    const compiler_v2 = @import("compiler_v2/root.zig");
+    /// QCP-1: legacy builds can never attach a v2 builder (the only
+    /// producers are comptime-gated on the parser's `v2_available`), so the
+    /// release check in `deinit` folds away with the rest of the v2 leg.
+    const compiler_v2_available =
+        !std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
 
     fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
         _ = atoms;
@@ -2989,6 +2995,12 @@ pub const function_def = struct {
         atom_operands: []atom.Atom = &.{},
         atom_operands_capacity: usize = 0,
         last_opcode_pos: i32 = -1,
+        /// QCP-1 stage 2P: compiler-v2 emission backend for this function's
+        /// parse. Heap-allocated when a v2 parse begins for this function
+        /// (stage 5 wires production; for now only the parser test hook does);
+        /// released in `deinit`. One optional pointer keeps @sizeOf impact
+        /// minimal.
+        v2_builder: ?*compiler_v2.Builder = null,
         /// See `FlowTailSummary`. Born valid-empty; the class machinery's
         /// direct byte injections invalidate at their sites and the next
         /// query rebuilds from whatever is present.
@@ -3556,6 +3568,16 @@ pub const function_def = struct {
             self.atoms.free(func_name);
             self.atoms.free(filename);
             self.atoms.free(script_or_module);
+
+            if (comptime compiler_v2_available) {
+                if (self.v2_builder) |v2b| {
+                    self.v2_builder = null;
+                    v2b.deinit();
+                    self.memory.destroy(compiler_v2.Builder, v2b);
+                }
+            } else {
+                std.debug.assert(self.v2_builder == null);
+            }
 
             freeGrowableNamedSlice(VarDef, self.atoms, self.memory, &self.vars, &self.vars_capacity);
             if (self.vars_htab.len != 0) self.memory.free(u32, self.vars_htab);

@@ -11637,3 +11637,69 @@ test "flow-tail summary: label/patch/move/truncate corpus compiles under the Deb
         try std.testing.expect(parsed.syntax_error == null);
     }
 }
+
+// ===== QCP-1 stage 2P: compiler-v2 emission scaffolding =====
+
+test "QCP-1 S2P: legacy builds keep emit_v2 comptime-dead and v2 modes report availability" {
+    try std.testing.expectEqual(
+        engine.parser.Parser.compiler_mode != .legacy,
+        engine.parser.Parser.v2_available,
+    );
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = env.lexer("1");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    try std.testing.expect(!state.emit_v2);
+    try std.testing.expect(state.function_def.v2_builder == null);
+}
+
+test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit releases it" {
+    // Runtime-opaque gate (a mutable local defeats comptime branch
+    // elimination): keeps this body semantically analyzed in legacy builds
+    // so compile breakage cannot hide behind the skip.
+    var skip = !engine.parser.Parser.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = env.lexer("1 + 2");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try state.beginV2EmissionForTest();
+    try std.testing.expect(state.emit_v2);
+    try std.testing.expect(state.function_def.v2_builder != null);
+
+    const b = state.v2Builder();
+    const label = try state.v2NewLabel();
+    try state.v2EmitJump(qop.goto, label); // marker + 5-byte jump
+    try state.v2EmitOp(qop.add); // marker + 1-byte op
+    const atom_id = try env.rt.internAtom("s2p_probe");
+    try state.v2EmitAtomOpOwned(qop.get_var, env.rt.atoms.dup(atom_id));
+    env.rt.atoms.free(atom_id);
+    try state.v2BindLabel(label);
+    try state.v2AddSourceMarker(3, 7);
+
+    try std.testing.expectEqual(@as(u32, 11), b.code_len); // 5 + 1 + 5
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 1), b.label_len);
+    try std.testing.expect(b.label_slots[label.index()].flags.bound);
+    try std.testing.expectEqual(@as(u32, 11), b.label_slots[label.index()].bound_offset);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos); // bind invalidates
+    // Marker precedes each opcode (appendBytesAt order): first marker's
+    // temp offset is the jump's offset 0.
+    try std.testing.expect(b.source_len >= 1);
+    try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
+    // state.deinit -> function_def.deinit releases the builder; the
+    // testing allocator turns any leak into a test failure.
+}

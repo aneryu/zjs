@@ -3482,6 +3482,18 @@ pub const parser_core = struct {
     const unicode = @import("libs/unicode.zig");
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
+    const compiler_v2 = @import("compiler_v2/root.zig");
+
+    /// QCP-1: comptime compiler selection parsed from -Dzjs_compiler.
+    pub const CompilerMode = enum { legacy, v2, dual };
+    pub const compiler_mode: CompilerMode = std.meta.stringToEnum(
+        CompilerMode,
+        @import("build_options").zjs_compiler,
+    ) orelse @compileError("invalid zjs_compiler build option value");
+    /// True when this build carries the compiler-v2 emission backend at all.
+    /// Every runtime v2 gate is spelled `v2_available and <state>.emit_v2` so
+    /// legacy builds comptime-fold the entire v2 leg away.
+    pub const v2_available = compiler_mode != .legacy;
 
     const bytecode_function = bytecode;
     const function_def_mod = bytecode.function_def;
@@ -4018,6 +4030,12 @@ pub const parser_core = struct {
         /// buffer instead of the Bytecode object's code buffer. Used for
         /// nested functions to maintain separate bytecode buffers.
         emit_to_function_def: bool = false,
+        /// QCP-1 stage 2P: when true, this parse emits through the compiler-v2
+        /// Builder attached to the current FunctionDef instead of the legacy
+        /// byte-stream primitives. Never set true unless `v2_available`; every
+        /// backend guard is spelled `v2_available and self.emit_v2` so legacy
+        /// builds fold the entire v2 leg away at comptime.
+        emit_v2: bool = false,
         pending_function_name: ?Atom = null,
         pending_function_is_decl: bool = false,
         pending_function_export_default: bool = false,
@@ -5171,12 +5189,14 @@ pub const parser_core = struct {
         }
 
         fn patchLabelBreaks(s: *State, frame_index: usize) Error!void {
+            std.debug.assert(!(v2_available and s.emit_v2));
             for (s.label_frames.items[frame_index].break_fixups.items) |off| {
                 try patchForwardJump(s, off);
             }
         }
 
         fn patchLabelContinues(s: *State, frame_index: usize) Error!void {
+            std.debug.assert(!(v2_available and s.emit_v2));
             for (s.label_frames.items[frame_index].continue_fixups.items) |off| {
                 try patchForwardJump(s, off);
             }
@@ -5671,6 +5691,8 @@ pub const parser_core = struct {
         }
 
         fn appendBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
+            // QCP-1: any un-migrated construct reaching legacy emission during a v2 parse must fail loudly (Debug) instead of corrupting two streams.
+            std.debug.assert(!(v2_available and self.emit_v2));
             const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 self.cur_func().appendByteCodeAssumeCapacity(bytes);
@@ -6611,6 +6633,7 @@ pub const parser_core = struct {
         /// exact; a rewrite that could lower the current absolute watermark
         /// falls back to lazy invalidation (the next query rebuilds).
         fn publishParserLabelTarget(self: *State, operand_offset: usize, target: u32) Error!void {
+            std.debug.assert(!(v2_available and self.emit_v2));
             var code = self.currentCode();
             if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
             const ft = self.flowTail();
@@ -6690,6 +6713,7 @@ pub const parser_core = struct {
         }
 
         fn appendBytesNoSource(self: *State, bytes: []const u8) Error!void {
+            std.debug.assert(!(v2_available and self.emit_v2));
             const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 try self.cur_func().appendByteCode(bytes);
@@ -6700,6 +6724,7 @@ pub const parser_core = struct {
         }
 
         fn emitSourcePosAndLoc(self: *State, line_num: u32, col_num: u32) Error!usize {
+            std.debug.assert(!(v2_available and self.emit_v2));
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             try self.emitSourcePos(line_num, col_num);
@@ -6715,6 +6740,7 @@ pub const parser_core = struct {
         }
 
         fn appendBytesAt(self: *State, bytes: []const u8, line_num: u32, col_num: u32) Error!void {
+            std.debug.assert(!(v2_available and self.emit_v2));
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             _ = try self.emitSourcePosAndLoc(line_num, col_num);
@@ -6722,6 +6748,85 @@ pub const parser_core = struct {
             try self.appendBytesNoSource(bytes);
             self.commitLastOpcode(opcode_pos);
         }
+
+        // ===== QCP-1 stage 2P: compiler-v2 emission veneer =====
+        // Thin State-level wrappers over compiler_v2.Builder. The later facade
+        // groups call these; no production construct is migrated yet. Marker
+        // precedes opcode, mirroring the appendBytesAt order.
+
+        /// Builder of the function currently being parsed. Only meaningful
+        /// during a v2 parse; the unwrap fails loudly for a v2 parse whose
+        /// FunctionDef never began v2 emission.
+        pub fn v2Builder(self: *State) *compiler_v2.Builder {
+            std.debug.assert(v2_available and self.emit_v2);
+            return self.cur_func().v2_builder.?;
+        }
+
+        /// v2 half of `emitSourcePosAndLoc`: record the (line,col) authority
+        /// for the next emitted opcode. The Builder ignores non-positive
+        /// coordinates.
+        pub fn v2AddSourceMarker(self: *State, line_num: u32, col_num: u32) compiler_v2.builder.Error!void {
+            try self.v2Builder().addSourceMarker(@intCast(line_num), @intCast(col_num));
+        }
+
+        /// v2 mirror of `appendBytes` for a plain opcode: source marker first,
+        /// then the opcode.
+        pub fn v2EmitOp(self: *State, op_id: u8) compiler_v2.builder.Error!void {
+            const loc = self.currentSourcePosition();
+            try self.v2AddSourceMarker(loc.line_num, loc.col_num);
+            try self.v2Builder().emitOp(op_id);
+        }
+
+        /// v2 mirror of the owned-atom emitters: marker first, then the
+        /// atom-bearing opcode. Ownership of `atom_id` (one retain) transfers
+        /// into the builder ledger even when the marker leg fails.
+        pub fn v2EmitAtomOpOwned(self: *State, op_id: u8, atom_id: Atom) compiler_v2.builder.Error!void {
+            const loc = self.currentSourcePosition();
+            const v2b = self.v2Builder();
+            v2b.addSourceMarker(@intCast(loc.line_num), @intCast(loc.col_num)) catch |err| {
+                v2b.atoms.free(atom_id);
+                return err;
+            };
+            try v2b.emitAtomOpOwned(op_id, atom_id);
+        }
+
+        /// v2 mirror of the jump emitters: marker first, then the jump holding
+        /// its LabelId operand until resolve_labels_v2.
+        pub fn v2EmitJump(self: *State, op_id: u8, label: compiler_v2.LabelId) compiler_v2.builder.Error!void {
+            const loc = self.currentSourcePosition();
+            try self.v2AddSourceMarker(loc.line_num, loc.col_num);
+            try self.v2Builder().emitJump(op_id, label);
+        }
+
+        pub fn v2NewLabel(self: *State) compiler_v2.builder.Error!compiler_v2.LabelId {
+            return self.v2Builder().newLabel();
+        }
+
+        /// Bind `label` at the current v2 position. A bound label is a
+        /// control-flow merge: forget the last opcode, exactly as qjs
+        /// emit_label leaves OP_label as the visible last opcode so no
+        /// peephole fuses across the join (quickjs.c emit_label /
+        /// fd->last_opcode_pos).
+        pub fn v2BindLabel(self: *State, label: compiler_v2.LabelId) compiler_v2.builder.Error!void {
+            const v2b = self.v2Builder();
+            try v2b.bindLabel(label);
+            v2b.invalidateLastOpcode();
+        }
+
+        /// QCP-1 stage 2P TEST HOOK: begin v2 emission for the current
+        /// function, allocating its Builder on first use. Stage 5 replaces
+        /// this with the compile()-entry v2/dual wiring (dual parses twice).
+        pub fn beginV2EmissionForTest(self: *State) compiler_v2.builder.Error!void {
+            std.debug.assert(v2_available);
+            const fd = self.cur_func();
+            if (fd.v2_builder == null) {
+                const v2b = try fd.memory.create(compiler_v2.Builder);
+                v2b.* = compiler_v2.Builder.init(fd.memory, fd.atoms);
+                fd.v2_builder = v2b;
+            }
+            self.emit_v2 = true;
+        }
+        // ===== end QCP-1 stage 2P veneer =====
 
         fn currentCodeLen(self: *State) usize {
             if (self.emit_to_function_def) return self.cur_func().byte_code.len;
@@ -6770,6 +6875,7 @@ pub const parser_core = struct {
         /// truncation so a re-emission after rollback does not have to
         /// reallocate.
         fn truncateCode(self: *State, target_len: usize) Error!void {
+            std.debug.assert(!(v2_available and self.emit_v2));
             if (self.cur_func().last_opcode_pos >= 0 and
                 @as(usize, @intCast(self.cur_func().last_opcode_pos)) >= target_len)
             {
@@ -10749,6 +10855,7 @@ pub const parser_core = struct {
     }
 
     fn patchContinueFrame(s: *State) Error!void {
+        std.debug.assert(!(v2_available and s.emit_v2));
         if (s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
         const start = s.continue_frame_lens.getLast();
         for (s.continue_fixups.items[start..]) |off| {
@@ -12934,6 +13041,7 @@ pub const parser_core = struct {
     }
 
     fn patchForwardJump(s: *State, operand_offset: usize) Error!void {
+        std.debug.assert(!(v2_available and s.emit_v2));
         const target: u32 = @intCast(s.currentCodeLen());
         try s.publishParserLabelTarget(operand_offset, target);
         // Patching to the current position represents a normal QuickJS label.
@@ -12942,10 +13050,12 @@ pub const parser_core = struct {
     }
 
     fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
+        std.debug.assert(!(v2_available and s.emit_v2));
         try s.publishParserLabelTarget(operand_offset, target);
     }
 
     fn patchAbsoluteTarget(s: *State, operand_offset: usize) Error!void {
+        std.debug.assert(!(v2_available and s.emit_v2));
         try s.publishParserLabelTarget(operand_offset, @intCast(s.currentCodeLen()));
         s.invalidateLastOpcode();
     }
