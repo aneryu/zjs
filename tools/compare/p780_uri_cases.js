@@ -340,6 +340,76 @@ export const cases = [
         'decodeURIComponent counterpart of p780_dec_esc1.',
         'decodeURIComponent',
     ),
+
+    // ------------------------------- fast-path / cache boundary controls
+    // p780_dec_esc1 keeps one constant input, so a single-entry result cache
+    // keyed on the decoded code units hits on every call. These separate the
+    // shape fast path (input is exactly one four-byte escape) from the cache.
+    p780(
+        'p780_dec_vary_base',
+        'varying-input decode control floor',
+        '65536 trips reading .length of one of 64 precomputed 12-byte inputs; the floor for p780_dec_esc1_vary.',
+        [
+            ...HEX_FN,
+            'var inputs = [];',
+            'for (var b4 = 0x80; b4 <= 0xBF; b4++) inputs.push("%F0%A0%80" + decimalToPercentHexString(b4));',
+            'var count = 0;',
+            'for (var i = 0; i < 65536; i++) count += inputs[i & 63].length;',
+            'print(count);',
+        ],
+    ),
+    p780(
+        'p780_dec_esc1_vary',
+        'varying 12-byte four-byte escape',
+        '65536 decodeURI calls cycling over 64 distinct 12-byte four-byte escapes: the input shape fast path still applies but a result cache keyed on the decoded units cannot hit.',
+        [
+            ...HEX_FN,
+            'var inputs = [];',
+            'for (var b4 = 0x80; b4 <= 0xBF; b4++) inputs.push("%F0%A0%80" + decimalToPercentHexString(b4));',
+            'var count = 0;',
+            'for (var i = 0; i < 65536; i++) count += decodeURI(inputs[i & 63]).length;',
+            'print(count);',
+        ],
+    ),
+    decodeControl(
+        'p780_dec_3b1',
+        '%E4%B8%AD%41',
+        '12 input bytes and 2 wide output units, exactly like p780_dec_esc1, but a three-byte escape plus an ASCII escape, so an input shape fast path keyed on a single four-byte escape cannot apply.',
+    ),
+    decodeControl(
+        'p780_dec_esc1_13',
+        `${ESC1}A`,
+        '13 input bytes: one four-byte escape plus a literal character, so a length-12 input shape fast path cannot apply.',
+    ),
+
+    p780(
+        'p780_B2x_nonhex',
+        'B2 with a non-hex alphabet',
+        'Identical in shape to p780_B2_hexconcat but the indexed alphabet is G..V, so a concatenation fast path keyed on the percent-hex-escape shape cannot apply. B2x - B2 is that fast path’s value.',
+        [
+            'function nonHexPair(n) {',
+            '  var alpha = "GHIJKLMNOPQRSTUV";',
+            '  return "%" + alpha[(n >> 4) & 0xf] + alpha[n & 0xf];',
+            '}',
+            ...NEST_OPEN,
+            ...NEST_MID,
+            '      count += nonHexPair(indexB4).length & 1;',
+            ...NEST_CLOSE,
+        ],
+    ),
+    p780(
+        'p780_B3f_outerconcat_flat',
+        'B3 with the result forced flat',
+        'The 9 + 3 outer concatenation consumed by charCodeAt(11) instead of .length. B3f - B3 exposes any deferred (rope) concatenation cost.',
+        [
+            ...NEST_OPEN,
+            '    var hexB1_B2_B3 = "%F0%A0%80";',
+            ...NEST_MID,
+            '      var hexB1_B2_B3_B4 = hexB1_B2_B3 + "%80";',
+            '      count += hexB1_B2_B3_B4.charCodeAt(11) & 1;',
+            ...NEST_CLOSE,
+        ],
+    ),
 ];
 
 export const categories = () => [...new Set(cases.map((item) => item.category))].sort();
