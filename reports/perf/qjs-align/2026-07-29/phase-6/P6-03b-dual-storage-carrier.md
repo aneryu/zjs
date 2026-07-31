@@ -238,8 +238,8 @@ pub fn addInPlaceExternal(self: *BigInt, other: libs.bigint.BigInt) !void {
 
 `BigInt.asUintN` —— pinned qjs `04be2460` 返回带符号值
 （`BigInt.asUintN(64, -1n)` 给 `-1`），zjs 给规范正确的 `18446744073709551615`。
-这是 `docs/qjs-align/FIX-PLAN-2026-07-02.md` D10 里**有意为之的修正**，
-在 P0 上同样存在，本轮差分对比时单独识别，未计为回归。
+这是既有的规范修正；原 D10 阶段计划已从 active docs 退役，可从 git
+历史恢复。在 P0 上同样存在，本轮差分对比时单独识别，未计为回归。
 
 ## 8. 裁决与限制
 

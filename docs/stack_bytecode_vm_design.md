@@ -46,6 +46,11 @@ script、eval、nested function 和 module root 都执行 canonical
 - `src/exec/tailcall_dispatch.zig`: threaded/tail-called opcode handlers；
 - `src/exec/call_runtime.zig`: call/eval/generator/Atomics shared runtime glue。
 
+tail-call handler 拆分是当前代码生成约束，不是文件组织偏好：每个 opcode
+handler 以 tail dispatch 结束，热臂在 handler 内完成，可能产生普通调用的冷工作
+先 outline 到 `vm_*.zig`。把这些 handler 合回一个大 switch 会重新扩大共享栈帧；
+没有固定二进制、反汇编和多 build PMU 证据时不得这样合并。
+
 普通同步 bytecode frame 优先从 runtime arena carve
 `[args | locals | operand | var-ref metadata]`。generator/async frame 必须在
 suspend 后继续存活，所以拥有可转移的 resident storage，而不是借用 arena。
@@ -106,8 +111,18 @@ QuickJS-faithful policy 的审计对象，不能继续以 microbenchmark 结果�
 - explicit generator/async resident-frame ownership；
 - direct and indirect eval entry；
 - catch/finally and pending JS exception propagation；
-- optional opcode profiling；
 - four zjs-only explicit-resource-management opcodes。
+
+opcode profiling（D0 修复后）：
+
+- profiling 构建（`zig build zjs-profile` / `-Dzjs_enable_opcode_profile=true`）
+  在 comptime 包装整张热 dispatch 表：每次表分发经 `vm_profile.noteDispatch`
+  计数并做 delta 归时（scope 无法跨 `always_tail` 链，前一 opcode 的区间由
+  下一次分发关闭，最后一个由 dump 前的 `flushPendingDispatch` 关闭）。
+  cold_table 与 property tail 表不包装——它们重分发同一 pc，包装会重计。
+- 默认构建的表逐项等于未包装表；`--profile-opcodes` 在非 profiling 二进制上
+  fail-closed（exit 2），`--perf-json` 显式输出 `opcode_profile_enabled`。
+  `perf-runtime-profiles` 门禁要求最小计数（非仅上限），全零档案无法通过。
 
 未实现：
 

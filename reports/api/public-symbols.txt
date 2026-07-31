@@ -118,6 +118,7 @@ zjs.object.promiseResult
 zjs.object.toValue
 zjs.object.typedArrayByteLength
 zjs.object.typedArrayConstructFullBufferOwned
+zjs.opcode_profile_build_enabled
 zjs.runtime
 zjs.runtime.EventLoop
 zjs.runtime.EventLoopOptions

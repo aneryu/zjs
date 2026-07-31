@@ -151,7 +151,7 @@ pub const EventLoop = struct {
     pub fn enqueueTimer(self: *EventLoop, ctx: *core.JSContext, id: i64, callback: zjs.JSValue, delay_ms: u64, repeats: bool) !void {
         const index = self.timers.len;
         try self.ensureTimerCapacity(ctx, index + 1);
-        const timer = try Timer.init(ctx, id, callback, nowMs() + delay_ms, delay_ms, repeats);
+        const timer = Timer.init(id, callback, nowMs() + delay_ms, delay_ms, repeats);
         self.timers = self.timers.ptr[0 .. index + 1];
         self.timers[index] = timer;
     }
@@ -268,7 +268,7 @@ pub const EventLoop = struct {
         const rt = ctx.runtimePtr();
         for (self.rw_handlers) |*handler| {
             if (handler.fd != fd) continue;
-            try handler.setCallback(rt, write_handler, callback);
+            handler.setCallback(rt, write_handler, callback);
             return;
         }
         const index = self.rw_handlers.len;
@@ -276,8 +276,7 @@ pub const EventLoop = struct {
         var handler = RwHandler{
             .fd = fd,
         };
-        errdefer handler.deinit(rt);
-        try handler.setCallback(rt, write_handler, callback);
+        handler.setCallback(rt, write_handler, callback);
         self.rw_handlers = self.rw_handlers.ptr[0 .. index + 1];
         self.rw_handlers[index] = handler;
     }
@@ -397,13 +396,13 @@ pub const EventLoop = struct {
         const rt = ctx.runtimePtr();
         for (self.signal_handlers) |*handler| {
             if (handler.sig != sig) continue;
-            try handler.setCallback(rt, callback);
+            handler.setCallback(rt, callback);
             _ = signal(@intCast(sig), @intFromPtr(&osSignalHandler));
             return;
         }
         const index = self.signal_handlers.len;
         try self.ensureSignalHandlerCapacity(ctx, index + 1);
-        const handler = try SignalHandler.init(ctx, sig, callback);
+        const handler = SignalHandler.init(sig, callback);
         self.signal_handlers = self.signal_handlers.ptr[0 .. index + 1];
         self.signal_handlers[index] = handler;
         _ = signal(@intCast(sig), @intFromPtr(&osSignalHandler));
@@ -469,24 +468,18 @@ const Timer = struct {
     timeout_ms: u64,
     delay_ms: u64,
     repeats: bool,
-    callback_symbol_rooted: bool = false,
 
-    fn init(ctx: *core.JSContext, id: i64, callback: zjs.JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) !Timer {
-        const rt = ctx.runtimePtr();
-        var timer = Timer{
+    fn init(id: i64, callback: zjs.JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) Timer {
+        return .{
             .id = id,
             .callback = callback.dup(),
             .timeout_ms = timeout_ms,
             .delay_ms = delay_ms,
             .repeats = repeats,
         };
-        errdefer timer.callback.free(rt);
-        timer.callback_symbol_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        return timer;
     }
 
     fn deinit(self: Timer, rt: *zjs.JSRuntime) void {
-        if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
         self.callback.free(rt);
     }
 
@@ -499,44 +492,24 @@ const RwHandler = struct {
     fd: i32,
     read_callback: zjs.JSValue = zjs.JSValue.nullValue(),
     write_callback: zjs.JSValue = zjs.JSValue.nullValue(),
-    symbol_root_mask: u2 = 0,
 
     fn deinit(self: RwHandler, rt: *zjs.JSRuntime) void {
-        if ((self.symbol_root_mask & 0b01) != 0) rt.unregisterExternalValueSymbolRoot(self.read_callback);
-        if ((self.symbol_root_mask & 0b10) != 0) rt.unregisterExternalValueSymbolRoot(self.write_callback);
         self.read_callback.free(rt);
         self.write_callback.free(rt);
     }
 
-    fn setCallback(self: *RwHandler, rt: *zjs.JSRuntime, write_handler: bool, callback: zjs.JSValue) !void {
+    fn setCallback(self: *RwHandler, rt: *zjs.JSRuntime, write_handler: bool, callback: zjs.JSValue) void {
         const next_callback = callback.dup();
-        var next_rooted = false;
-        errdefer next_callback.free(rt);
-        next_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        errdefer if (next_rooted) rt.unregisterExternalValueSymbolRoot(next_callback);
-
-        const bit: u2 = if (write_handler) 0b10 else 0b01;
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
         const old_callback = slot.*;
-        const old_rooted = (self.symbol_root_mask & bit) != 0;
         slot.* = next_callback;
-        if (next_rooted) {
-            self.symbol_root_mask |= bit;
-        } else {
-            self.symbol_root_mask &= ~bit;
-        }
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
     }
 
     fn clearCallback(self: *RwHandler, rt: *zjs.JSRuntime, write_handler: bool) void {
-        const bit: u2 = if (write_handler) 0b10 else 0b01;
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
         const old_callback = slot.*;
-        const old_rooted = (self.symbol_root_mask & bit) != 0;
         slot.* = zjs.JSValue.nullValue();
-        self.symbol_root_mask &= ~bit;
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
     }
 
@@ -549,36 +522,22 @@ const RwHandler = struct {
 const SignalHandler = struct {
     sig: u32,
     callback: zjs.JSValue,
-    callback_symbol_rooted: bool = false,
 
-    fn init(ctx: *core.JSContext, sig: u32, callback: zjs.JSValue) !SignalHandler {
-        const rt = ctx.runtimePtr();
-        var handler = SignalHandler{
+    fn init(sig: u32, callback: zjs.JSValue) SignalHandler {
+        return .{
             .sig = sig,
             .callback = callback.dup(),
         };
-        errdefer handler.callback.free(rt);
-        handler.callback_symbol_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        return handler;
     }
 
     fn deinit(self: SignalHandler, rt: *zjs.JSRuntime) void {
-        if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
         self.callback.free(rt);
     }
 
-    fn setCallback(self: *SignalHandler, rt: *zjs.JSRuntime, callback: zjs.JSValue) !void {
+    fn setCallback(self: *SignalHandler, rt: *zjs.JSRuntime, callback: zjs.JSValue) void {
         const next_callback = callback.dup();
-        var next_rooted = false;
-        errdefer next_callback.free(rt);
-        next_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        errdefer if (next_rooted) rt.unregisterExternalValueSymbolRoot(next_callback);
-
         const old_callback = self.callback;
-        const old_rooted = self.callback_symbol_rooted;
         self.callback = next_callback;
-        self.callback_symbol_rooted = next_rooted;
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
     }
 
@@ -866,7 +825,7 @@ test "EventLoop keeps host-held unique symbol atoms until release" {
     loop.signal_handlers = loop.signal_handlers.ptr[0..1];
     const signal_symbol = try rt.atoms.newValueSymbol("gc-event-loop-signal-symbol");
     const signal_value = try rt.symbolValue(signal_symbol);
-    loop.signal_handlers[0] = try SignalHandler.init(ctx.core, 2, signal_value);
+    loop.signal_handlers[0] = SignalHandler.init(2, signal_value);
     signal_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
@@ -905,7 +864,7 @@ test "runtime root tracer visits EventLoop host roots" {
     try loop.setRwHandler(ctx.core, 1, true, zjs.JSValue.int32(104));
     try loop.ensureSignalHandlerCapacity(ctx.core, 1);
     loop.signal_handlers = loop.signal_handlers.ptr[0..1];
-    loop.signal_handlers[0] = try SignalHandler.init(ctx.core, 2, zjs.JSValue.int32(105));
+    loop.signal_handlers[0] = SignalHandler.init(2, zjs.JSValue.int32(105));
 
     const Counter = struct {
         count: usize = 0,

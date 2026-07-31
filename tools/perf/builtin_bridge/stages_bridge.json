@@ -1,0 +1,464 @@
+{
+ "comment": [
+  "P7-42 stage table. Stage names come from the ACTUAL chain read out of the",
+  "shipped binary's DWARF line table, not from an a-priori list.",
+  "Every range is a file:line window in this worktree at 0e4ee496, and every",
+  "stage is SYMBOL-SCOPED: shared inline helpers (Vm.next, byteCode(),",
+  "loadCurrentLevel, Stack.topPtr, JSValue.dup) occur in more than one of the",
+  "mapped symbols, so an unscoped file:line table leaks samples between the",
+  "driver-re-entry stage and the callback's own return handler.",
+  "S* = on the builtin->bytecode callback bridge.",
+  "C* = present on the direct-control path as well.",
+  "X* = legs this corpus never takes; their sample counts are the instrument's",
+  "     own zero check.",
+  "popAndResume (tailcall_dispatch.zig:1069-1204) is inlined into BOTH op_return and op_return_undef; forEach's noop callback retires through op_return_undef while some/every/filter's predicate callbacks retire through op_return, so both symbols must be mapped or three of the four families lose their whole return column.",
+  "S7 is split into five sub-stages so the report can separate work that is re-derived from state the push path already held (S7c/S7d) from the cost of the driver activation itself (S7b) and from the dispatch entry (S7e). The split is by file:line within the same three symbols; the sum of the five equals the single S7 bucket of the earlier run."
+ ],
+ "symbols": [
+  {
+   "name": "exec.call_runtime.SyncInternalCallSite.call",
+   "default_stage": "Xcall_unattributed"
+  },
+  {
+   "name": "exec.zjs_vm.runActiveInvocationUntilNativeBoundary",
+   "default_stage": "S7_vm_driver_reentry"
+  },
+  {
+   "name": "exec.zjs_vm.runTC",
+   "default_stage": "C8_run_loop_other"
+  },
+  {
+   "name": "exec.tailcall_dispatch.op_return_undef",
+   "default_stage": "C9_callback_return_handler"
+  },
+  {
+   "name": "exec.tailcall_dispatch.op_return",
+   "default_stage": "C9_callback_return_handler"
+  },
+  {
+   "name": "exec.array_ops.qjsArrayIterationModeCall__anon_85061",
+   "default_stage": "C0_builtin_loop_and_element_read"
+  }
+ ],
+ "stages": [
+  {
+   "name": "S1_callsite_entry_and_poll",
+   "what": "noinline call-site prologue, one interrupt poll, active-invocation identity check, native-boundary-simple eligibility test",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 749,
+     "hi": 757
+    },
+    {
+     "file": "src/core/context.zig",
+     "lo": 605,
+     "hi": 640
+    },
+    {
+     "file": "src/exec/vm_exception_ops.zig",
+     "lo": 380,
+     "hi": 400
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 989,
+     "hi": 994
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 3258,
+     "hi": 3266
+    }
+   ]
+  },
+  {
+   "name": "S2_fence_scope_construct",
+   "what": "NativeBoundaryScope.init: capture the outer view, runtime pointer, MachineBacktraceView.segment over the current top, fence_depth snapshot",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 1009,
+     "hi": 1039
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 905,
+     "hi": 925
+    },
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 539,
+     "hi": 547
+    }
+   ]
+  },
+  {
+   "name": "S3_fence_publish",
+   "what": "NativeBoundaryScope.push: freeze the outer backtrace view, build the ActiveBacktraceFrame, link it into rt.hot.current_backtrace_frame, repoint invocation.current_backtrace_view",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 1040,
+     "hi": 1050
+    }
+   ]
+  },
+  {
+   "name": "S4_frame_admission",
+   "what": "planned stack bytes, runtime depth/byte budget commit, Entry slot lookup, VM stack arena carve",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 548,
+     "hi": 560
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 3316,
+     "hi": 3349
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 3350,
+     "hi": 3372
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 3416,
+     "hi": 3449
+    },
+    {
+     "file": "src/exec/vm_call.zig",
+     "lo": 168,
+     "hi": 182
+    },
+    {
+     "file": "src/exec/vm_call.zig",
+     "lo": 248,
+     "hi": 262
+    },
+    {
+     "file": "src/exec/vm_call.zig",
+     "lo": 1138,
+     "hi": 1152
+    },
+    {
+     "file": "src/core/runtime.zig",
+     "lo": 174,
+     "hi": 196
+    },
+    {
+     "file": "src/core/runtime.zig",
+     "lo": 2798,
+     "hi": 2814
+    },
+    {
+     "file": "/home/aneryu/.local/share/mise/installs/zig/0.16.0/lib/std/math.zig",
+     "lo": 555,
+     "hi": 575
+    }
+   ]
+  },
+  {
+   "name": "S5_argument_staging",
+   "what": "carve the arg_count-wide parameter window, duplicate min(3, arity) callback arguments into it, clear the tail",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 3450,
+     "hi": 3458
+    },
+    {
+     "file": "src/core/value.zig",
+     "lo": 613,
+     "hi": 626
+    },
+    {
+     "file": "src/core/gc.zig",
+     "lo": 483,
+     "hi": 494
+    }
+   ]
+  },
+  {
+   "name": "S6_entry_publication",
+   "what": "write the callback Entry: return_action=.native_boundary, catch target, profile guard, arena mark, complete Frame record, Stack arena window, teardown bits, prev link, depth bump",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 3373,
+     "hi": 3410
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 3459,
+     "hi": 3499
+    },
+    {
+     "file": "src/bytecode.zig",
+     "lo": 1915,
+     "hi": 1925
+    }
+   ]
+  },
+  {
+   "name": "S8_special_return",
+   "what": "return-handler special-return test, native-boundary arm, popReturnedNativeBoundary teardown, publish vm.return_value and the .native_returned outcome; op_return reaches the same arm through popAndResume's action switch",
+   "symbol_scope": [
+    "exec.tailcall_dispatch.op_return_undef",
+    "exec.tailcall_dispatch.op_return"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/tailcall_dispatch.zig",
+     "lo": 1196,
+     "hi": 1204
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 4404,
+     "hi": 4448
+    },
+    {
+     "file": "src/exec/tailcall_dispatch.zig",
+     "lo": 1004,
+     "hi": 1007
+    }
+   ]
+  },
+  {
+   "name": "S9_fence_restore",
+   "what": "NativeBoundaryScope.finish: unlink the ActiveBacktraceFrame, restore invocation.current_backtrace_view, re-liven the outer view",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 1073,
+     "hi": 1112
+    }
+   ]
+  },
+  {
+   "name": "S10_return_to_builtin",
+   "what": "hand the callback result back out of the noinline call site and restore the builtin's own register state",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 758,
+     "hi": 759
+    },
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 764,
+     "hi": 766
+    }
+   ]
+  },
+  {
+   "name": "X11a_fallback_args_hoisted",
+   "what": "argument loads for the never-taken authoritative fallback call, hoisted by the compiler into the unconditional prologue",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 771,
+     "hi": 782
+    }
+   ]
+  },
+  {
+   "name": "X11b_fallback_call_cold",
+   "what": "NOT TAKEN: the authoritative JS_Call-shaped fallback call itself",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 770,
+     "hi": 770
+    }
+   ]
+  },
+  {
+   "name": "X11c_owned_copy_leg",
+   "what": "NOT TAKEN: OwnedArgList leg for non-simple-eligible callees",
+   "symbol_scope": [
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 760,
+     "hi": 763
+    }
+   ]
+  },
+  {
+   "name": "C90_leaf_return_arms",
+   "what": "shared with the direct control: op_return_undef zero-arg / exact-args leaf return arms and their inline epilogues",
+   "symbol_scope": [
+    "exec.tailcall_dispatch.op_return_undef",
+    "exec.tailcall_dispatch.op_return"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/tailcall_dispatch.zig",
+     "lo": 1080,
+     "hi": 1195
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 4449,
+     "hi": 4500
+    }
+   ]
+  },
+  {
+   "name": "S7a_fence_depth_check_and_driver_call",
+   "what": "runActiveInvocationUntilNativeBoundary: fence-depth check, the call into the driver, and the post-return depth/top asserts",
+   "symbol_scope": [
+    "exec.zjs_vm.runTC",
+    "exec.zjs_vm.runActiveInvocationUntilNativeBoundary",
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/zjs_vm.zig",
+     "lo": 802,
+     "hi": 819
+    },
+    {
+     "file": "src/exec/call_runtime.zig",
+     "lo": 561,
+     "hi": 563
+    }
+   ]
+  },
+  {
+   "name": "S7b_driver_frame_save_restore",
+   "what": "the runTC activation itself: callee-saved register save/restore for a frame that has the whole inlined run() live-range",
+   "symbol_scope": [
+    "exec.zjs_vm.runTC",
+    "exec.zjs_vm.runActiveInvocationUntilNativeBoundary",
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/zjs_vm.zig",
+     "lo": 774,
+     "hi": 774
+    },
+    {
+     "file": "src/exec/zjs_vm.zig",
+     "lo": 799,
+     "hi": 800
+    }
+   ]
+  },
+  {
+   "name": "S7c_vm_cache_rebuild",
+   "what": "rebuild the Vm cache: Machine.loadCurrentLevel (depth branch, machine.top, &entry.frame/&entry.stack/&entry.catch_target), frame.function, function.byteCode(), then ten Vm field stores",
+   "symbol_scope": [
+    "exec.zjs_vm.runTC",
+    "exec.zjs_vm.runActiveInvocationUntilNativeBoundary",
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/zjs_vm.zig",
+     "lo": 775,
+     "hi": 798
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 1188,
+     "hi": 1200
+    },
+    {
+     "file": "src/exec/inline_calls.zig",
+     "lo": 853,
+     "hi": 862
+    },
+    {
+     "file": "src/bytecode.zig",
+     "lo": 1946,
+     "hi": 1960
+    }
+   ]
+  },
+  {
+   "name": "S7d_run_prologue",
+   "what": "run(): dispatch-table pointers, local_fast_blocked re-derivation, pc = code_base + frame.pc, sp = stack.topPtr(), var_buf = frame.locals.ptr",
+   "symbol_scope": [
+    "exec.zjs_vm.runTC",
+    "exec.zjs_vm.runActiveInvocationUntilNativeBoundary",
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/tailcall_dispatch.zig",
+     "lo": 4300,
+     "hi": 4307
+    },
+    {
+     "file": "src/exec/tailcall_dispatch.zig",
+     "lo": 4253,
+     "hi": 4270
+    },
+    {
+     "file": "src/exec/stack.zig",
+     "lo": 68,
+     "hi": 80
+    }
+   ]
+  },
+  {
+   "name": "S7e_dispatch_entry_and_outcome",
+   "what": "the call into next() and the run-loop outcome switch that turns .native_returned into the driver's return value",
+   "symbol_scope": [
+    "exec.zjs_vm.runTC",
+    "exec.zjs_vm.runActiveInvocationUntilNativeBoundary",
+    "exec.call_runtime.SyncInternalCallSite.call"
+   ],
+   "ranges": [
+    {
+     "file": "src/exec/tailcall_dispatch.zig",
+     "lo": 250,
+     "hi": 262
+    },
+    {
+     "file": "src/exec/tailcall_dispatch.zig",
+     "lo": 4308,
+     "hi": 4309
+    }
+   ]
+  }
+ ]
+}

@@ -5009,6 +5009,147 @@ test "memory account treats zero-length allocations as inert" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
+test "VM stack arena allocates and reuses a compact first chunk" {
+    try std.testing.expectEqual(
+        core.VmStackArena.first_chunk_bytes / @sizeOf(core.JSValue),
+        core.VmStackArena.first_chunk_slots,
+    );
+
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    var arena: core.VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    const initial_mark = arena.mark();
+    const first = arena.carve(&account, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), first.len);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), arena.active);
+    try std.testing.expectEqual(core.VmStackArena.first_chunk_slots, arena.chunks[0].len);
+    try std.testing.expectEqual(core.VmStackArena.first_chunk_bytes, account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+
+    arena.restore(initial_mark);
+    const allocations_before_reuse = account.allocation_count;
+    const reused = arena.carve(&account, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@intFromPtr(first.ptr), @intFromPtr(reused.ptr));
+    try std.testing.expectEqual(allocations_before_reuse, account.allocation_count);
+    try std.testing.expectEqual(core.VmStackArena.first_chunk_bytes, account.allocated_bytes);
+}
+
+test "VM stack arena active miss is pure before authoritative second chunk carve" {
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    var arena: core.VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    _ = arena.carve(&account, core.VmStackArena.first_chunk_slots) orelse
+        return error.TestUnexpectedResult;
+    const full_mark = arena.mark();
+    const bytes_before_miss = account.allocated_bytes;
+    const allocations_before_miss = account.allocation_count;
+
+    try std.testing.expect(arena.carveActiveMarked(1) == null);
+    try std.testing.expectEqual(full_mark, arena.mark());
+    try std.testing.expectEqual(bytes_before_miss, account.allocated_bytes);
+    try std.testing.expectEqual(allocations_before_miss, account.allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+
+    const second = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqual(@as(usize, 2), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.active);
+    try std.testing.expectEqual(core.VmStackArena.chunk_slots, arena.chunks[1].len);
+    try std.testing.expectEqual(@as(usize, 1), arena.used[1]);
+    try std.testing.expectEqual(
+        core.VmStackArena.first_chunk_bytes +
+            core.VmStackArena.chunk_slots * @sizeOf(core.JSValue),
+        account.allocated_bytes,
+    );
+    try std.testing.expectEqual(allocations_before_miss + 1, account.allocation_count);
+}
+
+test "VM stack arena large first carve retains the maximum chunk size" {
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    var arena: core.VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    const requested = core.VmStackArena.first_chunk_slots + 1;
+    const window = arena.carve(&account, requested) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(requested, window.len);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(core.VmStackArena.chunk_slots, arena.chunks[0].len);
+    try std.testing.expectEqual(
+        core.VmStackArena.chunk_slots * @sizeOf(core.JSValue),
+        account.allocated_bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+}
+
+test "VM stack arena oversized carve is rejected without state or accounting changes" {
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    var arena: core.VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    const before = arena.mark();
+    try std.testing.expect(arena.carve(&account, core.VmStackArena.chunk_slots + 1) == null);
+    try std.testing.expectEqual(before, arena.mark());
+    try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+}
+
+test "VM stack arena allocation failure is retryable and keeps accounting balanced" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = core.memory.MemoryAccount.init(failing_allocator.allocator());
+    var arena: core.VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+    const before = arena.mark();
+    try std.testing.expect(arena.carve(&account, 1) == null);
+    try std.testing.expectEqual(before, arena.mark());
+    try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+
+    failing_allocator.fail_index = std.math.maxInt(usize);
+    const retry = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), retry.len);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(core.VmStackArena.first_chunk_bytes, account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+
+    _ = arena.carve(&account, core.VmStackArena.first_chunk_slots - 1) orelse
+        return error.TestUnexpectedResult;
+    const full_first_mark = arena.mark();
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+    try std.testing.expect(arena.carve(&account, 1) == null);
+    try std.testing.expectEqual(full_first_mark, arena.mark());
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), arena.active);
+    try std.testing.expectEqual(@as(usize, 0), arena.chunks[1].len);
+    try std.testing.expectEqual(@as(usize, 0), arena.used[1]);
+    try std.testing.expectEqual(core.VmStackArena.first_chunk_bytes, account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+
+    failing_allocator.fail_index = std.math.maxInt(usize);
+    const second_retry = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), second_retry.len);
+    try std.testing.expectEqual(@as(usize, 2), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.active);
+    try std.testing.expectEqual(core.VmStackArena.chunk_slots, arena.chunks[1].len);
+    try std.testing.expectEqual(@as(usize, 1), arena.used[1]);
+    try std.testing.expectEqual(
+        core.VmStackArena.first_chunk_bytes +
+            core.VmStackArena.chunk_slots * @sizeOf(core.JSValue),
+        account.allocated_bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 2), account.allocation_count);
+
+    arena.deinit(&account);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+}
+
 test "runtime allocator facades share memory accounting" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -5063,6 +5204,94 @@ test "gc policy presets do not enable unimplemented concurrent collectors by def
 
     const low_latency = core.gc.Policy.forMode(.low_latency);
     try std.testing.expect(low_latency.callback_slice_budget_ns < default_policy.callback_slice_budget_ns);
+}
+
+test "process memory snapshot is needed exactly when a policy field consumes it" {
+    // The predicate decides whether every external allocation pays three
+    // openat plus a read and a close. It must answer true for exactly the four
+    // fields processMemoryRequest reads, so pin all of them individually rather
+    // than trusting the mode presets to stay as they are.
+    const default_policy: core.gc.Policy = .{};
+    try std.testing.expect(!default_policy.needsProcessMemorySnapshot());
+
+    try std.testing.expect(!core.gc.Policy.forMode(.balanced).needsProcessMemorySnapshot());
+    try std.testing.expect(!core.gc.Policy.forMode(.throughput).needsProcessMemorySnapshot());
+    try std.testing.expect(!core.gc.Policy.forMode(.low_latency).needsProcessMemorySnapshot());
+    try std.testing.expect(core.gc.Policy.forMode(.low_rss).needsProcessMemorySnapshot());
+
+    // Each consuming field on its own is enough, inside the default mode.
+    {
+        var policy: core.gc.Policy = .{};
+        policy.rss_soft_limit = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+    {
+        var policy: core.gc.Policy = .{};
+        policy.rss_hard_limit = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+    {
+        var policy: core.gc.Policy = .{};
+        policy.cgroup_soft_ratio_per_mille = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+    {
+        var policy: core.gc.Policy = .{};
+        policy.cgroup_hard_ratio_per_mille = 1;
+        try std.testing.expect(policy.needsProcessMemorySnapshot());
+    }
+
+    // The external limits are answered by the registry's own byte counter and
+    // must NOT drag the OS snapshot back in.
+    {
+        var policy: core.gc.Policy = .{};
+        policy.external_soft_limit = 1;
+        policy.external_hard_limit = 2;
+        try std.testing.expect(!policy.needsProcessMemorySnapshot());
+    }
+
+    // The gate reads the live policy, so flipping it on and back off again is
+    // observed both times rather than latching a stale answer.
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try std.testing.expect(!rt.gc.policy.needsProcessMemorySnapshot());
+    rt.gc.policy.rss_soft_limit = 1;
+    try std.testing.expect(rt.gc.policy.needsProcessMemorySnapshot());
+    rt.gc.policy.rss_soft_limit = null;
+    try std.testing.expect(!rt.gc.policy.needsProcessMemorySnapshot());
+}
+
+test "process memory gate preserves external accounting and still fires when consumed" {
+    // The gate sits after external accounting, so skipping the OS snapshot must
+    // not disturb the byte counter, and a policy that does consume the snapshot
+    // must still reach the identical decision.
+    if (builtin.os.tag != .linux) return;
+
+    {
+        var rt: core.JSRuntime = undefined;
+        try rt.init(std.testing.allocator, .{});
+        defer rt.deinit();
+        const before = rt.externalMemoryBytes();
+        var token = try rt.reportExternalAlloc(4096);
+        try std.testing.expectEqual(before + 4096, rt.externalMemoryBytes());
+        // Nothing consumes process memory here, so no rss request may appear.
+        try std.testing.expect(rt.gc.stats.last_request_reason != core.gc.RequestReason.rss_pressure);
+        token.release();
+    }
+
+    {
+        // An rss_soft_limit of one byte is always exceeded, so the slow path
+        // must run and raise the request exactly as before the gate existed.
+        var rt: core.JSRuntime = undefined;
+        try rt.init(std.testing.allocator, .{ .gc_policy = .{ .rss_soft_limit = 1 } });
+        defer rt.deinit();
+        const before = rt.externalMemoryBytes();
+        var token = try rt.reportExternalAlloc(4096);
+        try std.testing.expectEqual(before + 4096, rt.externalMemoryBytes());
+        try std.testing.expectEqual(core.gc.RequestReason.rss_pressure, rt.gc.stats.last_request_reason.?);
+        token.release();
+    }
 }
 
 test "gc process memory pressure policy maps rss and cgroup usage to major requests" {
@@ -9624,11 +9853,9 @@ test "stored symbol value preserves and releases across GC without external valu
     const symbol_atom = try rt.atoms.newValueSymbol("gc-external-rooted-symbol");
     const rooted_value = try rt.symbolValue(symbol_atom);
 
-    try std.testing.expect(!try rt.registerExternalValueSymbolRoot(rooted_value));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    rt.unregisterExternalValueSymbolRoot(rooted_value);
     rooted_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -10695,3 +10922,4 @@ test "fused multiply-subtract matches the reference limb for limb" {
         try std.testing.expectEqualSlices(Limb, reference, under_test);
     }
 }
+

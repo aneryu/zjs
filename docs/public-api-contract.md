@@ -47,8 +47,10 @@ of the current contract.
 ## Runtime And Context
 
 `JSRuntime` owns allocator-backed engine state, atom tables, GC state, public
-handle scopes, memory limits, interrupt hooks, opcode profiling state, and
-runtime cleanup.
+handle scopes, memory limits, interrupt hooks, legacy opcode-profiling state,
+and runtime cleanup. The profiling types remain public, but the current VM
+dispatcher does not populate per-opcode counts; this surface must not be
+presented as a working profiler until the execution scope is restored.
 
 `JSContext` owns a realm and exposes public helpers for:
 

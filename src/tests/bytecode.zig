@@ -2376,7 +2376,9 @@ test "resolve_variables empty finalizer removal is transactional across every al
     // No scope_make_ref appears in this topology, so the five tail ledgers are
     // deliberately absent. Keep the remaining transactional allocation
     // surface exact: every one was failed, checked unchanged, and retried.
-    try std.testing.expectEqual(@as(usize, 7), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 12), fail_offset);
 }
 
 test "resolve_variables: scope_put_var → put_var" {
@@ -4878,6 +4880,273 @@ test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
     try std.testing.expectEqual(op.return_undef, bc.code[2]);
 }
 
+test "resolve_variables large exact-scope index preserves nearest and outer binding order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("large-exact-scope");
+    const shadowed_atom = try rt.internAtom("shadowed");
+    const outer_only_atom = try rt.internAtom("outer_only");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(shadowed_atom);
+    defer rt.atoms.free(outer_only_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(shadowed_atom, .normal, 0, false, false);
+    _ = try fd.addScopeVar(outer_only_atom, .normal, 0, false, false);
+    const body_scope = try fd.appendScope(0);
+    fd.body_scope = body_scope;
+    fd.scope_level = body_scope;
+
+    var filler_atoms: [64]core.Atom = undefined;
+    var atom_buffer: [16]u8 = undefined;
+    for (&filler_atoms, 0..) |*slot, index| {
+        const filler_name = try std.fmt.bufPrint(&atom_buffer, "filler_{d}", .{index});
+        slot.* = try rt.internAtom(filler_name);
+        _ = try fd.addScopeVar(slot.*, .normal, body_scope, false, false);
+    }
+    defer for (filler_atoms) |filler_atom| rt.atoms.free(filler_atom);
+    const inner_idx = try fd.addScopeVar(shadowed_atom, .normal, body_scope, false, false);
+    try std.testing.expectEqual(@as(i32, 66), inner_idx);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], shadowed_atom, .little);
+    std.mem.writeInt(u16, input[5..7], @intCast(body_scope), .little);
+    input[7] = op.scope_get_var;
+    std.mem.writeInt(u32, input[8..12], outer_only_atom, .little);
+    std.mem.writeInt(u16, input[12..14], @intCast(body_scope), .little);
+    input[14] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(shadowed_atom);
+    try bc.retainAtomOperand(outer_only_atom);
+    // Exercise the same final scope topology that production lowers after
+    // `prepareCurrentBeforeChildren`, rather than appendScope's parser-time
+    // inherited heads.
+    try fd.rebuildFinalScopeLinks();
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    // The inner declaration is the exact-scope hit; outer_only deliberately
+    // misses the index and must retain the linked-chain fallback ordering.
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.get_loc8, 66, op.get_loc1, op.return_undef },
+        bc.code,
+    );
+}
+
+test "resolve_variables exact-scope index preserves linked prefixes and sentinels" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("exact-scope-prefixes");
+    const linked_atom = try rt.internAtom("linked-scope-zero");
+    const duplicate_atom = try rt.internAtom("same-scope-duplicate");
+    const parameter_atom = try rt.internAtom("parameter-scope-binding");
+    const body_atom = try rt.internAtom("body-scope-binding");
+    const unlinked_atom = try rt.internAtom("unlinked-function-name");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(linked_atom);
+    defer rt.atoms.free(duplicate_atom);
+    defer rt.atoms.free(parameter_atom);
+    defer rt.atoms.free(body_atom);
+    defer rt.atoms.free(unlinked_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    // QuickJS reserves scope 1 for the parameter environment. A function with
+    // parameter expressions gives it no parent and rebuildFinalScopeLinks()
+    // installs ARG_SCOPE_END there. The body then starts at scope 2.
+    _ = try fd.appendScope(-1);
+    const parameter_scope = try fd.appendScope(-1);
+    const body_scope = try fd.appendScope(0);
+    const empty_child_scope = try fd.appendScope(body_scope);
+    fd.has_parameter_expressions = true;
+    fd.body_scope = body_scope;
+    fd.scope_level = body_scope;
+
+    const linked_idx = try fd.addScopeVar(linked_atom, .normal, 0, true, false);
+    const parameter_idx = try fd.addScopeVar(parameter_atom, .normal, parameter_scope, true, false);
+    const body_idx = try fd.addScopeVar(body_atom, .normal, body_scope, true, false);
+    const older_duplicate_idx = try fd.addScopeVar(duplicate_atom, .normal, body_scope, true, false);
+    try std.testing.expectEqual(@as(i32, 0), linked_idx);
+    try std.testing.expectEqual(@as(i32, 1), parameter_idx);
+    try std.testing.expectEqual(@as(i32, 2), body_idx);
+    try std.testing.expectEqual(@as(i32, 3), older_duplicate_idx);
+
+    var filler_atoms: [62]core.Atom = undefined;
+    var atom_buffer: [24]u8 = undefined;
+    for (&filler_atoms, 0..) |*slot, index| {
+        const filler_name = try std.fmt.bufPrint(&atom_buffer, "prefix_filler_{d}", .{index});
+        slot.* = try rt.internAtom(filler_name);
+        _ = try fd.addScopeVar(slot.*, .normal, body_scope, false, false);
+    }
+    defer for (filler_atoms) |filler_atom| rt.atoms.free(filler_atom);
+
+    const newer_duplicate_idx = try fd.addScopeVar(duplicate_atom, .normal, body_scope, true, false);
+    try std.testing.expectEqual(@as(i32, 66), newer_duplicate_idx);
+
+    // Rebuild exactly as production does before resolution. The empty child
+    // now inherits the body head, whereas scope 1 ends at ARG_SCOPE_END.
+    try fd.rebuildFinalScopeLinks();
+
+    // add_func_var-style rows appear after the final graph exists and must
+    // remain absent from scopes[0].first. There is no linked row of this name,
+    // so resolution has to miss the cache and use flat newest-first fallback.
+    const unlinked_idx = try fd.appendVar(.{
+        .var_name = unlinked_atom,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .function_name,
+    });
+    try std.testing.expectEqual(@as(i32, 67), unlinked_idx);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 36;
+    const queries = [_]struct {
+        offset: usize,
+        op_id: u8,
+        atom_id: core.Atom,
+        scope: i32,
+    }{
+        .{ .offset = 0, .op_id = op.scope_get_var, .atom_id = linked_atom, .scope = 0 },
+        .{ .offset = 7, .op_id = op.scope_get_var, .atom_id = duplicate_atom, .scope = body_scope },
+        .{ .offset = 14, .op_id = op.scope_get_var, .atom_id = body_atom, .scope = empty_child_scope },
+        .{ .offset = 21, .op_id = op.scope_get_var, .atom_id = unlinked_atom, .scope = 0 },
+        .{ .offset = 28, .op_id = op.scope_get_var_undef, .atom_id = linked_atom, .scope = parameter_scope },
+    };
+    for (queries) |query| {
+        input[query.offset] = query.op_id;
+        std.mem.writeInt(u32, input[query.offset + 1 ..][0..4], query.atom_id, .little);
+        std.mem.writeInt(u16, input[query.offset + 5 ..][0..2], @intCast(query.scope), .little);
+        try bc.retainAtomOperand(query.atom_id);
+    }
+    input[35] = op.return_undef;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{
+            op.get_loc_check,
+            0,
+            0,
+            op.get_loc_check,
+            66,
+            0,
+            op.get_loc_check,
+            2,
+            0,
+            op.get_loc8,
+            67,
+            op.get_var_undef,
+            0,
+            0,
+            op.return_undef,
+        },
+        bc.code,
+    );
+    try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
+    try std.testing.expectEqual(linked_atom, fd.closure_var[0].var_name);
+}
+
+fn runExactScopeIndexResolveVariablesOomRetry(
+    cleanup_rt: *core.JSRuntime,
+    fail_offset: usize,
+) !bool {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = core.memory.MemoryAccount.init(failing.allocator());
+    var atoms = core.atom.AtomTable.init(&account);
+    defer atoms.deinit();
+
+    const name = try atoms.internString("exact-scope-index-oom-retry");
+    defer atoms.free(name);
+    const binding = try atoms.internString("exact-scope-index-oom-binding");
+    defer atoms.free(binding);
+
+    var fd = function_def.FunctionDef.init(&account, &atoms, name);
+    defer fd.deinit(cleanup_rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+    for (0..64) |_| {
+        _ = try fd.addScopeVar(binding, .normal, 0, false, false);
+    }
+    try fd.rebuildFinalScopeLinks();
+
+    var bc = bytecode.Bytecode.init(&account, &atoms, name);
+    defer bc.deinit(cleanup_rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], binding, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(binding);
+
+    const original_code_ptr = bc.code.ptr;
+    const original_code_capacity = bc.code_capacity;
+    const original_atom_ptr = bc.atom_operands.ptr;
+    const original_atom_capacity = bc.atom_operands_capacity;
+    const original_binding_refs = atoms.refCount(binding).?;
+
+    failing.fail_index = failing.alloc_index + fail_offset;
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    const first_result = pipeline.resolve_variables.run(&ctx);
+    const failed = if (first_result) |_| false else |err| switch (err) {
+        error.OutOfMemory => true,
+        else => return err,
+    };
+    failing.fail_index = std.math.maxInt(usize);
+
+    if (failed) {
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@intFromPtr(original_code_ptr), @intFromPtr(bc.code.ptr));
+        try std.testing.expectEqual(original_code_capacity, bc.code_capacity);
+        try std.testing.expectEqualSlices(u8, &input, bc.code);
+        try std.testing.expectEqual(@intFromPtr(original_atom_ptr), @intFromPtr(bc.atom_operands.ptr));
+        try std.testing.expectEqual(original_atom_capacity, bc.atom_operands_capacity);
+        try std.testing.expectEqualSlices(core.Atom, &.{binding}, bc.atom_operands);
+        try std.testing.expectEqual(original_binding_refs, atoms.refCount(binding).?);
+
+        // The same resolver context and FunctionDef must remain reusable after
+        // any injected allocation failure, including the exact-scope map.
+        try pipeline.resolve_variables.run(&ctx);
+    } else {
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+
+    try std.testing.expectEqualSlices(u8, &.{ op.get_loc8, 63, op.return_undef }, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{}, bc.atom_operands);
+    return failed;
+}
+
+test "resolve_variables exact-scope index is retryable across allocation failures" {
+    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer cleanup_rt.destroy();
+
+    var fail_offset: usize = 0;
+    while (try runExactScopeIndexResolveVariablesOomRetry(cleanup_rt, fail_offset)) {
+        fail_offset += 1;
+    }
+    try std.testing.expect(fail_offset > 0);
+}
+
 test "F10.2: resolve_labels selects push_i8 for signed 8-bit integer literals" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6694,7 +6963,9 @@ test "resolve_variables logical fold is transactional across every post-bind all
     }
     // The no-make-ref topology has six transactional allocations after
     // folding jump-target state into the CFG.
-    try std.testing.expectEqual(@as(usize, 6), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 11), fail_offset);
 }
 
 fn runTaggedLogicalPhaseOwnerAllocationFailure(
@@ -6800,7 +7071,9 @@ test "resolve_variables tagged logical labels are leak-free and retryable across
     }
     // Tagged-label binding contributes one allocation before the same six
     // no-make-ref phase-owner allocations.
-    try std.testing.expectEqual(@as(usize, 7), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 12), fail_offset);
 }
 
 test "resolve_labels null comparison strict_eq folds both constants with QuickJS source mapping" {
@@ -8018,7 +8291,9 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     body[10] = op.drop;
     body[11] = op.return_undef;
     try fd.appendByteCode(&body);
-    try fd.appendSourceLoc(2, 8, 5);
+    // pc 5 is an instruction boundary (just past the 5-byte push_atom_value):
+    // the P2-R1T source-loc entry contract rejects mid-instruction pcs.
+    try fd.appendSourceLoc(5, 8, 5);
     try fd.appendAtomOperand(name);
     _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{
@@ -8804,6 +9079,55 @@ test "stack_size compute reports the return-balance proof" {
     }
 }
 
+test "stack_size scratch stays on stack through 256 positions and falls back at 257" {
+    const op = bytecode.opcode.op;
+
+    var inline_code = [_]u8{op.nop} ** 256;
+    inline_code[inline_code.len - 1] = op.return_undef;
+    var fail_inline = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        try stack_size.compute(&inline_code, .{ .scratch_allocator = fail_inline.allocator() }),
+    );
+    try std.testing.expect(!fail_inline.has_induced_failure);
+
+    var fallback_code = [_]u8{op.nop} ** 257;
+    fallback_code[fallback_code.len - 1] = op.return_undef;
+    var fail_fallback = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        stack_size.compute(&fallback_code, .{ .scratch_allocator = fail_fallback.allocator() }),
+    );
+    try std.testing.expect(fail_fallback.has_induced_failure);
+
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        try stack_size.compute(&fallback_code, .{ .scratch_allocator = std.testing.allocator }),
+    );
+}
+
+test "stack_size allocation-free LIFO handles multiple pending successors" {
+    const op = bytecode.opcode.op;
+
+    // Each conditional seeds a distinct return target while fall-through
+    // reaches the next conditional. Four target PCs are therefore pending
+    // simultaneously before the LIFO starts draining them.
+    const code = [_]u8{
+        op.push_1,       op.if_false8,    10,
+        op.push_1,       op.if_false8,    8,
+        op.push_1,       op.if_false8,    6,
+        op.push_1,       op.if_false8,    4,
+        op.return_undef, op.return_undef, op.return_undef,
+        op.return_undef,
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        try stack_size.compute(&code, .{ .scratch_allocator = failing.allocator() }),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "stack verifier and finalize reject reachable end edges" {
     const op = bytecode.opcode.op;
 
@@ -9306,7 +9630,9 @@ fn populateFunctionDefForFinalizeFailure(
     body[9] = op.drop;
     body[10] = op.return_undef;
     try fd.appendByteCode(&body);
-    try fd.appendSourceLoc(2, 8, 5);
+    // pc 5 is an instruction boundary (just past the 5-byte push_atom_value):
+    // the P2-R1T source-loc entry contract rejects mid-instruction pcs.
+    try fd.appendSourceLoc(5, 8, 5);
     try fd.appendAtomOperand(name);
     _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{ .var_name = arg_name, .scope_level = 0, .is_lexical = false });
@@ -9389,4 +9715,782 @@ test "createFunctionBytecode exhaustively rolls back every precommit allocation 
         runFunctionBytecodeFinalizeOomLifecycle,
         .{},
     );
+}
+
+// P2-R1T: an injected OOM anywhere inside phase finalization (including the
+// code/atom trim allocations) must leave the transactional source-loc slots
+// untouched — the streaming remap commits them only at the no-fail install
+// boundary. checkAllAllocationFailures sweeps every allocation index, which
+// is strictly stronger than injecting at the trims alone.
+fn phase2SourceSlotInvariantRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    // push_i32@0 (5) | line_num@5 (5, dropped by the write pass -> forces the
+    // exact-fit trim allocation) | goto@10 -> 16 (terminal one-past-the-end
+    // relocation) | return_undef@15 (unreachable -> dead-range publish).
+    var code = [_]u8{
+        op.push_i32,     1,  0, 0, 0,
+        op.line_num,     7,  0, 0, 0,
+        op.goto,         16, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    try function.appendSourceLoc(10, 3, 1);
+    try function.appendSourceLoc(16, 4, 1);
+    const original_pcs = [_]u32{ 0, 5, 10, 16 };
+
+    // Phase 2 only: later phases commit their own slot rewrites on success,
+    // so the untouched-on-failure invariant is a phase-2 contract.
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    bytecode.pipeline.resolve_variables.run(&resolve_ctx) catch |err| {
+        try std.testing.expectEqual(original_pcs.len, function.source_loc_slots.len);
+        for (function.source_loc_slots, original_pcs) |slot, expected_pc| {
+            try std.testing.expectEqual(expected_pc, slot.pc);
+        }
+        return err;
+    };
+    // Success: the commit remapped every slot exactly once (push@0 -> 0;
+    // the dropped line_num@5 and the goto@10 both land at output pc 5; the
+    // one-past-the-end marker takes the terminal pc 10).
+    const remapped_pcs = [_]u32{ 0, 5, 5, 10 };
+    try std.testing.expectEqual(remapped_pcs.len, function.source_loc_slots.len);
+    for (function.source_loc_slots, remapped_pcs) |slot, expected_pc| {
+        try std.testing.expectEqual(expected_pc, slot.pc);
+    }
+}
+
+test "phase-2 trim OOM leaves transactional source-loc slots untouched (P2-R1T)" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2SourceSlotInvariantRun, .{});
+}
+
+test "P2-R1T relocation: shared goto target maps once for both sites" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     1,  0, 0, 0,
+        op.if_true,      20, 0, 0, 0,
+        op.line_num,     7,  0, 0, 0,
+        op.goto,         25, 0, 0, 0,
+        op.goto,         25, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 21), function.code.len);
+    try std.testing.expectEqual(op.if_true, function.code[5]);
+    try std.testing.expectEqual(@as(u32, 15), std.mem.readInt(u32, function.code[6..][0..4], .little));
+    try std.testing.expectEqual(op.goto, function.code[10]);
+    try std.testing.expectEqual(@as(u32, 20), std.mem.readInt(u32, function.code[11..][0..4], .little));
+    try std.testing.expectEqual(op.goto, function.code[15]);
+    try std.testing.expectEqual(@as(u32, 20), std.mem.readInt(u32, function.code[16..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[20]);
+}
+
+test "P2-R1T relocation: goto onto a dropped line_num lands on the next kept instruction" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.line_num,     3,  0, 0, 0,
+        op.goto,         10, 0, 0, 0,
+        op.line_num,     4,  0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), function.code.len);
+    try std.testing.expectEqual(op.goto, function.code[0]);
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, function.code[1..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[5]);
+}
+
+test "P2-R1T relocation: goto over a dead range maps to the reachable landing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.goto,         6,               0, 0, 0,
+        op.return_undef, op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), function.code.len);
+    try std.testing.expectEqual(op.goto, function.code[0]);
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, function.code[1..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[5]);
+}
+
+test "P2-R1T relocation: multiple source slots on one pc all remap and survive" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.line_num,     9,  0, 0, 0,
+        op.push_i32,     42, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(5, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    try function.appendSourceLoc(5, 3, 1);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 3), function.source_loc_slots.len);
+    const expected_lines = [_]i32{ 1, 2, 3 };
+    for (function.source_loc_slots, expected_lines) |slot, expected_line| {
+        try std.testing.expectEqual(@as(u32, 0), slot.pc);
+        try std.testing.expectEqual(expected_line, slot.line_num);
+    }
+}
+
+test "P2-R1T relocation: descending source slot pcs fail closed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     7, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    function.source_loc_slots[0].pc = 5;
+    function.source_loc_slots[1].pc = 0;
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try std.testing.expectError(error.InvalidBytecode, bytecode.pipeline.resolve_variables.run(&resolve_ctx));
+
+    try std.testing.expectEqual(@as(u32, 5), function.source_loc_slots[0].pc);
+    try std.testing.expectEqual(@as(u32, 0), function.source_loc_slots[1].pc);
+}
+
+test "P2-R1T relocation: mid-instruction source slot pc fails closed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     7, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    function.source_loc_slots[0].pc = 2;
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try std.testing.expectError(error.InvalidBytecode, bytecode.pipeline.resolve_variables.run(&resolve_ctx));
+
+    try std.testing.expectEqual(@as(u32, 2), function.source_loc_slots[0].pc);
+}
+
+test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full backing across replacement and deinit" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-replacement");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const pre_install_refs = rt.atoms.refCount(name).?;
+
+    const first_code = [_]u8{ 1, 2, 3, 4, 5 };
+    const first_code_backing = try rt.memory.alloc(u8, 16);
+    @memcpy(first_code_backing[0..first_code.len], &first_code);
+    bc.installCodeWithCapacity(first_code_backing[0..first_code.len], first_code_backing.len);
+    try std.testing.expectEqual(@as(usize, 5), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 16), bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &first_code, bc.code);
+
+    const first_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
+    for (first_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    bc.installAtomOperandsWithCapacity(first_atom_backing[0..3], first_atom_backing.len);
+    try std.testing.expectEqual(@as(usize, 3), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 8), bc.atom_operands_capacity);
+    try std.testing.expectEqual(pre_install_refs + 3, rt.atoms.refCount(name).?);
+
+    const second_code = [_]u8{ 9, 8 };
+    const second_code_backing = try rt.memory.alloc(u8, 6);
+    @memcpy(second_code_backing[0..second_code.len], &second_code);
+    const second_atom_backing = try rt.memory.alloc(core.atom.Atom, 6);
+    for (second_atom_backing[0..2]) |*slot| slot.* = rt.atoms.dup(name);
+
+    for (bc.atom_operands) |old| rt.atoms.free(old);
+    bc.installAtomOperandsWithCapacity(second_atom_backing[0..2], second_atom_backing.len);
+    bc.installCodeWithCapacity(second_code_backing[0..second_code.len], second_code_backing.len);
+
+    try std.testing.expectEqual(@as(usize, 2), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 6), bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &second_code, bc.code);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 6), bc.atom_operands_capacity);
+    try std.testing.expectEqual(pre_install_refs + 2, rt.atoms.refCount(name).?);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "capacity-carry install with zero used length still owns and frees the backing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-zero-used");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+
+    const code_backing = try rt.memory.alloc(u8, 12);
+    bc.installCodeWithCapacity(code_backing.ptr[0..0], code_backing.len);
+    const atom_backing = try rt.memory.alloc(core.atom.Atom, 4);
+    bc.installAtomOperandsWithCapacity(atom_backing.ptr[0..0], atom_backing.len);
+
+    try std.testing.expectEqual(@as(usize, 0), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 12), bc.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 4), bc.atom_operands_capacity);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "phase-3 exact-fit replacement frees the carried capacity once and releases atom refs once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-phase-3-replacement");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+
+    const carried_code = [_]u8{ 1, 3, 5, 7, 9 };
+    const carried_code_backing = try rt.memory.alloc(u8, 16);
+    @memcpy(carried_code_backing[0..carried_code.len], &carried_code);
+    bc.installCodeWithCapacity(carried_code_backing[0..carried_code.len], carried_code_backing.len);
+
+    const carried_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
+    for (carried_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    bc.installAtomOperandsWithCapacity(carried_atom_backing[0..3], carried_atom_backing.len);
+    const carried_refs = rt.atoms.refCount(name).?;
+
+    const fresh_code = try rt.memory.alloc(u8, bc.code.len);
+    @memcpy(fresh_code, bc.code);
+    const fresh_atoms = try rt.memory.alloc(core.atom.Atom, bc.atom_operands.len);
+    for (fresh_atoms) |*slot| slot.* = rt.atoms.dup(name);
+    const bytes_with_both_generations = rt.memory.allocated_bytes;
+    const count_with_both_generations = rt.memory.allocation_count;
+
+    for (bc.atom_operands) |old| rt.atoms.free(old);
+    bc.installCode(fresh_code);
+    bc.installAtomOperands(fresh_atoms);
+
+    try std.testing.expectEqual(carried_refs, rt.atoms.refCount(name).?);
+    const carried_backing_bytes =
+        16 * @sizeOf(u8) + 8 * @sizeOf(core.atom.Atom);
+    try std.testing.expectEqual(
+        bytes_with_both_generations - carried_backing_bytes,
+        rt.memory.allocated_bytes,
+    );
+    try std.testing.expectEqual(count_with_both_generations - 2, rt.memory.allocation_count);
+    try std.testing.expectEqual(
+        base_bytes + fresh_code.len * @sizeOf(u8) + fresh_atoms.len * @sizeOf(core.atom.Atom),
+        rt.memory.allocated_bytes,
+    );
+    try std.testing.expectEqual(base_count + 2, rt.memory.allocation_count);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "Phase2Builder grows geometrically, moves atom ownership with the backing, and deinitUncommitted releases everything" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("phase-2-builder-growth");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var builder = try bytecode.pipeline_resolve_variables.Phase2Builder.init(
+        &rt.memory,
+        &rt.atoms,
+        4,
+        2,
+        1,
+    );
+    var builder_live = true;
+    defer if (builder_live) builder.deinitUncommitted();
+
+    const first_code = [_]u8{ 1, 2, 3, 4 };
+    builder.appendCodeAssumeCapacity(&first_code);
+    builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 7 });
+    const refs_before_grow = rt.atoms.refCount(name).?;
+    try std.testing.expectEqual(base_refs + 2, refs_before_grow);
+
+    try builder.ensureAdditional(8, 3, 2);
+    try std.testing.expectEqual(@as(usize, 12), builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 5), builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 3), builder.jump_capacity);
+    try std.testing.expectEqual(builder.code_capacity, builder.code.len);
+    try std.testing.expectEqual(builder.atom_capacity, builder.atom_operands.len);
+    try std.testing.expectEqual(builder.jump_capacity, builder.jump_sites.len);
+    try std.testing.expectEqualSlices(u8, &first_code, builder.code[0..builder.code_len]);
+    try std.testing.expectEqual(name, builder.atom_operands[0]);
+    try std.testing.expectEqual(name, builder.atom_operands[1]);
+    try std.testing.expectEqual(refs_before_grow, rt.atoms.refCount(name).?);
+
+    const second_code = [_]u8{ 5, 6, 7, 8, 9, 10, 11, 12 };
+    builder.appendCodeAssumeCapacity(&second_code);
+    for (0..3) |_| builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 11 });
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 19 });
+
+    try std.testing.expectEqual(@as(usize, 12), builder.code_len);
+    try std.testing.expectEqual(@as(usize, 5), builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 3), builder.jump_len);
+    try std.testing.expectEqual(@as(usize, 7), builder.jump_sites[0].operand_pos);
+
+    builder.deinitUncommitted();
+    builder_live = false;
+    try std.testing.expectEqual(@as(usize, 0), builder.code.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.code_len);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_sites.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_len);
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+
+    var zero_builder = try bytecode.pipeline_resolve_variables.Phase2Builder.init(
+        &rt.memory,
+        &rt.atoms,
+        0,
+        0,
+        0,
+    );
+    var zero_builder_live = true;
+    defer if (zero_builder_live) zero_builder.deinitUncommitted();
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.code.len);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.jump_sites.len);
+
+    try zero_builder.ensureAdditional(1, 1, 1);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.jump_capacity);
+    zero_builder.appendCodeAssumeCapacity(&.{42});
+    zero_builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    zero_builder.appendJumpAssumeCapacity(.{ .operand_pos = 23 });
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.code_len);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.jump_len);
+
+    zero_builder.deinitUncommitted();
+    zero_builder_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+fn phase2ProbeBranchGrowRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-grow-x");
+    defer rt.atoms.free(x);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Mirror addEvalVariables' demand-created dynamic environment objects: these
+    // rows live outside the scope chain, so probe eligibility comes solely from
+    // the recorded indices.
+    fd.var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    fd.arg_var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{0} ** 19;
+    code[0] = op.push_i32;
+    std.mem.writeInt(i32, code[1..5], 1, .little);
+    code[5] = op.if_true;
+    std.mem.writeInt(u32, code[6..10], 18, .little);
+    code[10] = op.scope_get_var;
+    std.mem.writeInt(u32, code[11..15], x, .little);
+    std.mem.writeInt(u16, code[15..17], 0, .little);
+    code[17] = op.drop;
+    code[18] = op.return_undef;
+    try bc.setCode(&code);
+    try bc.retainAtomOperand(x);
+    try bc.appendSourceLoc(0, 1, 1);
+    try bc.appendSourceLoc(10, 2, 1);
+    try bc.appendSourceLoc(18, 3, 1);
+
+    var original_code: [19]u8 = undefined;
+    @memcpy(&original_code, bc.code);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    const original_atom_operands = [_]core.atom.Atom{bc.atom_operands[0]};
+    try std.testing.expectEqual(@as(usize, 3), bc.source_loc_slots.len);
+    const original_slot_pcs = [_]u32{
+        bc.source_loc_slots[0].pc,
+        bc.source_loc_slots[1].pc,
+        bc.source_loc_slots[2].pc,
+    };
+    try std.testing.expectEqualSlices(u32, &.{ 0, 10, 18 }, &original_slot_pcs);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    pipeline.resolve_variables.run(&ctx) catch |err| {
+        // P2-S1 transactional contract: any injected failure — including one
+        // landing after the builder has already grown past the input capacity —
+        // leaves the input artifacts item-identical and every initialized
+        // output atom prefix released.
+        try std.testing.expectEqualSlices(u8, &original_code, bc.code);
+        try std.testing.expectEqualSlices(core.atom.Atom, &original_atom_operands, bc.atom_operands);
+        try std.testing.expectEqual(original_slot_pcs.len, bc.source_loc_slots.len);
+        for (bc.source_loc_slots, original_slot_pcs) |slot, expected_pc| {
+            try std.testing.expectEqual(expected_pc, slot.pc);
+        }
+        try std.testing.expectEqual(pre_run_refs, rt.atoms.refCount(x).?);
+        return err;
+    };
+
+    var expected = [_]u8{0} ** 41;
+    expected[0] = op.push_i32;
+    std.mem.writeInt(i32, expected[1..5], 1, .little);
+    expected[5] = op.if_true;
+    std.mem.writeInt(u32, expected[6..10], 40, .little);
+    expected[10] = op.get_loc;
+    std.mem.writeInt(u16, expected[11..13], 0, .little);
+    expected[13] = op.with_get_var;
+    std.mem.writeInt(u32, expected[14..18], x, .little);
+    std.mem.writeInt(u32, expected[18..22], 39, .little);
+    expected[22] = 0;
+    expected[23] = op.get_loc;
+    std.mem.writeInt(u16, expected[24..26], 1, .little);
+    expected[26] = op.with_get_var;
+    std.mem.writeInt(u32, expected[27..31], x, .little);
+    std.mem.writeInt(u32, expected[31..35], 39, .little);
+    expected[35] = 0;
+    expected[36] = op.get_var;
+    std.mem.writeInt(u16, expected[37..39], 0, .little);
+    expected[39] = op.drop;
+    expected[40] = op.return_undef;
+
+    try std.testing.expectEqual(@as(usize, 41), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > code.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expect(bc.atom_operands.len > original_atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(x, bc.atom_operands[1]);
+    // The output carries three label operands instead of the input's one: the
+    // patched branch plus two probes whose shared done_pc is already final in
+    // output pc space, so those probe labels are not patchable jump sites.
+    try std.testing.expectEqual(@as(u32, 40), std.mem.readInt(u32, bc.code[6..10], .little));
+    try std.testing.expectEqual(@as(u32, 39), std.mem.readInt(u32, bc.code[18..22], .little));
+    try std.testing.expectEqual(@as(u32, 39), std.mem.readInt(u32, bc.code[31..35], .little));
+    const expected_slot_pcs = [_]u32{ 0, 10, 40 };
+    try std.testing.expectEqual(expected_slot_pcs.len, bc.source_loc_slots.len);
+    for (bc.source_loc_slots, expected_slot_pcs) |slot, expected_pc| {
+        try std.testing.expectEqual(expected_pc, slot.pc);
+    }
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+}
+
+fn phase2DirectEvalConflictGrowRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-conflict-x");
+    defer rt.atoms.free(x);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.is_eval = true;
+    fd.is_direct_eval = true;
+    // The outer lexical binding the direct eval's `var x` collides with.
+    _ = try fd.addClosureVar(.{
+        .closure_type = .ref,
+        .is_lexical = true,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+    try fd.appendGlobalVar(.{
+        .cpool_idx = -1,
+        .scope_level = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    defer bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    const code = [_]u8{op.return_undef};
+    try bc.setCode(&code);
+
+    const original_code = [1]u8{bc.code[0]};
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    pipeline.resolve_variables.run(&ctx) catch |err| {
+        try std.testing.expectEqualSlices(u8, &original_code, bc.code);
+        try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+        try std.testing.expectEqual(pre_run_refs, rt.atoms.refCount(x).?);
+        return err;
+    };
+
+    var expected = [_]u8{0} ** 7;
+    expected[0] = op.throw_error;
+    std.mem.writeInt(u32, expected[1..5], x, .little);
+    expected[5] = 1; // JS_THROW_VAR_REDECL
+    expected[6] = op.return_undef;
+    try std.testing.expectEqual(@as(usize, 7), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > code.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+}
+
+test "P2-S1 grow: dynamic-env probes grow phase-2 output beyond the input" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-grow-x");
+    defer rt.atoms.free(x);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(x).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    var fd_live = true;
+    defer if (fd_live) fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Mirror addEvalVariables' demand-created dynamic environment objects: these
+    // rows live outside the scope chain, so probe eligibility comes solely from
+    // the recorded indices.
+    fd.var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    fd.arg_var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    var expected = [_]u8{0} ** 30;
+    expected[0] = op.get_loc;
+    std.mem.writeInt(u16, expected[1..3], 0, .little);
+    expected[3] = op.with_get_var;
+    std.mem.writeInt(u32, expected[4..8], x, .little);
+    std.mem.writeInt(u32, expected[8..12], 29, .little);
+    expected[12] = 0;
+    expected[13] = op.get_loc;
+    std.mem.writeInt(u16, expected[14..16], 1, .little);
+    expected[16] = op.with_get_var;
+    std.mem.writeInt(u32, expected[17..21], x, .little);
+    std.mem.writeInt(u32, expected[21..25], 29, .little);
+    expected[25] = 0;
+    expected[26] = op.get_var;
+    std.mem.writeInt(u16, expected[27..29], 0, .little);
+    expected[29] = op.return_undef;
+    try std.testing.expectEqual(@as(usize, 30), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > input.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expect(bc.atom_operands.len > 1);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(x, bc.atom_operands[1]);
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+
+    // The phase-2 builder carries its oversized growth backing into Bytecode;
+    // explicit teardown proves that backing and its atom prefix free once.
+    bc.deinit(rt);
+    bc_live = false;
+    fd.deinit(rt);
+    fd_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(x).?);
+}
+
+test "P2-S1 grow: direct-eval lexical redeclaration prepends throw and grows atom operands" {
+    try phase2DirectEvalConflictGrowRun(std.testing.allocator);
+}
+
+test "P2-S1 grow: probe labels and patched branch survive single-pass growth" {
+    // This covers jump-operand growth in emitted code (one input label operand
+    // becomes three output label operands) and patches a branch across a grown
+    // buffer. Patchable sites are bounded by the input label census because
+    // probe labels are finalized output-space operands; Phase2Builder's unit
+    // test above covers jump-array growth mechanics directly.
+    try phase2ProbeBranchGrowRun(std.testing.allocator);
+}
+
+test "P2-S1 grow OOM matrix: probe/branch fixture is transactional across every allocation failure" {
+    // The sweep reaches post-growth allocation indices, so a later OOM also
+    // proves rollback releases every already-initialized output atom prefix.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2ProbeBranchGrowRun, .{});
+}
+
+test "P2-S1 grow OOM matrix: direct-eval conflict fixture is transactional across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2DirectEvalConflictGrowRun, .{});
+}
+
+test "P2-S1: line_num-only input shrinks to a zero-used capacity-carried backing through phase 2" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 5;
+    input[0] = op.line_num;
+    std.mem.writeInt(u32, input[1..5], 1, .little);
+    try bc.setCode(&input);
+
+    // line_num is dropped without consuming the input-sized initial backing,
+    // exercising the production used=0/capacity>0 install and free path.
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+    try pipeline.resolve_variables.run(&ctx);
+    try std.testing.expectEqual(@as(usize, 0), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 5), bc.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
 }

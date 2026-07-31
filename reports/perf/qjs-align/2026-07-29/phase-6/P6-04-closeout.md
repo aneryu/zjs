@@ -3,7 +3,43 @@
 - **日期**：2026-07-30
 - **起点**：`ca31bb9c`（P6-04a 基线）　**终点**：`5fdb3fc3`（含 d3 档案）
 - **裁决**：**关闭。**一个数量级错误的算法路径已收敛为普通的实现常数差距。
-  剩余的 `div_8x4 = 2.58x` **已经换了归属**（allocator 层），不再在 BigInt 内处理
+  剩余的 `div_8x4 = 2.58x` **已经换了归属**，不再在 BigInt 内处理
+
+> **归因更正（2026-07-30，依据 `phase-7/P7-00-allocator-churn/`）**
+>
+> 本档案原将 `div_8x4` 的剩余成本记为
+>
+> ```text
+> div_8x4 residual = SmallObjectSlab arena churn
+> ```
+>
+> 该表述不准确，正确表述是
+>
+> ```text
+> div_8x4 residual =
+> shared immediate-empty-arena policy
+> × zjs-specific transient scratch class occupancy
+> ```
+>
+> 前半段是**两侧共享**的 allocator policy：arena 4096 / arena 头 40 B / block 头 8 B /
+> `block_sizes` 表 / 类映射公式 / 每 arena 块数 / 空 arena 立即释放臂（`quickjs.c:1626-1630`）
+> 与后端 glibc `malloc` 逐项相同，实测 qjs 的 churn 率相同或更高。后半段才是 zjs-only：
+> `bigint.zig:742` 的 `u = alloc(Limb, na + 1)` 在 `na = 8` 时为 72 B 载荷 → **80 B class**，
+> 该类在 zjs 中没有其他驻留租户；qjs 的对应临时对象是 10-limb `JSBigInt`（88 B 载荷）
+> → **96 B class**，该类有驻留。**这是 BigInt 表示与尺寸类占用的偶合，不是 allocator 缺陷。**
+>
+> P7-00 已证明该偶合不具备跨类型普遍性，因此**不能升级为 allocator 政策修改**：
+> 下文第 5、7 节提出的 `SmallObjectSlab empty-arena retention` 路线
+> **已于 2026-07-30 永久关闭，P7-01 不开**。原位对照（保留 411 个 `Uint8Array(72)`
+> 填充 80 B class，不改除法一行）量得该项值 834 insn / 147 cyc / **37.7 ns 每次除法**，
+> 占 `div_8x4` 全部 zjs−qjs 差距的 **39.9%**（96.0 ns → 57.6 ns）。
+>
+> BigInt 主线**维持关闭**。411 驻留对象是因果证明而非可部署方案；填充特定 class、
+> 依 free-list 历史选路、全局保留 empty arena、BigInt 专用常驻对象四类修复分别
+> 把尺寸类偶然性写进算法、让同一输入依赖运行时历史、主动偏离 qjs、或仍是人为维持
+> allocator 状态。**只有出现不依赖 size class 与 allocator 历史的方案**——例如有严格
+> 容量上限、可重入语义清楚的通用临时 workspace，且跨多个 BigInt 形态稳定获益——
+> 才值得重开。当前没有这个前提。
 
 ---
 
@@ -66,7 +102,7 @@ per-limb instructions −47.6%，cycles −18.3%
 | `div_16x8` | **1.21x** | 大尺寸核心算法**已基本对齐，停止** |
 | `mod_8x4` | **1.54x** | 已进入可接受范围；d3 在 JS 层中性说明其剩余成本**不在 multiply-subtract** |
 | `div_8x1` | **1.93x** | 单 limb 已是线性扫描，剩余是**固定分配与 JS publication** |
-| `div_8x4` | **2.58x** | 唯一仍超 2x 的主要形态；**d2c sweep 已证**继续调 BigInt scratch 拓扑会落入 `SmallObjectSlab` size-class 彩票，**不应在 BigInt 内部规避** |
+| `div_8x4` | **2.58x** | 唯一仍超 2x 的主要形态；**d2c sweep 已证**继续调 BigInt scratch 拓扑会落入 `SmallObjectSlab` size-class 彩票，**不应在 BigInt 内部规避**。<br>**2026-07-30 更正**：其剩余成本 = 共享的 immediate-empty-arena policy × zjs-only 的 scratch 尺寸类占用（`u` → 无驻留的 80 B class），**不是** zjs 的 churn 机制劣于 qjs；见文首归因更正与 `phase-7/P7-00-allocator-churn/` |
 
 ⚠️ **不得因为 `div_8x4` 仍为 2.58x 而把 P6-04 拆成更多算术小刀。**
 剩余问题已经换了归属。
@@ -83,7 +119,11 @@ per-limb instructions −47.6%，cycles −18.3%
 
 以上保留为 issue，**不占下一阶段主线**。
 
-## 5. 真正值得继续的：独立 allocator 课题
+## 5. ~~真正值得继续的：独立 allocator 课题~~ —— **已于 2026-07-30 永久关闭**
+
+> 本节的判断在当时是合理的，但已被 P7-00 推翻：churn 是**两侧共享**的行为，
+> qjs 的 churn 率相同或更高，因此不存在可对齐的 allocator 缺陷。
+> **不开 P7-01。**下面的原文保留以便审计，不再作为路线。
 
 ```text
 SmallObjectSlab empty-arena retention
@@ -119,7 +159,12 @@ d2c 已证明这一行为可以占：
 快照的目的**不是刷新 policy baseline** —— 经过 global write、call/return、
 BigInt mul/div 的多轮改动，原始优先级已经失效，需要重新排序。
 
-## 7. 若 allocator churn 成为下一大项：`P7-00` 的前置条件
+## 7. ~~若 allocator churn 成为下一大项：`P7-00` 的前置条件~~ —— **已执行，结论为否**
+
+> P7-00 已按本节的前置条件执行完毕，裁决 **does not generalise → permanently close**：
+> 跨类型扫描（21 个短命分配尺寸）显示两侧都 churn 且 qjs 相同或更高，
+> 普通对象分配两侧都不 churn。**本节末尾「若跨类型审计显示 churn 只出现在少数合成形态，
+> 关闭 allocator 路线」的条件已经成立，路线关闭。**下面的原文保留以便审计。
 
 第一阶段**只画像，不改释放策略**。矩阵至少覆盖：
 

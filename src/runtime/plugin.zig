@@ -2644,6 +2644,97 @@ test "runtime Plugin closes only after synchronous wrapper callbacks release the
     try std.testing.expectEqual(@as(usize, 1), state.close_count);
 }
 
+test "runtime Plugin cycle finalizer skips condemned Realm and clears remaining class slots" {
+    const State = struct {
+        finalizer_calls: usize = 0,
+        close_count: usize = 0,
+
+        const type_id = ffi.HostTypeId.named("test.RuntimeOpaqueCondemnedRealm");
+        var active: ?*@This() = null;
+
+        fn finalize(_: ?*anyopaque, object: ffi.OpaqueHostObject) callconv(.c) void {
+            const self = active orelse return;
+            if (object.ptr == @as(*anyopaque, @ptrCast(self)) and
+                object.type_id.value == type_id.value)
+            {
+                self.finalizer_calls += 1;
+            }
+        }
+
+        fn observeClose(_: *InstalledPlugin) void {
+            const self = active orelse return;
+            self.close_count += 1;
+        }
+    };
+    const TestPlugin = ffi.Plugin("runtime-opaque-condemned-realm-test", .{
+        ffi.hostObject("RuntimeOpaqueCondemnedRealm", State.type_id, .{
+            .owner = .js,
+            .finalizer = State.finalize,
+        }),
+    });
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Publication order is load-bearing for the regression: the condemned
+    // Realm must be the raw context-list head before the still-owned Realm.
+    const dead = try zjs.JSContext.create(rt);
+    var dead_owner_live = true;
+    defer if (dead_owner_live) dead.destroy();
+    const dead_core = dead.core;
+
+    const live = try zjs.JSContext.create(rt);
+    defer live.destroy();
+    const constructing = try core.RealmContext.createConstructingWithOptions(rt, .{});
+    defer constructing.destroy();
+
+    var state = State{};
+    State.active = &state;
+    defer State.active = null;
+
+    const plugin = try InstalledPlugin.create(rt, "<opaque-condemned-realm>", TestPlugin.descriptor(), null);
+    var staging_owner_live = true;
+    defer if (staging_owner_live) plugin.release();
+    plugin.close_observer = State.observeClose;
+    try installHostClasses(dead.core, plugin);
+    const class_id = plugin.host_classes[0].class_id;
+
+    const sentinel = try core.Object.create(rt, core.class.ids.object, null);
+    const sentinel_value = sentinel.value();
+    defer sentinel_value.free(rt);
+    try live.core.setClassPrototype(class_id, sentinel);
+    try constructing.setClassPrototype(class_id, sentinel);
+    try std.testing.expectEqual(sentinel, live.core.classPrototypeObject(class_id).?);
+    try std.testing.expectEqual(sentinel, constructing.classPrototypeObject(class_id).?);
+
+    const wrapper = try createOpaqueObjectValue(
+        dead.core,
+        plugin,
+        ffi.OpaqueHostObject.from(@ptrCast(&state), State.type_id),
+    );
+    const wrapper_atom = try rt.internAtom("__opaqueCondemnedRealmWrapper");
+    defer rt.atoms.free(wrapper_atom);
+    const dead_global = try dead.globalObject();
+    try dead_global.defineOwnProperty(rt, wrapper_atom, core.Descriptor.data(wrapper, true, true, true));
+    wrapper.free(rt);
+
+    // Leave the wrapper in the dead Realm as the plugin's only artifact owner.
+    plugin.release();
+    staging_owner_live = false;
+
+    dead.destroy();
+    dead_owner_live = false;
+    try std.testing.expectEqual(dead_core, rt.firstContext().?);
+
+    try std.testing.expect(rt.runObjectCycleRemoval() > 0);
+    try std.testing.expectEqual(live.core, rt.firstContext().?);
+    try std.testing.expect(live.core.classPrototypeObject(class_id) == null);
+    try std.testing.expect(constructing.classPrototypeObject(class_id) == null);
+    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 1), state.close_count);
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+}
+
 test "runtime Plugin runtime destroy does not repeat synchronous opaque wrapper finalizers" {
     const State = struct {
         finalizer_calls: usize = 0,

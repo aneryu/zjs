@@ -1,0 +1,3014 @@
+{
+  "meta": {
+    "pmu": "armv8_pmuv3_1",
+    "cpu": 19,
+    "samples": 8,
+    "zjs": "/home/aneryu/worktrees/zjs-p7-80-uri/.build-a/out/bin/zjs",
+    "qjs": "/home/aneryu/quickjs/qjs",
+    "groups": {
+      "stall": [
+        "instructions",
+        "cycles",
+        "stall_backend",
+        "stall_backend_mem"
+      ],
+      "l1d": [
+        "instructions",
+        "cycles",
+        "l1d_cache",
+        "l1d_cache_refill"
+      ],
+      "outer": [
+        "instructions",
+        "cycles",
+        "ll_cache_miss_rd",
+        "br_mis_pred_retired"
+      ]
+    },
+    "mode": "counting (no -F, no sampling)"
+  },
+  "cases": {
+    "p780_L0_skeleton": {
+      "script": ".tmp/p780-scripts/p780_L0_skeleton.js",
+      "sourceSha256": "de9830e6f7548cbb",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 72472466,
+            "cycles": 13546738.5,
+            "stall_backend": 3546664,
+            "stall_backend_mem": 152003,
+            "ipc": 5.349809181006926
+          },
+          "zjs": {
+            "instructions": 75207427,
+            "cycles": 15367027.5,
+            "stall_backend": 2923934,
+            "stall_backend_mem": 219772.5,
+            "ipc": 4.894077725832143
+          },
+          "qjsSamples": [
+            {
+              "instructions": 72433354,
+              "cycles": 13458721,
+              "stall_backend": 3469673,
+              "stall_backend_mem": 137867
+            },
+            {
+              "instructions": 72578957,
+              "cycles": 13859959,
+              "stall_backend": 3787184,
+              "stall_backend_mem": 229243
+            },
+            {
+              "instructions": 72472024,
+              "cycles": 13520639,
+              "stall_backend": 3520752,
+              "stall_backend_mem": 128574
+            },
+            {
+              "instructions": 72472908,
+              "cycles": 13572838,
+              "stall_backend": 3572576,
+              "stall_backend_mem": 166139
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75153050,
+              "cycles": 15307508,
+              "stall_backend": 2820672,
+              "stall_backend_mem": 196025
+            },
+            {
+              "instructions": 75156126,
+              "cycles": 15573882,
+              "stall_backend": 1262969,
+              "stall_backend_mem": 154835
+            },
+            {
+              "instructions": 75258728,
+              "cycles": 15424357,
+              "stall_backend": 3027196,
+              "stall_backend_mem": 280038
+            },
+            {
+              "instructions": 75308318,
+              "cycles": 15309698,
+              "stall_backend": 3698514,
+              "stall_backend_mem": 243520
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 72484468.5,
+            "cycles": 13651421,
+            "l1d_cache": 26354305.5,
+            "l1d_cache_refill": 18491,
+            "ipc": 5.309664722815302
+          },
+          "zjs": {
+            "instructions": 75166500,
+            "cycles": 15278066,
+            "l1d_cache": 36024889,
+            "l1d_cache_refill": 21220.5,
+            "ipc": 4.91989627482955
+          },
+          "qjsSamples": [
+            {
+              "instructions": 72521606,
+              "cycles": 13766997,
+              "l1d_cache": 26372414,
+              "l1d_cache_refill": 18858
+            },
+            {
+              "instructions": 72440032,
+              "cycles": 13648554,
+              "l1d_cache": 26338493,
+              "l1d_cache_refill": 18111
+            },
+            {
+              "instructions": 72580686,
+              "cycles": 13579209,
+              "l1d_cache": 26370118,
+              "l1d_cache_refill": 19081
+            },
+            {
+              "instructions": 72447331,
+              "cycles": 13654288,
+              "l1d_cache": 26329356,
+              "l1d_cache_refill": 18124
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75173067,
+              "cycles": 15407599,
+              "l1d_cache": 36045662,
+              "l1d_cache_refill": 21126
+            },
+            {
+              "instructions": 75195946,
+              "cycles": 15209832,
+              "l1d_cache": 36035623,
+              "l1d_cache_refill": 21677
+            },
+            {
+              "instructions": 75150646,
+              "cycles": 15343408,
+              "l1d_cache": 36014155,
+              "l1d_cache_refill": 21315
+            },
+            {
+              "instructions": 75159933,
+              "cycles": 15212724,
+              "l1d_cache": 35989467,
+              "l1d_cache_refill": 21022
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 72463368.5,
+            "cycles": 13680427,
+            "ll_cache_miss_rd": 3617.5,
+            "br_mis_pred_retired": 17166,
+            "ipc": 5.2968645276934705
+          },
+          "zjs": {
+            "instructions": 75188970.5,
+            "cycles": 15429700,
+            "ll_cache_miss_rd": 8356.5,
+            "br_mis_pred_retired": 23805,
+            "ipc": 4.873002747947141
+          },
+          "qjsSamples": [
+            {
+              "instructions": 72478269,
+              "cycles": 13672725,
+              "ll_cache_miss_rd": 3620,
+              "br_mis_pred_retired": 17120
+            },
+            {
+              "instructions": 72521010,
+              "cycles": 13688129,
+              "ll_cache_miss_rd": 3615,
+              "br_mis_pred_retired": 17212
+            },
+            {
+              "instructions": 72448468,
+              "cycles": 13622108,
+              "ll_cache_miss_rd": 3061,
+              "br_mis_pred_retired": 16574
+            },
+            {
+              "instructions": 72432266,
+              "cycles": 13719856,
+              "ll_cache_miss_rd": 4207,
+              "br_mis_pred_retired": 17317
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75150518,
+              "cycles": 15564705,
+              "ll_cache_miss_rd": 8802,
+              "br_mis_pred_retired": 24462
+            },
+            {
+              "instructions": 75252477,
+              "cycles": 15356784,
+              "ll_cache_miss_rd": 5970,
+              "br_mis_pred_retired": 22683
+            },
+            {
+              "instructions": 75221465,
+              "cycles": 15502616,
+              "ll_cache_miss_rd": 10359,
+              "br_mis_pred_retired": 24995
+            },
+            {
+              "instructions": 75156476,
+              "cycles": 15145040,
+              "ll_cache_miss_rd": 7911,
+              "br_mis_pred_retired": 23148
+            }
+          ]
+        }
+      }
+    },
+    "p780_L1_build": {
+      "script": ".tmp/p780-scripts/p780_L1_build.js",
+      "sourceSha256": "f38ecb114c0e398f",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 211340830.5,
+            "cycles": 35585235,
+            "stall_backend": 9957752,
+            "stall_backend_mem": 243902,
+            "ipc": 5.939003367548366
+          },
+          "zjs": {
+            "instructions": 216841050,
+            "cycles": 45272625.5,
+            "stall_backend": 16341958,
+            "stall_backend_mem": 288440.5,
+            "ipc": 4.789672514133293
+          },
+          "qjsSamples": [
+            {
+              "instructions": 211286662,
+              "cycles": 35587884,
+              "stall_backend": 9968164,
+              "stall_backend_mem": 238049
+            },
+            {
+              "instructions": 211359280,
+              "cycles": 35705083,
+              "stall_backend": 9947340,
+              "stall_backend_mem": 249755
+            },
+            {
+              "instructions": 211390821,
+              "cycles": 35425762,
+              "stall_backend": 9861762,
+              "stall_backend_mem": 208315
+            },
+            {
+              "instructions": 211322381,
+              "cycles": 35582586,
+              "stall_backend": 9970511,
+              "stall_backend_mem": 262889
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 216770960,
+              "cycles": 45055691,
+              "stall_backend": 16336953,
+              "stall_backend_mem": 255592
+            },
+            {
+              "instructions": 216870403,
+              "cycles": 45114993,
+              "stall_backend": 16162182,
+              "stall_backend_mem": 288593
+            },
+            {
+              "instructions": 216811697,
+              "cycles": 45648753,
+              "stall_backend": 16346963,
+              "stall_backend_mem": 288288
+            },
+            {
+              "instructions": 216884802,
+              "cycles": 45430258,
+              "stall_backend": 16433503,
+              "stall_backend_mem": 335728
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 211279859,
+            "cycles": 35659618,
+            "l1d_cache": 69825260.5,
+            "l1d_cache_refill": 19253,
+            "ipc": 5.924905280813721
+          },
+          "zjs": {
+            "instructions": 216765876,
+            "cycles": 45208558.5,
+            "l1d_cache": 104931227.5,
+            "l1d_cache_refill": 25530,
+            "ipc": 4.794797339092331
+          },
+          "qjsSamples": [
+            {
+              "instructions": 211227395,
+              "cycles": 35432988,
+              "l1d_cache": 69804198,
+              "l1d_cache_refill": 18691
+            },
+            {
+              "instructions": 211404427,
+              "cycles": 35735337,
+              "l1d_cache": 69858967,
+              "l1d_cache_refill": 19727
+            },
+            {
+              "instructions": 211276730,
+              "cycles": 35583899,
+              "l1d_cache": 69824395,
+              "l1d_cache_refill": 19641
+            },
+            {
+              "instructions": 211282988,
+              "cycles": 36091726,
+              "l1d_cache": 69826126,
+              "l1d_cache_refill": 18865
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 216918705,
+              "cycles": 45649612,
+              "l1d_cache": 104917631,
+              "l1d_cache_refill": 26599
+            },
+            {
+              "instructions": 216758195,
+              "cycles": 44859521,
+              "l1d_cache": 104952020,
+              "l1d_cache_refill": 25825
+            },
+            {
+              "instructions": 216762518,
+              "cycles": 45411615,
+              "l1d_cache": 104887326,
+              "l1d_cache_refill": 24885
+            },
+            {
+              "instructions": 216769234,
+              "cycles": 45005502,
+              "l1d_cache": 104944824,
+              "l1d_cache_refill": 25235
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 211255407.5,
+            "cycles": 35549664,
+            "ll_cache_miss_rd": 4775,
+            "br_mis_pred_retired": 18530.5,
+            "ipc": 5.942543015315137
+          },
+          "zjs": {
+            "instructions": 216839279,
+            "cycles": 45482694,
+            "ll_cache_miss_rd": 10095.5,
+            "br_mis_pred_retired": 68688,
+            "ipc": 4.767511770520893
+          },
+          "qjsSamples": [
+            {
+              "instructions": 211286917,
+              "cycles": 35620880,
+              "ll_cache_miss_rd": 4653,
+              "br_mis_pred_retired": 18722
+            },
+            {
+              "instructions": 211227730,
+              "cycles": 35607450,
+              "ll_cache_miss_rd": 5491,
+              "br_mis_pred_retired": 18455
+            },
+            {
+              "instructions": 211283085,
+              "cycles": 35331916,
+              "ll_cache_miss_rd": 3368,
+              "br_mis_pred_retired": 18553
+            },
+            {
+              "instructions": 211218938,
+              "cycles": 35491878,
+              "ll_cache_miss_rd": 4897,
+              "br_mis_pred_retired": 18508
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 216947123,
+              "cycles": 45659401,
+              "ll_cache_miss_rd": 14280,
+              "br_mis_pred_retired": 68928
+            },
+            {
+              "instructions": 216816324,
+              "cycles": 45508844,
+              "ll_cache_miss_rd": 7923,
+              "br_mis_pred_retired": 68411
+            },
+            {
+              "instructions": 216862234,
+              "cycles": 45237622,
+              "ll_cache_miss_rd": 12017,
+              "br_mis_pred_retired": 70355
+            },
+            {
+              "instructions": 216797736,
+              "cycles": 45456544,
+              "ll_cache_miss_rd": 8174,
+              "br_mis_pred_retired": 68448
+            }
+          ]
+        }
+      }
+    },
+    "p780_L2_decode": {
+      "script": ".tmp/p780-scripts/p780_L2_decode.js",
+      "sourceSha256": "df041b91faa6f45a",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 275835289,
+            "cycles": 45970240.5,
+            "stall_backend": 11669659.5,
+            "stall_backend_mem": 222507.5,
+            "ipc": 6.000301194856703
+          },
+          "zjs": {
+            "instructions": 291822733.5,
+            "cycles": 59536387,
+            "stall_backend": 19921951,
+            "stall_backend_mem": 297829.5,
+            "ipc": 4.901586209791333
+          },
+          "qjsSamples": [
+            {
+              "instructions": 275857197,
+              "cycles": 46006481,
+              "stall_backend": 11626309,
+              "stall_backend_mem": 215294
+            },
+            {
+              "instructions": 275857517,
+              "cycles": 46189103,
+              "stall_backend": 11977016,
+              "stall_backend_mem": 246727
+            },
+            {
+              "instructions": 275708992,
+              "cycles": 45542555,
+              "stall_backend": 11407918,
+              "stall_backend_mem": 179012
+            },
+            {
+              "instructions": 275813381,
+              "cycles": 45934000,
+              "stall_backend": 11713010,
+              "stall_backend_mem": 229721
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 291781367,
+              "cycles": 59389811,
+              "stall_backend": 20006749,
+              "stall_backend_mem": 292800
+            },
+            {
+              "instructions": 291694587,
+              "cycles": 59682963,
+              "stall_backend": 19752187,
+              "stall_backend_mem": 245910
+            },
+            {
+              "instructions": 291981220,
+              "cycles": 60301308,
+              "stall_backend": 20160309,
+              "stall_backend_mem": 338491
+            },
+            {
+              "instructions": 291864100,
+              "cycles": 59385083,
+              "stall_backend": 19837153,
+              "stall_backend_mem": 302859
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 275817298.5,
+            "cycles": 45826830,
+            "l1d_cache": 88622614,
+            "l1d_cache_refill": 19699,
+            "ipc": 6.018685964095705
+          },
+          "zjs": {
+            "instructions": 291760333.5,
+            "cycles": 59798802,
+            "l1d_cache": 137273737,
+            "l1d_cache_refill": 25916,
+            "ipc": 4.879033086649462
+          },
+          "qjsSamples": [
+            {
+              "instructions": 275861663,
+              "cycles": 45790529,
+              "l1d_cache": 88660354,
+              "l1d_cache_refill": 19914
+            },
+            {
+              "instructions": 275886703,
+              "cycles": 45863131,
+              "l1d_cache": 88632497,
+              "l1d_cache_refill": 20814
+            },
+            {
+              "instructions": 275680562,
+              "cycles": 45630136,
+              "l1d_cache": 88588889,
+              "l1d_cache_refill": 18603
+            },
+            {
+              "instructions": 275772934,
+              "cycles": 45887116,
+              "l1d_cache": 88612731,
+              "l1d_cache_refill": 19484
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 291772524,
+              "cycles": 59868915,
+              "l1d_cache": 137263389,
+              "l1d_cache_refill": 26026
+            },
+            {
+              "instructions": 291706899,
+              "cycles": 59648430,
+              "l1d_cache": 137249731,
+              "l1d_cache_refill": 25516
+            },
+            {
+              "instructions": 291886712,
+              "cycles": 59992336,
+              "l1d_cache": 137289589,
+              "l1d_cache_refill": 26768
+            },
+            {
+              "instructions": 291748143,
+              "cycles": 59728689,
+              "l1d_cache": 137284085,
+              "l1d_cache_refill": 25806
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 275793536.5,
+            "cycles": 45681720,
+            "ll_cache_miss_rd": 4799,
+            "br_mis_pred_retired": 59107,
+            "ipc": 6.0372844214272146
+          },
+          "zjs": {
+            "instructions": 291780728.5,
+            "cycles": 59726760.5,
+            "ll_cache_miss_rd": 9978,
+            "br_mis_pred_retired": 66371.5,
+            "ipc": 4.885259573051848
+          },
+          "qjsSamples": [
+            {
+              "instructions": 275807172,
+              "cycles": 45691401,
+              "ll_cache_miss_rd": 5665,
+              "br_mis_pred_retired": 58952
+            },
+            {
+              "instructions": 275682857,
+              "cycles": 45809260,
+              "ll_cache_miss_rd": 5411,
+              "br_mis_pred_retired": 58788
+            },
+            {
+              "instructions": 275854608,
+              "cycles": 45672039,
+              "ll_cache_miss_rd": 3801,
+              "br_mis_pred_retired": 59262
+            },
+            {
+              "instructions": 275779901,
+              "cycles": 45597137,
+              "ll_cache_miss_rd": 4187,
+              "br_mis_pred_retired": 60116
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 291794573,
+              "cycles": 59828642,
+              "ll_cache_miss_rd": 10637,
+              "br_mis_pred_retired": 67055
+            },
+            {
+              "instructions": 291713199,
+              "cycles": 59624879,
+              "ll_cache_miss_rd": 8928,
+              "br_mis_pred_retired": 65508
+            },
+            {
+              "instructions": 291785943,
+              "cycles": 59927518,
+              "ll_cache_miss_rd": 12993,
+              "br_mis_pred_retired": 67352
+            },
+            {
+              "instructions": 291775514,
+              "cycles": 59403426,
+              "ll_cache_miss_rd": 9319,
+              "br_mis_pred_retired": 65688
+            }
+          ]
+        }
+      }
+    },
+    "p780_L3_full": {
+      "script": ".tmp/p780-scripts/p780_L3_full.js",
+      "sourceSha256": "56a1b95d94b52deb",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 326287047.5,
+            "cycles": 54699295.5,
+            "stall_backend": 14083783.5,
+            "stall_backend_mem": 327023,
+            "ipc": 5.965105117304481
+          },
+          "zjs": {
+            "instructions": 339133034.5,
+            "cycles": 71204407,
+            "stall_backend": 21620751.5,
+            "stall_backend_mem": 442755.5,
+            "ipc": 4.762809617949631
+          },
+          "qjsSamples": [
+            {
+              "instructions": 326207633,
+              "cycles": 54342631,
+              "stall_backend": 13808574,
+              "stall_backend_mem": 328449
+            },
+            {
+              "instructions": 326325666,
+              "cycles": 54743122,
+              "stall_backend": 14059583,
+              "stall_backend_mem": 271921
+            },
+            {
+              "instructions": 326316107,
+              "cycles": 54832533,
+              "stall_backend": 14107984,
+              "stall_backend_mem": 405294
+            },
+            {
+              "instructions": 326257988,
+              "cycles": 54655469,
+              "stall_backend": 14180694,
+              "stall_backend_mem": 325597
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 339053709,
+              "cycles": 71486318,
+              "stall_backend": 22345685,
+              "stall_backend_mem": 378810
+            },
+            {
+              "instructions": 339279206,
+              "cycles": 70548182,
+              "stall_backend": 21747925,
+              "stall_backend_mem": 325893
+            },
+            {
+              "instructions": 339154573,
+              "cycles": 70922496,
+              "stall_backend": 21493578,
+              "stall_backend_mem": 532100
+            },
+            {
+              "instructions": 339111496,
+              "cycles": 71528983,
+              "stall_backend": 19737908,
+              "stall_backend_mem": 506701
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 326207308.5,
+            "cycles": 54384090,
+            "l1d_cache": 107455998.5,
+            "l1d_cache_refill": 19693.5,
+            "ipc": 5.998212133364739
+          },
+          "zjs": {
+            "instructions": 339093323,
+            "cycles": 70885653.5,
+            "l1d_cache": 159465284,
+            "l1d_cache_refill": 27827.5,
+            "ipc": 4.78366645798081
+          },
+          "qjsSamples": [
+            {
+              "instructions": 326226428,
+              "cycles": 54427482,
+              "l1d_cache": 107446554,
+              "l1d_cache_refill": 19662
+            },
+            {
+              "instructions": 326216486,
+              "cycles": 54340698,
+              "l1d_cache": 107510887,
+              "l1d_cache_refill": 19626
+            },
+            {
+              "instructions": 326152762,
+              "cycles": 54297801,
+              "l1d_cache": 107465443,
+              "l1d_cache_refill": 20086
+            },
+            {
+              "instructions": 326198131,
+              "cycles": 54896151,
+              "l1d_cache": 107429286,
+              "l1d_cache_refill": 19725
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 339118665,
+              "cycles": 70856460,
+              "l1d_cache": 159485741,
+              "l1d_cache_refill": 27825
+            },
+            {
+              "instructions": 339108099,
+              "cycles": 71069703,
+              "l1d_cache": 159419271,
+              "l1d_cache_refill": 27830
+            },
+            {
+              "instructions": 339058973,
+              "cycles": 70433637,
+              "l1d_cache": 159444827,
+              "l1d_cache_refill": 27983
+            },
+            {
+              "instructions": 339078547,
+              "cycles": 70914847,
+              "l1d_cache": 159558167,
+              "l1d_cache_refill": 27195
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 326220892.5,
+            "cycles": 54597779,
+            "ll_cache_miss_rd": 5821.5,
+            "br_mis_pred_retired": 59106.5,
+            "ipc": 5.974984669248176
+          },
+          "zjs": {
+            "instructions": 339164754,
+            "cycles": 70907599,
+            "ll_cache_miss_rd": 13507,
+            "br_mis_pred_retired": 87204.5,
+            "ipc": 4.783193321776415
+          },
+          "qjsSamples": [
+            {
+              "instructions": 326399475,
+              "cycles": 54689054,
+              "ll_cache_miss_rd": 5136,
+              "br_mis_pred_retired": 59659
+            },
+            {
+              "instructions": 326232344,
+              "cycles": 54506504,
+              "ll_cache_miss_rd": 7227,
+              "br_mis_pred_retired": 59087
+            },
+            {
+              "instructions": 326122063,
+              "cycles": 54270748,
+              "ll_cache_miss_rd": 3702,
+              "br_mis_pred_retired": 57760
+            },
+            {
+              "instructions": 326209441,
+              "cycles": 55249321,
+              "ll_cache_miss_rd": 6507,
+              "br_mis_pred_retired": 59126
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 339166930,
+              "cycles": 71164287,
+              "ll_cache_miss_rd": 14171,
+              "br_mis_pred_retired": 81214
+            },
+            {
+              "instructions": 339162578,
+              "cycles": 70650911,
+              "ll_cache_miss_rd": 13723,
+              "br_mis_pred_retired": 86703
+            },
+            {
+              "instructions": 339188746,
+              "cycles": 71915409,
+              "ll_cache_miss_rd": 13291,
+              "br_mis_pred_retired": 91024
+            },
+            {
+              "instructions": 339152377,
+              "cycles": 70571473,
+              "ll_cache_miss_rd": 12505,
+              "br_mis_pred_retired": 87706
+            }
+          ]
+        }
+      }
+    },
+    "p780_B3_outerconcat": {
+      "script": ".tmp/p780-scripts/p780_B3_outerconcat.js",
+      "sourceSha256": "ececb6652dbb3434",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 102853741,
+            "cycles": 18831812.5,
+            "stall_backend": 5571712.5,
+            "stall_backend_mem": 173966.5,
+            "ipc": 5.461701628560713
+          },
+          "zjs": {
+            "instructions": 115492009.5,
+            "cycles": 24126530,
+            "stall_backend": 9154707,
+            "stall_backend_mem": 244135.5,
+            "ipc": 4.786929968793689
+          },
+          "qjsSamples": [
+            {
+              "instructions": 102850205,
+              "cycles": 18599960,
+              "stall_backend": 5480672,
+              "stall_backend_mem": 142135
+            },
+            {
+              "instructions": 102935607,
+              "cycles": 18847996,
+              "stall_backend": 5578226,
+              "stall_backend_mem": 200960
+            },
+            {
+              "instructions": 102857277,
+              "cycles": 18848004,
+              "stall_backend": 5603107,
+              "stall_backend_mem": 163749
+            },
+            {
+              "instructions": 102820829,
+              "cycles": 18815629,
+              "stall_backend": 5565199,
+              "stall_backend_mem": 184184
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 115501726,
+              "cycles": 24184541,
+              "stall_backend": 9136336,
+              "stall_backend_mem": 242938
+            },
+            {
+              "instructions": 115526787,
+              "cycles": 23970546,
+              "stall_backend": 8947219,
+              "stall_backend_mem": 245333
+            },
+            {
+              "instructions": 115482293,
+              "cycles": 24500409,
+              "stall_backend": 9387830,
+              "stall_backend_mem": 277428
+            },
+            {
+              "instructions": 115384322,
+              "cycles": 24068519,
+              "stall_backend": 9173078,
+              "stall_backend_mem": 235355
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 102884913.5,
+            "cycles": 18802584,
+            "l1d_cache": 35924226.5,
+            "l1d_cache_refill": 18848.5,
+            "ipc": 5.471849693637854
+          },
+          "zjs": {
+            "instructions": 115495261,
+            "cycles": 24330835,
+            "l1d_cache": 54317405,
+            "l1d_cache_refill": 22426.5,
+            "ipc": 4.746867955826423
+          },
+          "qjsSamples": [
+            {
+              "instructions": 102857709,
+              "cycles": 18800203,
+              "l1d_cache": 35925589,
+              "l1d_cache_refill": 18926
+            },
+            {
+              "instructions": 102921798,
+              "cycles": 18804965,
+              "l1d_cache": 35925168,
+              "l1d_cache_refill": 18984
+            },
+            {
+              "instructions": 102899678,
+              "cycles": 18745991,
+              "l1d_cache": 35923285,
+              "l1d_cache_refill": 18771
+            },
+            {
+              "instructions": 102870149,
+              "cycles": 18871489,
+              "l1d_cache": 35920231,
+              "l1d_cache_refill": 18612
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 115539229,
+              "cycles": 24397697,
+              "l1d_cache": 54325802,
+              "l1d_cache_refill": 22503
+            },
+            {
+              "instructions": 115477187,
+              "cycles": 24053110,
+              "l1d_cache": 54307639,
+              "l1d_cache_refill": 22350
+            },
+            {
+              "instructions": 115428156,
+              "cycles": 24424470,
+              "l1d_cache": 54309008,
+              "l1d_cache_refill": 22308
+            },
+            {
+              "instructions": 115513335,
+              "cycles": 24263973,
+              "l1d_cache": 54341639,
+              "l1d_cache_refill": 22978
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 102865476.5,
+            "cycles": 18789035.5,
+            "ll_cache_miss_rd": 4442,
+            "br_mis_pred_retired": 17686,
+            "ipc": 5.474760878492139
+          },
+          "zjs": {
+            "instructions": 115476502,
+            "cycles": 24235989,
+            "ll_cache_miss_rd": 11151.5,
+            "br_mis_pred_retired": 24618,
+            "ipc": 4.764670507153638
+          },
+          "qjsSamples": [
+            {
+              "instructions": 102881596,
+              "cycles": 18673746,
+              "ll_cache_miss_rd": 4350,
+              "br_mis_pred_retired": 17840
+            },
+            {
+              "instructions": 102806864,
+              "cycles": 18760769,
+              "ll_cache_miss_rd": 4868,
+              "br_mis_pred_retired": 17532
+            },
+            {
+              "instructions": 102849357,
+              "cycles": 18817302,
+              "ll_cache_miss_rd": 3243,
+              "br_mis_pred_retired": 17372
+            },
+            {
+              "instructions": 103006029,
+              "cycles": 19020516,
+              "ll_cache_miss_rd": 4534,
+              "br_mis_pred_retired": 17853
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 115430059,
+              "cycles": 24362424,
+              "ll_cache_miss_rd": 11250,
+              "br_mis_pred_retired": 24974
+            },
+            {
+              "instructions": 115631522,
+              "cycles": 24022344,
+              "ll_cache_miss_rd": 11016,
+              "br_mis_pred_retired": 24133
+            },
+            {
+              "instructions": 115522945,
+              "cycles": 24521302,
+              "ll_cache_miss_rd": 11101,
+              "br_mis_pred_retired": 25424
+            },
+            {
+              "instructions": 115386415,
+              "cycles": 24109554,
+              "ll_cache_miss_rd": 11202,
+              "br_mis_pred_retired": 24262
+            }
+          ]
+        }
+      }
+    },
+    "p780_B2_hexconcat": {
+      "script": ".tmp/p780-scripts/p780_B2_hexconcat.js",
+      "sourceSha256": "f892367859cf20b9",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 183037437.5,
+            "cycles": 30634934,
+            "stall_backend": 8222393.5,
+            "stall_backend_mem": 186258,
+            "ipc": 5.974794576022263
+          },
+          "zjs": {
+            "instructions": 175764482,
+            "cycles": 36189504,
+            "stall_backend": 12125161.5,
+            "stall_backend_mem": 239131.5,
+            "ipc": 4.8567806289912125
+          },
+          "qjsSamples": [
+            {
+              "instructions": 183142359,
+              "cycles": 30885927,
+              "stall_backend": 8382547,
+              "stall_backend_mem": 243811
+            },
+            {
+              "instructions": 182979838,
+              "cycles": 30510646,
+              "stall_backend": 8217810,
+              "stall_backend_mem": 175791
+            },
+            {
+              "instructions": 183070700,
+              "cycles": 30588954,
+              "stall_backend": 8213271,
+              "stall_backend_mem": 181485
+            },
+            {
+              "instructions": 183004175,
+              "cycles": 30680914,
+              "stall_backend": 8226977,
+              "stall_backend_mem": 191031
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 175810486,
+              "cycles": 36137973,
+              "stall_backend": 12670472,
+              "stall_backend_mem": 260864
+            },
+            {
+              "instructions": 175677950,
+              "cycles": 36241035,
+              "stall_backend": 11309952,
+              "stall_backend_mem": 201364
+            },
+            {
+              "instructions": 175919592,
+              "cycles": 36796775,
+              "stall_backend": 11837986,
+              "stall_backend_mem": 296424
+            },
+            {
+              "instructions": 175718478,
+              "cycles": 36038509,
+              "stall_backend": 12412337,
+              "stall_backend_mem": 217399
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 182992092,
+            "cycles": 30628464.5,
+            "l1d_cache": 61203508.5,
+            "l1d_cache_refill": 18473,
+            "ipc": 5.974576100607329
+          },
+          "zjs": {
+            "instructions": 175783661.5,
+            "cycles": 36393238.5,
+            "l1d_cache": 85310404.5,
+            "l1d_cache_refill": 25525.5,
+            "ipc": 4.830118690866162
+          },
+          "qjsSamples": [
+            {
+              "instructions": 183122116,
+              "cycles": 30809756,
+              "l1d_cache": 61244857,
+              "l1d_cache_refill": 19533
+            },
+            {
+              "instructions": 182968872,
+              "cycles": 30594006,
+              "l1d_cache": 61205548,
+              "l1d_cache_refill": 18358
+            },
+            {
+              "instructions": 183000014,
+              "cycles": 30463497,
+              "l1d_cache": 61201469,
+              "l1d_cache_refill": 18367
+            },
+            {
+              "instructions": 182984170,
+              "cycles": 30662923,
+              "l1d_cache": 61195350,
+              "l1d_cache_refill": 18579
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 175793706,
+              "cycles": 36486037,
+              "l1d_cache": 85270384,
+              "l1d_cache_refill": 25614
+            },
+            {
+              "instructions": 175732867,
+              "cycles": 36337597,
+              "l1d_cache": 85350425,
+              "l1d_cache_refill": 25140
+            },
+            {
+              "instructions": 175773617,
+              "cycles": 36448880,
+              "l1d_cache": 85225693,
+              "l1d_cache_refill": 25437
+            },
+            {
+              "instructions": 175861719,
+              "cycles": 36172097,
+              "l1d_cache": 85391398,
+              "l1d_cache_refill": 25959
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 183107094.5,
+            "cycles": 30761989.5,
+            "ll_cache_miss_rd": 4869.5,
+            "br_mis_pred_retired": 18515.5,
+            "ipc": 5.9523814121320076
+          },
+          "zjs": {
+            "instructions": 175698863.5,
+            "cycles": 36216320,
+            "ll_cache_miss_rd": 9750,
+            "br_mis_pred_retired": 56728,
+            "ipc": 4.851372627036651
+          },
+          "qjsSamples": [
+            {
+              "instructions": 183164000,
+              "cycles": 30695455,
+              "ll_cache_miss_rd": 4372,
+              "br_mis_pred_retired": 18634
+            },
+            {
+              "instructions": 183131504,
+              "cycles": 30832304,
+              "ll_cache_miss_rd": 5367,
+              "br_mis_pred_retired": 18462
+            },
+            {
+              "instructions": 183005667,
+              "cycles": 30580001,
+              "ll_cache_miss_rd": 4194,
+              "br_mis_pred_retired": 18140
+            },
+            {
+              "instructions": 183082685,
+              "cycles": 30828524,
+              "ll_cache_miss_rd": 5827,
+              "br_mis_pred_retired": 18569
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 175715962,
+              "cycles": 36631048,
+              "ll_cache_miss_rd": 11351,
+              "br_mis_pred_retired": 59213
+            },
+            {
+              "instructions": 175681765,
+              "cycles": 36035463,
+              "ll_cache_miss_rd": 8149,
+              "br_mis_pred_retired": 55024
+            },
+            {
+              "instructions": 175793213,
+              "cycles": 36397177,
+              "ll_cache_miss_rd": 11544,
+              "br_mis_pred_retired": 58432
+            },
+            {
+              "instructions": 175680919,
+              "cycles": 36031318,
+              "ll_cache_miss_rd": 7885,
+              "br_mis_pred_retired": 53833
+            }
+          ]
+        }
+      }
+    },
+    "p780_B2x_nonhex": {
+      "script": ".tmp/p780-scripts/p780_B2x_nonhex.js",
+      "sourceSha256": "7d21405f687f4d9e",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 183044043.5,
+            "cycles": 30757755,
+            "stall_backend": 8267659.5,
+            "stall_backend_mem": 226953.5,
+            "ipc": 5.951150969893609
+          },
+          "zjs": {
+            "instructions": 201315997.5,
+            "cycles": 39856172,
+            "stall_backend": 13316316,
+            "stall_backend_mem": 284789,
+            "ipc": 5.0510620412818374
+          },
+          "qjsSamples": [
+            {
+              "instructions": 182993444,
+              "cycles": 30424833,
+              "stall_backend": 8107133,
+              "stall_backend_mem": 184960
+            },
+            {
+              "instructions": 182993572,
+              "cycles": 30696456,
+              "stall_backend": 8131348,
+              "stall_backend_mem": 230325
+            },
+            {
+              "instructions": 183094515,
+              "cycles": 30819054,
+              "stall_backend": 8403971,
+              "stall_backend_mem": 223582
+            },
+            {
+              "instructions": 183200672,
+              "cycles": 31025741,
+              "stall_backend": 8542530,
+              "stall_backend_mem": 255293
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 201314753,
+              "cycles": 39968498,
+              "stall_backend": 12497627,
+              "stall_backend_mem": 276766
+            },
+            {
+              "instructions": 201505690,
+              "cycles": 39974847,
+              "stall_backend": 13372446,
+              "stall_backend_mem": 325161
+            },
+            {
+              "instructions": 201317242,
+              "cycles": 39743846,
+              "stall_backend": 13284688,
+              "stall_backend_mem": 292812
+            },
+            {
+              "instructions": 201300332,
+              "cycles": 39470713,
+              "stall_backend": 13347944,
+              "stall_backend_mem": 210603
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 183041807,
+            "cycles": 30716945.5,
+            "l1d_cache": 61214947.5,
+            "l1d_cache_refill": 19174.5,
+            "ipc": 5.958984658809907
+          },
+          "zjs": {
+            "instructions": 201382313,
+            "cycles": 39885983,
+            "l1d_cache": 92404002,
+            "l1d_cache_refill": 24868.5,
+            "ipc": 5.048949476812443
+          },
+          "qjsSamples": [
+            {
+              "instructions": 183055031,
+              "cycles": 30771639,
+              "l1d_cache": 61218861,
+              "l1d_cache_refill": 19793
+            },
+            {
+              "instructions": 183036469,
+              "cycles": 30768954,
+              "l1d_cache": 61211034,
+              "l1d_cache_refill": 19251
+            },
+            {
+              "instructions": 182993004,
+              "cycles": 30631004,
+              "l1d_cache": 61195399,
+              "l1d_cache_refill": 18439
+            },
+            {
+              "instructions": 183047145,
+              "cycles": 30664937,
+              "l1d_cache": 61224786,
+              "l1d_cache_refill": 19098
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 201419028,
+              "cycles": 40002665,
+              "l1d_cache": 92271656,
+              "l1d_cache_refill": 25659
+            },
+            {
+              "instructions": 201283206,
+              "cycles": 39361138,
+              "l1d_cache": 92473507,
+              "l1d_cache_refill": 24394
+            },
+            {
+              "instructions": 201400641,
+              "cycles": 40107714,
+              "l1d_cache": 92401653,
+              "l1d_cache_refill": 24640
+            },
+            {
+              "instructions": 201363985,
+              "cycles": 39769301,
+              "l1d_cache": 92406351,
+              "l1d_cache_refill": 25097
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 183066632.5,
+            "cycles": 30759042.5,
+            "ll_cache_miss_rd": 5157,
+            "br_mis_pred_retired": 18183.5,
+            "ipc": 5.95163625460708
+          },
+          "zjs": {
+            "instructions": 201383514.5,
+            "cycles": 39904363,
+            "ll_cache_miss_rd": 12839.5,
+            "br_mis_pred_retired": 27235.5,
+            "ipc": 5.046654033795753
+          },
+          "qjsSamples": [
+            {
+              "instructions": 183023089,
+              "cycles": 31285763,
+              "ll_cache_miss_rd": 5142,
+              "br_mis_pred_retired": 18375
+            },
+            {
+              "instructions": 182980455,
+              "cycles": 30648105,
+              "ll_cache_miss_rd": 6354,
+              "br_mis_pred_retired": 18180
+            },
+            {
+              "instructions": 183112359,
+              "cycles": 30713567,
+              "ll_cache_miss_rd": 5172,
+              "br_mis_pred_retired": 18187
+            },
+            {
+              "instructions": 183110176,
+              "cycles": 30804518,
+              "ll_cache_miss_rd": 4858,
+              "br_mis_pred_retired": 17936
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 201393634,
+              "cycles": 40052654,
+              "ll_cache_miss_rd": 12472,
+              "br_mis_pred_retired": 27686
+            },
+            {
+              "instructions": 201373395,
+              "cycles": 39772556,
+              "ll_cache_miss_rd": 13207,
+              "br_mis_pred_retired": 25794
+            },
+            {
+              "instructions": 201524022,
+              "cycles": 40036170,
+              "ll_cache_miss_rd": 13409,
+              "br_mis_pred_retired": 28555
+            },
+            {
+              "instructions": 201285717,
+              "cycles": 39547146,
+              "ll_cache_miss_rd": 8329,
+              "br_mis_pred_retired": 26785
+            }
+          ]
+        }
+      }
+    },
+    "p780_L4_decode_only": {
+      "script": ".tmp/p780-scripts/p780_L4_decode_only.js",
+      "sourceSha256": "1efd443a0a5e91df",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 173755071.5,
+            "cycles": 29556253.5,
+            "stall_backend": 8021452,
+            "stall_backend_mem": 277623,
+            "ipc": 5.878792164913595
+          },
+          "zjs": {
+            "instructions": 177024717,
+            "cycles": 36032931.5,
+            "stall_backend": 14042335.5,
+            "stall_backend_mem": 327701.5,
+            "ipc": 4.9128591438639955
+          },
+          "qjsSamples": [
+            {
+              "instructions": 173694817,
+              "cycles": 29475069,
+              "stall_backend": 8018969,
+              "stall_backend_mem": 278836
+            },
+            {
+              "instructions": 173709410,
+              "cycles": 29541063,
+              "stall_backend": 8034812,
+              "stall_backend_mem": 302946
+            },
+            {
+              "instructions": 173812954,
+              "cycles": 29603303,
+              "stall_backend": 8023935,
+              "stall_backend_mem": 276410
+            },
+            {
+              "instructions": 173800733,
+              "cycles": 29571444,
+              "stall_backend": 7791903,
+              "stall_backend_mem": 272737
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 177175344,
+              "cycles": 36452113,
+              "stall_backend": 14142369,
+              "stall_backend_mem": 404620
+            },
+            {
+              "instructions": 176961586,
+              "cycles": 35796821,
+              "stall_backend": 14047168,
+              "stall_backend_mem": 335045
+            },
+            {
+              "instructions": 177011893,
+              "cycles": 36078727,
+              "stall_backend": 14037503,
+              "stall_backend_mem": 309314
+            },
+            {
+              "instructions": 177037541,
+              "cycles": 35987136,
+              "stall_backend": 13760399,
+              "stall_backend_mem": 320358
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 173707098,
+            "cycles": 29628521.5,
+            "l1d_cache": 58943161.5,
+            "l1d_cache_refill": 73063,
+            "ipc": 5.86283382382074
+          },
+          "zjs": {
+            "instructions": 177029013.5,
+            "cycles": 36198392.5,
+            "l1d_cache": 77999095,
+            "l1d_cache_refill": 90732.5,
+            "ipc": 4.890521409203461
+          },
+          "qjsSamples": [
+            {
+              "instructions": 173696630,
+              "cycles": 29683894,
+              "l1d_cache": 58937758,
+              "l1d_cache_refill": 72775
+            },
+            {
+              "instructions": 173704175,
+              "cycles": 30137944,
+              "l1d_cache": 58995861,
+              "l1d_cache_refill": 74269
+            },
+            {
+              "instructions": 173710021,
+              "cycles": 29573149,
+              "l1d_cache": 58933800,
+              "l1d_cache_refill": 72286
+            },
+            {
+              "instructions": 173711940,
+              "cycles": 29404766,
+              "l1d_cache": 58948565,
+              "l1d_cache_refill": 73351
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 176989860,
+              "cycles": 36169508,
+              "l1d_cache": 77993607,
+              "l1d_cache_refill": 91417
+            },
+            {
+              "instructions": 176965975,
+              "cycles": 36286122,
+              "l1d_cache": 77986578,
+              "l1d_cache_refill": 90048
+            },
+            {
+              "instructions": 177068167,
+              "cycles": 36227277,
+              "l1d_cache": 78004583,
+              "l1d_cache_refill": 92608
+            },
+            {
+              "instructions": 177093210,
+              "cycles": 35916619,
+              "l1d_cache": 78034582,
+              "l1d_cache_refill": 85041
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 173808024.5,
+            "cycles": 29535631.5,
+            "ll_cache_miss_rd": 5142.5,
+            "br_mis_pred_retired": 29340,
+            "ipc": 5.884689633265502
+          },
+          "zjs": {
+            "instructions": 176996769.5,
+            "cycles": 36378217.5,
+            "ll_cache_miss_rd": 11536,
+            "br_mis_pred_retired": 33055.5,
+            "ipc": 4.865460202936002
+          },
+          "qjsSamples": [
+            {
+              "instructions": 173742803,
+              "cycles": 29580224,
+              "ll_cache_miss_rd": 4857,
+              "br_mis_pred_retired": 29180
+            },
+            {
+              "instructions": 173674307,
+              "cycles": 29338439,
+              "ll_cache_miss_rd": 5409,
+              "br_mis_pred_retired": 29464
+            },
+            {
+              "instructions": 173873246,
+              "cycles": 29491039,
+              "ll_cache_miss_rd": 4876,
+              "br_mis_pred_retired": 29245
+            },
+            {
+              "instructions": 173904024,
+              "cycles": 29688341,
+              "ll_cache_miss_rd": 6650,
+              "br_mis_pred_retired": 29435
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 177025306,
+              "cycles": 37363399,
+              "ll_cache_miss_rd": 12088,
+              "br_mis_pred_retired": 34138
+            },
+            {
+              "instructions": 176982347,
+              "cycles": 35932282,
+              "ll_cache_miss_rd": 9767,
+              "br_mis_pred_retired": 31758
+            },
+            {
+              "instructions": 177011192,
+              "cycles": 36442622,
+              "ll_cache_miss_rd": 12821,
+              "br_mis_pred_retired": 34682
+            },
+            {
+              "instructions": 176933068,
+              "cycles": 36313813,
+              "ll_cache_miss_rd": 10984,
+              "br_mis_pred_retired": 31973
+            }
+          ]
+        }
+      }
+    },
+    "p780_L4b_arrays_only": {
+      "script": ".tmp/p780-scripts/p780_L4b_arrays_only.js",
+      "sourceSha256": "e94af079b3b43e40",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 66013991,
+            "cycles": 13593607.5,
+            "stall_backend": 4759566,
+            "stall_backend_mem": 220902.5,
+            "ipc": 4.856252543704826
+          },
+          "zjs": {
+            "instructions": 75430789,
+            "cycles": 17122588.5,
+            "stall_backend": 6678609,
+            "stall_backend_mem": 284402,
+            "ipc": 4.405337954597227
+          },
+          "qjsSamples": [
+            {
+              "instructions": 65999157,
+              "cycles": 13584533,
+              "stall_backend": 4772508,
+              "stall_backend_mem": 239171
+            },
+            {
+              "instructions": 66008304,
+              "cycles": 13602682,
+              "stall_backend": 4746624,
+              "stall_backend_mem": 202634
+            },
+            {
+              "instructions": 66019678,
+              "cycles": 13418901,
+              "stall_backend": 4548389,
+              "stall_backend_mem": 199584
+            },
+            {
+              "instructions": 66027159,
+              "cycles": 13668188,
+              "stall_backend": 4810901,
+              "stall_backend_mem": 239630
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75492744,
+              "cycles": 17291606,
+              "stall_backend": 6694994,
+              "stall_backend_mem": 297984
+            },
+            {
+              "instructions": 75348136,
+              "cycles": 16842566,
+              "stall_backend": 6662224,
+              "stall_backend_mem": 211156
+            },
+            {
+              "instructions": 75371747,
+              "cycles": 17301228,
+              "stall_backend": 6695468,
+              "stall_backend_mem": 270820
+            },
+            {
+              "instructions": 75489831,
+              "cycles": 16953571,
+              "stall_backend": 6539783,
+              "stall_backend_mem": 300103
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 66031774.5,
+            "cycles": 13649633.5,
+            "l1d_cache": 24173332,
+            "l1d_cache_refill": 57601,
+            "ipc": 4.837622526641466
+          },
+          "zjs": {
+            "instructions": 75359581.5,
+            "cycles": 16903696,
+            "l1d_cache": 35145569.5,
+            "l1d_cache_refill": 72074,
+            "ipc": 4.458171840052022
+          },
+          "qjsSamples": [
+            {
+              "instructions": 66088960,
+              "cycles": 13554146,
+              "l1d_cache": 24205731,
+              "l1d_cache_refill": 39137
+            },
+            {
+              "instructions": 66006959,
+              "cycles": 13644226,
+              "l1d_cache": 24159225,
+              "l1d_cache_refill": 58043
+            },
+            {
+              "instructions": 65999424,
+              "cycles": 13655041,
+              "l1d_cache": 24170864,
+              "l1d_cache_refill": 57739
+            },
+            {
+              "instructions": 66056590,
+              "cycles": 13731303,
+              "l1d_cache": 24175800,
+              "l1d_cache_refill": 57463
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75409495,
+              "cycles": 17133845,
+              "l1d_cache": 35178697,
+              "l1d_cache_refill": 72074
+            },
+            {
+              "instructions": 75355631,
+              "cycles": 16525166,
+              "l1d_cache": 35137205,
+              "l1d_cache_refill": 71682
+            },
+            {
+              "instructions": 75357924,
+              "cycles": 16867420,
+              "l1d_cache": 35153554,
+              "l1d_cache_refill": 72253
+            },
+            {
+              "instructions": 75361239,
+              "cycles": 16939972,
+              "l1d_cache": 35137585,
+              "l1d_cache_refill": 72074
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 66009516.5,
+            "cycles": 13682596,
+            "ll_cache_miss_rd": 5788.5,
+            "br_mis_pred_retired": 18917.5,
+            "ipc": 4.8243415576985536
+          },
+          "zjs": {
+            "instructions": 75435510,
+            "cycles": 17110568.5,
+            "ll_cache_miss_rd": 11396.5,
+            "br_mis_pred_retired": 31494,
+            "ipc": 4.408708570963028
+          },
+          "qjsSamples": [
+            {
+              "instructions": 66000276,
+              "cycles": 13652055,
+              "ll_cache_miss_rd": 4520,
+              "br_mis_pred_retired": 18827
+            },
+            {
+              "instructions": 66020244,
+              "cycles": 13801462,
+              "ll_cache_miss_rd": 5806,
+              "br_mis_pred_retired": 19067
+            },
+            {
+              "instructions": 65995048,
+              "cycles": 13713137,
+              "ll_cache_miss_rd": 5771,
+              "br_mis_pred_retired": 18664
+            },
+            {
+              "instructions": 66018757,
+              "cycles": 13367958,
+              "ll_cache_miss_rd": 5853,
+              "br_mis_pred_retired": 19008
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75369638,
+              "cycles": 17075068,
+              "ll_cache_miss_rd": 11738,
+              "br_mis_pred_retired": 32145
+            },
+            {
+              "instructions": 75513898,
+              "cycles": 17146069,
+              "ll_cache_miss_rd": 11055,
+              "br_mis_pred_retired": 30774
+            },
+            {
+              "instructions": 75476053,
+              "cycles": 17437324,
+              "ll_cache_miss_rd": 15246,
+              "br_mis_pred_retired": 32799
+            },
+            {
+              "instructions": 75394967,
+              "cycles": 16907313,
+              "ll_cache_miss_rd": 9805,
+              "br_mis_pred_retired": 30843
+            }
+          ]
+        }
+      }
+    },
+    "p780_dec_base": {
+      "script": ".tmp/p780-scripts/p780_dec_base.js",
+      "sourceSha256": "845cb2089359f18d",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 25208082,
+            "cycles": 5345652.5,
+            "stall_backend": 1756165.5,
+            "stall_backend_mem": 160950.5,
+            "ipc": 4.715623022633813
+          },
+          "zjs": {
+            "instructions": 27383116.5,
+            "cycles": 6755101,
+            "stall_backend": 2311030,
+            "stall_backend_mem": 203978.5,
+            "ipc": 4.053694607971073
+          },
+          "qjsSamples": [
+            {
+              "instructions": 25208075,
+              "cycles": 5391939,
+              "stall_backend": 1809611,
+              "stall_backend_mem": 162967
+            },
+            {
+              "instructions": 25207257,
+              "cycles": 5289883,
+              "stall_backend": 1699595,
+              "stall_backend_mem": 158934
+            },
+            {
+              "instructions": 25208089,
+              "cycles": 5312036,
+              "stall_backend": 1737024,
+              "stall_backend_mem": 145959
+            },
+            {
+              "instructions": 25211827,
+              "cycles": 5379269,
+              "stall_backend": 1775307,
+              "stall_backend_mem": 175901
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 27389949,
+              "cycles": 6865612,
+              "stall_backend": 2457234,
+              "stall_backend_mem": 207770
+            },
+            {
+              "instructions": 27398183,
+              "cycles": 6497231,
+              "stall_backend": 2225213,
+              "stall_backend_mem": 200187
+            },
+            {
+              "instructions": 27376284,
+              "cycles": 6842043,
+              "stall_backend": 2214258,
+              "stall_backend_mem": 226961
+            },
+            {
+              "instructions": 27373007,
+              "cycles": 6668159,
+              "stall_backend": 2396847,
+              "stall_backend_mem": 193235
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 25204729,
+            "cycles": 5392185.5,
+            "l1d_cache": 9172886.5,
+            "l1d_cache_refill": 17122.5,
+            "ipc": 4.674306735181866
+          },
+          "zjs": {
+            "instructions": 27394575.5,
+            "cycles": 6817675,
+            "l1d_cache": 12524601,
+            "l1d_cache_refill": 20054,
+            "ipc": 4.018169757285292
+          },
+          "qjsSamples": [
+            {
+              "instructions": 25194030,
+              "cycles": 5371394,
+              "l1d_cache": 9168560,
+              "l1d_cache_refill": 17097
+            },
+            {
+              "instructions": 25205788,
+              "cycles": 5458278,
+              "l1d_cache": 9171220,
+              "l1d_cache_refill": 17148
+            },
+            {
+              "instructions": 25203670,
+              "cycles": 5276085,
+              "l1d_cache": 9176504,
+              "l1d_cache_refill": 17184
+            },
+            {
+              "instructions": 25213499,
+              "cycles": 5412977,
+              "l1d_cache": 9174553,
+              "l1d_cache_refill": 17036
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 27377828,
+              "cycles": 6929932,
+              "l1d_cache": 12518984,
+              "l1d_cache_refill": 19970
+            },
+            {
+              "instructions": 27451008,
+              "cycles": 6771628,
+              "l1d_cache": 12533639,
+              "l1d_cache_refill": 21126
+            },
+            {
+              "instructions": 27396585,
+              "cycles": 6863722,
+              "l1d_cache": 12526854,
+              "l1d_cache_refill": 19963
+            },
+            {
+              "instructions": 27392566,
+              "cycles": 6677333,
+              "l1d_cache": 12522348,
+              "l1d_cache_refill": 20138
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 25208146,
+            "cycles": 5368629.5,
+            "ll_cache_miss_rd": 3867,
+            "br_mis_pred_retired": 14805,
+            "ipc": 4.695452722151901
+          },
+          "zjs": {
+            "instructions": 27393311,
+            "cycles": 6816881.5,
+            "ll_cache_miss_rd": 10196.5,
+            "br_mis_pred_retired": 20984.5,
+            "ipc": 4.018451985706367
+          },
+          "qjsSamples": [
+            {
+              "instructions": 25207390,
+              "cycles": 5353558,
+              "ll_cache_miss_rd": 3285,
+              "br_mis_pred_retired": 14986
+            },
+            {
+              "instructions": 25205180,
+              "cycles": 5420717,
+              "ll_cache_miss_rd": 4449,
+              "br_mis_pred_retired": 14520
+            },
+            {
+              "instructions": 25208902,
+              "cycles": 5383701,
+              "ll_cache_miss_rd": 3052,
+              "br_mis_pred_retired": 14700
+            },
+            {
+              "instructions": 25325443,
+              "cycles": 5352198,
+              "ll_cache_miss_rd": 4839,
+              "br_mis_pred_retired": 14910
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 27387251,
+              "cycles": 6911623,
+              "ll_cache_miss_rd": 9995,
+              "br_mis_pred_retired": 21673
+            },
+            {
+              "instructions": 27403259,
+              "cycles": 6752472,
+              "ll_cache_miss_rd": 10708,
+              "br_mis_pred_retired": 20296
+            },
+            {
+              "instructions": 27373007,
+              "cycles": 6881291,
+              "ll_cache_miss_rd": 10398,
+              "br_mis_pred_retired": 21912
+            },
+            {
+              "instructions": 27399371,
+              "cycles": 6719021,
+              "ll_cache_miss_rd": 8897,
+              "br_mis_pred_retired": 20252
+            }
+          ]
+        }
+      }
+    },
+    "p780_dec_esc1": {
+      "script": ".tmp/p780-scripts/p780_dec_esc1.js",
+      "sourceSha256": "9f98d0a6b43f94e9",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 89440129,
+            "cycles": 14313616.5,
+            "stall_backend": 3120495.5,
+            "stall_backend_mem": 212082,
+            "ipc": 6.248604536805915
+          },
+          "zjs": {
+            "instructions": 75301403,
+            "cycles": 15951494,
+            "stall_backend": 6201555,
+            "stall_backend_mem": 214209.5,
+            "ipc": 4.720648924796636
+          },
+          "qjsSamples": [
+            {
+              "instructions": 89424685,
+              "cycles": 14266206,
+              "stall_backend": 3062345,
+              "stall_backend_mem": 204935
+            },
+            {
+              "instructions": 89451297,
+              "cycles": 14361027,
+              "stall_backend": 3154188,
+              "stall_backend_mem": 219229
+            },
+            {
+              "instructions": 89428961,
+              "cycles": 14229770,
+              "stall_backend": 3086803,
+              "stall_backend_mem": 191696
+            },
+            {
+              "instructions": 89499713,
+              "cycles": 14449859,
+              "stall_backend": 3291206,
+              "stall_backend_mem": 220344
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75407605,
+              "cycles": 16156839,
+              "stall_backend": 6246077,
+              "stall_backend_mem": 295895
+            },
+            {
+              "instructions": 75310362,
+              "cycles": 15746149,
+              "stall_backend": 6116520,
+              "stall_backend_mem": 218450
+            },
+            {
+              "instructions": 75292444,
+              "cycles": 15736924,
+              "stall_backend": 6157033,
+              "stall_backend_mem": 209969
+            },
+            {
+              "instructions": 75289522,
+              "cycles": 17608920,
+              "stall_backend": 7345788,
+              "stall_backend_mem": 195995
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 89377925.5,
+            "cycles": 14355696.5,
+            "l1d_cache": 27868304,
+            "l1d_cache_refill": 17843,
+            "ipc": 6.225955355074552
+          },
+          "zjs": {
+            "instructions": 75375546,
+            "cycles": 15970390,
+            "l1d_cache": 33161269.5,
+            "l1d_cache_refill": 21242.5,
+            "ipc": 4.719706030973571
+          },
+          "qjsSamples": [
+            {
+              "instructions": 89391046,
+              "cycles": 14363176,
+              "l1d_cache": 27872918,
+              "l1d_cache_refill": 18764
+            },
+            {
+              "instructions": 89332879,
+              "cycles": 14357227,
+              "l1d_cache": 27851661,
+              "l1d_cache_refill": 17444
+            },
+            {
+              "instructions": 89441463,
+              "cycles": 14354166,
+              "l1d_cache": 27891527,
+              "l1d_cache_refill": 18007
+            },
+            {
+              "instructions": 89364805,
+              "cycles": 14249343,
+              "l1d_cache": 27863690,
+              "l1d_cache_refill": 17679
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75374330,
+              "cycles": 16061013,
+              "l1d_cache": 33159423,
+              "l1d_cache_refill": 21261
+            },
+            {
+              "instructions": 75374039,
+              "cycles": 15828509,
+              "l1d_cache": 33157855,
+              "l1d_cache_refill": 21070
+            },
+            {
+              "instructions": 75376762,
+              "cycles": 15947645,
+              "l1d_cache": 33163116,
+              "l1d_cache_refill": 21224
+            },
+            {
+              "instructions": 75418120,
+              "cycles": 15993135,
+              "l1d_cache": 33169514,
+              "l1d_cache_refill": 21871
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 89390822,
+            "cycles": 14366542.5,
+            "ll_cache_miss_rd": 4069,
+            "br_mis_pred_retired": 15211,
+            "ipc": 6.222152755264532
+          },
+          "zjs": {
+            "instructions": 75425081.5,
+            "cycles": 15698864,
+            "ll_cache_miss_rd": 10400,
+            "br_mis_pred_retired": 21256,
+            "ipc": 4.804492955668639
+          },
+          "qjsSamples": [
+            {
+              "instructions": 89351417,
+              "cycles": 14177358,
+              "ll_cache_miss_rd": 3874,
+              "br_mis_pred_retired": 15159
+            },
+            {
+              "instructions": 89358548,
+              "cycles": 14610785,
+              "ll_cache_miss_rd": 4511,
+              "br_mis_pred_retired": 15235
+            },
+            {
+              "instructions": 89436856,
+              "cycles": 14348601,
+              "ll_cache_miss_rd": 4038,
+              "br_mis_pred_retired": 15187
+            },
+            {
+              "instructions": 89423096,
+              "cycles": 14384484,
+              "ll_cache_miss_rd": 4100,
+              "br_mis_pred_retired": 15489
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 75463876,
+              "cycles": 16097214,
+              "ll_cache_miss_rd": 13129,
+              "br_mis_pred_retired": 21872
+            },
+            {
+              "instructions": 75398861,
+              "cycles": 15543534,
+              "ll_cache_miss_rd": 9399,
+              "br_mis_pred_retired": 20640
+            },
+            {
+              "instructions": 75451302,
+              "cycles": 15801938,
+              "ll_cache_miss_rd": 10796,
+              "br_mis_pred_retired": 22365
+            },
+            {
+              "instructions": 75324343,
+              "cycles": 15595790,
+              "ll_cache_miss_rd": 10004,
+              "br_mis_pred_retired": 20371
+            }
+          ]
+        }
+      }
+    },
+    "p780_dec_esc1_vary": {
+      "script": ".tmp/p780-scripts/p780_dec_esc1_vary.js",
+      "sourceSha256": "1b4ce132f25aa0cf",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 95839362,
+            "cycles": 15811084.5,
+            "stall_backend": 3562187.5,
+            "stall_backend_mem": 182670.5,
+            "ipc": 6.06152993490105
+          },
+          "zjs": {
+            "instructions": 95729469.5,
+            "cycles": 19351090.5,
+            "stall_backend": 7298040,
+            "stall_backend_mem": 248530.5,
+            "ipc": 4.946980610730956
+          },
+          "qjsSamples": [
+            {
+              "instructions": 95868665,
+              "cycles": 15867910,
+              "stall_backend": 3637115,
+              "stall_backend_mem": 181866
+            },
+            {
+              "instructions": 95947901,
+              "cycles": 15970854,
+              "stall_backend": 3593000,
+              "stall_backend_mem": 264604
+            },
+            {
+              "instructions": 95810059,
+              "cycles": 15754259,
+              "stall_backend": 3531375,
+              "stall_backend_mem": 183475
+            },
+            {
+              "instructions": 95794068,
+              "cycles": 15744983,
+              "stall_backend": 3403915,
+              "stall_backend_mem": 172890
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 95672104,
+              "cycles": 19277615,
+              "stall_backend": 7203061,
+              "stall_backend_mem": 202123
+            },
+            {
+              "instructions": 95827000,
+              "cycles": 19531258,
+              "stall_backend": 7480479,
+              "stall_backend_mem": 314469
+            },
+            {
+              "instructions": 95777462,
+              "cycles": 19424566,
+              "stall_backend": 7289591,
+              "stall_backend_mem": 294938
+            },
+            {
+              "instructions": 95681477,
+              "cycles": 19234427,
+              "stall_backend": 7306489,
+              "stall_backend_mem": 189506
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 95826602,
+            "cycles": 15675095.5,
+            "l1d_cache": 30311385,
+            "l1d_cache_refill": 19081.5,
+            "ipc": 6.11330259518993
+          },
+          "zjs": {
+            "instructions": 95776444.5,
+            "cycles": 19280556.5,
+            "l1d_cache": 41685842.5,
+            "l1d_cache_refill": 24643,
+            "ipc": 4.967514526875819
+          },
+          "qjsSamples": [
+            {
+              "instructions": 95845467,
+              "cycles": 15661821,
+              "l1d_cache": 30323934,
+              "l1d_cache_refill": 19270
+            },
+            {
+              "instructions": 95782695,
+              "cycles": 15572909,
+              "l1d_cache": 30286559,
+              "l1d_cache_refill": 18544
+            },
+            {
+              "instructions": 95939556,
+              "cycles": 15688370,
+              "l1d_cache": 30336526,
+              "l1d_cache_refill": 19416
+            },
+            {
+              "instructions": 95807737,
+              "cycles": 15828885,
+              "l1d_cache": 30298836,
+              "l1d_cache_refill": 18893
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 95811239,
+              "cycles": 19326260,
+              "l1d_cache": 41697700,
+              "l1d_cache_refill": 25117
+            },
+            {
+              "instructions": 95741650,
+              "cycles": 19119427,
+              "l1d_cache": 41673985,
+              "l1d_cache_refill": 24436
+            },
+            {
+              "instructions": 95819300,
+              "cycles": 19234853,
+              "l1d_cache": 41707148,
+              "l1d_cache_refill": 24850
+            },
+            {
+              "instructions": 95685852,
+              "cycles": 19387427,
+              "l1d_cache": 41650944,
+              "l1d_cache_refill": 23773
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 95791099,
+            "cycles": 15580476,
+            "ll_cache_miss_rd": 5442,
+            "br_mis_pred_retired": 24906,
+            "ipc": 6.1481497099318405
+          },
+          "zjs": {
+            "instructions": 95681574.5,
+            "cycles": 19442007,
+            "ll_cache_miss_rd": 10972.5,
+            "br_mis_pred_retired": 24988.5,
+            "ipc": 4.921383605097971
+          },
+          "qjsSamples": [
+            {
+              "instructions": 95786400,
+              "cycles": 15578692,
+              "ll_cache_miss_rd": 4841,
+              "br_mis_pred_retired": 24561
+            },
+            {
+              "instructions": 95786083,
+              "cycles": 15557286,
+              "ll_cache_miss_rd": 4759,
+              "br_mis_pred_retired": 25040
+            },
+            {
+              "instructions": 95955224,
+              "cycles": 15761294,
+              "ll_cache_miss_rd": 6141,
+              "br_mis_pred_retired": 24772
+            },
+            {
+              "instructions": 95795798,
+              "cycles": 15582260,
+              "ll_cache_miss_rd": 6043,
+              "br_mis_pred_retired": 25259
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 95684717,
+              "cycles": 19618014,
+              "ll_cache_miss_rd": 12350,
+              "br_mis_pred_retired": 25865
+            },
+            {
+              "instructions": 95675943,
+              "cycles": 21645164,
+              "ll_cache_miss_rd": 9595,
+              "br_mis_pred_retired": 23849
+            },
+            {
+              "instructions": 95707759,
+              "cycles": 19266000,
+              "ll_cache_miss_rd": 13754,
+              "br_mis_pred_retired": 26336
+            },
+            {
+              "instructions": 95678432,
+              "cycles": 19167755,
+              "ll_cache_miss_rd": 9353,
+              "br_mis_pred_retired": 24112
+            }
+          ]
+        }
+      }
+    },
+    "p780_dec_vary_base": {
+      "script": ".tmp/p780-scripts/p780_dec_vary_base.js",
+      "sourceSha256": "70f75e89fc8ce9e2",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 31483038.5,
+            "cycles": 6756347,
+            "stall_backend": 2265916,
+            "stall_backend_mem": 160107,
+            "ipc": 4.659772285230465
+          },
+          "zjs": {
+            "instructions": 34054541.5,
+            "cycles": 8361209,
+            "stall_backend": 2886158.5,
+            "stall_backend_mem": 242904,
+            "ipc": 4.072920734310074
+          },
+          "qjsSamples": [
+            {
+              "instructions": 31509804,
+              "cycles": 6754889,
+              "stall_backend": 2265554,
+              "stall_backend_mem": 145230
+            },
+            {
+              "instructions": 31484594,
+              "cycles": 6757805,
+              "stall_backend": 2243153,
+              "stall_backend_mem": 173152
+            },
+            {
+              "instructions": 31481483,
+              "cycles": 6700982,
+              "stall_backend": 2266278,
+              "stall_backend_mem": 147062
+            },
+            {
+              "instructions": 31481065,
+              "cycles": 6789722,
+              "stall_backend": 2301852,
+              "stall_backend_mem": 188878
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 34168878,
+              "cycles": 8338119,
+              "stall_backend": 2833825,
+              "stall_backend_mem": 303216
+            },
+            {
+              "instructions": 34122826,
+              "cycles": 8525220,
+              "stall_backend": 2954847,
+              "stall_backend_mem": 248222
+            },
+            {
+              "instructions": 33986257,
+              "cycles": 8384299,
+              "stall_backend": 2938492,
+              "stall_backend_mem": 237586
+            },
+            {
+              "instructions": 33977415,
+              "cycles": 8262433,
+              "stall_backend": 2797727,
+              "stall_backend_mem": 176586
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 31588696,
+            "cycles": 7055248.5,
+            "l1d_cache": 11620636,
+            "l1d_cache_refill": 19033,
+            "ipc": 4.477332867864257
+          },
+          "zjs": {
+            "instructions": 33985202,
+            "cycles": 8334256.5,
+            "l1d_cache": 15812559.5,
+            "l1d_cache_refill": 23504.5,
+            "ipc": 4.077772504361967
+          },
+          "qjsSamples": [
+            {
+              "instructions": 31592875,
+              "cycles": 7096626,
+              "l1d_cache": 11623983,
+              "l1d_cache_refill": 19230
+            },
+            {
+              "instructions": 31584517,
+              "cycles": 7101388,
+              "l1d_cache": 11619091,
+              "l1d_cache_refill": 19021
+            },
+            {
+              "instructions": 31605546,
+              "cycles": 7013871,
+              "l1d_cache": 11622181,
+              "l1d_cache_refill": 19045
+            },
+            {
+              "instructions": 31515741,
+              "cycles": 6828637,
+              "l1d_cache": 11593794,
+              "l1d_cache_refill": 18325
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 33984337,
+              "cycles": 8352691,
+              "l1d_cache": 15813455,
+              "l1d_cache_refill": 23763
+            },
+            {
+              "instructions": 33980911,
+              "cycles": 8080159,
+              "l1d_cache": 15806631,
+              "l1d_cache_refill": 23287
+            },
+            {
+              "instructions": 33986067,
+              "cycles": 8729624,
+              "l1d_cache": 15814819,
+              "l1d_cache_refill": 23399
+            },
+            {
+              "instructions": 33996375,
+              "cycles": 8315822,
+              "l1d_cache": 15811664,
+              "l1d_cache_refill": 23610
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 31483425,
+            "cycles": 6774796,
+            "ll_cache_miss_rd": 5072,
+            "br_mis_pred_retired": 16392.5,
+            "ipc": 4.647139928641394
+          },
+          "zjs": {
+            "instructions": 33988749,
+            "cycles": 8252207.5,
+            "ll_cache_miss_rd": 11427.5,
+            "br_mis_pred_retired": 24969,
+            "ipc": 4.118746286978363
+          },
+          "qjsSamples": [
+            {
+              "instructions": 31638451,
+              "cycles": 6998007,
+              "ll_cache_miss_rd": 5021,
+              "br_mis_pred_retired": 16409
+            },
+            {
+              "instructions": 31470380,
+              "cycles": 6698182,
+              "ll_cache_miss_rd": 5123,
+              "br_mis_pred_retired": 16376
+            },
+            {
+              "instructions": 31485460,
+              "cycles": 6742665,
+              "ll_cache_miss_rd": 3632,
+              "br_mis_pred_retired": 16496
+            },
+            {
+              "instructions": 31481390,
+              "cycles": 6806927,
+              "ll_cache_miss_rd": 5511,
+              "br_mis_pred_retired": 16091
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 34131050,
+              "cycles": 8719289,
+              "ll_cache_miss_rd": 11717,
+              "br_mis_pred_retired": 25714
+            },
+            {
+              "instructions": 33987746,
+              "cycles": 8113155,
+              "ll_cache_miss_rd": 8181,
+              "br_mis_pred_retired": 24224
+            },
+            {
+              "instructions": 33989752,
+              "cycles": 8348909,
+              "ll_cache_miss_rd": 13540,
+              "br_mis_pred_retired": 25849
+            },
+            {
+              "instructions": 33982782,
+              "cycles": 8155506,
+              "ll_cache_miss_rd": 11138,
+              "br_mis_pred_retired": 24102
+            }
+          ]
+        }
+      }
+    },
+    "p780_dec_3b1": {
+      "script": ".tmp/p780-scripts/p780_dec_3b1.js",
+      "sourceSha256": "dab2934ca061b0ad",
+      "groups": {
+        "stall": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 91790726,
+            "cycles": 14601191,
+            "stall_backend": 2901521,
+            "stall_backend_mem": 192276.5,
+            "ipc": 6.286523202114129
+          },
+          "zjs": {
+            "instructions": 113627949,
+            "cycles": 23961006.5,
+            "stall_backend": 9855673.5,
+            "stall_backend_mem": 242425,
+            "ipc": 4.742202669992181
+          },
+          "qjsSamples": [
+            {
+              "instructions": 91770315,
+              "cycles": 14528673,
+              "stall_backend": 2941065,
+              "stall_backend_mem": 143374
+            },
+            {
+              "instructions": 91921569,
+              "cycles": 14651912,
+              "stall_backend": 2844650,
+              "stall_backend_mem": 225513
+            },
+            {
+              "instructions": 91787876,
+              "cycles": 14550470,
+              "stall_backend": 2898689,
+              "stall_backend_mem": 159040
+            },
+            {
+              "instructions": 91793576,
+              "cycles": 14663387,
+              "stall_backend": 2904353,
+              "stall_backend_mem": 228937
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 113585314,
+              "cycles": 23864320,
+              "stall_backend": 9818666,
+              "stall_backend_mem": 202718
+            },
+            {
+              "instructions": 113728824,
+              "cycles": 23943776,
+              "stall_backend": 9902369,
+              "stall_backend_mem": 218538
+            },
+            {
+              "instructions": 113670584,
+              "cycles": 24259820,
+              "stall_backend": 9892681,
+              "stall_backend_mem": 284761
+            },
+            {
+              "instructions": 113579639,
+              "cycles": 23978237,
+              "stall_backend": 9652364,
+              "stall_backend_mem": 266312
+            }
+          ]
+        },
+        "l1d": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 91803709,
+            "cycles": 14537775,
+            "l1d_cache": 28390071,
+            "l1d_cache_refill": 17951.5,
+            "ipc": 6.31483903141987
+          },
+          "zjs": {
+            "instructions": 113718848.5,
+            "cycles": 24039857.5,
+            "l1d_cache": 43941274,
+            "l1d_cache_refill": 21522.5,
+            "ipc": 4.730429392104342
+          },
+          "qjsSamples": [
+            {
+              "instructions": 91780807,
+              "cycles": 14550433,
+              "l1d_cache": 28384418,
+              "l1d_cache_refill": 17692
+            },
+            {
+              "instructions": 91868888,
+              "cycles": 14619631,
+              "l1d_cache": 28412122,
+              "l1d_cache_refill": 18300
+            },
+            {
+              "instructions": 91826611,
+              "cycles": 14525117,
+              "l1d_cache": 28395724,
+              "l1d_cache_refill": 18211
+            },
+            {
+              "instructions": 91769853,
+              "cycles": 14493130,
+              "l1d_cache": 28373390,
+              "l1d_cache_refill": 17501
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 113749821,
+              "cycles": 24171479,
+              "l1d_cache": 43957795,
+              "l1d_cache_refill": 22094
+            },
+            {
+              "instructions": 113687876,
+              "cycles": 23908236,
+              "l1d_cache": 43935033,
+              "l1d_cache_refill": 21456
+            },
+            {
+              "instructions": 113671127,
+              "cycles": 23901522,
+              "l1d_cache": 43932300,
+              "l1d_cache_refill": 21154
+            },
+            {
+              "instructions": 113750195,
+              "cycles": 24303567,
+              "l1d_cache": 43947515,
+              "l1d_cache_refill": 21589
+            }
+          ]
+        },
+        "outer": {
+          "order": "qjs->zjs->zjs->qjs->qjs->zjs->zjs->qjs",
+          "qjs": {
+            "instructions": 91780919,
+            "cycles": 14552492,
+            "ll_cache_miss_rd": 3776.5,
+            "br_mis_pred_retired": 15140.5,
+            "ipc": 6.306886751767326
+          },
+          "zjs": {
+            "instructions": 113642514,
+            "cycles": 23993364.5,
+            "ll_cache_miss_rd": 10188.5,
+            "br_mis_pred_retired": 21430.5,
+            "ipc": 4.7364142698703215
+          },
+          "qjsSamples": [
+            {
+              "instructions": 91775581,
+              "cycles": 14518150,
+              "ll_cache_miss_rd": 3253,
+              "br_mis_pred_retired": 15008
+            },
+            {
+              "instructions": 91853716,
+              "cycles": 14586834,
+              "ll_cache_miss_rd": 4123,
+              "br_mis_pred_retired": 15273
+            },
+            {
+              "instructions": 91769001,
+              "cycles": 14498421,
+              "ll_cache_miss_rd": 3430,
+              "br_mis_pred_retired": 14691
+            },
+            {
+              "instructions": 91786257,
+              "cycles": 14653587,
+              "ll_cache_miss_rd": 4890,
+              "br_mis_pred_retired": 15354
+            }
+          ],
+          "zjsSamples": [
+            {
+              "instructions": 113574336,
+              "cycles": 23894531,
+              "ll_cache_miss_rd": 10042,
+              "br_mis_pred_retired": 21918
+            },
+            {
+              "instructions": 113752080,
+              "cycles": 24008483,
+              "ll_cache_miss_rd": 7530,
+              "br_mis_pred_retired": 20943
+            },
+            {
+              "instructions": 113710692,
+              "cycles": 24118083,
+              "ll_cache_miss_rd": 13089,
+              "br_mis_pred_retired": 22108
+            },
+            {
+              "instructions": 113572351,
+              "cycles": 23978246,
+              "ll_cache_miss_rd": 10335,
+              "br_mis_pred_retired": 20151
+            }
+          ]
+        }
+      }
+    }
+  }
+}

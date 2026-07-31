@@ -1,0 +1,4058 @@
+{
+ "line": "P7-50",
+ "inner_loop_n": 20000,
+ "cpu": 19,
+ "pmu_device": "armv8_pmuv3_1",
+ "binaries": {
+  "zjsA": {
+   "path": "/home/aneryu/worktrees/zjs-p7-closure/zig-out-A/bin/zjs-same-runtime",
+   "sha256": "2ddbc16ab9ca636503a6a7e2b0158202a8c91d8c2ff484760c4cbc58ca52bc30"
+  },
+  "zjsB": {
+   "path": "/home/aneryu/worktrees/zjs-p7-closure/zig-out-B/bin/zjs-same-runtime",
+   "sha256": "f2e58958737cdcbdb6720f10b9c110d9e247598fad1e310a8d845a0fa3c64aa4"
+  },
+  "qjs": {
+   "path": "/home/aneryu/worktrees/zjs-p7-closure/.tmp/qjs-same-runtime-A",
+   "sha256": "0ad622824859df1caea69d828971e55b3fb26e91f4a06976e7ea78df6125cf3c"
+  }
+ },
+ "wall": {
+  "closure_reuse_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 254849.5,
+    "fill_median_ns": 255490.0,
+    "clear_median_ns": 253065.5,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 218873.0,
+    "fill_median_ns": 220001.5,
+    "clear_median_ns": 217153.0,
+    "n_samples": 240
+   }
+  },
+  "closure_reuse_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 255514.0,
+    "fill_median_ns": 256314.0,
+    "clear_median_ns": 253953.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 218521.0,
+    "fill_median_ns": 220681.0,
+    "clear_median_ns": 215697.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_nocap_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 1750947.5,
+    "fill_median_ns": 2664097.5,
+    "clear_median_ns": 798773.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1094975.0,
+    "fill_median_ns": 1584266.0,
+    "clear_median_ns": 805557.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_nocap_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 1723779.0,
+    "fill_median_ns": 2795794.5,
+    "clear_median_ns": 820517.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1100575.5,
+    "fill_median_ns": 1475098.0,
+    "clear_median_ns": 736301.0,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_nocap_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 1815524.0,
+    "fill_median_ns": 2984963.0,
+    "clear_median_ns": 923806.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1299176.0,
+    "fill_median_ns": 1739003.0,
+    "clear_median_ns": 784565.0,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_nocap_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 1856964.5,
+    "fill_median_ns": 3019124.0,
+    "clear_median_ns": 932158.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1290504.5,
+    "fill_median_ns": 1779067.5,
+    "clear_median_ns": 795669.5,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap1_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 1945493.0,
+    "fill_median_ns": 3293229.5,
+    "clear_median_ns": 973750.5,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1226120.0,
+    "fill_median_ns": 1624370.5,
+    "clear_median_ns": 855829.5,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap1_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 1913124.5,
+    "fill_median_ns": 3191228.5,
+    "clear_median_ns": 890038.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1266584.5,
+    "fill_median_ns": 1726939.5,
+    "clear_median_ns": 884461.5,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_cap1_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2082645.5,
+    "fill_median_ns": 3353821.5,
+    "clear_median_ns": 1003742.5,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1441649.5,
+    "fill_median_ns": 2081974.0,
+    "clear_median_ns": 974870.5,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_cap1_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2018405.5,
+    "fill_median_ns": 3094964.0,
+    "clear_median_ns": 891470.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1424017.0,
+    "fill_median_ns": 1898620.0,
+    "clear_median_ns": 874318.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap4_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2187110.0,
+    "fill_median_ns": 3714584.0,
+    "clear_median_ns": 1050447.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1431897.0,
+    "fill_median_ns": 2009613.0,
+    "clear_median_ns": 935926.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap4_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2159310.0,
+    "fill_median_ns": 3458854.0,
+    "clear_median_ns": 921214.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1391721.0,
+    "fill_median_ns": 2021109.0,
+    "clear_median_ns": 932118.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_loopbind_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2328711.0,
+    "fill_median_ns": 3746176.0,
+    "clear_median_ns": 1108903.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1518042.0,
+    "fill_median_ns": 2150702.0,
+    "clear_median_ns": 1069575.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_loopbind_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2379215.0,
+    "fill_median_ns": 3785345.0,
+    "clear_median_ns": 1234104.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1530218.0,
+    "fill_median_ns": 2153166.0,
+    "clear_median_ns": 1071727.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_call_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2133086.0,
+    "fill_median_ns": 3587439.5,
+    "clear_median_ns": 818125.5,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1358425.0,
+    "fill_median_ns": 2055405.5,
+    "clear_median_ns": 734645.0,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_call_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2145934.0,
+    "fill_median_ns": 3394886.0,
+    "clear_median_ns": 794141.0,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1331377.0,
+    "fill_median_ns": 2097182.0,
+    "clear_median_ns": 795165.0,
+    "n_samples": 240
+   }
+  },
+  "closure_reuse_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 267441.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 222849.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_reuse_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 263954.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 223369.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_nocap_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2484808.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1331176.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_nocap_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2479392.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1330601.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_nocap_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2681897.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1629587.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_nocap_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2664914.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1614306.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap1_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2801034.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1460697.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap1_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2752378.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1477930.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_cap1_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2988851.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1757427.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_fnexpr_cap1_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 2955436.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1769419.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap4_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 3181445.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1719251.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_cap4_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 3156396.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1717755.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_loopbind_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 3221557.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1598554.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_loopbind_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 3261293.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1597842.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_call_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_median_ns": 3222197.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1806707.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  },
+  "closure_arrow_call_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_median_ns": 3256005.5,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   },
+   "qjs": {
+    "pooled_median_ns": 1805636.0,
+    "fill_median_ns": null,
+    "clear_median_ns": null,
+    "n_samples": 240
+   }
+  }
+ },
+ "pmu": {
+  "closure_reuse_retain|zjsA": {
+   "instructions": 568.87436125,
+   "cycles": 98.96741875,
+   "ns": 25388120.0
+  },
+  "closure_reuse_retain|zjsB": {
+   "instructions": 567.76318,
+   "cycles": 98.32160125,
+   "ns": 25228500.0
+  },
+  "closure_reuse_retain|qjs": {
+   "instructions": 557.56729875,
+   "cycles": 87.221355,
+   "ns": 22353640.0
+  },
+  "closure_arrow_nocap_retain|zjsA": {
+   "instructions": 3313.43603625,
+   "cycles": 754.16559875,
+   "ns": 193376640.0
+  },
+  "closure_arrow_nocap_retain|zjsB": {
+   "instructions": 3337.3252,
+   "cycles": 731.04424,
+   "ns": 187470360.0
+  },
+  "closure_arrow_nocap_retain|qjs": {
+   "instructions": 2061.42464625,
+   "cycles": 469.1016275,
+   "ns": 120299120.0
+  },
+  "closure_fnexpr_nocap_retain|zjsA": {
+   "instructions": 3524.437525,
+   "cycles": 775.12687875,
+   "ns": 198777460.0
+  },
+  "closure_fnexpr_nocap_retain|zjsB": {
+   "instructions": 3528.7564625,
+   "cycles": 753.6702775,
+   "ns": 193260120.0
+  },
+  "closure_fnexpr_nocap_retain|qjs": {
+   "instructions": 2463.9249,
+   "cycles": 542.38906375,
+   "ns": 139101880.0
+  },
+  "closure_arrow_cap1_retain|zjsA": {
+   "instructions": 3694.94965625,
+   "cycles": 832.1694125,
+   "ns": 213377960.0
+  },
+  "closure_arrow_cap1_retain|zjsB": {
+   "instructions": 3706.11106,
+   "cycles": 799.59260875,
+   "ns": 205084600.0
+  },
+  "closure_arrow_cap1_retain|qjs": {
+   "instructions": 2309.6115475,
+   "cycles": 503.44068125,
+   "ns": 129122240.0
+  },
+  "closure_fnexpr_cap1_retain|zjsA": {
+   "instructions": 3913.821805,
+   "cycles": 859.787415,
+   "ns": 220486360.0
+  },
+  "closure_fnexpr_cap1_retain|zjsB": {
+   "instructions": 3913.70452,
+   "cycles": 790.6318175,
+   "ns": 202744780.0
+  },
+  "closure_fnexpr_cap1_retain|qjs": {
+   "instructions": 2686.7357825,
+   "cycles": 621.61608125,
+   "ns": 159406280.0
+  },
+  "closure_arrow_cap4_retain|zjsA": {
+   "instructions": 4202.9569525,
+   "cycles": 942.80755625,
+   "ns": 241783380.0
+  },
+  "closure_arrow_cap4_retain|zjsB": {
+   "instructions": 4210.59525875,
+   "cycles": 855.9066625,
+   "ns": 219479500.0
+  },
+  "closure_arrow_cap4_retain|qjs": {
+   "instructions": 2631.8805125,
+   "cycles": 600.7527375,
+   "ns": 154047300.0
+  },
+  "closure_arrow_loopbind_retain|zjsA": {
+   "instructions": 4193.6371825,
+   "cycles": 977.382355,
+   "ns": 250619140.0
+  },
+  "closure_arrow_loopbind_retain|zjsB": {
+   "instructions": 4195.1114625,
+   "cycles": 986.48257875,
+   "ns": 252968980.0
+  },
+  "closure_arrow_loopbind_retain|qjs": {
+   "instructions": 2545.01864125,
+   "cycles": 630.29679,
+   "ns": 161619660.0
+  },
+  "closure_arrow_call_retain|zjsA": {
+   "instructions": 4034.59390125,
+   "cycles": 887.100455,
+   "ns": 227505240.0
+  },
+  "closure_arrow_call_retain|zjsB": {
+   "instructions": 4026.98055375,
+   "cycles": 862.38952,
+   "ns": 221197020.0
+  },
+  "closure_arrow_call_retain|qjs": {
+   "instructions": 2540.99482,
+   "cycles": 519.49066625,
+   "ns": 133214640.0
+  },
+  "closure_reuse_churn|zjsA": {
+   "instructions": 297.5067325,
+   "cycles": 51.2823325,
+   "ns": 13147890.0
+  },
+  "closure_reuse_churn|zjsB": {
+   "instructions": 302.37770875,
+   "cycles": 50.7765075,
+   "ns": 13017520.0
+  },
+  "closure_reuse_churn|qjs": {
+   "instructions": 263.317420625,
+   "cycles": 43.12005625,
+   "ns": 11066130.0
+  },
+  "closure_arrow_nocap_churn|zjsA": {
+   "instructions": 2781.70158625,
+   "cycles": 483.655698125,
+   "ns": 124032320.0
+  },
+  "closure_arrow_nocap_churn|zjsB": {
+   "instructions": 2782.58207875,
+   "cycles": 485.1191325,
+   "ns": 124404950.0
+  },
+  "closure_arrow_nocap_churn|qjs": {
+   "instructions": 1588.736276875,
+   "cycles": 258.704716875,
+   "ns": 66340880.0
+  },
+  "closure_fnexpr_nocap_churn|zjsA": {
+   "instructions": 2985.5685975,
+   "cycles": 520.054264375,
+   "ns": 133351769.99999999
+  },
+  "closure_fnexpr_nocap_churn|zjsB": {
+   "instructions": 2977.678105,
+   "cycles": 517.904755625,
+   "ns": 132801220.0
+  },
+  "closure_fnexpr_nocap_churn|qjs": {
+   "instructions": 1949.416208125,
+   "cycles": 312.527371875,
+   "ns": 80144630.0
+  },
+  "closure_arrow_cap1_churn|zjsA": {
+   "instructions": 3148.576029375,
+   "cycles": 552.77346,
+   "ns": 141746060.0
+  },
+  "closure_arrow_cap1_churn|zjsB": {
+   "instructions": 3151.449405,
+   "cycles": 539.67971625,
+   "ns": 138389150.0
+  },
+  "closure_arrow_cap1_churn|qjs": {
+   "instructions": 1807.92081625,
+   "cycles": 285.84691125,
+   "ns": 73292860.0
+  },
+  "closure_fnexpr_cap1_churn|zjsA": {
+   "instructions": 3331.283810625,
+   "cycles": 579.33826625,
+   "ns": 148571030.0
+  },
+  "closure_fnexpr_cap1_churn|zjsB": {
+   "instructions": 3342.08382625,
+   "cycles": 575.64095875,
+   "ns": 147611170.0
+  },
+  "closure_fnexpr_cap1_churn|qjs": {
+   "instructions": 2172.04304125,
+   "cycles": 341.9385675,
+   "ns": 87685740.0
+  },
+  "closure_arrow_cap4_churn|zjsA": {
+   "instructions": 3589.394125625,
+   "cycles": 642.448811875,
+   "ns": 164741090.0
+  },
+  "closure_arrow_cap4_churn|zjsB": {
+   "instructions": 3576.830765,
+   "cycles": 632.203506875,
+   "ns": 162120790.0
+  },
+  "closure_arrow_cap4_churn|qjs": {
+   "instructions": 2070.65989875,
+   "cycles": 332.86713375,
+   "ns": 85366760.0
+  },
+  "closure_arrow_loopbind_churn|zjsA": {
+   "instructions": 3515.95716625,
+   "cycles": 626.006900625,
+   "ns": 160518470.0
+  },
+  "closure_arrow_loopbind_churn|zjsB": {
+   "instructions": 3522.254379375,
+   "cycles": 634.446555625,
+   "ns": 162689640.0
+  },
+  "closure_arrow_loopbind_churn|qjs": {
+   "instructions": 1929.832418125,
+   "cycles": 305.596156875,
+   "ns": 78372070.0
+  },
+  "closure_arrow_call_churn|zjsA": {
+   "instructions": 3488.094724375,
+   "cycles": 648.79506875,
+   "ns": 166367170.0
+  },
+  "closure_arrow_call_churn|zjsB": {
+   "instructions": 3484.59464875,
+   "cycles": 647.15405375,
+   "ns": 165943220.0
+  },
+  "closure_arrow_call_churn|qjs": {
+   "instructions": 2062.418864375,
+   "cycles": 347.75307,
+   "ns": 89171540.0
+  }
+ },
+ "split": {
+  "closure_reuse_retain|zjsA": {
+   "instructions": {
+    "fill": 493.786375,
+    "clear": -78.3895
+   },
+   "cycles": {
+    "fill": 53.767075,
+    "clear": 37.533925
+   }
+  },
+  "closure_reuse_retain|zjsB": {
+   "instructions": {
+    "fill": 466.262075,
+    "clear": 120.65625
+   },
+   "cycles": {
+    "fill": 45.488375,
+    "clear": 46.0403
+   }
+  },
+  "closure_reuse_retain|qjs": {
+   "instructions": {
+    "fill": 481.095,
+    "clear": 55.996275
+   },
+   "cycles": {
+    "fill": 55.0191,
+    "clear": 26.315625
+   }
+  },
+  "closure_arrow_nocap_retain|zjsA": {
+   "instructions": {
+    "fill": 2568.1212,
+    "clear": 639.287325
+   },
+   "cycles": {
+    "fill": 681.561075,
+    "clear": 106.871275
+   }
+  },
+  "closure_arrow_nocap_retain|zjsB": {
+   "instructions": {
+    "fill": 2776.972325,
+    "clear": 457.079825
+   },
+   "cycles": {
+    "fill": 671.35495,
+    "clear": 17.139575
+   }
+  },
+  "closure_arrow_nocap_retain|qjs": {
+   "instructions": {
+    "fill": 1543.94,
+    "clear": 500.98405
+   },
+   "cycles": {
+    "fill": 301.663125,
+    "clear": 210.017825
+   }
+  },
+  "closure_fnexpr_nocap_retain|zjsA": {
+   "instructions": {
+    "fill": 2551.219975,
+    "clear": 838.657675
+   },
+   "cycles": {
+    "fill": 577.37225,
+    "clear": 148.643475
+   }
+  },
+  "closure_fnexpr_nocap_retain|zjsB": {
+   "instructions": {
+    "fill": 2536.525575,
+    "clear": 1023.1448
+   },
+   "cycles": {
+    "fill": 486.790775,
+    "clear": 317.036525
+   }
+  },
+  "closure_fnexpr_nocap_retain|qjs": {
+   "instructions": {
+    "fill": 2005.577475,
+    "clear": 559.031275
+   },
+   "cycles": {
+    "fill": 424.48135,
+    "clear": 219.379075
+   }
+  },
+  "closure_arrow_cap1_retain|zjsA": {
+   "instructions": {
+    "fill": 2995.895625,
+    "clear": 599.390225
+   },
+   "cycles": {
+    "fill": 526.109075,
+    "clear": 239.063875
+   }
+  },
+  "closure_arrow_cap1_retain|zjsB": {
+   "instructions": {
+    "fill": 3131.853425,
+    "clear": 617.675975
+   },
+   "cycles": {
+    "fill": 649.313575,
+    "clear": 154.930275
+   }
+  },
+  "closure_arrow_cap1_retain|qjs": {
+   "instructions": {
+    "fill": 1831.419325,
+    "clear": 561.013575
+   },
+   "cycles": {
+    "fill": 524.449125,
+    "clear": -91.01705
+   }
+  },
+  "closure_fnexpr_cap1_retain|zjsA": {
+   "instructions": {
+    "fill": 2749.18985,
+    "clear": 1010.784125
+   },
+   "cycles": {
+    "fill": 601.07875,
+    "clear": 133.65875
+   }
+  },
+  "closure_fnexpr_cap1_retain|zjsB": {
+   "instructions": {
+    "fill": 3320.24615,
+    "clear": 645.103375
+   },
+   "cycles": {
+    "fill": 666.670825,
+    "clear": -197.4357
+   }
+  },
+  "closure_fnexpr_cap1_retain|qjs": {
+   "instructions": {
+    "fill": 2141.7204,
+    "clear": 532.0156
+   },
+   "cycles": {
+    "fill": 450.1713,
+    "clear": 207.242075
+   }
+  },
+  "closure_arrow_cap4_retain|zjsA": {
+   "instructions": {
+    "fill": 3152.05435,
+    "clear": 964.926675
+   },
+   "cycles": {
+    "fill": 726.129725,
+    "clear": 132.72235
+   }
+  },
+  "closure_arrow_cap4_retain|zjsB": {
+   "instructions": {
+    "fill": 3073.861625,
+    "clear": 1091.63375
+   },
+   "cycles": {
+    "fill": 835.05525,
+    "clear": 287.787175
+   }
+  },
+  "closure_arrow_cap4_retain|qjs": {
+   "instructions": {
+    "fill": 2048.910475,
+    "clear": 550.529225
+   },
+   "cycles": {
+    "fill": 406.81355,
+    "clear": 140.13265
+   }
+  },
+  "closure_arrow_loopbind_retain|zjsA": {
+   "instructions": {
+    "fill": 3127.30795,
+    "clear": 1015.5091
+   },
+   "cycles": {
+    "fill": 912.20015,
+    "clear": 5.3481
+   }
+  },
+  "closure_arrow_loopbind_retain|zjsB": {
+   "instructions": {
+    "fill": 3103.2958,
+    "clear": 913.30265
+   },
+   "cycles": {
+    "fill": 868.6689,
+    "clear": 50.922425
+   }
+  },
+  "closure_arrow_loopbind_retain|qjs": {
+   "instructions": {
+    "fill": 1806.1176,
+    "clear": 665.29
+   },
+   "cycles": {
+    "fill": 606.319375,
+    "clear": 24.555925
+   }
+  },
+  "closure_arrow_call_retain|zjsA": {
+   "instructions": {
+    "fill": 3117.858975,
+    "clear": 865.611675
+   },
+   "cycles": {
+    "fill": 752.278325,
+    "clear": 30.883325
+   }
+  },
+  "closure_arrow_call_retain|zjsB": {
+   "instructions": {
+    "fill": 3202.743325,
+    "clear": 968.27975
+   },
+   "cycles": {
+    "fill": 492.09415,
+    "clear": 359.527775
+   }
+  },
+  "closure_arrow_call_retain|qjs": {
+   "instructions": {
+    "fill": 2146.941825,
+    "clear": 473.84975
+   },
+   "cycles": {
+    "fill": 368.5127,
+    "clear": 142.962975
+   }
+  }
+ },
+ "counts_per_op": {
+  "closure_reuse_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 0.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_reuse_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 0.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_reuse_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 0.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_reuse_retain|qjs|create": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 0.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_reuse_retain|qjs|create_plus_release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 0.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_reuse_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 0.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_reuse_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 0.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_reuse_churn|qjs|create_plus_release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 0.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_nocap_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.036,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.036
+  },
+  "closure_arrow_nocap_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.036,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.036,
+   "malloc": 0.036
+  },
+  "closure_arrow_nocap_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.036,
+   "malloc": 0.0
+  },
+  "closure_arrow_nocap_retain|qjs|create": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.027,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_nocap_retain|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.027,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_nocap_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_nocap_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_arrow_nocap_churn|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 3.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_fnexpr_nocap_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.036,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.036
+  },
+  "closure_fnexpr_nocap_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 3.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.036,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.036,
+   "malloc": 0.036
+  },
+  "closure_fnexpr_nocap_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.036,
+   "malloc": 0.0
+  },
+  "closure_fnexpr_nocap_retain|qjs|create": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 3.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 3.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 0.0,
+   "js_realloc": 1.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.031,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_fnexpr_nocap_retain|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 3.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 3.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 3.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 0.0,
+   "js_realloc": 1.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.031,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_fnexpr_nocap_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_fnexpr_nocap_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 3.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_fnexpr_nocap_churn|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 3.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 3.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 3.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 3.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 1.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_cap1_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.04,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.04
+  },
+  "closure_arrow_cap1_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.04,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.04,
+   "malloc": 0.04
+  },
+  "closure_arrow_cap1_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.04,
+   "malloc": 0.0
+  },
+  "closure_arrow_cap1_retain|qjs|create": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.031,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_cap1_retain|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 1.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.031,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_cap1_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 1.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_cap1_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_arrow_cap1_churn|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 1.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 3.0,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_fnexpr_cap1_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.04,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.04
+  },
+  "closure_fnexpr_cap1_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 3.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.04,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.04,
+   "malloc": 0.04
+  },
+  "closure_fnexpr_cap1_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.04,
+   "malloc": 0.0
+  },
+  "closure_fnexpr_cap1_retain|qjs|create": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 3.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 3.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 1.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.035,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_fnexpr_cap1_retain|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 1.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 3.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 3.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 3.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 1.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.035,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_fnexpr_cap1_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 1.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_fnexpr_cap1_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 3.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_fnexpr_cap1_churn|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 1.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 3.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 3.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 3.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 3.0,
+   "js_mallocz": 1.0,
+   "js_realloc": 1.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_cap4_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.046,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.046
+  },
+  "closure_arrow_cap4_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.046,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.046,
+   "malloc": 0.046
+  },
+  "closure_arrow_cap4_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.046,
+   "malloc": 0.0
+  },
+  "closure_arrow_cap4_retain|qjs|create": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 4.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.037,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_cap4_retain|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 4.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 4.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.037,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_cap4_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 4.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_cap4_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_arrow_cap4_churn|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 4.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 4.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 3.0,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_loopbind_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.054,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.054
+  },
+  "closure_arrow_loopbind_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 1.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 2.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 2.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 2.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.054,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.054,
+   "malloc": 0.054
+  },
+  "closure_arrow_loopbind_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 1.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 2.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 2.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 2.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.054,
+   "malloc": 0.0
+  },
+  "closure_arrow_loopbind_retain|qjs|create": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 3.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.045,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_loopbind_retain|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 2.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 3.999,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.045,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_loopbind_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 2.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_loopbind_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 1.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 2.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 2.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 2.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_arrow_loopbind_churn|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 1.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 2.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 4.0,
+   "js_mallocz": 1.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_call_retain|zjs|create": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 0.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 0.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 0.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 0.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 0.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.036,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.036
+  },
+  "closure_arrow_call_retain|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.036,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.036,
+   "malloc": 0.036
+  },
+  "closure_arrow_call_retain|zjs|release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 0.0,
+   "core.object.Object.create": 0.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 0.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 0.0,
+   "exec.object_ops.attachFunctionCaptures": 0.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 0.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 0.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 0.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 0.0,
+   "core.shape.Registry.destroyShape": 0.0,
+   "core.shape.Registry.release": 1.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 0.0,
+   "exec.call_runtime.functionNameValueFromAtom": 0.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.036,
+   "malloc": 0.0
+  },
+  "closure_arrow_call_retain|qjs|create": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 0.0,
+   "__JS_FreeValueRT": 0.0,
+   "free_gc_object": 0.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.027,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_call_retain|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.001,
+   "gc_free_cycles": 0.001,
+   "js_malloc": 2.999,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.027,
+   "js_def_realloc": 0.006,
+   "js_realloc2": 0.006
+  },
+  "closure_arrow_call_retain|qjs|release": {
+   "js_closure": 0.0,
+   "js_closure2.isra.0": 0.0,
+   "JS_NewObjectClass": 0.0,
+   "JS_NewObjectProtoClass": 0.0,
+   "JS_NewObjectFromShape": 0.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 0.0,
+   "JS_DefinePropertyValue": 0.0,
+   "add_property": 0.0,
+   "add_shape_property": 0.0,
+   "find_hashed_shape_prop": 0.0,
+   "find_hashed_shape_proto": 0.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 0.0,
+   "js_free_shape": 1.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 0.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 0.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  },
+  "closure_arrow_call_churn|zjs|create_plus_release": {
+   "exec.object_ops.createBytecodeFunctionObjectInternal": 1.0,
+   "core.object.Object.create": 1.0,
+   "core.object.Object.allocFunctionPayload": 0.0,
+   "core.object.Object.setFunctionBytecodeValue": 1.0,
+   "exec.object_ops.bytecodeFunctionPrototypeForRealm": 1.0,
+   "exec.object_ops.attachFunctionCaptures": 1.0,
+   "core.var_ref.VarRef.createClosed__anon_31568": 0.0,
+   "core.var_ref.VarRef.destroyFromHeader__anon_60948": 0.0,
+   "exec.frame.ensureVarRefsCapacity": 0.0,
+   "exec.frame.Frame.ensureOpenVarRefSlots": 0.0,
+   "exec.frame.Frame.closeOpenVarRefs__anon_65974": 0.0,
+   "core.object.Object.defineOwnProperty": 2.0,
+   "core.object.Object.defineOwnPropertyAssumingNew": 0.0,
+   "core.object.Object.adoptShapeForNewProperty": 1.0,
+   "core.object.Object.ensureUniqueShapeForMutation": 0.0,
+   "core.object.Object.ensurePropertyCapacity": 0.0,
+   "core.shape.Registry.createObjectRoot": 1.0,
+   "core.shape.Registry.cloneShape": 0.0,
+   "core.shape.Registry.prepareUpdate": 0.0,
+   "core.shape.Registry.createInitialShape": 0.0,
+   "core.shape.Registry.transitionPropertyUncached": 1.0,
+   "core.shape.Registry.destroyShape": 1.0,
+   "core.shape.Registry.release": 2.0,
+   "core.shape.Registry.ensureShapeHashCapacity": 0.0,
+   "exec.object_ops.installOrdinaryFunctionPrototype": 1.0,
+   "exec.call_runtime.functionNameValueFromAtom": 1.0,
+   "core.object.Object.destroyFromHeader": 1.0,
+   "core.object.FunctionRarePayload.destroy": 0.0,
+   "core.gc.destroyZeroRef__anon_32430": 1.0,
+   "core.gc.destroyZeroRefNow__anon_61467": 1.0,
+   "core.value.JSValue.destroyZeroRef__anon_24255": 1.0,
+   "core.runtime.JSRuntime.pollGC": 0.0,
+   "core.gc.Registry.endDecrefPhase__anon_60972": 1.0,
+   "core.memory.MemoryAccount.allocAlignedBytesNoTrigger": 0.0,
+   "core.memory.MemoryAccount.freeAlignedBytes": 0.0,
+   "core.memory.SmallObjectSlab.addArena": 0.0,
+   "core.memory.SmallObjectSlab.releaseEmptyArena": 0.0,
+   "malloc": 0.0
+  },
+  "closure_arrow_call_churn|qjs|create_plus_release": {
+   "js_closure": 1.0,
+   "js_closure2.isra.0": 1.0,
+   "JS_NewObjectClass": 1.0,
+   "JS_NewObjectProtoClass": 1.0,
+   "JS_NewObjectFromShape": 1.0,
+   "get_var_ref": 0.0,
+   "js_create_var_ref": 0.0,
+   "free_var_ref": 0.0,
+   "close_var_refs": 0.0,
+   "js_function_set_properties": 1.0,
+   "JS_DefinePropertyValue": 2.0,
+   "add_property": 2.0,
+   "add_shape_property": 1.0,
+   "find_hashed_shape_prop": 2.0,
+   "find_hashed_shape_proto": 1.0,
+   "js_clone_shape": 0.0,
+   "js_shape_prepare_update": 0.0,
+   "js_new_shape2.constprop.0": 1.0,
+   "js_free_shape": 2.0,
+   "resize_properties": 0.0,
+   "JS_AtomToString": 1.0,
+   "js_bytecode_function_finalizer": 1.0,
+   "__JS_FreeValueRT": 1.0,
+   "free_gc_object": 1.0,
+   "JS_RunGC": 0.0,
+   "gc_free_cycles": 0.0,
+   "js_malloc": 3.0,
+   "js_mallocz": 0.0,
+   "js_realloc": 0.0,
+   "js_free": 0.0,
+   "js_def_malloc": 0.0,
+   "js_def_realloc": 0.0,
+   "js_realloc2": 0.0
+  }
+ },
+ "baseline_subtracted": {
+  "closure_arrow_nocap_retain|zjsA": {
+   "instructions": 2744.561675,
+   "cycles": 655.19818,
+   "ns": 167988520.0,
+   "split": {
+    "instructions": {
+     "fill": 2074.334825,
+     "clear": 717.676825
+    },
+    "cycles": {
+     "fill": 627.794,
+     "clear": 69.33734999999999
+    }
+   }
+  },
+  "closure_arrow_nocap_retain|zjsB": {
+   "instructions": 2769.5620200000003,
+   "cycles": 632.72263875,
+   "ns": 162241860.0,
+   "split": {
+    "instructions": {
+     "fill": 2310.71025,
+     "clear": 336.423575
+    },
+    "cycles": {
+     "fill": 625.866575,
+     "clear": -28.900725
+    }
+   }
+  },
+  "closure_arrow_nocap_retain|qjs": {
+   "instructions": 1503.8573475,
+   "cycles": 381.8802725,
+   "ns": 97945480.0,
+   "split": {
+    "instructions": {
+     "fill": 1062.845,
+     "clear": 444.98777500000006
+    },
+    "cycles": {
+     "fill": 246.64402499999997,
+     "clear": 183.70219999999998
+    }
+   }
+  },
+  "closure_fnexpr_nocap_retain|zjsA": {
+   "instructions": 2955.56316375,
+   "cycles": 676.15946,
+   "ns": 173389340.0,
+   "split": {
+    "instructions": {
+     "fill": 2057.4336,
+     "clear": 917.047175
+    },
+    "cycles": {
+     "fill": 523.605175,
+     "clear": 111.10954999999998
+    }
+   }
+  },
+  "closure_fnexpr_nocap_retain|zjsB": {
+   "instructions": 2960.9932825,
+   "cycles": 655.34867625,
+   "ns": 168031620.0,
+   "split": {
+    "instructions": {
+     "fill": 2070.2635,
+     "clear": 902.48855
+    },
+    "cycles": {
+     "fill": 441.3024,
+     "clear": 270.996225
+    }
+   }
+  },
+  "closure_fnexpr_nocap_retain|qjs": {
+   "instructions": 1906.35760125,
+   "cycles": 455.16770875,
+   "ns": 116748240.0,
+   "split": {
+    "instructions": {
+     "fill": 1524.482475,
+     "clear": 503.0350000000001
+    },
+    "cycles": {
+     "fill": 369.46225000000004,
+     "clear": 193.06345
+    }
+   }
+  },
+  "closure_arrow_cap1_retain|zjsA": {
+   "instructions": 3126.0752949999996,
+   "cycles": 733.20199375,
+   "ns": 187989840.0,
+   "split": {
+    "instructions": {
+     "fill": 2502.10925,
+     "clear": 677.779725
+    },
+    "cycles": {
+     "fill": 472.342,
+     "clear": 201.52994999999999
+    }
+   }
+  },
+  "closure_arrow_cap1_retain|zjsB": {
+   "instructions": 3138.3478800000003,
+   "cycles": 701.2710075,
+   "ns": 179856100.0,
+   "split": {
+    "instructions": {
+     "fill": 2665.5913499999997,
+     "clear": 497.019725
+    },
+    "cycles": {
+     "fill": 603.8252,
+     "clear": 108.88997499999999
+    }
+   }
+  },
+  "closure_arrow_cap1_retain|qjs": {
+   "instructions": 1752.0442487500002,
+   "cycles": 416.21932625,
+   "ns": 106768600.0,
+   "split": {
+    "instructions": {
+     "fill": 1350.324325,
+     "clear": 505.0173
+    },
+    "cycles": {
+     "fill": 469.430025,
+     "clear": -117.332675
+    }
+   }
+  },
+  "closure_fnexpr_cap1_retain|zjsA": {
+   "instructions": 3344.9474437500003,
+   "cycles": 760.81999625,
+   "ns": 195098240.0,
+   "split": {
+    "instructions": {
+     "fill": 2255.403475,
+     "clear": 1089.173625
+    },
+    "cycles": {
+     "fill": 547.311675,
+     "clear": 96.12482499999999
+    }
+   }
+  },
+  "closure_fnexpr_cap1_retain|zjsB": {
+   "instructions": 3345.94134,
+   "cycles": 692.31021625,
+   "ns": 177516280.0,
+   "split": {
+    "instructions": {
+     "fill": 2853.984075,
+     "clear": 524.447125
+    },
+    "cycles": {
+     "fill": 621.18245,
+     "clear": -243.476
+    }
+   }
+  },
+  "closure_fnexpr_cap1_retain|qjs": {
+   "instructions": 2129.1684837499997,
+   "cycles": 534.39472625,
+   "ns": 137052640.0,
+   "split": {
+    "instructions": {
+     "fill": 1660.6254000000001,
+     "clear": 476.019325
+    },
+    "cycles": {
+     "fill": 395.1522,
+     "clear": 180.92645
+    }
+   }
+  },
+  "closure_arrow_cap4_retain|zjsA": {
+   "instructions": 3634.0825912499995,
+   "cycles": 843.8401375,
+   "ns": 216395260.0,
+   "split": {
+    "instructions": {
+     "fill": 2658.2679749999998,
+     "clear": 1043.316175
+    },
+    "cycles": {
+     "fill": 672.36265,
+     "clear": 95.188425
+    }
+   }
+  },
+  "closure_arrow_cap4_retain|zjsB": {
+   "instructions": 3642.8320787499997,
+   "cycles": 757.5850612500001,
+   "ns": 194251000.0,
+   "split": {
+    "instructions": {
+     "fill": 2607.59955,
+     "clear": 970.9775
+    },
+    "cycles": {
+     "fill": 789.566875,
+     "clear": 241.746875
+    }
+   }
+  },
+  "closure_arrow_cap4_retain|qjs": {
+   "instructions": 2074.3132137499997,
+   "cycles": 513.5313825,
+   "ns": 131693660.0,
+   "split": {
+    "instructions": {
+     "fill": 1567.815475,
+     "clear": 494.53295
+    },
+    "cycles": {
+     "fill": 351.79445000000004,
+     "clear": 113.81702500000002
+    }
+   }
+  },
+  "closure_arrow_loopbind_retain|zjsA": {
+   "instructions": 3624.7628212499994,
+   "cycles": 878.41493625,
+   "ns": 225231020.0,
+   "split": {
+    "instructions": {
+     "fill": 2633.5215749999998,
+     "clear": 1093.8986
+    },
+    "cycles": {
+     "fill": 858.433075,
+     "clear": -32.185825
+    }
+   }
+  },
+  "closure_arrow_loopbind_retain|zjsB": {
+   "instructions": 3627.3482825,
+   "cycles": 888.1609775000001,
+   "ns": 227740480.0,
+   "split": {
+    "instructions": {
+     "fill": 2637.033725,
+     "clear": 792.6464
+    },
+    "cycles": {
+     "fill": 823.180525,
+     "clear": 4.882124999999995
+    }
+   }
+  },
+  "closure_arrow_loopbind_retain|qjs": {
+   "instructions": 1987.4513425000002,
+   "cycles": 543.075435,
+   "ns": 139266020.0,
+   "split": {
+    "instructions": {
+     "fill": 1325.0226,
+     "clear": 609.293725
+    },
+    "cycles": {
+     "fill": 551.300275,
+     "clear": -1.7597000000000023
+    }
+   }
+  },
+  "closure_arrow_call_retain|zjsA": {
+   "instructions": 3465.71954,
+   "cycles": 788.13303625,
+   "ns": 202117120.0,
+   "split": {
+    "instructions": {
+     "fill": 2624.0726,
+     "clear": 944.001175
+    },
+    "cycles": {
+     "fill": 698.51125,
+     "clear": -6.650600000000004
+    }
+   }
+  },
+  "closure_arrow_call_retain|zjsB": {
+   "instructions": 3459.21737375,
+   "cycles": 764.06791875,
+   "ns": 195968520.0,
+   "split": {
+    "instructions": {
+     "fill": 2736.48125,
+     "clear": 847.6235
+    },
+    "cycles": {
+     "fill": 446.605775,
+     "clear": 313.487475
+    }
+   }
+  },
+  "closure_arrow_call_retain|qjs": {
+   "instructions": 1983.42752125,
+   "cycles": 432.26931125,
+   "ns": 110861000.0,
+   "split": {
+    "instructions": {
+     "fill": 1665.8468249999999,
+     "clear": 417.853475
+    },
+    "cycles": {
+     "fill": 313.4936,
+     "clear": 116.64735
+    }
+   }
+  },
+  "closure_arrow_nocap_churn|zjsA": {
+   "instructions": 2484.19485375,
+   "cycles": 432.373365625,
+   "ns": 110884430.0
+  },
+  "closure_arrow_nocap_churn|zjsB": {
+   "instructions": 2480.2043700000004,
+   "cycles": 434.342625,
+   "ns": 111387430.0
+  },
+  "closure_arrow_nocap_churn|qjs": {
+   "instructions": 1325.4188562499999,
+   "cycles": 215.58466062499997,
+   "ns": 55274750.0
+  },
+  "closure_fnexpr_nocap_churn|zjsA": {
+   "instructions": 2688.061865,
+   "cycles": 468.771931875,
+   "ns": 120203879.99999999
+  },
+  "closure_fnexpr_nocap_churn|zjsB": {
+   "instructions": 2675.3003962499997,
+   "cycles": 467.128248125,
+   "ns": 119783700.0
+  },
+  "closure_fnexpr_nocap_churn|qjs": {
+   "instructions": 1686.0987874999998,
+   "cycles": 269.40731562499997,
+   "ns": 69078500.0
+  },
+  "closure_arrow_cap1_churn|zjsA": {
+   "instructions": 2851.069296875,
+   "cycles": 501.4911275,
+   "ns": 128598170.0
+  },
+  "closure_arrow_cap1_churn|zjsB": {
+   "instructions": 2849.07169625,
+   "cycles": 488.90320875,
+   "ns": 125371630.0
+  },
+  "closure_arrow_cap1_churn|qjs": {
+   "instructions": 1544.6033956249998,
+   "cycles": 242.726855,
+   "ns": 62226730.0
+  },
+  "closure_fnexpr_cap1_churn|zjsA": {
+   "instructions": 3033.777078125,
+   "cycles": 528.0559337499999,
+   "ns": 135423140.0
+  },
+  "closure_fnexpr_cap1_churn|zjsB": {
+   "instructions": 3039.7061175,
+   "cycles": 524.86445125,
+   "ns": 134593650.0
+  },
+  "closure_fnexpr_cap1_churn|qjs": {
+   "instructions": 1908.725620625,
+   "cycles": 298.81851125,
+   "ns": 76619610.0
+  },
+  "closure_arrow_cap4_churn|zjsA": {
+   "instructions": 3291.887393125,
+   "cycles": 591.166479375,
+   "ns": 151593200.0
+  },
+  "closure_arrow_cap4_churn|zjsB": {
+   "instructions": 3274.4530562500004,
+   "cycles": 581.426999375,
+   "ns": 149103270.0
+  },
+  "closure_arrow_cap4_churn|qjs": {
+   "instructions": 1807.342478125,
+   "cycles": 289.7470775,
+   "ns": 74300630.0
+  },
+  "closure_arrow_loopbind_churn|zjsA": {
+   "instructions": 3218.45043375,
+   "cycles": 574.7245681249999,
+   "ns": 147370580.0
+  },
+  "closure_arrow_loopbind_churn|zjsB": {
+   "instructions": 3219.876670625,
+   "cycles": 583.670048125,
+   "ns": 149672120.0
+  },
+  "closure_arrow_loopbind_churn|qjs": {
+   "instructions": 1666.5149975,
+   "cycles": 262.476100625,
+   "ns": 67305940.0
+  },
+  "closure_arrow_call_churn|zjsA": {
+   "instructions": 3190.587991875,
+   "cycles": 597.51273625,
+   "ns": 153219280.0
+  },
+  "closure_arrow_call_churn|zjsB": {
+   "instructions": 3182.2169400000002,
+   "cycles": 596.37754625,
+   "ns": 152925700.0
+  },
+  "closure_arrow_call_churn|qjs": {
+   "instructions": 1799.1014437499998,
+   "cycles": 304.63301375,
+   "ns": 78105410.0
+  },
+  "wall|closure_arrow_nocap_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 74.8049,
+    "fill_ns_per_op": 120.430375,
+    "clear_ns_per_op": 27.285375
+   },
+   "qjs": {
+    "pooled_ns_per_op": 43.8051,
+    "fill_ns_per_op": 68.213225,
+    "clear_ns_per_op": 29.4202
+   }
+  },
+  "wall|closure_arrow_nocap_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 73.41325,
+    "fill_ns_per_op": 126.974025,
+    "clear_ns_per_op": 28.3282
+   },
+   "qjs": {
+    "pooled_ns_per_op": 44.102725,
+    "fill_ns_per_op": 62.72085,
+    "clear_ns_per_op": 26.0302
+   }
+  },
+  "wall|closure_fnexpr_nocap_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 78.033725,
+    "fill_ns_per_op": 136.47365,
+    "clear_ns_per_op": 33.537025
+   },
+   "qjs": {
+    "pooled_ns_per_op": 54.01515,
+    "fill_ns_per_op": 75.950075,
+    "clear_ns_per_op": 28.3706
+   }
+  },
+  "wall|closure_fnexpr_nocap_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 80.072525,
+    "fill_ns_per_op": 138.1405,
+    "clear_ns_per_op": 33.91025
+   },
+   "qjs": {
+    "pooled_ns_per_op": 53.599175,
+    "fill_ns_per_op": 77.919325,
+    "clear_ns_per_op": 28.998625
+   }
+  },
+  "wall|closure_arrow_cap1_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 84.532175,
+    "fill_ns_per_op": 151.886975,
+    "clear_ns_per_op": 36.03425
+   },
+   "qjs": {
+    "pooled_ns_per_op": 50.36235,
+    "fill_ns_per_op": 70.21845,
+    "clear_ns_per_op": 31.933825
+   }
+  },
+  "wall|closure_arrow_cap1_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 82.880525,
+    "fill_ns_per_op": 146.745725,
+    "clear_ns_per_op": 31.80425
+   },
+   "qjs": {
+    "pooled_ns_per_op": 52.403175,
+    "fill_ns_per_op": 75.312925,
+    "clear_ns_per_op": 33.438225
+   }
+  },
+  "wall|closure_fnexpr_cap1_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 91.3898,
+    "fill_ns_per_op": 154.916575,
+    "clear_ns_per_op": 37.53385
+   },
+   "qjs": {
+    "pooled_ns_per_op": 61.138825,
+    "fill_ns_per_op": 93.098625,
+    "clear_ns_per_op": 37.885875
+   }
+  },
+  "wall|closure_fnexpr_cap1_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 88.144575,
+    "fill_ns_per_op": 141.9325,
+    "clear_ns_per_op": 31.87585
+   },
+   "qjs": {
+    "pooled_ns_per_op": 60.2748,
+    "fill_ns_per_op": 83.89695,
+    "clear_ns_per_op": 32.93105
+   }
+  },
+  "wall|closure_arrow_cap4_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 96.613025,
+    "fill_ns_per_op": 172.9547,
+    "clear_ns_per_op": 39.869075
+   },
+   "qjs": {
+    "pooled_ns_per_op": 60.6512,
+    "fill_ns_per_op": 89.480575,
+    "clear_ns_per_op": 35.93865
+   }
+  },
+  "wall|closure_arrow_cap4_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 95.1898,
+    "fill_ns_per_op": 160.127,
+    "clear_ns_per_op": 33.36305
+   },
+   "qjs": {
+    "pooled_ns_per_op": 58.66,
+    "fill_ns_per_op": 90.0214,
+    "clear_ns_per_op": 35.82105
+   }
+  },
+  "wall|closure_arrow_loopbind_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 103.693075,
+    "fill_ns_per_op": 174.5343,
+    "clear_ns_per_op": 42.791875
+   },
+   "qjs": {
+    "pooled_ns_per_op": 64.95845,
+    "fill_ns_per_op": 96.535025,
+    "clear_ns_per_op": 42.6211
+   }
+  },
+  "wall|closure_arrow_loopbind_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 106.18505,
+    "fill_ns_per_op": 176.45155,
+    "clear_ns_per_op": 49.00755
+   },
+   "qjs": {
+    "pooled_ns_per_op": 65.58485,
+    "fill_ns_per_op": 96.62425,
+    "clear_ns_per_op": 42.8015
+   }
+  },
+  "wall|closure_arrow_call_retain|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 93.911825,
+    "fill_ns_per_op": 166.597475,
+    "clear_ns_per_op": 28.253
+   },
+   "qjs": {
+    "pooled_ns_per_op": 56.9776,
+    "fill_ns_per_op": 91.7702,
+    "clear_ns_per_op": 25.8746
+   }
+  },
+  "wall|closure_arrow_call_retain|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 94.521,
+    "fill_ns_per_op": 156.9286,
+    "clear_ns_per_op": 27.0094
+   },
+   "qjs": {
+    "pooled_ns_per_op": 55.6428,
+    "fill_ns_per_op": 93.82505,
+    "clear_ns_per_op": 28.9734
+   }
+  },
+  "wall|closure_arrow_nocap_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 110.86835
+   },
+   "qjs": {
+    "pooled_ns_per_op": 55.41635
+   }
+  },
+  "wall|closure_arrow_nocap_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 110.7719
+   },
+   "qjs": {
+    "pooled_ns_per_op": 55.361575
+   }
+  },
+  "wall|closure_fnexpr_nocap_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 120.7228
+   },
+   "qjs": {
+    "pooled_ns_per_op": 70.336875
+   }
+  },
+  "wall|closure_fnexpr_nocap_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 120.048
+   },
+   "qjs": {
+    "pooled_ns_per_op": 69.54685
+   }
+  },
+  "wall|closure_arrow_cap1_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 126.67965
+   },
+   "qjs": {
+    "pooled_ns_per_op": 61.8924
+   }
+  },
+  "wall|closure_arrow_cap1_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 124.4212
+   },
+   "qjs": {
+    "pooled_ns_per_op": 62.728025
+   }
+  },
+  "wall|closure_fnexpr_cap1_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 136.070475
+   },
+   "qjs": {
+    "pooled_ns_per_op": 76.7289
+   }
+  },
+  "wall|closure_fnexpr_cap1_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 134.5741
+   },
+   "qjs": {
+    "pooled_ns_per_op": 77.3025
+   }
+  },
+  "wall|closure_arrow_cap4_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 145.700175
+   },
+   "qjs": {
+    "pooled_ns_per_op": 74.8201
+   }
+  },
+  "wall|closure_arrow_cap4_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 144.622125
+   },
+   "qjs": {
+    "pooled_ns_per_op": 74.7193
+   }
+  },
+  "wall|closure_arrow_loopbind_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 147.705775
+   },
+   "qjs": {
+    "pooled_ns_per_op": 68.785225
+   }
+  },
+  "wall|closure_arrow_loopbind_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 149.86695
+   },
+   "qjs": {
+    "pooled_ns_per_op": 68.723625
+   }
+  },
+  "wall|closure_arrow_call_churn|zjsA|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 147.737775
+   },
+   "qjs": {
+    "pooled_ns_per_op": 79.1929
+   }
+  },
+  "wall|closure_arrow_call_churn|zjsB|qjs": {
+   "zjs": {
+    "pooled_ns_per_op": 149.602575
+   },
+   "qjs": {
+    "pooled_ns_per_op": 79.113325
+   }
+  }
+ }
+}

@@ -16,6 +16,11 @@ pub const OpcodeProfile = zjs_binding.OpcodeProfile;
 pub const default_stack_size = zjs_binding.default_stack_size;
 pub const default_gc_threshold = zjs_binding.default_gc_threshold;
 
+/// True when this binary carries per-opcode profiling scopes
+/// (-Dzjs_enable_opcode_profile / the zjs-profile artifact). The CLI fails
+/// closed on --profile-opcodes when false instead of emitting zero counts.
+pub const opcode_profile_build_enabled: bool = @import("build_options").zjs_enable_opcode_profile;
+
 pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
     zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName);
     return zjs_binding.activateOpcodeProfile(profile);

@@ -3508,6 +3508,148 @@ pub const parser_core = struct {
         col_num: u32,
     };
 
+    /// Parser-only accelerator for the two declaration-conflict scans which
+    /// otherwise make a flat list of unique lexical declarations quadratic.
+    /// The finalized FunctionBytecode never observes this state.
+    const declaration_conflict_index_threshold: usize = 64;
+    const no_declaration_index: u32 = std.math.maxInt(u32);
+
+    const DeclarationConflictEntry = struct {
+        /// Newest linked lexical declaration in this exact scope.
+        newest_lexical: u32 = no_declaration_index,
+        /// Newest linked lexical-or-catch declaration in this exact scope.
+        newest_lexical_or_catch: u32 = no_declaration_index,
+        /// Oldest scope-0 var whose parser-time origin is this scope or one of
+        /// its descendants. This preserves find_var_in_child_scope's forward
+        /// scan result while making the query exact-scope.
+        oldest_child_function_var: u32 = no_declaration_index,
+    };
+
+    const DeclarationConflictIndex = struct {
+        const ScopeNameMap = std.AutoHashMapUnmanaged(u64, DeclarationConflictEntry);
+        const BuildError = error{ OutOfMemory, InvalidTopology };
+
+        scope_names: ScopeNameMap = .empty,
+        observed_vars_len: usize = 0,
+        dirty: bool = false,
+
+        fn deinit(self: *DeclarationConflictIndex, allocator: std.mem.Allocator) void {
+            self.scope_names.deinit(allocator);
+            self.* = .{};
+        }
+
+        fn scopeNameKey(scope_level: i32, name: Atom) ?u64 {
+            if (scope_level < 0) return null;
+            return (@as(u64, @intCast(scope_level)) << 32) | name;
+        }
+
+        fn validateScopes(fd: *const function_def_mod.FunctionDef) BuildError!void {
+            for (fd.scopes, 0..) |scope, scope_index| {
+                if (scope.parent < -1) return error.InvalidTopology;
+                if (scope.parent >= 0 and @as(usize, @intCast(scope.parent)) >= scope_index) {
+                    return error.InvalidTopology;
+                }
+            }
+        }
+
+        fn entry(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            key: u64,
+        ) BuildError!*DeclarationConflictEntry {
+            const result = try self.scope_names.getOrPut(allocator, key);
+            if (!result.found_existing) result.value_ptr.* = .{};
+            return result.value_ptr;
+        }
+
+        fn recordLinkedNewestFirst(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            vd: function_def_mod.VarDef,
+            var_index: usize,
+        ) BuildError!void {
+            const eligible_for_lexical = vd.is_lexical;
+            const eligible_for_lexical_or_catch = eligible_for_lexical or vd.var_kind == .catch_;
+            if (!eligible_for_lexical_or_catch) return;
+            const key = scopeNameKey(vd.scope_level, vd.var_name) orelse return error.InvalidTopology;
+            const value = try self.entry(allocator, key);
+            if (eligible_for_lexical and value.newest_lexical == no_declaration_index) {
+                value.newest_lexical = @intCast(var_index);
+            }
+            if (value.newest_lexical_or_catch == no_declaration_index) {
+                value.newest_lexical_or_catch = @intCast(var_index);
+            }
+        }
+
+        fn recordFunctionVarOriginOldestFirst(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            fd: *const function_def_mod.FunctionDef,
+            vd: function_def_mod.VarDef,
+            var_index: usize,
+        ) BuildError!void {
+            var scope = vd.scope_next;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    return error.InvalidTopology;
+                }
+                const key = scopeNameKey(scope, vd.var_name) orelse return error.InvalidTopology;
+                const value = try self.entry(allocator, key);
+                if (value.oldest_child_function_var == no_declaration_index) {
+                    value.oldest_child_function_var = @intCast(var_index);
+                }
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+        }
+
+        fn build(
+            self: *DeclarationConflictIndex,
+            allocator: std.mem.Allocator,
+            fd: *const function_def_mod.FunctionDef,
+        ) BuildError!void {
+            try validateScopes(fd);
+            if (fd.vars.len != 0) {
+                try self.scope_names.ensureTotalCapacity(allocator, @intCast(fd.vars.len));
+            }
+
+            // Each scope's local prefix is newest-first. Inherited heads stop
+            // at the first row owned by an outer scope.
+            for (fd.scopes, 0..) |scope, scope_index| {
+                var var_index = scope.first;
+                var visited: usize = 0;
+                while (var_index >= 0) : (visited += 1) {
+                    if (visited >= fd.vars.len or @as(usize, @intCast(var_index)) >= fd.vars.len) {
+                        return error.InvalidTopology;
+                    }
+                    const index: usize = @intCast(var_index);
+                    const vd = fd.vars[index];
+                    if (vd.scope_level != @as(i32, @intCast(scope_index))) break;
+                    try self.recordLinkedNewestFirst(allocator, vd, index);
+                    var_index = vd.scope_next;
+                }
+            }
+
+            // Parser-time scope-0 rows retain their source declaration scope
+            // in scope_next and are intentionally absent from scope.first.
+            // Walk oldest-first to preserve the legacy scan's returned index.
+            for (fd.vars, 0..) |vd, var_index| {
+                if (vd.scope_level != 0) continue;
+                try self.recordFunctionVarOriginOldestFirst(allocator, fd, vd, var_index);
+            }
+
+            self.observed_vars_len = fd.vars.len;
+            self.dirty = false;
+        }
+
+        fn readyFor(self: *const DeclarationConflictIndex, fd: *const function_def_mod.FunctionDef) bool {
+            return !self.dirty and self.observed_vars_len == fd.vars.len;
+        }
+    };
+
+    const DeclarationConflictIndexRegistry =
+        std.AutoHashMapUnmanaged(*function_def_mod.FunctionDef, DeclarationConflictIndex);
+
     pub const Error = lexer_mod.Error || error{
         UnexpectedToken,
         InvalidLhs,
@@ -3813,6 +3955,9 @@ pub const parser_core = struct {
         /// Root-bytecode label identity counter. Nested FunctionDefs use their
         /// own `label_count`, matching QuickJS's per-function label namespace.
         root_parser_label_count: u32 = 0,
+        /// Flow-tail summary for the root (non-FunctionDef) emission stream;
+        /// FunctionDef streams carry their own in `FunctionDef.flow_tail`.
+        root_flow_tail: bytecode.FlowTailSummary = .{},
         /// Function bodies currently anchor hoist/TDZ work in the finalizer
         /// instead of emitting their QuickJS `enter_scope` marker here. The
         /// body-event unification is tracked separately from ordinary blocks.
@@ -3854,6 +3999,11 @@ pub const parser_core = struct {
         /// (`quickjs.c:21581`). Tests in `qjs_parser_test.zig` assert the
         /// `vars` / `scopes` layout is populated correctly.
         function_def: function_def_mod.FunctionDef,
+
+        /// Ephemeral declaration-conflict indices keyed by the FunctionDef
+        /// being parsed. They accelerate only parser-time collision queries
+        /// and are never transferred into FunctionBytecode.
+        declaration_conflict_indices: DeclarationConflictIndexRegistry = .empty,
 
         /// Stack of FunctionDef pointers for nested function parsing.
         /// Mirrors `JSParseState.cur_func` stack management. The top of
@@ -3986,6 +4136,7 @@ pub const parser_core = struct {
         /// be released. `anytype` matches `Bytecode.deinit`'s signature
         /// so callers pass their existing runtime pointer.
         pub fn deinit(self: *State, rt: anytype) void {
+            self.deinitDeclarationConflictIndices();
             if (self.source_line_starts.len != 0) {
                 self.function.memory.allocator.free(self.source_line_starts);
                 self.source_line_starts = &.{};
@@ -4052,6 +4203,214 @@ pub const parser_core = struct {
             return self.cur_func_stack[idx - 1];
         }
 
+        fn deinitDeclarationConflictIndices(self: *State) void {
+            const allocator = self.function.memory.allocator;
+            var iterator = self.declaration_conflict_indices.iterator();
+            while (iterator.next()) |entry| {
+                entry.value_ptr.deinit(allocator);
+            }
+            self.declaration_conflict_indices.deinit(allocator);
+            self.declaration_conflict_indices = .empty;
+        }
+
+        fn discardDeclarationConflictIndex(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+        ) void {
+            if (self.declaration_conflict_indices.getPtr(fd)) |index| {
+                index.deinit(self.function.memory.allocator);
+                _ = self.declaration_conflict_indices.remove(fd);
+            }
+        }
+
+        /// Return a complete index or null for the legacy scan path. Dirty
+        /// indices are rebuilt into a temporary owner and replaced only after
+        /// the complete topology has been indexed successfully.
+        fn declarationConflictIndex(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+        ) Error!?*DeclarationConflictIndex {
+            if (self.declaration_conflict_indices.getPtr(fd)) |existing| {
+                if (existing.readyFor(fd)) return existing;
+                existing.dirty = true;
+            }
+            if (fd.vars.len < declaration_conflict_index_threshold) return null;
+
+            const allocator = self.function.memory.allocator;
+            var candidate: DeclarationConflictIndex = .{};
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit(allocator);
+            candidate.build(allocator, fd) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidTopology => return null,
+            };
+
+            if (self.declaration_conflict_indices.getPtr(fd)) |existing| {
+                const replaced = existing.*;
+                existing.* = candidate;
+                candidate = replaced;
+                return existing;
+            }
+
+            try self.declaration_conflict_indices.put(allocator, fd, candidate);
+            candidate_owned = false;
+            return self.declaration_conflict_indices.getPtr(fd) orelse unreachable;
+        }
+
+        fn readyDeclarationConflictIndexForWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+        ) ?*DeclarationConflictIndex {
+            const index = self.declaration_conflict_indices.getPtr(fd) orelse return null;
+            if (!index.readyFor(fd)) {
+                index.dirty = true;
+                return null;
+            }
+            return index;
+        }
+
+        /// Reserve the sole possible exact-scope key before the authoritative
+        /// FunctionDef append. Once the append succeeds, publishing the cache
+        /// update is allocation-free.
+        fn prepareLinkedDeclarationIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            name: Atom,
+            kind: function_def_mod.VarKind,
+            is_lexical: bool,
+        ) Error!bool {
+            const index = self.readyDeclarationConflictIndexForWrite(fd) orelse return false;
+            if (!is_lexical and kind != .catch_) return true;
+            const key = DeclarationConflictIndex.scopeNameKey(self.scope_level, name) orelse {
+                index.dirty = true;
+                return false;
+            };
+            if (!index.scope_names.contains(key)) {
+                const needed = std.math.add(
+                    usize,
+                    @as(usize, @intCast(index.scope_names.count())),
+                    1,
+                ) catch return error.OutOfMemory;
+                try index.scope_names.ensureTotalCapacity(
+                    self.function.memory.allocator,
+                    @intCast(needed),
+                );
+            }
+            return true;
+        }
+
+        fn commitLinkedDeclarationIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            var_index: i32,
+            prepared: bool,
+        ) void {
+            if (!prepared) return;
+            const index = self.declaration_conflict_indices.getPtr(fd) orelse return;
+            if (index.dirty or
+                var_index < 0 or
+                @as(usize, @intCast(var_index)) + 1 != fd.vars.len or
+                index.observed_vars_len + 1 != fd.vars.len)
+            {
+                index.dirty = true;
+                return;
+            }
+            const vd = fd.vars[@intCast(var_index)];
+            if (vd.is_lexical or vd.var_kind == .catch_) {
+                const key = DeclarationConflictIndex.scopeNameKey(vd.scope_level, vd.var_name) orelse {
+                    index.dirty = true;
+                    return;
+                };
+                if (!index.scope_names.contains(key)) {
+                    index.scope_names.putAssumeCapacity(key, .{});
+                }
+                const value = index.scope_names.getPtr(key) orelse unreachable;
+                if (vd.is_lexical) value.newest_lexical = @intCast(var_index);
+                value.newest_lexical_or_catch = @intCast(var_index);
+            }
+            index.observed_vars_len = fd.vars.len;
+        }
+
+        /// A parser-time function var conflicts with lexical declarations in
+        /// its origin scope and every ancestor. Reserve all missing keys before
+        /// appending the unlinked scope-0 row.
+        fn prepareFunctionVarOriginIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            name: Atom,
+            origin_scope: i32,
+        ) Error!bool {
+            const index = self.readyDeclarationConflictIndexForWrite(fd) orelse return false;
+            var missing: usize = 0;
+            var scope = origin_scope;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    index.dirty = true;
+                    return false;
+                }
+                const key = DeclarationConflictIndex.scopeNameKey(scope, name) orelse {
+                    index.dirty = true;
+                    return false;
+                };
+                if (!index.scope_names.contains(key)) missing += 1;
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+            if (missing != 0) {
+                const needed = std.math.add(
+                    usize,
+                    @as(usize, @intCast(index.scope_names.count())),
+                    missing,
+                ) catch return error.OutOfMemory;
+                try index.scope_names.ensureTotalCapacity(
+                    self.function.memory.allocator,
+                    @intCast(needed),
+                );
+            }
+            return true;
+        }
+
+        fn commitFunctionVarOriginIndexWrite(
+            self: *State,
+            fd: *function_def_mod.FunctionDef,
+            var_index: i32,
+            origin_scope: i32,
+            prepared: bool,
+        ) void {
+            if (!prepared) return;
+            const index = self.declaration_conflict_indices.getPtr(fd) orelse return;
+            if (index.dirty or
+                var_index < 0 or
+                @as(usize, @intCast(var_index)) + 1 != fd.vars.len or
+                index.observed_vars_len + 1 != fd.vars.len)
+            {
+                index.dirty = true;
+                return;
+            }
+            const vd = fd.vars[@intCast(var_index)];
+            var scope = origin_scope;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    index.dirty = true;
+                    return;
+                }
+                const key = DeclarationConflictIndex.scopeNameKey(scope, vd.var_name) orelse {
+                    index.dirty = true;
+                    return;
+                };
+                if (!index.scope_names.contains(key)) {
+                    index.scope_names.putAssumeCapacity(key, .{});
+                }
+                const value = index.scope_names.getPtr(key) orelse unreachable;
+                if (value.oldest_child_function_var == no_declaration_index) {
+                    value.oldest_child_function_var = @intCast(var_index);
+                }
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+            index.observed_vars_len = fd.vars.len;
+        }
+
         /// Push a new FunctionDef onto the stack. Called when entering
         /// a nested function. Mirrors the parent link setup in
         /// `js_new_function_def` (`quickjs.c:31484-31490`).
@@ -4096,6 +4455,7 @@ pub const parser_core = struct {
         }
 
         fn discardFunctionDef(self: *State, fd: *function_def_mod.FunctionDef) void {
+            self.discardDeclarationConflictIndex(fd);
             if (self.runtime) |rt| {
                 fd.deinit(rt);
                 self.function.memory.destroy(function_def_mod.FunctionDef, fd);
@@ -4183,7 +4543,22 @@ pub const parser_core = struct {
             is_lexical: bool,
             is_const: bool,
         ) Error!i32 {
-            return self.cur_func().addScopeVar(name, kind, self.scope_level, is_lexical, is_const) catch return error.OutOfMemory;
+            const fd = self.cur_func();
+            const index_prepared = try self.prepareLinkedDeclarationIndexWrite(
+                fd,
+                name,
+                kind,
+                is_lexical,
+            );
+            const var_index = fd.addScopeVar(
+                name,
+                kind,
+                self.scope_level,
+                is_lexical,
+                is_const,
+            ) catch return error.OutOfMemory;
+            self.commitLinkedDeclarationIndexWrite(fd, var_index, index_prepared);
+            return var_index;
         }
 
         /// Parser-time declaration classes accepted by QuickJS `define_var`.
@@ -4242,11 +4617,12 @@ pub const parser_core = struct {
             return null;
         }
 
-        /// QuickJS `find_lexical_decl` (quickjs.c:24087).  `scope_first`
-        /// already denotes the complete visible chain; do not rebuild a
-        /// parallel name ledger here.  Only global-eval (not module/direct
-        /// eval) adds the GLOBAL_VAR_OFFSET lexical fallback.
-        fn findLexicalDeclaration(self: *State, name: Atom, check_catch: bool) ?LexicalDeclaration {
+        /// Authoritative QuickJS `find_lexical_decl` scan
+        /// (`quickjs.c:24087`). The parser-only index below is derived from
+        /// this exact linked topology and falls back here when unavailable or
+        /// dirty. Only global-eval (not module/direct eval) adds the
+        /// GLOBAL_VAR_OFFSET lexical fallback.
+        fn findLexicalDeclarationLegacy(self: *State, name: Atom, check_catch: bool) ?LexicalDeclaration {
             const fd = self.cur_func();
             var var_idx = fd.scope_first;
             var visited: usize = 0;
@@ -4269,11 +4645,70 @@ pub const parser_core = struct {
             return null;
         }
 
+        fn findIndexedLexicalDeclaration(
+            self: *State,
+            index: *const DeclarationConflictIndex,
+            fd: *const function_def_mod.FunctionDef,
+            name: Atom,
+            check_catch: bool,
+        ) error{InvalidTopology}!?u16 {
+            var scope = self.scope_level;
+            var visited: usize = 0;
+            while (scope >= 0) : (visited += 1) {
+                if (visited >= fd.scopes.len or @as(usize, @intCast(scope)) >= fd.scopes.len) {
+                    return error.InvalidTopology;
+                }
+                const key = DeclarationConflictIndex.scopeNameKey(scope, name) orelse
+                    return error.InvalidTopology;
+                if (index.scope_names.get(key)) |entry| {
+                    const raw_index = if (check_catch)
+                        entry.newest_lexical_or_catch
+                    else
+                        entry.newest_lexical;
+                    if (raw_index != no_declaration_index) {
+                        if (@as(usize, @intCast(raw_index)) >= fd.vars.len or
+                            raw_index > std.math.maxInt(u16))
+                        {
+                            return error.InvalidTopology;
+                        }
+                        return @intCast(raw_index);
+                    }
+                }
+                scope = fd.scopes[@intCast(scope)].parent;
+            }
+            return null;
+        }
+
+        fn findLexicalDeclaration(
+            self: *State,
+            name: Atom,
+            check_catch: bool,
+        ) Error!?LexicalDeclaration {
+            const fd = self.cur_func();
+            if (try self.declarationConflictIndex(fd)) |index| {
+                const indexed = self.findIndexedLexicalDeclaration(index, fd, name, check_catch) catch {
+                    index.dirty = true;
+                    return self.findLexicalDeclarationLegacy(name, check_catch);
+                };
+                if (indexed) |var_index| return .{ .local = var_index };
+                if (fd.is_eval and
+                    !fd.is_direct_eval and
+                    !fd.is_indirect_eval and
+                    !fd.is_module and
+                    self.findLexicalGlobalVar(name))
+                {
+                    return .global;
+                }
+                return null;
+            }
+            return self.findLexicalDeclarationLegacy(name, check_catch);
+        }
+
         /// QuickJS `find_var_in_child_scope` (quickjs.c:24048).  A function
         /// `var` remains a scope-0 row, but until final scope-link rebuilding
         /// its `scope_next` field is the lexical scope where the declaration
         /// occurred.  Such rows are intentionally absent from scope.first.
-        fn findFunctionVarInChildScope(self: *State, name: Atom, scope_level: i32) ?u16 {
+        fn findFunctionVarInChildScopeLegacy(self: *State, name: Atom, scope_level: i32) ?u16 {
             for (self.cur_func().vars, 0..) |vd, idx| {
                 if (vd.var_name != name or vd.scope_level != 0) continue;
                 if (self.isChildScope(vd.scope_next, scope_level)) return @intCast(idx);
@@ -4281,8 +4716,38 @@ pub const parser_core = struct {
             return null;
         }
 
+        fn findFunctionVarInChildScope(
+            self: *State,
+            name: Atom,
+            scope_level: i32,
+        ) Error!?u16 {
+            const fd = self.cur_func();
+            if (try self.declarationConflictIndex(fd)) |index| {
+                const key = DeclarationConflictIndex.scopeNameKey(scope_level, name) orelse {
+                    index.dirty = true;
+                    return self.findFunctionVarInChildScopeLegacy(name, scope_level);
+                };
+                if (index.scope_names.get(key)) |entry| {
+                    const raw_index = entry.oldest_child_function_var;
+                    if (raw_index != no_declaration_index) {
+                        if (@as(usize, @intCast(raw_index)) >= fd.vars.len or
+                            raw_index > std.math.maxInt(u16))
+                        {
+                            index.dirty = true;
+                            return self.findFunctionVarInChildScopeLegacy(name, scope_level);
+                        }
+                        return @intCast(raw_index);
+                    }
+                }
+                return null;
+            }
+            return self.findFunctionVarInChildScopeLegacy(name, scope_level);
+        }
+
         fn appendFunctionVarAtOrigin(self: *State, name: Atom, origin_scope: i32) Error!u16 {
-            const idx = self.cur_func().appendVar(.{
+            const fd = self.cur_func();
+            const index_prepared = try self.prepareFunctionVarOriginIndexWrite(fd, name, origin_scope);
+            const idx = fd.appendVar(.{
                 .var_name = name,
                 .scope_level = 0,
                 .scope_next = origin_scope,
@@ -4290,6 +4755,7 @@ pub const parser_core = struct {
                 .is_const = false,
                 .var_kind = .normal,
             }) catch return error.OutOfMemory;
+            self.commitFunctionVarOriginIndexWrite(fd, idx, origin_scope, index_prepared);
             return @intCast(idx);
         }
 
@@ -4304,7 +4770,7 @@ pub const parser_core = struct {
                     return .{ .local = @intCast(try self.addScopeVar(name, .normal, false, false)) };
                 },
                 .let_, .const_, .function_decl, .new_function_decl => {
-                    if (self.findLexicalDeclaration(name, true)) |decl| switch (decl) {
+                    if (try self.findLexicalDeclaration(name, true)) |decl| switch (decl) {
                         .local => |idx| {
                             const existing = fd.vars[idx];
                             if (existing.scope_level == self.scope_level) {
@@ -4326,7 +4792,7 @@ pub const parser_core = struct {
                     {
                         return Error.UnexpectedToken;
                     }
-                    if (self.findFunctionVarInChildScope(name, self.scope_level) != null) {
+                    if (try self.findFunctionVarInChildScope(name, self.scope_level) != null) {
                         return Error.UnexpectedToken;
                     }
                     if (fd.is_global_var) {
@@ -4366,7 +4832,7 @@ pub const parser_core = struct {
                     return .{ .local = @intCast(try self.addScopeVar(name, .catch_, false, false)) };
                 },
                 .var_ => {
-                    if (self.findLexicalDeclaration(name, false) != null) {
+                    if (try self.findLexicalDeclaration(name, false) != null) {
                         return Error.UnexpectedToken;
                     }
                     if (fd.is_global_var) {
@@ -5157,6 +5623,11 @@ pub const parser_core = struct {
             self.setParserLabelCount(snapshot.label_count);
             self.cur_func().last_opcode_pos = snapshot.last_opcode_pos;
             self.last_opcode_source_offset = snapshot.last_opcode_source_offset;
+            // Emission rollback is an OOM-abort path (measured zero hits on
+            // the compile corpus): a per-emission summary copy in
+            // takeEmissionSnapshot costs ~0.8% of all compile instructions,
+            // so invalidate instead — the next query rebuilds exactly.
+            self.flowTail().valid = false;
         }
 
         fn commitLastOpcode(self: *State, opcode_pos: usize) void {
@@ -5200,11 +5671,13 @@ pub const parser_core = struct {
         }
 
         fn appendBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
+            const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 self.cur_func().appendByteCodeAssumeCapacity(bytes);
             } else {
                 self.function.appendCodeAssumeCapacity(bytes);
             }
+            if (bytes.len != 0) self.noteEmittedOp(bytes[0], pos, bytes.len);
         }
 
         fn appendAtomOperandAssumeCapacity(self: *State, atom_id: Atom) void {
@@ -5543,6 +6016,7 @@ pub const parser_core = struct {
             _ = try self.emitSourcePosAndLoc(loc.line_num, loc.col_num);
             const label_offset = self.currentCodeLen() + 5;
             try self.emitOpcodeBytesNoSource(&bytes);
+            self.noteEmittedLabelOperand(label);
             return label_offset;
         }
 
@@ -6086,12 +6560,143 @@ pub const parser_core = struct {
             self.cur_func().last_opcode_pos = -1;
         }
 
+        fn flowTail(self: *State) *bytecode.FlowTailSummary {
+            if (self.emit_to_function_def) return &self.cur_func().flow_tail;
+            return &self.root_flow_tail;
+        }
+
+        /// Incremental note for one appended instruction (`bytes[0]` is the
+        /// op). Every parser-phase code append funnels through
+        /// `appendBytesNoSource` / `appendBytesNoSourceAssumeCapacity`, each
+        /// carrying exactly one instruction; the one multi-instruction
+        /// caller (`appendMovedCodeWithAtoms`) invalidates first, and a note
+        /// on an invalid summary is a no-op. The Debug oracle in
+        /// `flowSummary` cross-checks this contract on every query.
+        fn noteEmittedOp(self: *State, op_id: u8, pos: usize, len: usize) void {
+            const ft = self.flowTail();
+            if (!ft.valid) return;
+            if (pos + len > std.math.maxInt(u32)) {
+                ft.valid = false;
+                return;
+            }
+            ft.prev_last_non_line_op = ft.last_non_line_op;
+            ft.prev_last_non_cleanup_op = ft.last_non_cleanup_op;
+            ft.prev_tail_start = ft.tail_start;
+            ft.prev_op_pos = @intCast(pos);
+            ft.has_prev = true;
+            ft.last_note_had_label = false;
+            if (op_id == opcode.op.line_num) return;
+            ft.last_non_line_op = op_id;
+            if (op_id == opcode.op.leave_scope or op_id == opcode.op.close_loc) return;
+            ft.last_non_cleanup_op = op_id;
+            ft.tail_start = @intCast(pos + len);
+        }
+
+        /// Record the initial value of a label operand just emitted (tagged
+        /// parser label, forward placeholder 0, or known absolute target).
+        fn noteEmittedLabelOperand(self: *State, value: u32) void {
+            const ft = self.flowTail();
+            if (!ft.valid) return;
+            if ((value & opcode.op.parser_label_tag) != 0) {
+                ft.tagged_target_count += 1;
+                ft.last_note_had_label = true;
+            } else if (value > ft.max_absolute_target) {
+                ft.max_absolute_target = value;
+                ft.last_note_had_label = true;
+            }
+        }
+
+        /// The single mutation primitive for an already-emitted label
+        /// operand. Reads the old value so tagged/absolute bookkeeping stays
+        /// exact; a rewrite that could lower the current absolute watermark
+        /// falls back to lazy invalidation (the next query rebuilds).
+        fn publishParserLabelTarget(self: *State, operand_offset: usize, target: u32) Error!void {
+            var code = self.currentCode();
+            if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
+            const ft = self.flowTail();
+            if (ft.valid) {
+                const old = std.mem.readInt(u32, code[operand_offset..][0..4], .little);
+                if ((old & opcode.op.parser_label_tag) != 0) {
+                    std.debug.assert(ft.tagged_target_count > 0);
+                    ft.tagged_target_count -= 1;
+                } else if (old != 0 and old == ft.max_absolute_target and target < old) {
+                    ft.valid = false;
+                }
+            }
+            std.mem.writeInt(u32, code[operand_offset..][0..4], target, .little);
+            if (ft.valid) {
+                if ((target & opcode.op.parser_label_tag) != 0) {
+                    ft.tagged_target_count += 1;
+                } else if (target > ft.max_absolute_target) {
+                    ft.max_absolute_target = target;
+                }
+            }
+        }
+
+        /// Recompute the summary by scanning, using the same decode the
+        /// legacy query scans use. Also the Debug oracle's reference.
+        fn rebuildFlowTail(ft: *bytecode.FlowTailSummary, code: []const u8, atoms: []const Atom) void {
+            ft.* = .{ .valid = true };
+            var pc: usize = 0;
+            var atom_index: usize = 0;
+            while (pc < code.len) {
+                const op_id = code[pc];
+                const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+                const size: usize = instr.size;
+                if (size == 0 or pc + size > code.len or pc + size > std.math.maxInt(u32)) {
+                    // Malformed suffix: poison to the conservative answers the
+                    // legacy scans produced (jump-to-end true, no last op).
+                    ft.* = .{ .valid = true, .tagged_target_count = 1 };
+                    return;
+                }
+                if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
+                    if (offset + 4 <= code.len) {
+                        const target = std.mem.readInt(u32, code[offset..][0..4], .little);
+                        if ((target & opcode.op.parser_label_tag) != 0) {
+                            ft.tagged_target_count += 1;
+                        } else if (target > ft.max_absolute_target) {
+                            ft.max_absolute_target = target;
+                        }
+                    }
+                }
+                if (op_id != opcode.op.line_num) {
+                    ft.last_non_line_op = op_id;
+                    if (op_id != opcode.op.leave_scope and op_id != opcode.op.close_loc) {
+                        ft.last_non_cleanup_op = op_id;
+                        ft.tail_start = @intCast(pc + size);
+                    }
+                }
+                if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+                pc += size;
+            }
+        }
+
+        /// Valid, oracle-checked summary for the current emission stream.
+        fn flowSummary(self: *State) *bytecode.FlowTailSummary {
+            const ft = self.flowTail();
+            if (!ft.valid) {
+                rebuildFlowTail(ft, self.currentCode(), self.currentAtomOperands());
+            }
+            if (comptime @import("builtin").mode == .Debug) {
+                var check: bytecode.FlowTailSummary = .{};
+                rebuildFlowTail(&check, self.currentCode(), self.currentAtomOperands());
+                std.debug.assert(check.last_non_line_op == ft.last_non_line_op);
+                std.debug.assert(check.last_non_cleanup_op == ft.last_non_cleanup_op);
+                std.debug.assert(check.tail_start == ft.tail_start);
+                std.debug.assert(check.max_absolute_target == ft.max_absolute_target);
+                std.debug.assert(check.tagged_target_count == ft.tagged_target_count);
+            }
+            return ft;
+        }
+
         fn appendBytesNoSource(self: *State, bytes: []const u8) Error!void {
+            const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 try self.cur_func().appendByteCode(bytes);
             } else {
                 try self.function.appendCode(bytes);
             }
+            if (bytes.len != 0) self.noteEmittedOp(bytes[0], pos, bytes.len);
         }
 
         fn emitSourcePosAndLoc(self: *State, line_num: u32, col_num: u32) Error!usize {
@@ -6144,6 +6749,9 @@ pub const parser_core = struct {
             try validateMovedBytecodeLabels(code, atoms, old_base, new_base);
             try self.reserveEmission(code.len, atoms.len);
             rebaseMovedBytecodeLabelsAssumeValidated(code, atoms, old_base, new_base);
+            // Multi-instruction splice with rebased label operands: outside
+            // the single-op incremental contract, so rebuild lazily.
+            self.flowTail().valid = false;
             self.appendBytesNoSourceAssumeCapacity(code);
             for (atoms) |atom_id| self.appendAtomOperandAssumeCapacity(atom_id);
             // A splice is a control-flow construction boundary.  QuickJS
@@ -6166,6 +6774,34 @@ pub const parser_core = struct {
                 @as(usize, @intCast(self.cur_func().last_opcode_pos)) >= target_len)
             {
                 self.invalidateLastOpcode();
+            }
+            // Markers describing the truncated region are garbage once its
+            // bytes are gone — and were silently remapped to whatever code
+            // later occupied those pcs. Mirror rollbackEmission's slot
+            // truncation on the direct-truncate paths (the phase-2 streaming
+            // source remap also relies on slot pcs staying non-decreasing).
+            if (self.emit_to_function_def) {
+                const fd_slots = self.cur_func();
+                var keep = fd_slots.source_loc_slots.len;
+                while (keep > 0 and fd_slots.source_loc_slots[keep - 1].pc >= target_len) keep -= 1;
+                fd_slots.truncateSourceLocs(keep);
+            } else {
+                var keep = self.function.source_loc_slots.len;
+                while (keep > 0 and self.function.source_loc_slots[keep - 1].pc >= target_len) keep -= 1;
+                self.function.truncateSourceLocs(keep);
+            }
+            const ft = self.flowTail();
+            if (ft.valid) {
+                if (ft.has_prev and !ft.last_note_had_label and ft.prev_op_pos == target_len) {
+                    // Rolling back exactly the most recent single-instruction
+                    // emission: restore the one-deep history precisely.
+                    ft.last_non_line_op = ft.prev_last_non_line_op;
+                    ft.last_non_cleanup_op = ft.prev_last_non_cleanup_op;
+                    ft.tail_start = ft.prev_tail_start;
+                    ft.has_prev = false;
+                } else {
+                    ft.valid = false;
+                }
             }
             if (self.emit_to_function_def) {
                 self.cur_func().truncateByteCode(target_len);
@@ -6859,10 +7495,7 @@ pub const parser_core = struct {
             .super_value => emitOpNoSourceAssumeCapacity(s, opcode.op.put_super_value),
         }
         if (ref_label_target) |target| {
-            var code = s.currentCode();
-            const offset = lvalue.label_offset.?;
-            std.debug.assert(offset + 4 <= code.len);
-            std.mem.writeInt(u32, code[offset..][0..4], target, .little);
+            try s.publishParserLabelTarget(lvalue.label_offset.?, target);
         }
     }
 
@@ -9557,6 +10190,7 @@ pub const parser_core = struct {
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         const loc = s.currentSourcePosition();
         try s.appendBytesAt(&bytes, loc.line_num, loc.col_num);
+        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
     }
 
     fn emitParserLabelJumpNoSource(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
@@ -9565,6 +10199,7 @@ pub const parser_core = struct {
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         try s.emitOpcodeBytesNoSource(&bytes);
+        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
     }
 
     fn emitParserLabelJumpNoSourceAssumeCapacity(s: *State, op_id: u8, label: ParserLabelRef) void {
@@ -9573,6 +10208,7 @@ pub const parser_core = struct {
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
+        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
     }
 
     fn emitGotoParserLabelNoSource(s: *State, label: ParserLabelRef) Error!void {
@@ -9620,6 +10256,7 @@ pub const parser_core = struct {
         std.mem.writeInt(u32, bytes[1..5], target, .little);
         const loc = s.currentSourcePosition();
         try s.appendBytesAt(&bytes, loc.line_num, loc.col_num);
+        s.noteEmittedLabelOperand(target);
     }
 
     fn emitBackwardJumpNoSource(s: *State, op_id: u8, target: u32) Error!void {
@@ -9627,6 +10264,7 @@ pub const parser_core = struct {
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], target, .little);
         try s.emitOpcodeBytesNoSource(&bytes);
+        s.noteEmittedLabelOperand(target);
     }
 
     const ParserPhaseInstruction = struct {
@@ -9931,7 +10569,7 @@ pub const parser_core = struct {
     }
 
     fn caseCanFallthrough(s: *State) bool {
-        const op_id = lastOpcode(s.currentCode(), s.currentAtomOperands()) orelse return true;
+        const op_id = s.flowSummary().last_non_line_op orelse return true;
         return switch (op_id) {
             opcode.op.goto,
             opcode.op.@"return",
@@ -9946,7 +10584,8 @@ pub const parser_core = struct {
     /// QuickJS `js_is_live_code`: only the straight-line predecessor matters
     /// while constructing a statement's fixed control-flow topology.
     fn isLiveCode(s: *State) bool {
-        const op_id = lastNonCleanupOpcode(s.currentCode(), s.currentAtomOperands()) orelse return true;
+        const ft = s.flowSummary();
+        const op_id = ft.last_non_cleanup_op orelse return true;
         const terminal = switch (op_id) {
             opcode.op.goto,
             opcode.op.@"return",
@@ -9964,8 +10603,10 @@ pub const parser_core = struct {
         // zjs patches loop/branch exits to the current absolute byte offset
         // instead of emitting a physical OP_label at every merge. Such an
         // incoming edge makes the merge live even when the preceding linear
-        // instruction is a back-edge or return.
-        return hasAbsoluteJumpToCurrentEnd(s.currentCode(), s.currentAtomOperands());
+        // instruction is a back-edge or return. Tagged parser labels are
+        // deliberately excluded here (statement-local view), matching the
+        // legacy hasAbsoluteJumpToCurrentEnd mask.
+        return ft.max_absolute_target >= ft.tail_start;
     }
 
     fn lastOpcode(code: []const u8, atoms: []const Atom) ?u8 {
@@ -10078,6 +10719,21 @@ pub const parser_core = struct {
     /// separate `hasJumpToCurrentEnd` OR — a body whose last real op is a
     /// terminator can still be entered at its end by a finished-construct
     /// jump (if/else arm, break), and that path needs a landing terminator.
+    /// Summary-backed equivalent of `functionNeedsImplicitReturn`.
+    fn flowNeedsImplicitReturn(ft: *const bytecode.FlowTailSummary) bool {
+        const op_id = ft.last_non_cleanup_op orelse return true;
+        return switch (op_id) {
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.return_async,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.throw,
+            => false,
+            else => true,
+        };
+    }
+
     pub fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
         const op_id = lastNonCleanupOpcode(code, atoms) orelse return true;
         return switch (op_id) {
@@ -12278,25 +12934,19 @@ pub const parser_core = struct {
     }
 
     fn patchForwardJump(s: *State, operand_offset: usize) Error!void {
-        var code = s.currentCode();
-        if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
-        const target: u32 = @intCast(code.len);
-        std.mem.writeInt(u32, code[operand_offset..][0..4], target, .little);
+        const target: u32 = @intCast(s.currentCodeLen());
+        try s.publishParserLabelTarget(operand_offset, target);
         // Patching to the current position represents a normal QuickJS label.
         // A control-flow merge cannot inherit an lvalue from one predecessor.
         s.invalidateLastOpcode();
     }
 
     fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
-        var code = s.currentCode();
-        if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
-        std.mem.writeInt(u32, code[operand_offset..][0..4], target, .little);
+        try s.publishParserLabelTarget(operand_offset, target);
     }
 
     fn patchAbsoluteTarget(s: *State, operand_offset: usize) Error!void {
-        var code = s.currentCode();
-        if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
-        std.mem.writeInt(u32, code[operand_offset..][0..4], @intCast(code.len), .little);
+        try s.publishParserLabelTarget(operand_offset, @intCast(s.currentCodeLen()));
         s.invalidateLastOpcode();
     }
 
@@ -13807,13 +14457,12 @@ pub const parser_core = struct {
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
         if (capture_child) {
-            const code = s.currentCode();
-            const atoms = s.currentAtomOperands();
             // A jump targeting the current end (post-lowering `code_end`) needs
             // a real terminator to land on — the dispatch has no fall-off
             // bounds check (qjs-aligned; qjs functions always end in a return).
-            const jump_to_end = hasJumpToCurrentEnd(code, atoms);
-            const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
+            const ft = s.flowSummary();
+            const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
+            const needs_return = jump_to_end or flowNeedsImplicitReturn(ft);
             if (needs_return) {
                 if (func_kind == .async) {
                     try s.emitOp(opcode.op.undefined);
@@ -14288,12 +14937,11 @@ pub const parser_core = struct {
             try parseFunctionBodyBlock(s);
             if (has_non_simple_params and s.cur_func().has_use_strict) return Error.UnexpectedToken;
             if (capture_child) {
-                const code = s.currentCode();
-                const atoms = s.currentAtomOperands();
                 // See the function-body epilogue: an end-targeting jump must
                 // land on a real terminator (no dispatch fall-off check).
-                const jump_to_end = hasJumpToCurrentEnd(code, atoms);
-                const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
+                const ft = s.flowSummary();
+                const jump_to_end = ft.tagged_target_count != 0 or ft.max_absolute_target >= ft.tail_start;
+                const needs_return = jump_to_end or flowNeedsImplicitReturn(ft);
                 if (needs_return) {
                     if (is_async) {
                         try s.emitOp(opcode.op.undefined);
@@ -15877,6 +16525,7 @@ pub const parser_core = struct {
             std.mem.writeInt(u32, brand_prefix[8..12], atom_module.ids.home_object, .little);
             std.mem.writeInt(u16, brand_prefix[12..14], 0, .little);
             brand_prefix[14] = opcode.op.add_brand;
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&brand_prefix);
             try child_fd.appendAtomOperand(atom_module.ids.home_object);
         }
@@ -15908,6 +16557,7 @@ pub const parser_core = struct {
             else => true,
         };
         if (!needs_return) return;
+        init_fd.flow_tail.valid = false;
         try init_fd.appendByteCode(&.{opcode.op.return_undef});
     }
 
@@ -16670,6 +17320,7 @@ pub const parser_core = struct {
         std.mem.writeInt(u16, code[18..20], 0, .little);
         code[20] = opcode.op.drop;
         try fd.appendAtomOperand(atom_class_fields_init);
+        fd.flow_tail.valid = false;
         try fd.appendByteCode(&code);
     }
 
@@ -16708,16 +17359,19 @@ pub const parser_core = struct {
         // Default derived constructors use OP_init_ctor below, whose handler
         // performs the new.target gate while initializing derived state.
         if (!s.class_has_extends) {
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{opcode.op.check_ctor});
         }
         var body_marker: [3]u8 = undefined;
         body_marker[0] = opcode.op.enter_scope;
         std.mem.writeInt(u16, body_marker[1..3], @intCast(body_scope), .little);
+        child_fd.flow_tail.valid = false;
         try child_fd.appendByteCode(&body_marker);
         const this_idx_i32 = child_fd.ensureThisBinding() catch return error.OutOfMemory;
         if (this_idx_i32 < 0 or this_idx_i32 > std.math.maxInt(u16)) return Error.UnexpectedToken;
         const this_idx: u16 = @intCast(this_idx_i32);
         if (s.class_has_extends) {
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{
                 opcode.op.init_ctor,
                 opcode.op.put_loc_check_init,
@@ -16730,6 +17384,7 @@ pub const parser_core = struct {
             // reads `this` with scope_get_var_checkthis so an uninitialized
             // ReferenceError is raised in the caller context, lowered to
             // get_loc_checkthis (quickjs.c:33073-33077).
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{
                 opcode.op.get_loc_checkthis,
                 @truncate(this_idx),
@@ -16738,6 +17393,7 @@ pub const parser_core = struct {
             });
         } else {
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
+            child_fd.flow_tail.valid = false;
             try child_fd.appendByteCode(&.{opcode.op.return_undef});
         }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
@@ -17638,6 +18294,17 @@ pub const compile_entry = struct {
         if (restored_any) state.in_class = true;
     }
 
+    fn elapsedNanosSince(start: u64) u64 {
+        const end = monotonicNanos();
+        return if (end > start) end - start else 0;
+    }
+
+    fn monotonicNanos() u64 {
+        var ts: std.c.timespec = undefined;
+        if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
     pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl {
         const rt = compile_context.realm.runtime;
         var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
@@ -17753,6 +18420,7 @@ pub const compile_entry = struct {
         function: *bytecode.Bytecode,
         features: *std.EnumSet(FeatureImpl),
     ) !*bytecode.FunctionBytecode {
+        const frontend_start = if (compile_context.timing != null) monotonicNanos() else 0;
         const effective_strict = options.strict;
         var lex = lexer_mod.Lexer.init(rt.memory.allocator, &rt.atoms, source);
         defer lex.deinit();
@@ -17862,6 +18530,9 @@ pub const compile_entry = struct {
                 parser_impl.functionNeedsImplicitReturn(code, atoms);
             if (needs_return) try state.emitReturnUndefined();
         }
+        if (compile_context.timing) |timing| {
+            timing.frontend_ns += elapsedNanosSince(frontend_start);
+        }
 
         // Parsing intentionally redirects the operation allocator to the
         // short-lived arena. Finalization may use that facade for scratch
@@ -17871,6 +18542,7 @@ pub const compile_entry = struct {
         // additionally prevents a future finalizer helper from accidentally
         // retaining an arena-backed allocation. Restore it before State.deinit
         // so parser scratch still unwinds under the allocator that created it.
+        const finalize_start = if (compile_context.timing != null) monotonicNanos() else 0;
         const parse_allocator = rt.memory.allocator;
         rt.memory.allocator = compile_context.artifactAllocator();
         defer rt.memory.allocator = parse_allocator;
@@ -17882,6 +18554,9 @@ pub const compile_entry = struct {
                 compile_context,
             );
         } else try bytecode.pipeline.finalize.createFunctionBytecode(&state.function_def, compile_context);
+        if (compile_context.timing) |timing| {
+            timing.finalize_ns += elapsedNanosSince(finalize_start);
+        }
         features.* = state.features;
         _ = filename_atom;
         return &root_slice[0];

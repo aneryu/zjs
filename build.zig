@@ -135,6 +135,43 @@ pub fn build(b: *std.Build) void {
     zjs_step.dependOn(&install_zjs.step);
     b.installArtifact(zjs_exe);
 
+    // Profiling CLI: the same ReleaseFast engine with per-opcode dispatch
+    // scopes compiled in (the hot table is comptime-wrapped; see
+    // exec/vm_profile.zig). A separate artifact so --profile-opcodes users
+    // and the perf-runtime-profiles gate never depend on remembering -D
+    // flags, and the default zjs binary never carries profiling code.
+    const profile_engine_options = b.addOptions();
+    profile_engine_options.addOption(bool, "zjs_enable_opcode_profile", true);
+    profile_engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    profile_engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
+    profile_engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    profile_engine_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
+    profile_engine_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
+    const internal_profile_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal_root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .omit_frame_pointer = true,
+    });
+    internal_profile_mod.addOptions("build_options", profile_engine_options);
+    const zjs_profile_cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/zjs.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = internal_profile_mod },
+        },
+    });
+    const zjs_profile_exe = b.addExecutable(.{
+        .name = "zjs-profile",
+        .root_module = zjs_profile_cli_mod,
+    });
+    const install_zjs_profile = b.addInstallArtifact(zjs_profile_exe, .{});
+    const zjs_profile_step = b.step("zjs-profile", "Build and install the profiling zjs (per-opcode dispatch scopes)");
+    zjs_profile_step.dependOn(&install_zjs_profile.step);
+
     // Debug-only CLI used by the inner-loop gate. Keep the production `zjs`
     // artifact ReleaseFast while avoiding optimized whole-engine compilation
     // on every focused edit.
@@ -251,6 +288,9 @@ pub fn build(b: *std.Build) void {
         script: []const u8,
         expect_stdout: []const u8,
         expect_opcodes: []const []const u8,
+        // Minimum gates: an all-zero profile must never pass (the 2026-07-31
+        // regression survived precisely because 0 <= max is vacuous).
+        expect_opcode_mins: []const []const u8 = &.{},
     };
 
     const profiles = [_]ProfileConfig{
@@ -259,14 +299,25 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the URI 4-byte decode benchmark script",
             .script = "uri_decode_4byte",
             .expect_stdout = "65536\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "get_var=67626",
+                "get_var=988211",
                 "get_var_ref0=0",
-                "put_var=1042",
-                "push_i16=1040",
-                "goto16=0",
-                "add=0",
-                "if_false8=1",
+                "put_var=396322",
+                "push_i16=396320",
+                "goto16=66576",
+                "add=527360",
+                "if_false8=65536",
+            },
+            .expect_opcode_mins = &.{
+                "get_var=988211",
+                "put_var=396322",
+                "push_i16=396320",
+                "goto16=66576",
+                "add=527360",
+                "if_false8=65536",
             },
         },
         .{
@@ -274,14 +325,25 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the URI component 4-byte decode benchmark script",
             .script = "uri_component_decode_4byte",
             .expect_stdout = "65536\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "get_var=67626",
+                "get_var=988211",
                 "get_var_ref0=0",
-                "put_var=1042",
-                "push_i16=1040",
-                "goto16=0",
-                "add=0",
-                "if_false8=1",
+                "put_var=396322",
+                "push_i16=396320",
+                "goto16=66576",
+                "add=527360",
+                "if_false8=65536",
+            },
+            .expect_opcode_mins = &.{
+                "get_var=988211",
+                "put_var=396322",
+                "push_i16=396320",
+                "goto16=66576",
+                "add=527360",
+                "if_false8=65536",
             },
         },
         .{
@@ -289,10 +351,18 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the global property read benchmark script",
             .script = "prop_read_global_mono",
             .expect_stdout = "1000000\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "get_field=0",
-                "add=0",
-                "goto8=0",
+                "get_field=1000000",
+                "add=1000000",
+                "goto8=1000000",
+            },
+            .expect_opcode_mins = &.{
+                "get_field=1000000",
+                "add=1000000",
+                "goto8=1000000",
             },
         },
         .{
@@ -300,10 +370,18 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the global prototype read benchmark script",
             .script = "proto_read_global",
             .expect_stdout = "1000000\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "get_field=0",
-                "add=0",
-                "goto8=0",
+                "get_field=1000000",
+                "add=1000000",
+                "goto8=1000000",
+            },
+            .expect_opcode_mins = &.{
+                "get_field=1000000",
+                "add=1000000",
+                "goto8=1000000",
             },
         },
         .{
@@ -311,12 +389,22 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the global polymorphic property read benchmark script",
             .script = "prop_read_poly3_global",
             .expect_stdout = "1000000\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "get_array_el=0",
-                "get_field=0",
-                "mod=0",
-                "add=0",
-                "goto8=0",
+                "get_array_el=1000000",
+                "get_field=1000000",
+                "mod=1000000",
+                "add=1000000",
+                "goto8=1000000",
+            },
+            .expect_opcode_mins = &.{
+                "get_array_el=1000000",
+                "get_field=1000000",
+                "mod=1000000",
+                "add=1000000",
+                "goto8=1000000",
             },
         },
         .{
@@ -324,11 +412,20 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the global call2 loop benchmark script",
             .script = "call2_loop_global",
             .expect_stdout = "500000500000\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "call2=0",
-                "add=0",
-                "post_inc=0",
-                "goto8=0",
+                "call2=1000000",
+                "add=2000000",
+                "post_inc=1000000",
+                "goto8=1000000",
+            },
+            .expect_opcode_mins = &.{
+                "call2=1000000",
+                "add=2000000",
+                "post_inc=1000000",
+                "goto8=1000000",
             },
         },
         .{
@@ -336,10 +433,18 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the global closure call loop benchmark script",
             .script = "closure_call_loop_global",
             .expect_stdout = "500000500000\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "add=0",
-                "post_inc=0",
-                "goto8=0",
+                "add=2000000",
+                "post_inc=1000000",
+                "goto8=1000000",
+            },
+            .expect_opcode_mins = &.{
+                "add=2000000",
+                "post_inc=1000000",
+                "goto8=1000000",
             },
         },
         .{
@@ -347,23 +452,42 @@ pub fn build(b: *std.Build) void {
             .desc = "Record a zjs runtime profile for the string microbench loop script",
             .script = "string_loop",
             .expect_stdout = "261\n",
+            // Exact dispatch-count pins recalibrated 2026-07-31 against the
+            // restored total-dispatch counting (D0). A drop or rise must be
+            // acknowledged by recalibrating, never by loosening to a vacuum.
             .expect_opcodes = &.{
-                "get_var=1",
-                "get_length=2",
-                "push_i8=0",
-                "gt=0",
-                "get_field2=2",
-                "call_method=2",
-                "get_loc0=6000",
-                "get_loc1=100",
-                "add=2",
-                "get_arg0=0",
-                "lt=0",
-                "if_false8=0",
+                "get_var=5002",
+                "get_length=5002",
+                "push_i8=15309",
+                "gt=5000",
+                "get_field2=5311",
+                "call_method=5311",
+                "get_loc0=5313",
+                "get_loc1=10001",
+                "add=10002",
+                "get_arg0=5001",
+                "lt=5001",
+                "if_false8=10001",
                 "post_inc=0",
-                "goto8=0",
+                "goto8=5000",
                 "put_loc1=1",
-                "drop=1",
+                "drop=0",
+            },
+            .expect_opcode_mins = &.{
+                "get_var=5002",
+                "get_length=5002",
+                "push_i8=15309",
+                "gt=5000",
+                "get_field2=5311",
+                "call_method=5311",
+                "get_loc0=5313",
+                "get_loc1=10001",
+                "add=10002",
+                "get_arg0=5001",
+                "lt=5001",
+                "if_false8=10001",
+                "goto8=5000",
+                "put_loc1=1",
             },
         },
         .{
@@ -382,7 +506,9 @@ pub fn build(b: *std.Build) void {
             "node",
             "tools/perf/run_runtime_profile.js",
             "--zjs",
-            b.getInstallPath(.bin, "zjs"),
+            b.getInstallPath(.bin, "zjs-profile"),
+            "--expect-total-opcodes-min",
+            "1",
             "--output",
             "reports/perf/current/runtime/" ++ profile.script ++ ".json",
             "--stdout",
@@ -400,14 +526,24 @@ pub fn build(b: *std.Build) void {
             break :blk arr;
         };
 
+        const opcode_min_args = comptime blk: {
+            var arr: [profile.expect_opcode_mins.len * 2][]const u8 = undefined;
+            for (profile.expect_opcode_mins, 0..) |opcode, idx| {
+                arr[idx * 2] = "--expect-opcode-min";
+                arr[idx * 2 + 1] = opcode;
+            }
+            break :blk arr;
+        };
+
         const script_args = [_][]const u8{
             "reports/perf/current/scripts/" ++ profile.script ++ ".js",
         };
 
-        const full_args = base_args ++ opcode_args ++ script_args;
+        const full_args = base_args ++ opcode_args ++ opcode_min_args ++ script_args;
 
         const run_profile = b.addSystemCommand(&full_args);
         run_profile.step.dependOn(&install_zjs.step);
+        run_profile.step.dependOn(&install_zjs_profile.step);
 
         const profile_step = b.step(profile.name, profile.desc);
         profile_step.dependOn(&run_profile.step);
@@ -498,6 +634,18 @@ pub fn build(b: *std.Build) void {
     run_perf_hotpath.step.dependOn(&install_zjs.step);
     const perf_hotpath_step = b.step("perf-hotpath", "Record independent hotpath calibration benchmark report");
     perf_hotpath_step.dependOn(&run_perf_hotpath.step);
+
+    const run_measurement_contract_tests = b.addSystemCommand(&.{
+        "bun",
+        "tools/compare/test_measurement_contract.js",
+        "--output",
+        ".zig-cache/perf/measurement-contract-tests.json",
+    });
+    const measurement_contract_test_step = b.step(
+        "perf-measurement-contract",
+        "Run the whole-process measurement contract tests (no binaries, no measurement lock)",
+    );
+    measurement_contract_test_step.dependOn(&run_measurement_contract_tests.step);
 
     const run_perf_native_callback = b.addSystemCommand(&.{
         "bun",
@@ -599,6 +747,8 @@ pub fn build(b: *std.Build) void {
     // Production smoke tests retain the ReleaseFast CLI contract.
     const smoke_options = b.addOptions();
     smoke_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
+    smoke_options.addOption([]const u8, "zjs_profile_executable_path", b.getInstallPath(.bin, "zjs-profile"));
+    smoke_options.addOption(bool, "smoke_profile_checks", true);
     const smoke_tests = b.addTest(.{
         .name = "smoke-tests-releasefast",
         .root_module = b.createModule(.{
@@ -615,6 +765,7 @@ pub fn build(b: *std.Build) void {
     smoke_tests.root_module.addOptions("build_options", smoke_options);
     const run_smoke_tests = b.addRunArtifact(smoke_tests);
     run_smoke_tests.step.dependOn(&install_zjs.step);
+    run_smoke_tests.step.dependOn(&install_zjs_profile.step);
     if (b.args) |args| run_smoke_tests.addArgs(args);
 
     const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
@@ -623,8 +774,12 @@ pub fn build(b: *std.Build) void {
     // Debug smoke tests are the single engine-bearing artifact in the inner
     // loop. They deliberately do not depend on unified-test modules or plugin
     // fixtures.
+    // The dev inner loop deliberately carries no ReleaseFast engine build;
+    // profile-contract smoke checks run in the release smoke tier only.
     const smoke_dev_options = b.addOptions();
     smoke_dev_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs-dev"));
+    smoke_dev_options.addOption([]const u8, "zjs_profile_executable_path", "");
+    smoke_dev_options.addOption(bool, "smoke_profile_checks", false);
     const smoke_dev_tests = b.addTest(.{
         .name = "smoke-tests-debug",
         .root_module = b.createModule(.{

@@ -176,6 +176,96 @@ const matchedAllowKeys = new Set();
 const files = [];
 walk(path.join(repoRoot, 'src'), files);
 
+// Production-module reachability. The import-edge rules above validate edges
+// that EXIST; they cannot see a module that nothing imports. The 2026-07-31
+// opcode-profiling regression survived because vm_profile.zig fell out of
+// the production graph silently. Solve reachability from the production and
+// test roots separately; a module reachable from neither must carry an
+// orphan-allowlist entry with a reason and an exit milestone.
+const PRODUCTION_ROOTS = [
+  'src/root.zig',
+  'src/internal_root.zig',
+  'src/cli/zjs.zig',
+  'src/cli/run_test262.zig',
+];
+const TEST_ROOTS = [
+  'src/all_tests.zig',
+  // Focused-suite and gate roots referenced directly by build.zig.
+  'src/exec_tests.zig',
+  'src/builtins_tests.zig',
+  'src/runtime_tests.zig',
+  'src/tests/oom.zig',
+  'src/tests/smoke_test.zig',
+];
+const orphanAllowlistPath = path.join(repoRoot, 'tools/architecture/orphan-allowlist.json');
+
+function readOrphanAllowlist() {
+  const entries = JSON.parse(fs.readFileSync(orphanAllowlistPath, 'utf8'));
+  if (!Array.isArray(entries)) fail(`orphan allowlist must be a JSON array: ${orphanAllowlistPath}`);
+  for (const [index, entry] of entries.entries()) {
+    for (const field of ['module', 'reason', 'exit_milestone']) {
+      if (typeof entry[field] !== 'string' || entry[field].length === 0) {
+        fail(`orphan allowlist entry ${index} is missing non-empty ${field}`);
+      }
+    }
+    entry.module = normalizeRepoPath(entry.module);
+  }
+  return entries;
+}
+
+function reachableFrom(roots, edges) {
+  const seen = new Set();
+  const queue = roots.filter((root) => edges.has(root));
+  for (const root of queue) seen.add(root);
+  while (queue.length) {
+    const source = queue.pop();
+    for (const target of edges.get(source) || []) {
+      if (!seen.has(target)) {
+        seen.add(target);
+        queue.push(target);
+      }
+    }
+  }
+  return seen;
+}
+
+function checkProductionReachability() {
+  const edges = new Map();
+  for (const source of files) {
+    edges.set(source, importsFor(source).map((item) => item.target));
+  }
+  for (const root of [...PRODUCTION_ROOTS, ...TEST_ROOTS]) {
+    if (!edges.has(root)) fail(`reachability root does not exist: ${root}`);
+  }
+  const productionReachable = reachableFrom(PRODUCTION_ROOTS, edges);
+  const testReachable = reachableFrom(TEST_ROOTS, edges);
+  const orphans = files.filter((file) => !productionReachable.has(file) && !testReachable.has(file));
+  const allowlist = readOrphanAllowlist();
+  const allowByModule = new Map(allowlist.map((entry) => [entry.module, entry]));
+  const unallowed = orphans.filter((file) => !allowByModule.has(file));
+  const staleOrphans = allowlist.filter(
+    (entry) => productionReachable.has(entry.module) || testReachable.has(entry.module) || !files.includes(entry.module),
+  );
+  if (unallowed.length !== 0 || staleOrphans.length !== 0) {
+    if (unallowed.length !== 0) {
+      console.error('\nModules reachable from neither production nor test roots (orphans):');
+      for (const file of unallowed) console.error(`  ${file}`);
+      console.error('  Either wire the module back in, delete it, or add an orphan-allowlist entry with a reason and exit milestone.');
+    }
+    if (staleOrphans.length !== 0) {
+      console.error('\nStale orphan-allowlist entries (module is reachable again or gone):');
+      for (const entry of staleOrphans) console.error(`  ${entry.module} (exit_milestone: ${entry.exit_milestone})`);
+    }
+    process.exit(1);
+  }
+  const testOnly = files.filter((file) => !productionReachable.has(file) && testReachable.has(file));
+  return {
+    production: productionReachable.size,
+    testOnly: testOnly.length,
+    allowedOrphans: orphans.length,
+  };
+}
+
 const retiredBuiltinFiles = files.filter((source) => source.startsWith('src/builtins/'));
 if (retiredBuiltinFiles.length !== 0) {
   fail(`legacy src/builtins directory was retired; move these modules to exec or core:\n  ${retiredBuiltinFiles.join('\n  ')}`);
@@ -192,6 +282,13 @@ const standardGlobalsSource = fs.readFileSync(path.join(repoRoot, 'src/exec/stan
 for (const retiredRegistryToken of ['ConstructorSpec', 'constructor_specs']) {
   if (standardGlobalsSource.includes(retiredRegistryToken)) {
     fail(`generic standard-constructor registry reintroduced in src/exec/standard_globals.zig: ${retiredRegistryToken}`);
+  }
+}
+
+const propertyIcSource = fs.readFileSync(path.join(repoRoot, 'src/exec/property_ic.zig'), 'utf8');
+for (const retiredFacadeToken of ['cachedDataPropertyValueForFastPath']) {
+  if (propertyIcSource.includes(retiredFacadeToken)) {
+    fail(`proven-dead IC facade reintroduced in src/exec/property_ic.zig: ${retiredFacadeToken} (removed in D2; the inline cache is gone and qjs has none)`);
   }
 }
 
@@ -240,4 +337,8 @@ if (violations.length !== 0 || stale.length !== 0) {
   process.exit(1);
 }
 
-console.log(`architecture dependency check ok (${files.length} Zig files, ${matchedAllowKeys.size} transitional allowlist entries)`);
+const reachability = checkProductionReachability();
+console.log(
+  `architecture dependency check ok (${files.length} Zig files, ${matchedAllowKeys.size} transitional allowlist entries, ` +
+  `${reachability.production} production-reachable, ${reachability.testOnly} test-only, ${reachability.allowedOrphans} allowlisted orphans)`,
+);

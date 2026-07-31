@@ -5276,7 +5276,6 @@ pub fn indirectEval(
             .var_refs = root_function_object.functionCaptures(),
             .output = output,
             .global = eval_global,
-            .break_var_ref_cycles_on_exit = true,
             .strict_unresolved_get_var = function.isStrictMode(),
             .current_function_value = root_function_value,
             .eval_global_var_bindings = !function.isStrictMode(),

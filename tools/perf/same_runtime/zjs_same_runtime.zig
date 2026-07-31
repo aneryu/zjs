@@ -64,15 +64,28 @@ pub fn main(init: std.process.Init) !void {
         fatal("unable to allocate timing samples: {s}", .{@errorName(err)});
     defer allocator.free(samples);
 
-    const runtime_start = monotonicNanos();
+    const engine_cold_start = monotonicNanos();
+    const runtime_start = engine_cold_start;
     const runtime = zjs.JSRuntime.createWithOptions(allocator, .{}) catch |err|
         fatal("runtime creation failed: {s}", .{@errorName(err)});
     const runtime_create_ns = elapsedNanosSince(runtime_start);
 
-    const context_start = monotonicNanos();
-    const context = zjs.JSContext.create(runtime) catch |err|
-        fatal("context creation failed: {s}", .{@errorName(err)});
-    const context_create_ns = elapsedNanosSince(context_start);
+    // The measured entry executes the exact public JSContext.createWithOptions
+    // implementation. It only adds the two internal timestamps requested here,
+    // so facade ownership, callback registration, GC-threshold restoration,
+    // error cleanup, and publication order cannot drift from production.
+    const realm_ready_start = monotonicNanos();
+    var context_create_timing: zjs.binding_root.context_mod.ContextCreateTiming = .{};
+    const context = zjs.binding_root.context_mod.createWithOptionsMeasured(
+        runtime,
+        .{},
+        &context_create_timing,
+    ) catch |err| fatal("context creation failed: {s}", .{@errorName(err)});
+    const realm_raw_create_ns = context_create_timing.raw_create_ns;
+    const realm_bootstrap_ns = context_create_timing.bootstrap_ns;
+    const realm_ready_ns = elapsedNanosSince(realm_ready_start);
+    // Preserve the complete-context phase consumed by existing artifacts.
+    const context_create_ns = realm_ready_ns;
     context.setPreserveUncaughtException(true);
 
     var eval_timing: zjs.EvalTiming = .{};
@@ -87,14 +100,15 @@ pub fn main(init: std.process.Init) !void {
         .discard_script_result = true,
         .timing = &eval_timing,
     }) catch |err| engineFatal(context, allocator, "compile/top-level execution", err);
+    const engine_cold_to_first_result_ns = elapsedNanosSince(engine_cold_start);
     if (eval_result.isException()) {
         engineFatal(context, allocator, "compile/top-level execution", error.JSException);
     }
     top_level_executions += 1;
-    const eval_total_ns = elapsedNanosSince(eval_total_start);
     eval_result.free(runtime);
+    const promise_jobs_ns = eval_timing.promise_jobs_ns;
+    const eval_total_ns = elapsedNanosSince(eval_total_start);
 
-    var job_drain_ns = eval_timing.promise_jobs_ns;
     const global_object = context.globalObject() catch |err|
         engineFatal(context, allocator, "global object lookup", err);
     const run_function = context.getProperty(global_object.value(), "run") catch |err|
@@ -140,7 +154,10 @@ pub fn main(init: std.process.Init) !void {
 
     const final_jobs_start = monotonicNanos();
     context.runJobs(null) catch |err| engineFatal(context, allocator, "final job drain", err);
-    job_drain_ns += elapsedNanosSince(final_jobs_start);
+    const final_job_drain_ns = elapsedNanosSince(final_jobs_start);
+    const job_drain_sum = @addWithOverflow(promise_jobs_ns, final_job_drain_ns);
+    if (job_drain_sum[1] != 0) fatal("job drain timing overflow", .{});
+    const job_drain_ns = job_drain_sum[0];
 
     const sorted_samples = allocator.dupe(u64, samples) catch |err|
         fatal("unable to allocate sorted samples: {s}", .{@errorName(err)});
@@ -180,9 +197,14 @@ pub fn main(init: std.process.Init) !void {
         checksum,
         runtime_create_ns,
         context_create_ns,
-        eval_timing.parse_ns,
-        eval_timing.vm_run_ns,
+        realm_raw_create_ns,
+        realm_bootstrap_ns,
+        realm_ready_ns,
+        eval_timing,
+        engine_cold_to_first_result_ns,
         eval_total_ns,
+        promise_jobs_ns,
+        final_job_drain_ns,
         job_drain_ns,
         context_destroy_ns,
         runtime_destroy_ns,
@@ -333,9 +355,14 @@ fn writeResult(
     checksum: []const u8,
     runtime_create_ns: u64,
     context_create_ns: u64,
-    compile_ns: u64,
-    first_execute_ns: u64,
+    realm_raw_create_ns: u64,
+    realm_bootstrap_ns: u64,
+    realm_ready_ns: u64,
+    eval_timing: zjs.EvalTiming,
+    engine_cold_to_first_result_ns: u64,
     eval_total_ns: u64,
+    promise_jobs_ns: u64,
+    final_job_drain_ns: u64,
     job_drain_ns: u64,
     context_destroy_ns: ?u64,
     runtime_destroy_ns: ?u64,
@@ -348,9 +375,14 @@ fn writeResult(
     stats: SampleStats,
 ) !void {
     try output.print(
-        "{{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\",\n  \"dossier_variant\": \"{s}\",\n  \"dossier_simple_ctor_bypass\": {},\n  \"dossier_simple_ctor_memo\": {},\n  \"case\": ",
-        .{ dossier_variant, dossier_bypass, dossier_memo },
+        "{{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\",\n  \"dossier_variant\": \"{s}\",\n  \"dossier_simple_ctor_bypass\": {},\n  \"dossier_simple_ctor_memo\": {}",
+        .{
+            dossier_variant,
+            dossier_bypass,
+            dossier_memo,
+        },
     );
+    try output.writeAll(",\n  \"case\": ");
     try writeJsonString(output, options.case_name);
     try output.writeAll(",\n  \"source_sha256\": ");
     try writeJsonString(output, source_sha256);
@@ -385,14 +417,24 @@ fn writeResult(
     );
     try writeJsonString(output, checksum);
     try output.writeAll(
-        ",\n  \"globals_install_note\": \"JSContext.create installs standard globals during context creation; the public API has no separate install step.\",\n" ++
+        ",\n  \"globals_install_note\": \"The internal harness splits the production JSContext.create sequence around construction-only core Realm creation and the real materializer/contextGlobal bootstrap; context_create_ns retains the complete public-ready boundary.\",\n" ++
             "  \"phase_definitions\": {\n" ++
             "    \"runtime_create_ns\": \"Create one engine runtime.\",\n" ++
-            "    \"context_create_ns\": \"Create one context; includes standard globals when the engine cannot expose them separately.\",\n" ++
+            "    \"context_create_ns\": \"Create one public-ready context, retained as the backward-compatible complete Realm boundary.\",\n" ++
             "    \"globals_install_ns\": \"Install standard globals separately when the engine API exposes that boundary; otherwise null.\",\n" ++
-            "    \"compile_ns\": \"Internal parse timing only; not cross-engine comparable because zjs excludes contextGlobal and root bytecode function creation.\",\n" ++
-            "    \"first_execute_ns\": \"Internal VM-run timing only; not cross-engine comparable because zjs excludes contextGlobal and root bytecode function creation.\",\n" ++
-            "    \"eval_total_ns\": \"Outer wall-clock time around the complete context.eval call, including compile, root bytecode function creation, and first top-level execution.\",\n" ++
+            "    \"realm_raw_create_ns\": \"Create the construction-only core Realm before any global object or intrinsic graph exists; zjs-internal attribution only.\",\n" ++
+            "    \"realm_bootstrap_ns\": \"Run the real contextGlobal path through intrinsic installation and Realm publication; zjs-internal attribution only.\",\n" ++
+            "    \"realm_ready_ns\": \"Outer public-constructor-equivalent boundary: facade allocation, standard-global/materializer registration, raw Realm, contextGlobal bootstrap, and GC-threshold restoration; equal to context_create_ns in this harness.\",\n" ++
+            "    \"compile_ns\": \"Complete parser.compile boundary through canonical FunctionBytecode publication; parse_ns is the retained internal alias.\",\n" ++
+            "    \"compile_frontend_ns\": \"Lexer, parser, and pre-finalization bytecode work inside parser.compile.\",\n" ++
+            "    \"compile_finalize_ns\": \"Recursive FunctionBytecode finalization and canonical artifact creation inside parser.compile.\",\n" ++
+            "    \"root_function_publish_ns\": \"Create the ordinary script root function object and publish its value-root frame.\",\n" ++
+            "    \"first_execute_ns\": \"From the compiled ordinary root through root-function publication and the first completed top-level VM run; the existing eval-epilogue root-function-value release remains outside this phase, unlike QuickJS JS_EvalFunction cleanup.\",\n" ++
+            "    \"vm_run_ns\": \"Stack setup plus the first top-level VM run, excluding root-function publication.\",\n" ++
+            "    \"promise_jobs_ns\": \"Immediate post-top-level drain performed inside context.eval and included in eval_total_ns; zjs also polls host signal, I/O, timer, and Atomics completion queues.\",\n" ++
+            "    \"final_job_drain_ns\": \"Drain after all warmup and timed run invocations; zjs also polls its host queues.\",\n" ++
+            "    \"engine_cold_to_first_result_ns\": \"Outer boundary from runtime creation start through the first completed top-level context.eval result; source I/O is excluded.\",\n" ++
+            "    \"eval_total_ns\": \"Outer ordinary-global-script boundary around the complete context.eval call, its immediate job/host-queue drain, and subsequent completion-value release.\",\n" ++
             "    \"steady_execute\": \"After warmup, each sample times one call to the retained run function; the source is never recompiled.\",\n" ++
             "    \"job_drain_ns\": \"Sum of pending-job drain time immediately after top-level execution and after all run invocations.\",\n" ++
             "    \"context_destroy_ns\": \"Destroy the context only in leak-check mode; null in normal mode.\",\n" ++
@@ -404,12 +446,41 @@ fn writeResult(
         "    \"runtime_create_ns\": {d},\n" ++
             "    \"context_create_ns\": {d},\n" ++
             "    \"globals_install_ns\": null,\n" ++
+            "    \"realm_raw_create_ns\": {d},\n" ++
+            "    \"realm_bootstrap_ns\": {d},\n" ++
+            "    \"realm_ready_ns\": {d},\n" ++
             "    \"compile_ns\": {d},\n" ++
+            "    \"parse_ns\": {d},\n" ++
+            "    \"compile_frontend_ns\": {d},\n" ++
+            "    \"compile_finalize_ns\": {d},\n" ++
+            "    \"root_function_publish_ns\": {d},\n" ++
             "    \"first_execute_ns\": {d},\n" ++
+            "    \"vm_run_ns\": {d},\n" ++
+            "    \"promise_jobs_ns\": {d},\n" ++
+            "    \"final_job_drain_ns\": {d},\n" ++
+            "    \"engine_cold_to_first_result_ns\": {d},\n" ++
             "    \"eval_total_ns\": {d},\n" ++
             "    \"job_drain_ns\": {d},\n" ++
             "    \"context_destroy_ns\": ",
-        .{ runtime_create_ns, context_create_ns, compile_ns, first_execute_ns, eval_total_ns, job_drain_ns },
+        .{
+            runtime_create_ns,
+            context_create_ns,
+            realm_raw_create_ns,
+            realm_bootstrap_ns,
+            realm_ready_ns,
+            eval_timing.compile_ns,
+            eval_timing.parse_ns,
+            eval_timing.compile_frontend_ns,
+            eval_timing.compile_finalize_ns,
+            eval_timing.root_function_publish_ns,
+            eval_timing.first_execute_ns,
+            eval_timing.vm_run_ns,
+            promise_jobs_ns,
+            final_job_drain_ns,
+            engine_cold_to_first_result_ns,
+            eval_total_ns,
+            job_drain_ns,
+        },
     );
     try writeOptionalU64(output, context_destroy_ns);
     try output.writeAll(",\n    \"runtime_destroy_ns\": ");
@@ -479,11 +550,9 @@ fn writeResult(
             "    \"peak_rss_bytes\": ",
     );
     try writeOptionalU64(output, peak_rss_bytes);
-    try output.writeAll(
-        ",\n    \"peak_rss_source\": \"getrusage(RUSAGE_SELF).ru_maxrss (Linux KiB)\"\n" ++
-            "  }\n" ++
-            "}\n",
-    );
+    try output.writeAll(",\n    \"peak_rss_source\": ");
+    try writeJsonString(output, peakRssSource());
+    try output.writeAll("\n  }\n}\n");
 }
 
 fn writeOptionalU64(output: *std.Io.Writer, value: ?u64) !void {
@@ -536,7 +605,15 @@ fn monotonicResolutionNanos() ?u64 {
 fn peakRssBytes() ?u64 {
     const resource_usage = std.posix.getrusage(std.posix.rusage.SELF);
     if (resource_usage.maxrss < 0) return null;
-    const value_kib: u64 = @intCast(resource_usage.maxrss);
-    if (value_kib > std.math.maxInt(u64) / 1024) return null;
-    return value_kib * 1024;
+    const value: u64 = @intCast(resource_usage.maxrss);
+    if (builtin.os.tag == .macos) return value;
+    if (value > std.math.maxInt(u64) / 1024) return null;
+    return value * 1024;
+}
+
+fn peakRssSource() []const u8 {
+    return if (builtin.os.tag == .macos)
+        "getrusage(RUSAGE_SELF).ru_maxrss (Darwin bytes)"
+    else
+        "getrusage(RUSAGE_SELF).ru_maxrss (KiB converted to bytes)";
 }

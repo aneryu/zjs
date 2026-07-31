@@ -1,0 +1,299 @@
+{
+  "tool": "zjs-measurement-redteam",
+  "timestamp": "2026-07-30T17:59:03.439Z",
+  "policy": {
+    "policy_id": "qjs-align-p7-70-whole-process-measurement",
+    "policy_version": 1,
+    "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68"
+  },
+  "binaries": {
+    "zjs": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.build-a/out/bin/zjs",
+    "qjs": "/home/aneryu/quickjs/qjs"
+  },
+  "cpu": 19,
+  "workdir": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.zig-cache/perf/p7-70/redteam",
+  "preconditionCleanWorktree": true,
+  "total": 21,
+  "held": 21,
+  "breaches": 0,
+  "exitCodeMap": {
+    "ok": 0,
+    "validationFailure": 1,
+    "usage": 2,
+    "sampleBalance": 3,
+    "affinityAttestation": 4,
+    "provenanceIncomplete": 5,
+    "artifactPolicyOverride": 6,
+    "startupResolution": 7,
+    "sessionSchema": 8,
+    "attributionScope": 9,
+    "phaseSampling": 10
+  },
+  "attacks": [
+    {
+      "id": "RT-00",
+      "attack": "control: an honest formal run must still succeed",
+      "defence": "a fail-closed contract must not be a blanket denial",
+      "held": true,
+      "evidence": {
+        "exitCode": 0,
+        "complete": true,
+        "headline": 1.1961647607537396,
+        "pairedGeomean": 1.1961647607537396,
+        "stderr": ""
+      }
+    },
+    {
+      "id": "RT-01",
+      "attack": "request an odd sample count (--iters 5)",
+      "defence": "SampleBalanceError before any process is spawned; exit 3",
+      "held": true,
+      "evidence": {
+        "exitCode": 3,
+        "expectedExitCode": 3,
+        "artifactWritten": false,
+        "message": "error: sample-count-odd: samples=5 is odd; ABBA cannot balance an odd sample count | error: first-position-imbalance: first-position counts are {\"qjs\":3,\"zjs\":2}; every treatment must lead equally often | error: position-imbalance: treatment qjs appears 3 time(s) in position 0, expected 2.5"
+      }
+    },
+    {
+      "id": "RT-01b",
+      "attack": "request 7 samples",
+      "defence": "SampleBalanceError, exit 3, no artifact",
+      "held": true,
+      "evidence": {
+        "exitCode": 3,
+        "message": "error: sample-count-odd: samples=7 is odd; ABBA cannot balance an odd sample count"
+      }
+    },
+    {
+      "id": "RT-01c",
+      "attack": "request an odd warmup in formal mode",
+      "defence": "SampleBalanceError, rule warmup-odd, exit 3",
+      "held": true,
+      "evidence": {
+        "exitCode": 3,
+        "message": "error: warmup-odd: warmup=5 is odd; the warmup rounds would themselves be order-imbalanced"
+      }
+    },
+    {
+      "id": "RT-02",
+      "attack": "forge the declared sample order so the artifact claims balance it did not have",
+      "defence": "SampleBalanceError, rule declared-order-execution-mismatch, exit 3, headline null",
+      "held": true,
+      "evidence": {
+        "exitCode": 3,
+        "complete": false,
+        "headline": null,
+        "errorClass": "SampleBalanceError",
+        "message": "the artifact-declared order differs from the recorded execution at 4 index(es)"
+      }
+    },
+    {
+      "id": "RT-03",
+      "attack": "drop one treatment from the middle of a run",
+      "defence": "SampleBalanceError, rule treatment-missing, exit 3",
+      "held": true,
+      "evidence": {
+        "exitCode": 3,
+        "complete": false,
+        "headline": null,
+        "message": "1 round(s) did not execute every treatment"
+      }
+    },
+    {
+      "id": "RT-04",
+      "attack": "run formal sampling without taskset so the runner and children inherit 0-19",
+      "defence": "AffinityAttestationError, rule collector-not-pinned, exit 4",
+      "held": true,
+      "evidence": {
+        "exitCode": 4,
+        "expectedExitCode": 4,
+        "message": "error: collector-not-pinned: collector Cpus_allowed_list=0-19 is not exactly {19}; an allowed-list that merely contains the CPU is not pinning"
+      }
+    },
+    {
+      "id": "RT-04b",
+      "attack": "ask for a CPU that is not even in the allowed set",
+      "defence": "AffinityAttestationError, rule requested-cpu-not-in-allowed-set, exit 4",
+      "held": true,
+      "evidence": {
+        "exitCode": 4,
+        "message": "warning: --cpu 19 does not match runner Cpus_allowed_list=18; timed children will inherit the measured runner affinity"
+      }
+    },
+    {
+      "id": "RT-05",
+      "attack": "a measured child escapes the pin",
+      "defence": "AffinityAttestationError, rule child-not-pinned, exit 4, headline null",
+      "held": true,
+      "evidence": {
+        "exitCode": 4,
+        "complete": false,
+        "headline": null,
+        "message": "measured zjs child pid=2056818 (pre) has Cpus_allowed_list=0-19, expected exactly {19}"
+      }
+    },
+    {
+      "id": "RT-05b",
+      "attack": "a child is re-pinned between the start and the end of the run",
+      "defence": "AffinityAttestationError, rules child-escaped + child-affinity-changed",
+      "held": true,
+      "evidence": {
+        "exitCode": 4,
+        "headline": null,
+        "rules": [
+          "child-escaped",
+          "child-affinity-changed"
+        ],
+        "message": "measured qjs child affinity moved from {19} to {18} across the run"
+      }
+    },
+    {
+      "id": "RT-05c",
+      "attack": "the collector itself changes affinity mid-run",
+      "defence": "AffinityAttestationError, rule collector-affinity-changed",
+      "held": true,
+      "evidence": {
+        "exitCode": 4,
+        "message": "collector affinity moved from {19} to {18,19} during the run"
+      }
+    },
+    {
+      "id": "RT-06",
+      "attack": "the artifact ships its own thresholds to move the line it is judged by",
+      "defence": "ArtifactPolicyOverrideError, rule artifact-supplied-policy, exit 6",
+      "held": true,
+      "evidence": {
+        "exitCode": 6,
+        "complete": false,
+        "headline": null,
+        "policyReadFrom": "/home/aneryu/worktrees/zjs-p7-measurement-contract/tools/compare/measurement_policy.json",
+        "raisedBy": {
+          "errorClass": "ArtifactPolicyOverrideError",
+          "exitCode": 6
+        },
+        "message": "artifact top-level key \"startup\" carries policy thresholds; the validator reads policy from /home/aneryu/worktrees/zjs-p7-measurement-contract/tools/compare/measurement_policy.json"
+      }
+    },
+    {
+      "id": "RT-07",
+      "attack": "strip the measured binary SHA-256 from the artifact",
+      "defence": "ProvenanceIncompleteError, exit 5, meta.zjs.sha256 named",
+      "held": true,
+      "evidence": {
+        "exitCode": 5,
+        "complete": false,
+        "headline": null,
+        "message": "missing required provenance field(s): meta.zjs.sha256"
+      }
+    },
+    {
+      "id": "RT-08",
+      "attack": "publish a formal snapshot from a dirty worktree",
+      "defence": "ProvenanceIncompleteError, rule dirty-worktree, exit 5",
+      "held": true,
+      "evidence": {
+        "exitCode": 5,
+        "headline": null,
+        "message": "toolRepoCommit repository was dirty at measurement time; the recorded commit does not describe the measured binary"
+      }
+    },
+    {
+      "id": "RT-09",
+      "attack": "swap a case source hash so the measured script is not the declared script",
+      "defence": "ProvenanceIncompleteError, rule case-source-sha-mismatch, exit 5",
+      "held": true,
+      "evidence": {
+        "exitCode": 5,
+        "headline": null,
+        "message": "case source SHA-256 disagreement for 1 case(s), first: int_sum row=0000000000000000000000000000000000000000000000000000000000000000 table=776b71aa70195a58cbf3655476fd2085f55dfc7cafd207b5fbdbf6d2a4afaab2"
+      }
+    },
+    {
+      "id": "RT-09b",
+      "attack": "reuse a startup baseline from another measurement generation",
+      "defence": "ProvenanceIncompleteError, rule generation-mismatch, exit 5",
+      "held": true,
+      "evidence": {
+        "exitCode": 5,
+        "headline": null,
+        "message": "case int_sum generation=2026-07-30T17:59:01.710Z#2056811 differs from the startup baseline generation=phase-6-closeout"
+      }
+    },
+    {
+      "id": "RT-10",
+      "attack": "drive the startup residual to the noise band and demand an adjusted ratio",
+      "defence": "ratio null; the naive quotient would have been > 5",
+      "held": true,
+      "evidence": {
+        "naiveRatioWouldHaveBeen": 95.38552256057068,
+        "ratio": null,
+        "reasons": [
+          "residual-below-startup-iqr",
+          "residual-below-case-iqr",
+          "residual-below-min-time-resolution"
+        ],
+        "aggregateEmitted": null
+      }
+    },
+    {
+      "id": "RT-10b",
+      "attack": "demand the aggregate startup-adjusted geomean from a real formal artifact",
+      "defence": "startupAdjustedGeometricMean === null with headlineEligible false",
+      "held": true,
+      "evidence": {
+        "startupAdjustedGeometricMean": null,
+        "headlineEligible": false,
+        "voidReason": "P7-20/P7-70: with this suite composition the majority of denominators are at or below the noise band; unresolved cases are never aggregated and the aggregate is therefore not emitted"
+      }
+    },
+    {
+      "id": "RT-11",
+      "attack": "declare session samples as part of the legacy pool",
+      "defence": "SessionSchemaError, rule session-legacy-sample-mixing, exit 8",
+      "held": true,
+      "evidence": {
+        "exitCode": 8,
+        "headline": null,
+        "raisedBy": {
+          "errorClass": "SessionSchemaError",
+          "exitCode": 8
+        },
+        "message": "session-mode raw samples were mixed into the legacy one-process-per-case sample pool"
+      }
+    },
+    {
+      "id": "RT-11b",
+      "attack": "promote a session-mode result to the headline",
+      "defence": "SessionSchemaError, rule session-headline-eligible, exit 8",
+      "held": true,
+      "evidence": {
+        "exitCode": 8,
+        "raisedBy": {
+          "errorClass": "SessionSchemaError",
+          "exitCode": 8
+        },
+        "message": "session-mode results may not be headline eligible"
+      }
+    },
+    {
+      "id": "RT-11c",
+      "attack": "confirm session mode leaves the legacy default path alone",
+      "defence": "default artifact reports enabled=false and legacyPathUnchanged=true",
+      "held": true,
+      "evidence": {
+        "block": {
+          "schemaVersion": 2,
+          "enabled": false,
+          "sessions": 1,
+          "interleaved": false,
+          "headlineEligible": false,
+          "legacyPathUnchanged": true,
+          "mixedWithLegacySamples": false,
+          "samplePool": "legacy",
+          "description": "legacy one-process-per-case ABBA path; session mode is off"
+        }
+      }
+    }
+  ]
+}

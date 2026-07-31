@@ -9510,16 +9510,14 @@ pub const Object = extern struct {
         return null;
     }
 
-    /// Borrowed own `.prototype` object for a constructor's [[Construct]], with
-    /// the one difference from getOwnDataObjectBorrowed that matters here: a
-    /// function's `.prototype` is created LAZILY (an auto_init placeholder) in
-    /// zjs, whereas qjs creates it eagerly, so a bare data read misses on the
-    /// first construct and the constructor falls all the way to
-    /// reflectConstructPrototypeVm. Materialize the auto_init here (js_closure
-    /// would have done this eagerly) — the slot becomes a permanent .data
-    /// object, so this and every later `new` take the direct read. Accessor /
-    /// var_ref prototypes (or an exotic receiver) return null to keep the
-    /// general path. Returns a BORROWED pointer (Object.create dups it).
+    /// Borrowed own `.prototype` object for a constructor's [[Construct]].
+    /// Normal functions use the same lazy JS_DefineAutoInitProperty mechanism
+    /// as qjs, so a bare data read must materialize the placeholder before the
+    /// constructor falls back to reflectConstructPrototypeVm. The slot then
+    /// becomes a permanent .data object, and every later `new` takes the direct
+    /// read. Accessor / var_ref prototypes (or an exotic receiver) return null
+    /// to keep the general path. Returns a BORROWED pointer (Object.create dups
+    /// it).
     pub fn getOwnConstructorPrototypeObject(self: *Object, rt: *JSRuntime) !?*Object {
         if (self.hasExoticMethods()) return null;
         const index = self.findProperty(atom.ids.prototype) orelse return null;
@@ -9720,16 +9718,6 @@ pub const Object = extern struct {
         return property.AutoInitSlot.retainProp(&realm.header, stored);
     }
 
-    fn createPropAutoInitSlotFromDescriptor(
-        self: *Object,
-        rt: *JSRuntime,
-        explicit_global: ?*Object,
-        info: *const property.AutoInit,
-    ) !property.AutoInitSlot {
-        const realm = try self.autoInitRealmForDefinition(rt, explicit_global);
-        return property.AutoInitSlot.retainProp(&realm.header, info);
-    }
-
     /// Installs a PROP placeholder backed directly by an immutable descriptor
     /// whose lifetime dominates the property. Standard tables pass pointers to
     /// static entries; dynamic host callers use the Runtime arena path below.
@@ -9741,12 +9729,28 @@ pub const Object = extern struct {
         realm_global: ?*Object,
         info: *const property.AutoInit,
     ) !void {
+        const realm = try self.autoInitRealmForDefinition(rt, realm_global);
+        try self.defineAutoInitPropertyFromDescriptorWithResolvedRealm(rt, atom_id, flags, realm, info);
+    }
+
+    /// Internal bootstrap fast path for a caller that has already resolved the
+    /// target's Realm. Each property still owns one retained Realm edge; only
+    /// the repeated target/global-to-Realm lookup is skipped.
+    pub fn defineAutoInitPropertyFromDescriptorWithResolvedRealm(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        flags: property.Flags,
+        resolved_realm: *context_mod.RealmContext,
+        info: *const property.AutoInit,
+    ) !void {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
+        std.debug.assert(resolved_realm.runtime == rt);
         try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{
-            .auto_init = try self.createPropAutoInitSlotFromDescriptor(rt, realm_global, info),
+            .auto_init = property.AutoInitSlot.retainProp(&resolved_realm.header, info),
         });
     }
 
@@ -11829,10 +11833,8 @@ test "object value refs keep nested symbol bodies without external symbol roots"
     try object.defineOwnProperty(rt, key, descriptor.Descriptor.data(nested_value, true, true, true));
     nested_value.free(rt);
 
-    try std.testing.expect(!try rt.registerExternalValueSymbolRoot(object_value));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(nested_symbol) != null);
-    rt.unregisterExternalValueSymbolRoot(object_value);
 
     object_value.free(rt);
     object_value = JSValue.undefinedValue();

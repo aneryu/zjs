@@ -44,6 +44,60 @@ results for arithmetic, dense array, object property, and string loops before
 emitting timing JSON. Use the JSON as a local diagnostic signal, not as a
 release gate.
 
+### Whole-process measurement contract
+
+`tools/compare/run_microbench.js` is governed by
+`tools/compare/measurement_policy.json`, the authoritative policy. Nothing reads
+thresholds from the artifact under test.
+
+`--formal` turns on formal sampling. It fails closed -- non-zero exit,
+`complete=false`, `headline=null`, `pairedGeomean=null` -- when the sampling
+design cannot be balanced (odd sample count, odd warmup, an artifact-declared
+order that does not match the recorded execution, a treatment missing from a
+round), when the collector or a measured child is not pinned to exactly the
+requested CPU, when affinity moves during the run, when the PMU serving the CPU
+cannot be identified, or when required provenance is missing.
+
+```sh
+ZJS_MEASUREMENT_LOCK=/tmp/zjs-host-heavy.lock ZJS_MEASUREMENT_LOCK_MODE=exclusive \
+flock -x /tmp/zjs-host-heavy.lock taskset -c 19 bun tools/compare/run_microbench.js \
+  --formal --cpu 19 --iters 8 --warmup 4 \
+  --zjs path/to/zjs --qjs path/to/qjs --output /tmp/microbench.json
+
+bun tools/compare/validate_measurement_artifact.js --formal /tmp/microbench.json
+```
+
+The validator additionally refuses a snapshot taken from a dirty worktree, a
+case whose recorded source hash disagrees with the suite table, a startup
+baseline from a different measurement generation, and any artifact carrying its
+own policy body.
+
+`startupAdjustedGeometricMean` is permanently `null`: it is diagnostic-only and
+not headline eligible. Per-case adjusted ratios exist only for cases whose
+startup residual clears the startup IQR, the case's own IQR and the minimum time
+resolution; everything else is `unresolved`.
+
+Contract and red-team suites:
+
+```sh
+zig build perf-measurement-contract
+bun tools/compare/test_measurement_redteam.js --zjs path/to/zjs --qjs path/to/qjs --cpu 19
+```
+
+The red-team suite requires a clean worktree: the reference artifact it tampers
+with must record `dirty=false`, otherwise every attack is adjudicated by the
+dirty-worktree rule instead of its own.
+
+### Session mode
+
+`--sessions N` (or `BENCH_SESSIONS`) groups ABBA rounds into independent timing
+sessions, each with its own warmup; `--interleaved` requires it. Session mode is
+**off by default** and session results are never headline eligible: the artifact
+carries a versioned `meta.sessions` block (`schemaVersion: 2`) and session
+samples live in their own pool, never merged into the legacy
+one-process-per-case pool. With `--sessions 1` and no `--interleaved` the legacy
+path is used unchanged.
+
 ### Native callback and execution-root suite
 
 `native-callback` is the mechanism-focused suite for synchronous
@@ -201,47 +255,20 @@ For coarse internal stage timing:
 zig-out/bin/zjs --perf-json -e "for(var i=0; i<100000; i++) {}" 2> .zig-cache/perf/current/perf.json
 ```
 
-The JSON is written to stderr so script stdout remains comparable. Use the
-checked runtime-profile helper below when you need opcode rows in the artifact.
+The JSON is written to stderr so script stdout remains comparable. Its stage
+timings and memory counters remain usable.
 
-For a checked runtime-profile artifact that keeps script stdout separate and is
-not confused with `zjs-microbench` multi-case reports:
+Per-opcode profiling is temporarily unavailable. The build option
+`-Dzjs_enable_opcode_profile=true`, CLI `--profile-opcodes`,
+`tools/perf/run_runtime_profile.js`, and the `perf-*-profile` build shortcuts
+still exist, but the dispatcher no longer imports the profiling scope. A real
+script therefore reports zero executed opcodes. Do not refresh checked runtime
+profile artifacts or use opcode rows for attribution until the scope is
+restored and an end-to-end non-zero-count test is part of the gate.
 
-```sh
-node tools/perf/run_runtime_profile.js \
-  --output reports/perf/current/runtime/uri_decode_4byte.json \
-  --stdout reports/perf/current/runtime/uri_decode_4byte.stdout \
-  --expect-stdout $'65536\n' \
-  --expect-opcode-max get_var=67626 \
-  --expect-opcode-max get_var_ref0=0 \
-  --expect-opcode-max put_var=1042 \
-  --expect-opcode-max push_i16=1040 \
-  --expect-opcode-max goto16=0 \
-  --expect-opcode-max add=0 \
-  --expect-opcode-max if_false8=1 \
-  reports/perf/current/scripts/uri_decode_4byte.js
-```
-
-The helper runs `--perf-json --profile-opcodes`, strips the textual opcode dump
-from stdout, and stores stage timings, memory counters, IC counters, and sorted
-opcode rows in one JSON artifact. Opcode-count expectations are deterministic
-guards for focused hot-path regressions; use max thresholds so later reductions
-continue to pass.
-
-Focused runtime-profile shortcuts are also available:
-
-```sh
-zig build perf-uri-profile --seed 0 --summary all
-zig build perf-uri-component-profile --seed 0 --summary all
-zig build perf-prop-global-profile --seed 0 --summary all
-zig build perf-proto-global-profile --seed 0 --summary all
-zig build perf-prop-poly3-profile --seed 0 --summary all
-zig build perf-call2-global-profile --seed 0 --summary all
-zig build perf-closure-call-global-profile --seed 0 --summary all
-zig build perf-string-loop-profile --seed 0 --summary all
-zig build perf-empty-loop-profile --seed 0 --summary all
-zig build perf-runtime-profiles --seed 0 --summary all
-```
+Existing files under `reports/perf/current/runtime/` are historical evidence
+from builds where opcode instrumentation was connected. They are not a
+description of the current binary.
 
 Compare two runtime-profile artifacts:
 
@@ -252,17 +279,10 @@ node tools/perf/diff_runtime_profile.js \
   NEW-runtime-profile.json
 ```
 
-Opcode-specific improvement gates are also supported:
-
-```sh
-node tools/perf/diff_runtime_profile.js \
-  --require-improvement opcode_count:get_var_ref0:0.1 \
-  OLD-runtime-profile.json \
-  NEW-runtime-profile.json
-```
-
-Use `--warn-regressions` for noisy exploratory runs and keep strict thresholds
-for evidence attached to a performance-sensitive change.
+`diff_runtime_profile.js` can still compare non-opcode fields in existing
+artifacts. Its opcode-specific gates are historical-only until profiling is
+restored. Use `--warn-regressions` for noisy exploratory runs and keep strict
+thresholds for evidence attached to a performance-sensitive change.
 
 Linux sampling:
 

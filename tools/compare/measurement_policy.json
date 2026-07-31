@@ -1,0 +1,82 @@
+{
+  "policy_id": "qjs-align-p7-70-whole-process-measurement",
+  "policy_version": 1,
+  "description": "Authoritative whole-process measurement contract. The validator reads thresholds from this file only; an artifact that ships its own thresholds is rejected.",
+  "sampling": {
+    "treatments": ["qjs", "zjs"],
+    "minimumSamples": 2,
+    "recommendedSamples": 8,
+    "requireEvenSampleCount": true,
+    "requireBalancedFirstPosition": true,
+    "requireDeclaredOrderMatchesExecution": true,
+    "requireEveryTreatmentInEveryPosition": true,
+    "requireEvenWarmupInFormalMode": true
+  },
+  "affinity": {
+    "formalCpu": 19,
+    "requireExactCpuSet": true,
+    "requireCollectorAttestation": true,
+    "requireChildAttestation": true,
+    "requireChildAttestationAtEnd": true,
+    "requirePmuIdentity": true
+  },
+  "startup": {
+    "headlineEligible": false,
+    "diagnosticOnly": true,
+    "minTimeResolutionMs": 0.05,
+    "requireResidualAboveStartupIqr": true,
+    "requireResidualAboveCaseIqr": true,
+    "executionDominantMaxStartupShare": 0.2,
+    "partiallyResolvableMaxStartupShare": 0.5,
+    "classifierEngine": "qjs"
+  },
+  "provenance": {
+    "requiredFields": [
+      "meta.zjs.commit",
+      "meta.zjs.sha256",
+      "meta.zjs.binary",
+      "meta.toolRepoCommit.commit",
+      "meta.toolRepoCommit.dirty",
+      "meta.zjs.dirty",
+      "meta.qjs.commit",
+      "meta.qjs.version",
+      "meta.qjs.sha256",
+      "meta.qjs.binary",
+      "meta.qjs.dirty",
+      "meta.host.kernel",
+      "meta.host.cpuModel",
+      "meta.host.pinnedCpu",
+      "meta.host.affinityMask",
+      "meta.host.pmuIdentity.name",
+      "meta.sampling.iters",
+      "meta.sampling.warmup",
+      "meta.sampling.timed.sampleOrders",
+      "meta.startupBaselineIdentity.scriptSha256",
+      "meta.startupBaselineIdentity.generation",
+      "meta.lock.path",
+      "meta.lock.mode",
+      "meta.environment.ZIG_GLOBAL_CACHE_DIR",
+      "meta.environment.TMPDIR",
+      "meta.environment.ZJS_REPO_ROOT",
+      "meta.caseSources"
+    ],
+    "requiredPerCaseFields": ["sourceSha256", "sourcePath"]
+  },
+  "artifact": {
+    "forbidSelfSuppliedPolicy": true,
+    "allowedPolicyReferenceKeys": ["policy_id", "policy_version", "sha256", "path"]
+  },
+  "attribution": {
+    "allowedStageScopes": ["symbol", "callChain", "addressRange"],
+    "forbidBareFileLineScope": true,
+    "forbidFrequencySamplingForPhaseAttribution": true,
+    "requireRecordedPeriod": true,
+    "requirePeriodCoprimeWithInnerLoop": true
+  },
+  "sessions": {
+    "schemaVersion": 2,
+    "defaultSessions": 1,
+    "defaultInterleaved": false,
+    "headlineEligible": false
+  }
+}

@@ -1604,7 +1604,9 @@ pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
 }
 
 fn parseArrayIndex(bytes: []const u8) ?u32 {
-    if (bytes.len == 0) return null;
+    // Leading-digit gate before any scan work, mirroring qjs JS_NewAtomLen
+    // (quickjs.c:3465 `is_digit(*str)`): identifier spellings bail here.
+    if (bytes.len == 0 or bytes[0] < '0' or bytes[0] > '9') return null;
     if (bytes.len > 1 and bytes[0] == '0') return null;
     var n: u64 = 0;
     for (bytes) |c| {
