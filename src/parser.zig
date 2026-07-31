@@ -6775,6 +6775,21 @@ pub const parser_core = struct {
             {
                 self.invalidateLastOpcode();
             }
+            // Markers describing the truncated region are garbage once its
+            // bytes are gone — and were silently remapped to whatever code
+            // later occupied those pcs. Mirror rollbackEmission's slot
+            // truncation on the direct-truncate paths (the phase-2 streaming
+            // source remap also relies on slot pcs staying non-decreasing).
+            if (self.emit_to_function_def) {
+                const fd_slots = self.cur_func();
+                var keep = fd_slots.source_loc_slots.len;
+                while (keep > 0 and fd_slots.source_loc_slots[keep - 1].pc >= target_len) keep -= 1;
+                fd_slots.truncateSourceLocs(keep);
+            } else {
+                var keep = self.function.source_loc_slots.len;
+                while (keep > 0 and self.function.source_loc_slots[keep - 1].pc >= target_len) keep -= 1;
+                self.function.truncateSourceLocs(keep);
+            }
             const ft = self.flowTail();
             if (ft.valid) {
                 if (ft.has_prev and !ft.last_note_had_label and ft.prev_op_pos == target_len) {

@@ -2376,7 +2376,9 @@ test "resolve_variables empty finalizer removal is transactional across every al
     // No scope_make_ref appears in this topology, so the five tail ledgers are
     // deliberately absent. Keep the remaining transactional allocation
     // surface exact: every one was failed, checked unchanged, and retried.
-    try std.testing.expectEqual(@as(usize, 7), fail_offset);
+    // P2-R1T added the Debug/ReleaseSafe relocation-oracle allocation to
+    // this segment (sparse words + oracle dense map + jump sites).
+    try std.testing.expectEqual(@as(usize, 8), fail_offset);
 }
 
 test "resolve_variables: scope_put_var → put_var" {
@@ -6961,7 +6963,8 @@ test "resolve_variables logical fold is transactional across every post-bind all
     }
     // The no-make-ref topology has six transactional allocations after
     // folding jump-target state into the CFG.
-    try std.testing.expectEqual(@as(usize, 6), fail_offset);
+    // P2-R1T: +1 for the Debug/ReleaseSafe relocation-oracle allocation.
+    try std.testing.expectEqual(@as(usize, 7), fail_offset);
 }
 
 fn runTaggedLogicalPhaseOwnerAllocationFailure(
@@ -7067,7 +7070,9 @@ test "resolve_variables tagged logical labels are leak-free and retryable across
     }
     // Tagged-label binding contributes one allocation before the same six
     // no-make-ref phase-owner allocations.
-    try std.testing.expectEqual(@as(usize, 7), fail_offset);
+    // P2-R1T added the Debug/ReleaseSafe relocation-oracle allocation to
+    // this segment (sparse words + oracle dense map + jump sites).
+    try std.testing.expectEqual(@as(usize, 8), fail_offset);
 }
 
 test "resolve_labels null comparison strict_eq folds both constants with QuickJS source mapping" {
@@ -9705,4 +9710,57 @@ test "createFunctionBytecode exhaustively rolls back every precommit allocation 
         runFunctionBytecodeFinalizeOomLifecycle,
         .{},
     );
+}
+
+// P2-R1T: an injected OOM anywhere inside phase finalization (including the
+// code/atom trim allocations) must leave the transactional source-loc slots
+// untouched — the streaming remap commits them only at the no-fail install
+// boundary. checkAllAllocationFailures sweeps every allocation index, which
+// is strictly stronger than injecting at the trims alone.
+fn phase2SourceSlotInvariantRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    // push_i32@0 (5) | line_num@5 (5, dropped by the write pass -> forces the
+    // exact-fit trim allocation) | goto@10 -> 16 (terminal one-past-the-end
+    // relocation) | return_undef@15 (unreachable -> dead-range publish).
+    var code = [_]u8{
+        op.push_i32, 1, 0, 0, 0,
+        op.line_num, 7, 0, 0, 0,
+        op.goto,     16, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    try function.appendSourceLoc(10, 3, 1);
+    try function.appendSourceLoc(16, 4, 1);
+    const original_pcs = [_]u32{ 0, 5, 10, 16 };
+
+    // Phase 2 only: later phases commit their own slot rewrites on success,
+    // so the untouched-on-failure invariant is a phase-2 contract.
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    bytecode.pipeline.resolve_variables.run(&resolve_ctx) catch |err| {
+        try std.testing.expectEqual(original_pcs.len, function.source_loc_slots.len);
+        for (function.source_loc_slots, original_pcs) |slot, expected_pc| {
+            try std.testing.expectEqual(expected_pc, slot.pc);
+        }
+        return err;
+    };
+    // Success: the commit remapped every slot exactly once (push@0 -> 0;
+    // the dropped line_num@5 and the goto@10 both land at output pc 5; the
+    // one-past-the-end marker takes the terminal pc 10).
+    const remapped_pcs = [_]u32{ 0, 5, 5, 10 };
+    try std.testing.expectEqual(remapped_pcs.len, function.source_loc_slots.len);
+    for (function.source_loc_slots, remapped_pcs) |slot, expected_pc| {
+        try std.testing.expectEqual(expected_pc, slot.pc);
+    }
+}
+
+test "phase-2 trim OOM leaves transactional source-loc slots untouched (P2-R1T)" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2SourceSlotInvariantRun, .{});
 }
