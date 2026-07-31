@@ -3719,6 +3719,9 @@ pub const parser_core = struct {
         break_frame_depth: usize,
         break_fixups: std.ArrayList(usize) = .empty,
         continue_fixups: std.ArrayList(usize) = .empty,
+        /// QCP-1 S2-G1: v2 parses carry the qjs label identities directly.
+        v2_break_label: ?compiler_v2.LabelId = null,
+        v2_continue_label: ?compiler_v2.LabelId = null,
 
         fn deinit(self: *LabelFrame, allocator: std.mem.Allocator) void {
             self.break_fixups.deinit(allocator);
@@ -3730,11 +3733,13 @@ pub const parser_core = struct {
         top_break: ?*BlockEnv,
         break_fixups: std.ArrayList(usize),
         break_frame_lens: std.ArrayList(usize),
+        v2_break_frame_labels: std.ArrayList(compiler_v2.LabelId),
         break_frame_catch_marker_depths: std.ArrayList(u32),
         break_frame_cleanup_drops: std.ArrayList(u8),
         break_frame_cross_cleanup_drops: std.ArrayList(u8),
         continue_fixups: std.ArrayList(usize),
         continue_frame_lens: std.ArrayList(usize),
+        v2_continue_frame_labels: std.ArrayList(compiler_v2.LabelId),
         continue_frame_break_frame_indices: std.ArrayList(usize),
         continue_frame_catch_marker_depths: std.ArrayList(u32),
         continue_frame_cleanup_drops: std.ArrayList(u8),
@@ -4060,8 +4065,13 @@ pub const parser_core = struct {
         emit_lexical_tdz_at_decl: bool = false,
         break_fixups: std.ArrayList(usize) = .empty,
         break_frame_lens: std.ArrayList(usize) = .empty,
+        /// QCP-1 S2-G1: v2 twin of break_frame_lens/continue_frame_lens — one
+        /// LabelId per frame (qjs push_break_entry label_break/label_cont). Only
+        /// populated while `v2_available and emit_v2`.
+        v2_break_frame_labels: std.ArrayList(compiler_v2.LabelId) = .empty,
         continue_fixups: std.ArrayList(usize) = .empty,
         continue_frame_lens: std.ArrayList(usize) = .empty,
+        v2_continue_frame_labels: std.ArrayList(compiler_v2.LabelId) = .empty,
         continue_frame_break_frame_indices: std.ArrayList(usize) = .empty,
         break_frame_catch_marker_depths: std.ArrayList(u32) = .empty,
         break_frame_cleanup_drops: std.ArrayList(u8) = .empty,
@@ -4184,8 +4194,10 @@ pub const parser_core = struct {
             }
             self.break_fixups.deinit(self.function.memory.allocator);
             self.break_frame_lens.deinit(self.function.memory.allocator);
+            self.v2_break_frame_labels.deinit(self.function.memory.allocator);
             self.continue_fixups.deinit(self.function.memory.allocator);
             self.continue_frame_lens.deinit(self.function.memory.allocator);
+            self.v2_continue_frame_labels.deinit(self.function.memory.allocator);
             self.continue_frame_break_frame_indices.deinit(self.function.memory.allocator);
             self.break_frame_catch_marker_depths.deinit(self.function.memory.allocator);
             self.break_frame_cleanup_drops.deinit(self.function.memory.allocator);
@@ -5178,25 +5190,47 @@ pub const parser_core = struct {
         }
 
         fn pushLabelFrame(s: *State, atom_id: Atom, allow_continue: bool) Error!usize {
+            var v2_break_label: ?compiler_v2.LabelId = null;
+            var v2_continue_label: ?compiler_v2.LabelId = null;
+            if (v2_available and s.emit_v2) {
+                if (allow_continue) v2_continue_label = try v2FNewLabel(s);
+                v2_break_label = try v2FNewLabel(s);
+            }
             try s.label_frames.append(s.function.memory.allocator, LabelFrame{
                 .atom = atom_id,
                 .allow_continue = allow_continue,
                 .catch_marker_depth = s.active_catch_marker_depth,
                 .control_frame_depth = s.continue_frame_lens.items.len,
                 .break_frame_depth = s.break_frame_lens.items.len,
+                .v2_break_label = v2_break_label,
+                .v2_continue_label = v2_continue_label,
             });
             return s.label_frames.items.len - 1;
         }
 
         fn patchLabelBreaks(s: *State, frame_index: usize) Error!void {
-            std.debug.assert(!(v2_available and s.emit_v2));
+            if (v2_available and s.emit_v2) {
+                // qjs emit_label(label_break): the merge label binds unconditionally,
+                // even with zero refs (resolve_labels_v2 drops dead labels).
+                if (s.label_frames.items[frame_index].v2_break_label) |label| {
+                    try v2FBindLabel(s, label);
+                }
+                return;
+            }
             for (s.label_frames.items[frame_index].break_fixups.items) |off| {
                 try patchForwardJump(s, off);
             }
         }
 
         fn patchLabelContinues(s: *State, frame_index: usize) Error!void {
-            std.debug.assert(!(v2_available and s.emit_v2));
+            if (v2_available and s.emit_v2) {
+                // qjs emit_label(label_cont): the merge label binds unconditionally,
+                // even with zero refs (resolve_labels_v2 drops dead labels).
+                if (s.label_frames.items[frame_index].v2_continue_label) |label| {
+                    try v2FBindLabel(s, label);
+                }
+                return;
+            }
             for (s.label_frames.items[frame_index].continue_fixups.items) |off| {
                 try patchForwardJump(s, off);
             }
@@ -5278,11 +5312,13 @@ pub const parser_core = struct {
             const allocator = s.function.memory.allocator;
             s.break_fixups.deinit(allocator);
             s.break_frame_lens.deinit(allocator);
+            s.v2_break_frame_labels.deinit(allocator);
             s.break_frame_catch_marker_depths.deinit(allocator);
             s.break_frame_cleanup_drops.deinit(allocator);
             s.break_frame_cross_cleanup_drops.deinit(allocator);
             s.continue_fixups.deinit(allocator);
             s.continue_frame_lens.deinit(allocator);
+            s.v2_continue_frame_labels.deinit(allocator);
             s.continue_frame_break_frame_indices.deinit(allocator);
             s.continue_frame_catch_marker_depths.deinit(allocator);
             s.continue_frame_cleanup_drops.deinit(allocator);
@@ -5298,11 +5334,13 @@ pub const parser_core = struct {
                 .top_break = s.top_break,
                 .break_fixups = s.break_fixups,
                 .break_frame_lens = s.break_frame_lens,
+                .v2_break_frame_labels = s.v2_break_frame_labels,
                 .break_frame_catch_marker_depths = s.break_frame_catch_marker_depths,
                 .break_frame_cleanup_drops = s.break_frame_cleanup_drops,
                 .break_frame_cross_cleanup_drops = s.break_frame_cross_cleanup_drops,
                 .continue_fixups = s.continue_fixups,
                 .continue_frame_lens = s.continue_frame_lens,
+                .v2_continue_frame_labels = s.v2_continue_frame_labels,
                 .continue_frame_break_frame_indices = s.continue_frame_break_frame_indices,
                 .continue_frame_catch_marker_depths = s.continue_frame_catch_marker_depths,
                 .continue_frame_cleanup_drops = s.continue_frame_cleanup_drops,
@@ -5314,11 +5352,13 @@ pub const parser_core = struct {
             s.top_break = null;
             s.break_fixups = .empty;
             s.break_frame_lens = .empty;
+            s.v2_break_frame_labels = .empty;
             s.break_frame_catch_marker_depths = .empty;
             s.break_frame_cleanup_drops = .empty;
             s.break_frame_cross_cleanup_drops = .empty;
             s.continue_fixups = .empty;
             s.continue_frame_lens = .empty;
+            s.v2_continue_frame_labels = .empty;
             s.continue_frame_break_frame_indices = .empty;
             s.continue_frame_catch_marker_depths = .empty;
             s.continue_frame_cleanup_drops = .empty;
@@ -5334,11 +5374,13 @@ pub const parser_core = struct {
             s.top_break = saved.top_break;
             s.break_fixups = saved.break_fixups;
             s.break_frame_lens = saved.break_frame_lens;
+            s.v2_break_frame_labels = saved.v2_break_frame_labels;
             s.break_frame_catch_marker_depths = saved.break_frame_catch_marker_depths;
             s.break_frame_cleanup_drops = saved.break_frame_cleanup_drops;
             s.break_frame_cross_cleanup_drops = saved.break_frame_cross_cleanup_drops;
             s.continue_fixups = saved.continue_fixups;
             s.continue_frame_lens = saved.continue_frame_lens;
+            s.v2_continue_frame_labels = saved.v2_continue_frame_labels;
             s.continue_frame_break_frame_indices = saved.continue_frame_break_frame_indices;
             s.continue_frame_catch_marker_depths = saved.continue_frame_catch_marker_depths;
             s.continue_frame_cleanup_drops = saved.continue_frame_cleanup_drops;
@@ -7772,16 +7814,33 @@ pub const parser_core = struct {
             var then_flags = forceResultNeeded(flags);
             then_flags.in_accepted = true;
             const else_flags = forceResultNeeded(flags);
-            // Short-circuit: if false, jump to else branch. The parser emits
-            // absolute u32 offsets; `resolve_labels` lowers them to relative
-            // goto8/goto16 forms.
-            const else_jump_offset = try emitForwardJump(s, opcode.op.if_false);
+            var v2_else_label: compiler_v2.LabelId = undefined;
+            var else_jump_offset: usize = undefined;
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_cond_expr: label1 = emit_goto(if_false), label2 = emit_goto(goto), emit_label at each merge.
+                v2_else_label = try v2FNewLabel(s);
+                try v2FEmitJump(s, opcode.op.if_false, v2_else_label);
+            } else {
+                else_jump_offset = try emitForwardJump(s, opcode.op.if_false);
+            }
             try parseAssignExprWithoutPendingFunctionName(s, then_flags);
-            const end_jump_offset = try emitForwardJump(s, opcode.op.goto);
-            try patchForwardJump(s, else_jump_offset);
+            var v2_end_label: compiler_v2.LabelId = undefined;
+            var end_jump_offset: usize = undefined;
+            if (v2_available and s.emit_v2) {
+                v2_end_label = try v2FNewLabel(s);
+                try v2FEmitJump(s, opcode.op.goto, v2_end_label);
+                try v2FBindLabel(s, v2_else_label);
+            } else {
+                end_jump_offset = try emitForwardJump(s, opcode.op.goto);
+                try patchForwardJump(s, else_jump_offset);
+            }
             try expectPunct(s, ':');
             try parseAssignExprWithoutPendingFunctionName(s, else_flags);
-            try patchForwardJump(s, end_jump_offset);
+            if (v2_available and s.emit_v2) {
+                try v2FBindLabel(s, v2_end_label);
+            } else {
+                try patchForwardJump(s, end_jump_offset);
+            }
             s.last_anonymous_function_expr = false;
         }
     }
@@ -7791,25 +7850,41 @@ pub const parser_core = struct {
         try parseLogicalAndOr(s, tok.TOK_LOR, flags);
         if (s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
             s.last_coalesce_expr_depth = s.assign_expr_depth;
-            var end_jumps: std.ArrayList(usize) = .empty;
-            defer end_jumps.deinit(s.lex.allocator);
-            const rhs_flags = forceResultNeeded(flags);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_coalesce_expr: label1 = new_label(); every non-nullish
+                // test jumps to it; emit_label(label1) after the operand loop.
+                const end_label = try v2FNewLabel(s);
+                const rhs_flags = forceResultNeeded(flags);
+                while (s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                    try s.advance();
+                    try v2FEmitOp(s, opcode.op.dup);
+                    try v2FEmitOp(s, opcode.op.is_undefined_or_null);
+                    try v2FEmitJump(s, opcode.op.if_false, end_label);
+                    try v2FEmitOp(s, opcode.op.drop);
+                    try parseExprBinaryWithoutPendingFunctionName(s, 8, rhs_flags);
+                }
+                try v2FBindLabel(s, end_label);
+            } else {
+                var end_jumps: std.ArrayList(usize) = .empty;
+                defer end_jumps.deinit(s.lex.allocator);
+                const rhs_flags = forceResultNeeded(flags);
 
-            while (s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                try s.advance();
-                // Short-circuit on non-nullish: `a ?? b` keeps a if not
-                // null/undefined, else evaluates b. All successful
-                // non-nullish tests jump to the common end label, matching
-                // QuickJS's single-label lowering for chained `??`.
-                try s.emitOp(opcode.op.dup);
-                try s.emitOp(opcode.op.is_undefined_or_null);
-                const skip_jump = try emitForwardJump(s, opcode.op.if_false);
-                try end_jumps.append(s.lex.allocator, skip_jump);
-                try s.emitOp(opcode.op.drop);
-                try parseExprBinaryWithoutPendingFunctionName(s, 8, rhs_flags);
-            }
-            for (end_jumps.items) |skip_jump| {
-                try patchForwardJump(s, skip_jump);
+                while (s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                    try s.advance();
+                    // Short-circuit on non-nullish: `a ?? b` keeps a if not
+                    // null/undefined, else evaluates b. All successful
+                    // non-nullish tests jump to the common end label, matching
+                    // QuickJS's single-label lowering for chained `??`.
+                    try s.emitOp(opcode.op.dup);
+                    try s.emitOp(opcode.op.is_undefined_or_null);
+                    const skip_jump = try emitForwardJump(s, opcode.op.if_false);
+                    try end_jumps.append(s.lex.allocator, skip_jump);
+                    try s.emitOp(opcode.op.drop);
+                    try parseExprBinaryWithoutPendingFunctionName(s, 8, rhs_flags);
+                }
+                for (end_jumps.items) |skip_jump| {
+                    try patchForwardJump(s, skip_jump);
+                }
             }
             s.last_anonymous_function_expr = false;
         }
@@ -7820,38 +7895,74 @@ pub const parser_core = struct {
         if (op_kind == tok.TOK_LOR) {
             try parseLogicalAndOr(s, tok.TOK_LAND, flags);
             if (s.peekKind() == tok.TOK_LOR) {
-                const end_label = newParserLabel(s);
-                while (s.peekKind() == tok.TOK_LOR) {
-                    try s.advance();
-                    // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
-                    try s.emitOpNoSource(opcode.op.dup);
-                    try emitParserLabelJumpNoSource(s, opcode.op.if_true, end_label);
-                    try s.emitOpNoSource(opcode.op.drop);
-                    try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
-                    s.last_anonymous_function_expr = false;
-                    if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                        return Error.UnexpectedToken;
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_logical_and_or: label1 = new_label() before the loop;
+                    // dup ; if_true label1 ; drop per operand; emit_label(label1) at end.
+                    const end_label = try v2FNewLabel(s);
+                    while (s.peekKind() == tok.TOK_LOR) {
+                        try s.advance();
+                        try v2FEmitOpNoSource(s, opcode.op.dup);
+                        try v2FEmitJumpNoSource(s, opcode.op.if_true, end_label);
+                        try v2FEmitOpNoSource(s, opcode.op.drop);
+                        try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
+                        s.last_anonymous_function_expr = false;
+                        if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                            return Error.UnexpectedToken;
+                        }
                     }
+                    try v2FBindLabel(s, end_label);
+                } else {
+                    const end_label = newParserLabel(s);
+                    while (s.peekKind() == tok.TOK_LOR) {
+                        try s.advance();
+                        // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
+                        try s.emitOpNoSource(opcode.op.dup);
+                        try emitParserLabelJumpNoSource(s, opcode.op.if_true, end_label);
+                        try s.emitOpNoSource(opcode.op.drop);
+                        try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
+                        s.last_anonymous_function_expr = false;
+                        if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                            return Error.UnexpectedToken;
+                        }
+                    }
+                    try emitParserLabelNoSource(s, end_label);
                 }
-                try emitParserLabelNoSource(s, end_label);
             }
         } else {
             try parseExprBinary(s, 8, flags);
             if (s.peekKind() == tok.TOK_LAND) {
-                const end_label = newParserLabel(s);
-                while (s.peekKind() == tok.TOK_LAND) {
-                    try s.advance();
-                    // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
-                    try s.emitOpNoSource(opcode.op.dup);
-                    try emitParserLabelJumpNoSource(s, opcode.op.if_false, end_label);
-                    try s.emitOpNoSource(opcode.op.drop);
-                    try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
-                    s.last_anonymous_function_expr = false;
-                    if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                        return Error.UnexpectedToken;
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_logical_and_or: label1 = new_label() before the loop;
+                    // dup ; if_false label1 ; drop per operand; emit_label(label1) at end.
+                    const end_label = try v2FNewLabel(s);
+                    while (s.peekKind() == tok.TOK_LAND) {
+                        try s.advance();
+                        try v2FEmitOpNoSource(s, opcode.op.dup);
+                        try v2FEmitJumpNoSource(s, opcode.op.if_false, end_label);
+                        try v2FEmitOpNoSource(s, opcode.op.drop);
+                        try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
+                        s.last_anonymous_function_expr = false;
+                        if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                            return Error.UnexpectedToken;
+                        }
                     }
+                    try v2FBindLabel(s, end_label);
+                } else {
+                    const end_label = newParserLabel(s);
+                    while (s.peekKind() == tok.TOK_LAND) {
+                        try s.advance();
+                        // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
+                        try s.emitOpNoSource(opcode.op.dup);
+                        try emitParserLabelJumpNoSource(s, opcode.op.if_false, end_label);
+                        try s.emitOpNoSource(opcode.op.drop);
+                        try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
+                        s.last_anonymous_function_expr = false;
+                        if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                            return Error.UnexpectedToken;
+                        }
+                    }
+                    try emitParserLabelNoSource(s, end_label);
                 }
-                try emitParserLabelNoSource(s, end_label);
             }
         }
     }
@@ -8627,23 +8738,42 @@ pub const parser_core = struct {
             return;
         }
         const was_super = s.last_was_super;
-        var optional_chain_label: ?ParserLabelRef = null;
+        var optional_chain_label: ?OptionalChainLabel = null;
         try parseMemberChain(s, flags, &optional_chain_label);
         if (optional_chain_label) |label| {
-            const getter_end = s.currentCodeLen();
-            // Like QuickJS `emit_label_raw`, the marker carries label identity
-            // but does not replace the last real opcode.
-            try emitParserLabelRawNoSource(s, label);
-            const fd = s.cur_func();
-            if (fd.last_opcode_pos >= 0) {
-                const pos: usize = @intCast(fd.last_opcode_pos);
-                const code = s.currentCode();
-                if (pos + 5 == getter_end and code[pos] == opcode.op.get_field) {
-                    code[pos] = opcode.op.get_field_opt_chain;
-                } else if (pos + 1 == getter_end and code[pos] == opcode.op.get_array_el) {
-                    code[pos] = opcode.op.get_array_el_opt_chain;
-                } else {
-                    s.invalidateLastOpcode();
+            if (v2_available and s.emit_v2) {
+                // v2 chain close: no in-stream raw label marker — the bind slot
+                // carries the position; the pseudo getter rewrite is identical.
+                // resolve_labels_v2 later lowers *_opt_chain exactly like phase 2.
+                const v2b = s.v2Builder();
+                const getter_end = v2b.code_len;
+                try v2FBindLabelRaw(s, label.v2);
+                if (v2b.last_opcode_pos >= 0) {
+                    const pos: usize = @intCast(v2b.last_opcode_pos);
+                    if (pos + 5 == getter_end and v2b.code[pos] == opcode.op.get_field) {
+                        v2b.code[pos] = opcode.op.get_field_opt_chain;
+                    } else if (pos + 1 == getter_end and v2b.code[pos] == opcode.op.get_array_el) {
+                        v2b.code[pos] = opcode.op.get_array_el_opt_chain;
+                    } else {
+                        v2b.invalidateLastOpcode();
+                    }
+                }
+            } else {
+                const getter_end = s.currentCodeLen();
+                // Like QuickJS `emit_label_raw`, the marker carries label identity
+                // but does not replace the last real opcode.
+                try emitParserLabelRawNoSource(s, label.legacy);
+                const fd = s.cur_func();
+                if (fd.last_opcode_pos >= 0) {
+                    const pos: usize = @intCast(fd.last_opcode_pos);
+                    const code = s.currentCode();
+                    if (pos + 5 == getter_end and code[pos] == opcode.op.get_field) {
+                        code[pos] = opcode.op.get_field_opt_chain;
+                    } else if (pos + 1 == getter_end and code[pos] == opcode.op.get_array_el) {
+                        code[pos] = opcode.op.get_array_el_opt_chain;
+                    } else {
+                        s.invalidateLastOpcode();
+                    }
                 }
             }
         }
@@ -8858,7 +8988,7 @@ pub const parser_core = struct {
         }
     }
 
-    fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?ParserLabelRef) Error!void {
+    fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?OptionalChainLabel) Error!void {
         while (true) {
             const k = s.peekKind();
             if (k == @as(tok.TokenKind, @intCast('.'))) {
@@ -8901,7 +9031,11 @@ pub const parser_core = struct {
                 } else if (private_name) {
                     try s.emitOpAtomU16(opcode.op.scope_get_private_field, retained_name, @intCast(s.scope_level));
                 } else {
-                    try s.emitOpAtom(opcode.op.get_field, retained_name);
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(retained_name));
+                    } else {
+                        try s.emitOpAtom(opcode.op.get_field, retained_name);
+                    }
                 }
             } else if (k == tok.TOK_QUESTION_MARK_DOT) {
                 s.last_anonymous_function_expr = false;
@@ -8921,7 +9055,11 @@ pub const parser_core = struct {
                     try s.advance();
                     try parseExpr(s);
                     try expectPunct(s, ']');
-                    try s.emitOp(opcode.op.get_array_el);
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitOp(s, opcode.op.get_array_el);
+                    } else {
+                        try s.emitOp(opcode.op.get_array_el);
+                    }
                 } else if (next == tok.TOK_IDENT or next == tok.TOK_PRIVATE_NAME or tok.isKeyword(next) or next == tok.TOK_DELETE or next == tok.TOK_CATCH) {
                     try emitOptionalChainTest(s, optional_chain_label, 1);
                     const private_name = next == tok.TOK_PRIVATE_NAME;
@@ -8948,7 +9086,11 @@ pub const parser_core = struct {
                     if (private_name) {
                         try s.emitOpAtomU16(opcode.op.scope_get_private_field, retained_name, @intCast(s.scope_level));
                     } else {
-                        try s.emitOpAtom(opcode.op.get_field, retained_name);
+                        if (v2_available and s.emit_v2) {
+                            try v2FEmitAtomOpOwned(s, opcode.op.get_field, s.function.atoms.dup(retained_name));
+                        } else {
+                            try s.emitOpAtom(opcode.op.get_field, retained_name);
+                        }
                     }
                 } else {
                     return Error.UnexpectedToken;
@@ -8973,7 +9115,11 @@ pub const parser_core = struct {
                 if (was_super) {
                     try s.emitOp(opcode.op.get_super_value);
                 } else {
-                    try s.emitOp(opcode.op.get_array_el);
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitOp(s, opcode.op.get_array_el);
+                    } else {
+                        try s.emitOp(opcode.op.get_array_el);
+                    }
                 }
             } else if (k == @as(tok.TokenKind, @intCast('('))) {
                 s.last_anonymous_function_expr = false;
@@ -9106,16 +9252,40 @@ pub const parser_core = struct {
     /// (`obj?.b()` / `?.()`); slice 7 only handles the member-access cases.
     fn emitOptionalChainTest(
         s: *State,
-        optional_chain_label: *?ParserLabelRef,
+        optional_chain_label: *?OptionalChainLabel,
         drop_count: u8,
     ) Error!void {
+        if (v2_available and s.emit_v2) {
+            // qjs optional_chain_test (quickjs.c:26814), labels born as LabelIds.
+            const v2b = s.v2Builder();
+            const snap = v2b.snapshot();
+            const old_label = optional_chain_label.*;
+            errdefer {
+                v2b.rollback(snap);
+                optional_chain_label.* = old_label;
+            }
+            if (optional_chain_label.* == null)
+                optional_chain_label.* = .{ .v2 = try v2FNewLabel(s) };
+            try v2FEmitOp(s, opcode.op.dup);
+            try v2FEmitOp(s, opcode.op.is_undefined_or_null);
+            const next_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.if_false, next_label);
+            var i: u8 = 0;
+            while (i < drop_count) : (i += 1) {
+                try v2FEmitOp(s, opcode.op.drop);
+            }
+            try v2FEmitOp(s, opcode.op.undefined);
+            try v2FEmitJumpNoSource(s, opcode.op.goto, optional_chain_label.*.?.v2);
+            try v2FBindLabel(s, next_label);
+            return;
+        }
         const snapshot = s.takeEmissionSnapshot();
         const old_label = optional_chain_label.*;
         errdefer {
             s.rollbackEmission(snapshot);
             optional_chain_label.* = old_label;
         }
-        if (optional_chain_label.* == null) optional_chain_label.* = newParserLabel(s);
+        if (optional_chain_label.* == null) optional_chain_label.* = .{ .legacy = newParserLabel(s) };
         try s.emitOp(opcode.op.dup);
         try s.emitOp(opcode.op.is_undefined_or_null);
         const next_jump = try emitForwardJump(s, opcode.op.if_false);
@@ -9124,7 +9294,7 @@ pub const parser_core = struct {
             try s.emitOp(opcode.op.drop);
         }
         try s.emitOp(opcode.op.undefined);
-        try emitGotoParserLabelNoSource(s, optional_chain_label.*.?);
+        try emitGotoParserLabelNoSource(s, optional_chain_label.*.?.legacy);
         try patchForwardJump(s, next_jump);
     }
 
@@ -9248,15 +9418,30 @@ pub const parser_core = struct {
             @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => try parseRegExpLiteral(s),
             tok.TOK_TEMPLATE => return parseTemplate(s, flags),
             tok.TOK_TRUE => {
-                try s.emitOp(opcode.op.push_true);
+                // QCP-1 S2-G1 harness leaf
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOp(s, opcode.op.push_true);
+                } else {
+                    try s.emitOp(opcode.op.push_true);
+                }
                 try s.advance();
             },
             tok.TOK_FALSE => {
-                try s.emitOp(opcode.op.push_false);
+                // QCP-1 S2-G1 harness leaf
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOp(s, opcode.op.push_false);
+                } else {
+                    try s.emitOp(opcode.op.push_false);
+                }
                 try s.advance();
             },
             tok.TOK_NULL => {
-                try s.emitOp(opcode.op.null);
+                // QCP-1 S2-G1 harness leaf
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOp(s, opcode.op.null);
+                } else {
+                    try s.emitOp(opcode.op.null);
+                }
                 try s.advance();
             },
             tok.TOK_THIS => {
@@ -10255,6 +10440,62 @@ pub const parser_core = struct {
         return @intCast(signed);
     }
 
+    // ===== QCP-1 S2-G1: parser-error-typed facade over the S2P v2 veneer =====
+    // Construct arms call these; the S2P State veneers stay builder-typed.
+
+    fn v2MapBuilderError(err: compiler_v2.builder.Error) Error {
+        return switch (err) {
+            error.OutOfMemory => Error.OutOfMemory,
+            error.BytecodeOverflow => Error.BytecodeOverflow,
+            // Builder fail-closed invariants (double bind, foreign label) surface
+            // the same way other parser-internal fail-closed checks do.
+            error.InvalidBytecode => Error.UnexpectedToken,
+        };
+    }
+
+    fn v2FNewLabel(s: *State) Error!compiler_v2.LabelId {
+        return s.v2NewLabel() catch |err| v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `emitForwardJump`/`emitParserLabelJump` (marker'd).
+    fn v2FEmitJump(s: *State, op_id: u8, label: compiler_v2.LabelId) Error!void {
+        s.v2EmitJump(op_id, label) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `emitForwardJumpNoSource`/`emitParserLabelJumpNoSource`.
+    fn v2FEmitJumpNoSource(s: *State, op_id: u8, label: compiler_v2.LabelId) Error!void {
+        s.v2Builder().emitJump(op_id, label) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `State.emitOp` (marker'd).
+    fn v2FEmitOp(s: *State, op_id: u8) Error!void {
+        s.v2EmitOp(op_id) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `State.emitOpNoSource`.
+    fn v2FEmitOpNoSource(s: *State, op_id: u8) Error!void {
+        s.v2Builder().emitOp(op_id) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `State.emitOpAtom` — ownership of `atom_id` (one retain)
+    /// transfers into the builder ledger (marker'd).
+    fn v2FEmitAtomOpOwned(s: *State, op_id: u8, atom_id: Atom) Error!void {
+        s.v2EmitAtomOpOwned(op_id, atom_id) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `patchForwardJump` / `emitParserLabelNoSource`: bind at the
+    /// current position AND forget the last opcode (control-flow merge).
+    fn v2FBindLabel(s: *State, label: compiler_v2.LabelId) Error!void {
+        s.v2BindLabel(label) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `emitParserLabelRawNoSource`: bind WITHOUT invalidating the
+    /// last opcode (the preceding real opcode stays visible as call/delete
+    /// provenance — qjs emit_label_raw).
+    fn v2FBindLabelRaw(s: *State, label: compiler_v2.LabelId) Error!void {
+        s.v2Builder().bindLabel(label) catch |err| return v2MapBuilderError(err);
+    }
+
     /// Emit a forward-jump opcode with a placeholder absolute target. The
     /// caller passes the offset back to `patchForwardJump` once the target
     /// is known. The parser uses absolute u32 offsets; `resolve_labels`
@@ -10279,6 +10520,13 @@ pub const parser_core = struct {
 
     const ParserLabelRef = struct {
         id: u32,
+    };
+
+    /// QCP-1 S2-G1: chain-exit label identity for `?.` — a legacy parser label
+    /// or a v2 LabelId depending on the emission backend of the current parse.
+    const OptionalChainLabel = union(enum) {
+        legacy: ParserLabelRef,
+        v2: compiler_v2.LabelId,
     };
 
     fn newParserLabel(s: *State) ParserLabelRef {
@@ -10522,6 +10770,11 @@ pub const parser_core = struct {
         try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
         try s.continue_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
         try s.continue_frame_cleanup_drops.append(s.function.memory.allocator, 0);
+        if (v2_available and s.emit_v2) {
+            // qjs push_break_entry order: label_cont first, then label_break.
+            try s.v2_continue_frame_labels.append(s.function.memory.allocator, try v2FNewLabel(s));
+            try s.v2_break_frame_labels.append(s.function.memory.allocator, try v2FNewLabel(s));
+        }
     }
 
     fn pushBreakOnlyFrame(s: *State) Error!void {
@@ -10529,6 +10782,9 @@ pub const parser_core = struct {
         try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
         try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
         try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
+        if (v2_available and s.emit_v2) {
+            try s.v2_break_frame_labels.append(s.function.memory.allocator, try v2FNewLabel(s));
+        }
     }
 
     /// Put a real break/continue target in the same ordered environment chain
@@ -10855,7 +11111,11 @@ pub const parser_core = struct {
     }
 
     fn patchContinueFrame(s: *State) Error!void {
-        std.debug.assert(!(v2_available and s.emit_v2));
+        if (v2_available and s.emit_v2) {
+            if (s.v2_continue_frame_labels.items.len == 0) return Error.UnexpectedToken;
+            try v2FBindLabel(s, s.v2_continue_frame_labels.getLast());
+            return;
+        }
         if (s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
         const start = s.continue_frame_lens.getLast();
         for (s.continue_fixups.items[start..]) |off| {
@@ -10874,6 +11134,14 @@ pub const parser_core = struct {
         _ = s.break_frame_catch_marker_depths.pop().?;
         _ = s.break_frame_cleanup_drops.pop().?;
         _ = s.break_frame_cross_cleanup_drops.pop().?;
+        if (v2_available and s.emit_v2) {
+            // The continue label was bound by patchContinueFrame; only pop it.
+            _ = s.v2_continue_frame_labels.pop() orelse return Error.UnexpectedToken;
+            const break_label = s.v2_break_frame_labels.pop() orelse return Error.UnexpectedToken;
+            try v2FBindLabel(s, break_label);
+            std.debug.assert(s.break_fixups.items.len == start);
+            return;
+        }
         for (s.break_fixups.items[start..]) |off| {
             try patchForwardJump(s, off);
         }
@@ -10886,6 +11154,12 @@ pub const parser_core = struct {
         _ = s.break_frame_catch_marker_depths.pop().?;
         _ = s.break_frame_cleanup_drops.pop().?;
         _ = s.break_frame_cross_cleanup_drops.pop().?;
+        if (v2_available and s.emit_v2) {
+            const break_label = s.v2_break_frame_labels.pop() orelse return Error.UnexpectedToken;
+            try v2FBindLabel(s, break_label);
+            std.debug.assert(s.break_fixups.items.len == start);
+            return;
+        }
         for (s.break_fixups.items[start..]) |off| {
             try patchForwardJump(s, off);
         }
@@ -11872,7 +12146,15 @@ pub const parser_core = struct {
                 try s.expectToken('(');
                 try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = true });
                 try s.expectToken(')');
-                const if_false_off = try emitForwardJump(s, opcode.op.if_false);
+                var v2_if_false_label: compiler_v2.LabelId = undefined;
+                var if_false_off: usize = undefined;
+                if (v2_available and s.emit_v2) {
+                    // qjs TOK_IF (quickjs.c:29018): emit_goto(OP_if_false) / emit_goto(OP_goto) / emit_label at each merge.
+                    v2_if_false_label = try v2FNewLabel(s);
+                    try v2FEmitJump(s, opcode.op.if_false, v2_if_false_label);
+                } else {
+                    if_false_off = try emitForwardJump(s, opcode.op.if_false);
+                }
                 const allow_annex_b_if_function = !s.is_strict and !s.cur_func().is_strict_mode;
                 const then_is_annex_b_function =
                     allow_annex_b_if_function and
@@ -11886,9 +12168,17 @@ pub const parser_core = struct {
                 s.annex_b_if_function_decl_clause = saved_annex_b_if_function_decl_clause;
                 if (s.peekKind() == tok.TOK_ELSE) {
                     try s.advance();
-                    const else_goto_off = try emitForwardJump(s, opcode.op.goto);
-                    // Patch if_false to land at the start of the else block.
-                    try patchForwardJump(s, if_false_off);
+                    var v2_else_goto_label: compiler_v2.LabelId = undefined;
+                    var else_goto_off: usize = undefined;
+                    if (v2_available and s.emit_v2) {
+                        v2_else_goto_label = try v2FNewLabel(s);
+                        try v2FEmitJump(s, opcode.op.goto, v2_else_goto_label);
+                        try v2FBindLabel(s, v2_if_false_label);
+                    } else {
+                        else_goto_off = try emitForwardJump(s, opcode.op.goto);
+                        // Patch if_false to land at the start of the else block.
+                        try patchForwardJump(s, if_false_off);
+                    }
                     const else_is_annex_b_function =
                         allow_annex_b_if_function and
                         s.peekKind() == tok.TOK_FUNCTION and
@@ -11897,11 +12187,19 @@ pub const parser_core = struct {
                     s.annex_b_if_function_decl_clause = else_is_annex_b_function;
                     try parseStatementOrDecl(s, else_decl_mask);
                     s.annex_b_if_function_decl_clause = saved_annex_b_if_function_decl_clause;
-                    // Patch the goto-over-else to land after the else block.
-                    try patchForwardJump(s, else_goto_off);
+                    if (v2_available and s.emit_v2) {
+                        try v2FBindLabel(s, v2_else_goto_label);
+                    } else {
+                        // Patch the goto-over-else to land after the else block.
+                        try patchForwardJump(s, else_goto_off);
+                    }
                 } else {
-                    // No else: patch if_false to land just past the then block.
-                    try patchForwardJump(s, if_false_off);
+                    if (v2_available and s.emit_v2) {
+                        try v2FBindLabel(s, v2_if_false_label);
+                    } else {
+                        // No else: patch if_false to land just past the then block.
+                        try patchForwardJump(s, if_false_off);
+                    }
                 }
                 try s.popScope();
             },
@@ -12457,7 +12755,12 @@ pub const parser_core = struct {
                 if (keep_completion) {
                     try s.emitEvalRetPut();
                 } else {
-                    try s.emitOpNoSource(opcode.op.drop);
+                    // QCP-1 S2-G1 harness leaf
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitOpNoSource(s, opcode.op.drop);
+                    } else {
+                        try s.emitOpNoSource(opcode.op.drop);
+                    }
                 }
             },
         }
@@ -12928,6 +13231,26 @@ pub const parser_core = struct {
         target: FinallyControlTarget,
         resolved: ResolvedFinallyControlTarget,
     ) Error!void {
+        if (v2_available and s.emit_v2) {
+            // v2: the jump is born as the frame's LabelId (qjs emit_goto to
+            // label_break/label_cont); no operand-offset fixup lists.
+            const label = if (resolved.label_frame_index) |label_index| switch (target.kind) {
+                .@"break" => s.label_frames.items[label_index].v2_break_label,
+                .@"continue" => s.label_frames.items[label_index].v2_continue_label,
+            } else switch (target.kind) {
+                .@"break" => blk: {
+                    if (resolved.depth == 0 or resolved.depth > s.v2_break_frame_labels.items.len) break :blk null;
+                    break :blk s.v2_break_frame_labels.items[resolved.depth - 1];
+                },
+                .@"continue" => blk: {
+                    if (resolved.depth == 0 or resolved.depth > s.v2_continue_frame_labels.items.len) break :blk null;
+                    break :blk s.v2_continue_frame_labels.items[resolved.depth - 1];
+                },
+            };
+            const label_id = label orelse return Error.UnexpectedToken;
+            try v2FEmitJumpNoSource(s, opcode.op.goto, label_id);
+            return;
+        }
         const off = try emitForwardJumpNoSource(s, opcode.op.goto);
         if (resolved.label_frame_index) |label_index| {
             switch (target.kind) {
