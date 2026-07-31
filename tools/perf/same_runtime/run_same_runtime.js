@@ -11,6 +11,7 @@ const expectedQjsHead = '04be246001599f5995fa2f2d8c91a0f198d3f34c';
 const expectedQjsVersion = '2026-06-04';
 const scriptDir = __dirname;
 const policyPath = path.join(scriptDir, 'policy.json');
+const hostPlatform = process.platform;
 
 function exactObjectKeys(value, expectedKeys, label) {
     if (value == null || typeof value !== 'object' || Array.isArray(value)) {
@@ -158,7 +159,7 @@ const config = {
     // contract #3 -- an odd count has voided headline numbers twice.
     samples: 6,
     teardown: 'normal',
-    cpu: 19,
+    cpu: null,
     output: path.join(
         repoRoot,
         '.zig-cache/perf/qjs-align/same-runtime/summary.json',
@@ -169,14 +170,20 @@ const config = {
         '.zig-cache/perf/qjs-align/same-runtime/qjs-same-runtime',
     ),
     zig: process.env.ZIG || 'zig',
-    pmu: true,
+    pmuRequested: false,
+    pmuExplicitlyDisabled: false,
+    pmu: false,
+    pmuUnavailableReason: 'PMU collection was not requested',
     selectedPmu: null,
+    validateRecord: null,
 };
 
 function usage() {
     console.log(`Usage: ${path.basename(process.argv[1] || 'run_same_runtime.js')} [options]
 
-Runs paired zjs/QuickJS compile-once, execute-many samples pinned to one CPU.
+Runs paired zjs/QuickJS compile-once, execute-many samples. The collector never
+changes affinity: on Linux, externally pinned affinity is verified and inherited
+by child processes; platforms without a supported affinity query are explicit.
 
 Options:
   --cases a,b,c          Cases to run (default: all policy sentinels)
@@ -186,12 +193,15 @@ Options:
   --warmup N             Untimed run() calls per invocation (default: 20)
   --samples K            Paired harness invocations per case, must be even (default: 6)
   --teardown MODE        normal or leak-check (default: normal)
-  --cpu N                CPU passed to taskset -c (default: 19)
+  --cpu N                Expected externally pinned CPU (Linux only; no default)
   --output PATH          Summary JSON path (default: .zig-cache/perf/qjs-align/same-runtime/summary.json)
   --zjs-harness PATH     zjs harness path (default: zig-out/bin/zjs-same-runtime)
   --qjs-harness PATH     qjs harness path (default: .zig-cache/perf/qjs-align/same-runtime/qjs-same-runtime)
   --zig PATH             Zig executable used for environment metadata
-  --no-pmu               Skip the separate perf-stat invocations
+  --describe-phase NAME  Print reviewed phase-comparability metadata and exit
+  --validate-record PATH Validate one raw harness JSON record and exit
+  --pmu                  Request Linux perf-stat PMU collection when available
+  --no-pmu               Explicitly disable separate perf-stat invocations (default)
   -h, --help             Show this help`);
 }
 
@@ -321,8 +331,32 @@ function parseArgs() {
                 config.zig = optionValue(args, i, '--zig');
                 i += 1;
                 break;
+            case '--describe-phase':
+                console.log(
+                    JSON.stringify(
+                        phaseComparabilityFor(
+                            optionValue(args, i, '--describe-phase'),
+                        ),
+                    ),
+                );
+                process.exit(0);
+            case '--validate-record':
+                config.validateRecord = absoluteFromCwd(
+                    optionValue(args, i, '--validate-record'),
+                );
+                i += 1;
+                break;
+            case '--pmu':
+                if (config.pmuExplicitlyDisabled) {
+                    fail('--pmu and --no-pmu are mutually exclusive');
+                }
+                config.pmuRequested = true;
+                break;
             case '--no-pmu':
-                config.pmu = false;
+                if (config.pmuRequested) {
+                    fail('--pmu and --no-pmu are mutually exclusive');
+                }
+                config.pmuExplicitlyDisabled = true;
                 break;
             case '-h':
             case '--help':
@@ -419,6 +453,26 @@ function parseCpuSet(text) {
 }
 
 function discoverPmuForCpu(cpu) {
+    if (hostPlatform !== 'linux') {
+        return {
+            passed: false,
+            platform: hostPlatform,
+            cpu,
+            name: null,
+            candidates: [],
+            reason: `PMU discovery is only supported on Linux; host platform is ${hostPlatform}`,
+        };
+    }
+    if (!Number.isSafeInteger(cpu) || cpu < 0) {
+        return {
+            passed: false,
+            platform: hostPlatform,
+            cpu,
+            name: null,
+            candidates: [],
+            reason: 'PMU discovery requires one verified inherited CPU affinity',
+        };
+    }
     const devicesRoot = '/sys/bus/event_source/devices';
     let names = [];
     try {
@@ -457,6 +511,7 @@ function discoverPmuForCpu(cpu) {
     );
     return {
         passed: matches.length === 1,
+        platform: hostPlatform,
         cpu,
         name: matches.length === 1 ? matches[0].name : null,
         candidates,
@@ -467,7 +522,70 @@ function discoverPmuForCpu(cpu) {
     };
 }
 
-function probeTasksetAffinity(cpu) {
+function probePerfTool() {
+    if (hostPlatform !== 'linux') {
+        return {
+            passed: false,
+            platform: hostPlatform,
+            version: null,
+            reason: `perf is only used on Linux; host platform is ${hostPlatform}`,
+        };
+    }
+    const result = captureCommand('perf', ['--version']);
+    const passed =
+        !result.spawn_error &&
+        result.exit_code === 0 &&
+        result.stdout.trim().length > 0;
+    return {
+        passed,
+        platform: hostPlatform,
+        version: passed ? result.stdout.trim().split(/\r?\n/, 1)[0] : null,
+        reason: passed
+            ? null
+            : result.spawn_error ||
+              `perf --version exited ${result.exit_code}: ${result.stderr.trim()}`,
+    };
+}
+
+function linuxAffinityTextForCurrentProcess() {
+    const text = fs.readFileSync('/proc/self/status', 'utf8');
+    const match = text.match(/^Cpus_allowed_list:\s*(.+)$/m);
+    if (!match) {
+        throw new Error('/proc/self/status has no Cpus_allowed_list field');
+    }
+    return match[1].trim();
+}
+
+function probeInheritedAffinity(expectedCpu) {
+    if (hostPlatform !== 'linux') {
+        return {
+            supported: false,
+            passed: false,
+            platform: hostPlatform,
+            mode: 'unavailable',
+            pinned: false,
+            requested_cpu: expectedCpu,
+            parent_affinity_text: null,
+            parent_cpus: null,
+            child_affinity_text: null,
+            child_cpus: null,
+            child_exit_code: null,
+            child_stderr: '',
+            reason:
+                `inherited CPU affinity verification is unavailable on ${hostPlatform}; ` +
+                'the collector is explicitly unpinned',
+        };
+    }
+
+    let parentText = null;
+    let parentCpus = null;
+    let parentError = null;
+    try {
+        parentText = linuxAffinityTextForCurrentProcess();
+        parentCpus = parseCpuSet(parentText);
+    } catch (error) {
+        parentError = error.message;
+    }
     const probe = [
         "const fs = require('node:fs');",
         "const text = fs.readFileSync('/proc/self/status', 'utf8');",
@@ -476,46 +594,69 @@ function probeTasksetAffinity(cpu) {
         'console.log(JSON.stringify(match[1].trim()));',
     ].join('');
     const result = spawnSync(
-        'taskset',
-        ['-c', String(cpu), process.execPath, '-e', probe],
+        process.execPath,
+        ['-e', probe],
         {
             cwd: repoRoot,
             encoding: 'utf8',
             maxBuffer: 1024 * 1024,
         },
     );
-    let observedText = null;
-    let observedCpus = null;
+    let childText = null;
+    let childCpus = null;
     let parseError = null;
     try {
-        observedText = JSON.parse((result.stdout || '').trim());
-        observedCpus = parseCpuSet(observedText);
+        childText = JSON.parse((result.stdout || '').trim());
+        childCpus = parseCpuSet(childText);
     } catch (error) {
         parseError = error.message;
     }
+    const pinned =
+        parentCpus?.length === 1 &&
+        childCpus?.length === 1 &&
+        parentCpus[0] === childCpus[0];
+    const expectedMatches =
+        expectedCpu == null ||
+        (pinned && parentCpus[0] === expectedCpu);
     const passed =
+        parentError == null &&
         !result.error &&
         result.status === 0 &&
         (!result.stderr || result.stderr.length === 0) &&
-        observedCpus?.length === 1 &&
-        observedCpus[0] === cpu;
+        pinned &&
+        expectedMatches;
     const reasons = [];
+    if (parentError) reasons.push(`parent affinity probe failed: ${parentError}`);
     if (result.error) reasons.push(`spawn failed: ${result.error.message}`);
-    if (result.status !== 0) reasons.push(`taskset probe exited ${result.status}`);
-    if (result.stderr) reasons.push('taskset probe stderr was non-empty');
-    if (observedCpus?.length !== 1 || observedCpus?.[0] !== cpu) {
+    if (result.status !== 0) {
+        reasons.push(`child affinity probe exited ${result.status}`);
+    }
+    if (result.stderr) reasons.push('child affinity probe stderr was non-empty');
+    if (!pinned) {
         reasons.push(
-            `observed affinity was ${JSON.stringify(observedCpus)}, expected [${cpu}]`,
+            `collector/child affinity was ${JSON.stringify(parentCpus)}/${JSON.stringify(childCpus)}; ` +
+                'both must inherit the same single CPU',
+        );
+    }
+    if (!expectedMatches) {
+        reasons.push(
+            `inherited CPU ${JSON.stringify(parentCpus?.[0] ?? null)} did not match --cpu ${expectedCpu}`,
         );
     }
     if (parseError) reasons.push(`affinity output parse failed: ${parseError}`);
     return {
+        supported: true,
         passed,
-        requested_cpu: cpu,
-        observed_affinity_text: observedText,
-        observed_cpus: observedCpus,
-        exit_code: result.status,
-        stderr: result.stderr || '',
+        platform: hostPlatform,
+        mode: 'inherited',
+        pinned,
+        requested_cpu: expectedCpu,
+        parent_affinity_text: parentText,
+        parent_cpus: parentCpus,
+        child_affinity_text: childText,
+        child_cpus: childCpus,
+        child_exit_code: result.status,
+        child_stderr: result.stderr || '',
         reason: passed ? null : reasons.join('; '),
     };
 }
@@ -593,12 +734,52 @@ function validateHarnessRecord(record, engine, caseName, iterations, warmup) {
     ) {
         errors.push('JSValue representation metadata is missing or invalid');
     }
-    if (
-        !record.phases ||
+    if (!record.phases || typeof record.phases !== 'object') {
+        errors.push('phases metadata is missing or invalid');
+    } else if (
         !Number.isFinite(record.phases.eval_total_ns) ||
         record.phases.eval_total_ns < 0
     ) {
         errors.push('phases.eval_total_ns is missing or invalid');
+    } else {
+        for (const [name, value] of Object.entries(record.phases)) {
+            if (
+                value !== null &&
+                (!Number.isFinite(value) || value < 0)
+            ) {
+                errors.push(
+                    `phases.${name} must be null or a non-negative finite number`,
+                );
+            }
+        }
+        for (const name of [
+            'promise_jobs_ns',
+            'final_job_drain_ns',
+            'job_drain_ns',
+        ]) {
+            const value = record.phases[name];
+            if (!Number.isFinite(value) || value < 0) {
+                errors.push(
+                    `phases.${name} is required and must be a non-negative finite number`,
+                );
+            }
+        }
+        const immediateJobs = record.phases.promise_jobs_ns;
+        const finalJobs = record.phases.final_job_drain_ns;
+        const aggregateJobs = record.phases.job_drain_ns;
+        if (
+            Number.isFinite(immediateJobs) &&
+            immediateJobs >= 0 &&
+            Number.isFinite(finalJobs) &&
+            finalJobs >= 0 &&
+            Number.isFinite(aggregateJobs) &&
+            aggregateJobs >= 0 &&
+            aggregateJobs !== immediateJobs + finalJobs
+        ) {
+            errors.push(
+                'phases.job_drain_ns must equal promise_jobs_ns + final_job_drain_ns',
+            );
+        }
     }
     if (!record.resources || typeof record.resources !== 'object') {
         errors.push('resources metadata is missing');
@@ -643,15 +824,11 @@ function runHarness(
         '--teardown',
         config.teardown,
     ];
-    const result = spawnSync(
-        'taskset',
-        ['-c', String(config.cpu), harness, ...harnessArgs],
-        {
-            cwd: repoRoot,
-            encoding: 'utf8',
-            maxBuffer: 128 * 1024 * 1024,
-        },
-    );
+    const result = spawnSync(harness, harnessArgs, {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        maxBuffer: 128 * 1024 * 1024,
+    });
     const errors = [];
     if (result.error) errors.push(`spawn failed: ${result.error.message}`);
     if (result.status !== 0) {
@@ -766,6 +943,12 @@ function numericStats(values) {
 }
 
 const phaseComparability = {
+    runtime_create_ns: {
+        comparable: true,
+        reason: null,
+        parity_gate_eligible: true,
+        note: 'Both harnesses measure engine runtime allocation before Realm/context creation.',
+    },
     context_create_ns: {
         comparable: false,
         reason: 'QuickJS reports JS_NewContextRaw only, while zjs JSContext.create includes standard-global installation; raw values must not be divided.',
@@ -777,26 +960,97 @@ const phaseComparability = {
         note: 'The installed global surfaces also differ; see environment.global_surface.',
     },
     compile_ns: {
-        comparable: false,
-        reason: 'zjs parse_ns excludes src/exec/eval_entry.zig:118-128 (contextGlobal plus createRootBytecodeFunctionObject); it cannot be divided by QuickJS JS_Eval(COMPILE_ONLY).',
-        note: 'Use eval_total_ns for the cross-engine compile-plus-first-execute boundary.',
-    },
-    first_execute_ns: {
-        comparable: false,
-        reason: 'zjs vm_run_ns starts after src/exec/eval_entry.zig:118-128 (contextGlobal plus createRootBytecodeFunctionObject); it cannot be divided by QuickJS JS_EvalFunction.',
-        note: 'Use eval_total_ns for the cross-engine compile-plus-first-execute boundary.',
-    },
-    context_plus_globals_ns: {
         comparable: true,
         reason: null,
-        note: 'Derived as context_create_ns + (globals_install_ns ?? 0) on each engine. Timing boundaries align, but installed global surfaces differ; see environment.global_surface.',
+        parity_gate_eligible: true,
+        note: 'For ordinary global scripts, both harnesses measure the complete compile-only boundary through production of a function-bytecode value; modules require a separate boundary audit.',
+    },
+    first_execute_ns: {
+        comparable: true,
+        reason: null,
+        parity_gate_eligible: false,
+        note: 'Boundary-level diagnostic for ordinary global scripts only: QuickJS JS_CallFree releases the root closure and may free FunctionBytecode before returning, while zjs stops at the VM result and releases root_function_value later via defer. Do not use this ratio as a hard parity gate.',
+    },
+    realm_raw_create_ns: {
+        comparable: false,
+        reason: 'The engines expose different raw Realm/context construction boundaries and ownership setup.',
+        note: 'Retained as per-engine diagnostic timing only.',
+    },
+    realm_bootstrap_ns: {
+        comparable: false,
+        reason: 'Intrinsic/bootstrap work and installed global surfaces differ between the engines.',
+        note: 'Retained as per-engine diagnostic timing only; see environment.global_surface.',
+    },
+    realm_ready_ns: {
+        comparable: false,
+        reason: 'The outer Realm-ready boundary aligns, but the installed global surfaces differ.',
+        note: 'This is a diagnostic cold-start comparison, not a formal parity-gate ratio; see environment.global_surface.',
+    },
+    compile_frontend_ns: {
+        comparable: false,
+        reason: 'Parser/frontend pass boundaries are engine-internal and do not map one-to-one.',
+        note: 'Use compile_ns for the reviewed cross-engine compile-only boundary.',
+    },
+    parse_ns: {
+        comparable: false,
+        reason: 'This zjs compatibility alias is the complete parser.compile boundary, but QuickJS emits no parse_ns peer field.',
+        note: 'For zjs, parse_ns equals compile_ns. Use compile_ns for the reviewed cross-engine compile-only boundary.',
+    },
+    compile_finalize_ns: {
+        comparable: false,
+        reason: 'Bytecode finalization and packing boundaries are engine-internal and do not map one-to-one.',
+        note: 'Use compile_ns for the reviewed cross-engine compile-only boundary.',
+    },
+    root_function_publish_ns: {
+        comparable: false,
+        reason: 'QuickJS closure creation and zjs root-function publication split different work from first execution.',
+        note: 'Use first_execute_ns for the reviewed outer publication-through-result boundary.',
+    },
+    vm_run_ns: {
+        comparable: false,
+        reason: 'This inner VM-only boundary excludes different root publication and closure work across engines.',
+        note: 'Use first_execute_ns for the reviewed outer publication-through-result boundary.',
+    },
+    engine_cold_to_first_result_ns: {
+        comparable: false,
+        reason: 'QuickJS stops at JS_EvalFunction return, while zjs context.eval returns only after its immediate host-aware drain; Realm/global surfaces also differ.',
+        note: 'Retained as per-engine cold-start attribution only; see eval_total_ns for the reviewed eval boundary.',
+    },
+    promise_jobs_ns: {
+        comparable: false,
+        reason: 'QuickJS drains only its ECMAScript pending-job queue, while zjs also polls host signal, I/O, timer, and Atomics completion queues.',
+        note: 'Immediate post-top-level drain attribution only; it is included in eval_total_ns.',
+    },
+    final_job_drain_ns: {
+        comparable: false,
+        reason: 'The engines drain different queue surfaces after the retained run invocations.',
+        note: 'Final drain attribution only.',
+    },
+    job_drain_ns: {
+        comparable: false,
+        reason: 'This aggregate combines two non-comparable drain phases whose queue surfaces differ.',
+        note: 'Defined as promise_jobs_ns + final_job_drain_ns on each engine.',
+    },
+    context_plus_globals_ns: {
+        comparable: false,
+        reason: 'This legacy derived Realm-ready boundary installs different global surfaces.',
+        note: 'Retained as per-engine diagnostic timing only; prefer realm_ready_ns.',
     },
     eval_total_ns: {
         comparable: true,
         reason: null,
-        note: 'Complete outer eval boundary on both engines; this is the only published cross-engine compile-plus-first-execute ratio.',
+        parity_gate_eligible: false,
+        note: 'Boundary-level diagnostic for ordinary global scripts only: both include compile, first execution, immediate drain, then completion-value release, but zjs also polls host queues. Do not use this ratio as a hard parity gate.',
     },
 };
+
+function phaseComparabilityFor(name) {
+    return phaseComparability[name] || {
+        comparable: false,
+        reason: `phase ${name} is not registered in phaseComparability; an unchecked phase cannot publish a cross-engine ratio`,
+        note: 'Add an explicit phase definition only after its two timing boundaries have been reviewed.',
+    };
+}
 
 function phaseValue(record, name) {
     if (name === 'context_plus_globals_ns') {
@@ -831,17 +1085,15 @@ function phaseStatistics(name, pairs) {
             }
         }
     }
-    const metadata = phaseComparability[name] || {
-        comparable: false,
-        reason: `phase ${name} is not registered in phaseComparability; an unchecked phase cannot publish a cross-engine ratio`,
-        note: 'Add an explicit phase definition only after its two timing boundaries have been reviewed.',
-    };
+    const metadata = phaseComparabilityFor(name);
     let reason = metadata.reason;
     if (metadata.comparable && belowResolution) {
         reason = `ratio suppressed because at least one matched value was below phase_ratio_floor_ns=${phaseRatioFloorNs}`;
     }
     return {
         comparable: metadata.comparable,
+        parity_gate_eligible:
+            metadata.parity_gate_eligible === true,
         reason,
         note: metadata.note,
         below_resolution: belowResolution,
@@ -1034,6 +1286,14 @@ function emptyPmuEngine(reason) {
     };
 }
 
+function pmuDisabledReason() {
+    if (config.pmuExplicitlyDisabled) return 'disabled by --no-pmu';
+    if (!config.pmuRequested) {
+        return 'disabled by default; pass --pmu to request Linux PMU collection';
+    }
+    return config.pmuUnavailableReason;
+}
+
 function normalizedPmuKey(eventName) {
     for (const name of pmuEvents) {
         if (
@@ -1138,7 +1398,7 @@ function parsePerfCounters(stderr, expectedPmuName) {
 
 function runPmu(engine, harness, caseName, sourcePath) {
     if (!config.pmu) {
-        return emptyPmuEngine('disabled by --no-pmu');
+        return emptyPmuEngine(pmuDisabledReason());
     }
     const harnessArgs = [
         '--case',
@@ -1156,11 +1416,8 @@ function runPmu(engine, harness, caseName, sourcePath) {
         ? pmuEvents.map((event) => `${config.selectedPmu}/${event}/`)
         : pmuEvents;
     const result = spawnSync(
-        'taskset',
+        'perf',
         [
-            '-c',
-            String(config.cpu),
-            'perf',
             'stat',
             '-x,',
             '-e',
@@ -1656,7 +1913,8 @@ function provenanceComparability(item, environment) {
                 pair.zjs?.warmup === config.warmup,
         );
     const pmuReliable =
-        !config.pmu || item.pmu?.binding_reliable === true;
+        !config.pmuRequested ||
+        (config.pmu && item.pmu?.binding_reliable === true);
     const checks = {
         case_registered: {
             passed: Boolean(caseMetadata[item.name]),
@@ -1717,13 +1975,13 @@ function provenanceComparability(item, environment) {
                     ? null
                     : 'one or more harness SHA-256 values are missing',
         },
-        taskset_binding_succeeded: {
-            passed: environment.taskset_binding_probe?.passed === true,
+        inherited_affinity_verified: {
+            passed: environment.affinity?.passed === true,
             reason:
-                environment.taskset_binding_probe?.passed === true
+                environment.affinity?.passed === true
                     ? null
-                    : environment.taskset_binding_probe?.reason ||
-                      'taskset affinity was not checked',
+                    : environment.affinity?.reason ||
+                      'inherited CPU affinity was not checked',
         },
         sampling_abba_complete: {
             passed: samplingComplete,
@@ -1818,7 +2076,13 @@ function parseCpuInfo() {
     });
 }
 
-function collectCpuMetadata() {
+function optionalCommandFirstLine(command, args) {
+    const result = captureCommand(command, args);
+    if (result.spawn_error || result.exit_code !== 0) return null;
+    return result.stdout.trim().split(/\r?\n/, 1)[0] || null;
+}
+
+function collectLinuxCpuMetadata() {
     const lscpuText = runCommand('lscpu', [
         '-p=CPU,MODELNAME,CORE,SOCKET,MAXMHZ,MINMHZ',
     ]);
@@ -1880,6 +2144,77 @@ function collectCpuMetadata() {
             cpu_revision: boundInfo?.['CPU revision'] ?? null,
         },
     };
+}
+
+function collectDarwinCpuMetadata() {
+    const logicalCpus = os.cpus();
+    const brand =
+        optionalCommandFirstLine('sysctl', ['-n', 'machdep.cpu.brand_string']) ||
+        logicalCpus[0]?.model ||
+        null;
+    return {
+        source:
+            'node os.cpus() plus optional Darwin sysctl metadata; no CPU affinity claim',
+        fixed_cpu_id: null,
+        brand,
+        hardware_model: optionalCommandFirstLine('sysctl', [
+            '-n',
+            'hw.model',
+        ]),
+        logical_cpu_count: logicalCpus.length,
+        physical_cpu_count: (() => {
+            const value = optionalCommandFirstLine('sysctl', [
+                '-n',
+                'hw.physicalcpu',
+            ]);
+            return value != null && Number.isSafeInteger(Number(value))
+                ? Number(value)
+                : null;
+        })(),
+        logical_cpus: logicalCpus.map((cpu, id) => ({
+            id,
+            model: cpu.model || null,
+            speed_mhz: Number.isFinite(cpu.speed) ? cpu.speed : null,
+        })),
+        bound_cpu: null,
+    };
+}
+
+function collectGenericCpuMetadata() {
+    const logicalCpus = os.cpus();
+    return {
+        source: 'node os.cpus(); platform-specific topology unavailable',
+        fixed_cpu_id: null,
+        logical_cpu_count: logicalCpus.length,
+        logical_cpus: logicalCpus.map((cpu, id) => ({
+            id,
+            model: cpu.model || null,
+            speed_mhz: Number.isFinite(cpu.speed) ? cpu.speed : null,
+        })),
+        bound_cpu: null,
+    };
+}
+
+function collectCpuMetadata() {
+    if (hostPlatform === 'linux') return collectLinuxCpuMetadata();
+    if (hostPlatform === 'darwin') return collectDarwinCpuMetadata();
+    return collectGenericCpuMetadata();
+}
+
+function phaseAvailability(record) {
+    if (!record?.phases || typeof record.phases !== 'object') return null;
+    return Object.fromEntries(
+        Object.entries(record.phases)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([name, value]) => [
+                name,
+                {
+                    present: true,
+                    measured:
+                        Number.isFinite(value) && value >= 0,
+                },
+            ]),
+    );
 }
 
 function probeGlobalSurface() {
@@ -1952,8 +2287,9 @@ function probeGlobalSurface() {
     }
 }
 
-function collectEnvironment() {
-    const quickjsDir = process.env.QUICKJS_DIR || '/home/aneryu/quickjs';
+function collectEnvironment(affinityProbe, pmuBindingProbe) {
+    const quickjsDir =
+        process.env.QUICKJS_DIR || path.resolve(repoRoot, '../quickjs');
     const qjsVersionPath = path.join(quickjsDir, 'VERSION');
     const qjsCliPath = path.join(quickjsDir, 'qjs');
     const qjsCliProbe = captureCommand(qjsCliPath, ['--help']);
@@ -1964,8 +2300,6 @@ function collectEnvironment() {
         'git',
         ['-C', quickjsDir, 'status', '--porcelain'],
     );
-    const tasksetBindingProbe = probeTasksetAffinity(config.cpu);
-    const pmuBindingProbe = discoverPmuForCpu(config.cpu);
     return {
         zjs_git_commit: runCommand('git', ['rev-parse', 'HEAD'], {
             cwd: repoRoot,
@@ -1991,25 +2325,33 @@ function collectEnvironment() {
         zjs_harness_sha256: sha256File(config.zjsHarness),
         qjs_harness_sha256: sha256File(config.qjsHarness),
         zig_version: commandFirstLine(config.zig, ['version']),
-        gcc_version: commandFirstLine('gcc', ['--version']),
-        uname_release: commandFirstLine('uname', ['-r']),
-        kernel: runCommand('uname', ['-srvmo']),
+        c_compiler_version: optionalCommandFirstLine(
+            process.env.CC || 'cc',
+            ['--version'],
+        ),
+        platform: {
+            node_platform: hostPlatform,
+            os_type: os.type(),
+            os_release: os.release(),
+            os_version: os.version(),
+            architecture: os.arch(),
+        },
+        uname_release: os.release(),
+        kernel: optionalCommandFirstLine('uname', ['-a']),
         cpu: collectCpuMetadata(),
         fixed_cpu_id: config.cpu,
-        taskset_binding_probe: tasksetBindingProbe,
+        affinity: affinityProbe,
         sampling: {
             warmup: config.warmup,
             timed_samples: config.samples,
             iterations_per_sample: config.iterations,
             order: 'ABBA',
         },
-        phase_coverage: {
-            parser: true,
-            compile: true,
-            context_create: true,
-            globals_install_boundary: true,
-            eval_total: true,
-            steady_execute: true,
+        phase_schema: {
+            registered_comparability:
+                Object.keys(phaseComparability).sort(),
+            unknown_phase_policy:
+                'retain raw per-engine statistics; comparable=false; ratio stats=null',
             teardown_phase_present: true,
             teardown_measured: config.teardown === 'leak-check',
         },
@@ -2017,11 +2359,14 @@ function collectEnvironment() {
         leak_check: config.teardown === 'leak-check',
         pmu: {
             enabled: config.pmu,
+            requested: config.pmuRequested,
+            explicitly_disabled: config.pmuExplicitlyDisabled,
+            unavailable_reason: config.pmuUnavailableReason,
             separate_from_timing_samples: true,
             selected_pmu: config.selectedPmu,
             binding_probe: pmuBindingProbe,
             command_shape:
-                'taskset -c <cpu> perf stat -x, -e <selected-pmu>/{instructions,cycles,branches,branch-misses}/ -- <harness> ...',
+                'perf stat -x, -e <selected-pmu>/{instructions,cycles,branches,branch-misses}/ -- <harness> ... (inherits collector affinity)',
             counters: pmuEvents,
         },
     };
@@ -2127,7 +2472,7 @@ function buildAggregate(cases) {
     const instructions = aggregateMetric(
         cases,
         (item) => item.pmu?.ratios?.instructions,
-        config.pmu ? null : 'disabled by --no-pmu',
+        config.pmu ? null : pmuDisabledReason(),
     );
     return {
         status: steady.status,
@@ -2201,18 +2546,93 @@ function summarizeValidation() {
 }
 
 parseArgs();
+if (config.validateRecord) {
+    let record;
+    try {
+        record = JSON.parse(
+            fs.readFileSync(config.validateRecord, 'utf8'),
+        );
+    } catch (error) {
+        fail(
+            `cannot read harness record ${config.validateRecord}: ${error.message}`,
+            1,
+        );
+    }
+    const errors = validateHarnessRecord(
+        record,
+        record?.engine,
+        record?.case,
+        record?.iterations,
+        record?.warmup,
+    );
+    console.log(
+        JSON.stringify({
+            valid: errors.length === 0,
+            errors,
+        }),
+    );
+    if (errors.length > 0) process.exit(1);
+    process.exit(0);
+}
 for (const harness of [config.zjsHarness, config.qjsHarness]) {
     if (!fs.existsSync(harness)) fail(`harness does not exist: ${harness}`);
 }
-const initialPmuBindingProbe = discoverPmuForCpu(config.cpu);
-config.selectedPmu =
-    initialPmuBindingProbe.passed === true
-        ? initialPmuBindingProbe.name
+const initialAffinityProbe = probeInheritedAffinity(config.cpu);
+config.cpu =
+    initialAffinityProbe.passed === true &&
+    initialAffinityProbe.parent_cpus?.length === 1
+        ? initialAffinityProbe.parent_cpus[0]
         : null;
+const pmuDeviceProbe = discoverPmuForCpu(config.cpu);
+const perfToolProbe = probePerfTool();
+const pmuBindingProbe = {
+    passed:
+        initialAffinityProbe.passed === true &&
+        pmuDeviceProbe.passed === true &&
+        perfToolProbe.passed === true,
+    platform: hostPlatform,
+    cpu: config.cpu,
+    name: pmuDeviceProbe.name,
+    affinity_passed: initialAffinityProbe.passed,
+    device: pmuDeviceProbe,
+    perf_tool: perfToolProbe,
+    reason: null,
+};
+if (!pmuBindingProbe.passed) {
+    pmuBindingProbe.reason = [
+        initialAffinityProbe.passed
+            ? null
+            : `affinity: ${initialAffinityProbe.reason}`,
+        pmuDeviceProbe.passed ? null : `device: ${pmuDeviceProbe.reason}`,
+        perfToolProbe.passed ? null : `perf: ${perfToolProbe.reason}`,
+    ]
+        .filter(Boolean)
+        .join('; ');
+}
+if (config.pmuRequested && pmuBindingProbe.passed) {
+    config.pmu = true;
+    config.selectedPmu = pmuDeviceProbe.name;
+    config.pmuUnavailableReason = null;
+} else if (config.pmuRequested) {
+    config.pmuUnavailableReason =
+        pmuBindingProbe.reason || 'requested Linux PMU collection is unavailable';
+}
 
 const startedAt = new Date().toISOString();
-const environment = collectEnvironment();
+const environment = collectEnvironment(
+    initialAffinityProbe,
+    pmuBindingProbe,
+);
 environment.global_surface = probeGlobalSurface();
+environment.phase_coverage = {
+    source: 'validated global-surface probe harness records',
+    zjs: phaseAvailability(
+        environment.global_surface.validation?.zjs?.record,
+    ),
+    qjs: phaseAvailability(
+        environment.global_surface.validation?.qjs?.record,
+    ),
+};
 environment.build_mode = {
     zjs:
         environment.global_surface.validation?.zjs?.record?.build ?? null,
@@ -2266,6 +2686,7 @@ const summary = {
     warmup: config.warmup,
     samples: config.samples,
     phase_ratio_floor_ns: phaseRatioFloorNs,
+    pmu_requested: config.pmuRequested,
     pmu_enabled: config.pmu,
     policy: {
         policy_id: sameRuntimePolicy.policy_id,

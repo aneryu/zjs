@@ -30,13 +30,16 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 SYMBOL_HEADER = re.compile(r"^([0-9a-f]+) <(.+)>:$")
-INSTRUCTION = re.compile(r"^\s+([0-9a-f]+):\s+((?:[0-9a-f]{2} ?)+)\t(.*)$")
+INSTRUCTION = re.compile(
+    r"^\s*([0-9a-f]+):\s+((?:[0-9a-f]{2}[ ]?)+)[ ]*\t(.*)$"
+)
 BLANK_OR_NOISE = re.compile(
     r"^$|^Disassembly of section |^\S+:\s+file format |^\s*\.\.\.$"
 )
@@ -47,6 +50,22 @@ TARGET_WITH_SYMBOL = re.compile(r"\b[0-9a-f]{2,}\s+<([^>]+)>")
 # A bare code address with no symbol (intra-function branch). Rewritten
 # relative to the referring instruction so branch distance is preserved.
 BARE_ADDRESS = re.compile(r"(?<![\w.$])([0-9a-f]{4,})(?![\w.$])")
+
+ELF_MAGIC = b"\x7fELF"
+MACHO_LAYOUTS = {
+    b"\xcf\xfa\xed\xfe": ("<", True),
+    b"\xfe\xed\xfa\xcf": (">", True),
+    b"\xce\xfa\xed\xfe": ("<", False),
+    b"\xfe\xed\xfa\xce": (">", False),
+}
+FAT_MACHO_MAGICS = {
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf",
+    b"\xbf\xba\xfe\xca",
+}
+LC_SEGMENT = 0x1
+LC_SEGMENT_64 = 0x19
 
 
 class ParseError(RuntimeError):
@@ -66,7 +85,10 @@ def normalize_operands(text: str, instruction_address: int) -> str:
     return BARE_ADDRESS.sub(rewrite_bare, text)
 
 
-def parse_disassembly(lines: list[str]) -> dict[str, list[str]]:
+def parse_disassembly(
+    lines: list[str],
+    encoded_sizes: dict[str, int] | None = None,
+) -> dict[str, list[str]]:
     """Parse `objdump -d` output into symbol -> normalized instruction bodies."""
     symbols: dict[str, list[str]] = {}
     current: str | None = None
@@ -75,12 +97,18 @@ def parse_disassembly(lines: list[str]) -> dict[str, list[str]]:
         if header:
             current = header.group(2)
             symbols[current] = []
+            if encoded_sizes is not None:
+                encoded_sizes[current] = 0
             continue
         instruction = INSTRUCTION.match(line)
         if instruction:
             if current is None:
                 raise ParseError(f"instruction outside any symbol: {line!r}")
             address = int(instruction.group(1), 16)
+            if encoded_sizes is not None:
+                encoded_sizes[current] += len(
+                    instruction.group(2).replace(" ", "")
+                ) // 2
             symbols[current].append(
                 normalize_operands(instruction.group(3), address)
             )
@@ -114,7 +142,94 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def text_sha256(binary: Path) -> str:
+def binary_format(binary: Path) -> str:
+    with binary.open("rb") as handle:
+        magic = handle.read(4)
+    if magic == ELF_MAGIC:
+        return "elf"
+    if magic in MACHO_LAYOUTS:
+        return "mach-o"
+    if magic in FAT_MACHO_MAGICS:
+        raise ParseError(
+            f"universal Mach-O binaries are unsupported: {binary}"
+        )
+    raise ParseError(f"unsupported binary format for {binary}")
+
+
+def fixed_name(raw: bytes) -> str:
+    return raw.split(b"\0", 1)[0].decode("ascii")
+
+
+def macho_text_bytes(binary: Path) -> bytes:
+    """Read the raw __TEXT,__text bytes from one thin Mach-O binary."""
+    data = binary.read_bytes()
+    layout = MACHO_LAYOUTS.get(data[:4])
+    if layout is None:
+        raise ParseError(f"not a supported thin Mach-O binary: {binary}")
+    endian, is_64 = layout
+    if is_64:
+        header_format = endian + "IiiIIIII"
+        segment_command = LC_SEGMENT_64
+        segment_format = endian + "II16sQQQQiiII"
+        section_format = endian + "16s16sQQIIIIIIII"
+    else:
+        header_format = endian + "IiiIIII"
+        segment_command = LC_SEGMENT
+        segment_format = endian + "II16sIIIIiiII"
+        section_format = endian + "16s16sIIIIIIIII"
+
+    header_size = struct.calcsize(header_format)
+    if len(data) < header_size:
+        raise ParseError(f"truncated Mach-O header: {binary}")
+    header = struct.unpack_from(header_format, data)
+    command_count = header[4]
+    command_offset = header_size
+    segment_size = struct.calcsize(segment_format)
+    section_size = struct.calcsize(section_format)
+
+    for _ in range(command_count):
+        if command_offset + 8 > len(data):
+            raise ParseError(f"truncated Mach-O load command: {binary}")
+        command, command_size = struct.unpack_from(
+            endian + "II", data, command_offset
+        )
+        command_end = command_offset + command_size
+        if command_size < 8 or command_end > len(data):
+            raise ParseError(f"invalid Mach-O load command size: {binary}")
+        if command == segment_command:
+            if command_size < segment_size:
+                raise ParseError(f"truncated Mach-O segment command: {binary}")
+            segment = struct.unpack_from(segment_format, data, command_offset)
+            section_count = segment[9]
+            section_offset = command_offset + segment_size
+            if section_offset + section_count * section_size > command_end:
+                raise ParseError(f"truncated Mach-O section table: {binary}")
+            for index in range(section_count):
+                section = struct.unpack_from(
+                    section_format,
+                    data,
+                    section_offset + index * section_size,
+                )
+                if fixed_name(section[0]) != "__text":
+                    continue
+                if fixed_name(section[1]) != "__TEXT":
+                    continue
+                file_offset = section[4]
+                byte_count = section[3]
+                file_end = file_offset + byte_count
+                if file_end > len(data):
+                    raise ParseError(f"truncated Mach-O __text section: {binary}")
+                return data[file_offset:file_end]
+        command_offset = command_end
+    raise ParseError(f"Mach-O __TEXT,__text section not found: {binary}")
+
+
+def text_sha256(binary: Path, format_name: str | None = None) -> str:
+    if format_name is None:
+        format_name = binary_format(binary)
+    if format_name == "mach-o":
+        return hashlib.sha256(macho_text_bytes(binary)).hexdigest()
+
     completed = subprocess.run(
         ["objcopy", "-O", "binary", "--only-section=.text", str(binary), "/dev/stdout"],
         capture_output=True,
@@ -126,14 +241,29 @@ def text_sha256(binary: Path) -> str:
 
 
 def identity(binary: Path) -> dict[str, Any]:
+    format_name = binary_format(binary)
+    section_name = "__text" if format_name == "mach-o" else ".text"
     completed = subprocess.run(
-        ["objdump", "-d", "--section=.text", str(binary)],
+        ["objdump", "-d", f"--section={section_name}", str(binary)],
         capture_output=True,
         text=True,
         check=True,
     )
-    bodies = parse_disassembly(completed.stdout.split("\n"))
-    sizes = symbol_sizes(binary)
+    encoded_sizes: dict[str, int] | None = (
+        {} if format_name == "mach-o" else None
+    )
+    bodies = parse_disassembly(
+        completed.stdout.split("\n"),
+        encoded_sizes=encoded_sizes,
+    )
+    if not bodies:
+        raise ParseError(
+            f"disassembly produced no symbols from {section_name}: {binary}"
+        )
+    # Mach-O symbol tables do not carry ELF-style st_size values. LLVM nm
+    # reports every size as zero, so use the exact encoded instruction bytes
+    # already parsed above. ELF retains the existing strict nm path.
+    sizes = encoded_sizes if encoded_sizes is not None else symbol_sizes(binary)
 
     symbols: dict[str, dict[str, Any]] = {}
     for name, body in bodies.items():
@@ -149,7 +279,7 @@ def identity(binary: Path) -> dict[str, Any]:
     return {
         "binary": str(binary),
         "binary_sha256": sha256_file(binary),
-        "text_sha256": text_sha256(binary),
+        "text_sha256": text_sha256(binary, format_name),
         "global_normalized_signature": global_signature(symbols),
         "symbols": symbols,
     }

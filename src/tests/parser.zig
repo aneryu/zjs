@@ -6311,6 +6311,216 @@ test "defineVar core matches pinned QuickJS declaration collision matrix" {
     }
 }
 
+const declaration_index_padding_count = 65;
+
+fn compilePaddedDeclarationIndexCase(
+    rt: *core.JSRuntime,
+    tail: []const u8,
+    filename: []const u8,
+) !bool {
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "function indexedDeclarations(){");
+    var declaration_buffer: [64]u8 = undefined;
+    for (0..declaration_index_padding_count) |index| {
+        const declaration = try std.fmt.bufPrint(
+            &declaration_buffer,
+            "const __declaration_index_pad_{d}=0;",
+            .{index},
+        );
+        try source.appendSlice(std.testing.allocator, declaration);
+    }
+    try source.appendSlice(std.testing.allocator, tail);
+    try source.append(std.testing.allocator, '}');
+
+    var parsed = try compileForTest(rt, source.items, .{
+        .mode = .script,
+        .filename = filename,
+    });
+    defer parsed.deinit();
+    return parsed.syntax_error != null;
+}
+
+test "parser declaration index preserves unique and duplicate same-scope lexical declarations" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try std.testing.expect(!try compilePaddedDeclarationIndexCase(
+        rt,
+        "const tail = 1;",
+        "declaration-index-unique.js",
+    ));
+    try std.testing.expect(try compilePaddedDeclarationIndexCase(
+        rt,
+        "const tail = 1; const tail = 2;",
+        "declaration-index-duplicate.js",
+    ));
+}
+
+test "parser declaration index preserves shadowing and catch plus two scopes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try std.testing.expect(!try compilePaddedDeclarationIndexCase(
+        rt,
+        "const shadowed = 1; { const shadowed = 2; }",
+        "declaration-index-shadow.js",
+    ));
+    try std.testing.expect(try compilePaddedDeclarationIndexCase(
+        rt,
+        "try {} catch (caught) { const caught = 1; }",
+        "declaration-index-catch-conflict.js",
+    ));
+    try std.testing.expect(!try compilePaddedDeclarationIndexCase(
+        rt,
+        "try {} catch (caught) { { const caught = 1; } }",
+        "declaration-index-catch-shadow.js",
+    ));
+}
+
+test "parser declaration index preserves function-var ancestor and sibling origins" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try std.testing.expect(try compilePaddedDeclarationIndexCase(
+        rt,
+        "{ var ancestorConflict; } let ancestorConflict;",
+        "declaration-index-function-var-ancestor.js",
+    ));
+    try std.testing.expect(!try compilePaddedDeclarationIndexCase(
+        rt,
+        "{ var siblingAllowed; } { let siblingAllowed; }",
+        "declaration-index-function-var-sibling.js",
+    ));
+}
+
+test "parser declaration index rebuilds after bypassed linked and function-var writers" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("declaration-index-bypass");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "");
+    defer lex.deinit();
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    var padding_atoms: [declaration_index_padding_count]core.Atom = undefined;
+    var initialized_atoms: usize = 0;
+    defer for (padding_atoms[0..initialized_atoms]) |atom_id| env.rt.atoms.free(atom_id);
+    var atom_buffer: [48]u8 = undefined;
+    for (&padding_atoms, 0..) |*slot, index| {
+        const atom_name = try std.fmt.bufPrint(&atom_buffer, "declaration_index_atom_{d}", .{index});
+        slot.* = try env.rt.internAtom(atom_name);
+        initialized_atoms += 1;
+        _ = try state.defineVar(slot.*, .const_);
+    }
+
+    const linked_collision = try env.rt.internAtom("linked_collision");
+    defer env.rt.atoms.free(linked_collision);
+    _ = try state.function_def.addScopeVar(
+        linked_collision,
+        .normal,
+        state.scope_level,
+        true,
+        true,
+    );
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        state.defineVar(linked_collision, .const_),
+    );
+
+    const origin_collision = try env.rt.internAtom("origin_collision");
+    defer env.rt.atoms.free(origin_collision);
+    _ = try state.function_def.appendVar(.{
+        .var_name = origin_collision,
+        .scope_level = 0,
+        .scope_next = state.scope_level,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+    });
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        state.defineVar(origin_collision, .const_),
+    );
+}
+
+fn runParserDeclarationIndexOomRetry(
+    cleanup_rt: *core.JSRuntime,
+    fail_offset: usize,
+) !bool {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = core.memory.MemoryAccount.init(failing.allocator());
+    var atoms = core.atom.AtomTable.init(&account);
+    defer atoms.deinit();
+
+    const name = try atoms.internString("parser-declaration-index-oom");
+    defer atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&account, &atoms, name);
+    defer function.deinit(cleanup_rt);
+    var lex = QjsLexer.init(failing.allocator(), &atoms, "");
+    defer lex.deinit();
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(cleanup_rt);
+
+    var declaration_atoms: [declaration_index_padding_count]core.Atom = undefined;
+    var initialized_atoms: usize = 0;
+    defer for (declaration_atoms[0..initialized_atoms]) |atom_id| atoms.free(atom_id);
+    var atom_buffer: [48]u8 = undefined;
+    for (&declaration_atoms, 0..) |*slot, index| {
+        const atom_name = try std.fmt.bufPrint(&atom_buffer, "oom_declaration_index_atom_{d}", .{index});
+        slot.* = try atoms.internString(atom_name);
+        initialized_atoms += 1;
+    }
+    for (declaration_atoms[0 .. declaration_index_padding_count - 1]) |atom_id| {
+        _ = try state.defineVar(atom_id, .const_);
+    }
+
+    failing.fail_index = failing.alloc_index + fail_offset;
+    const first_result = state.defineVar(
+        declaration_atoms[declaration_index_padding_count - 1],
+        .const_,
+    );
+    const failed = if (first_result) |_| false else |err| switch (err) {
+        error.OutOfMemory => true,
+        else => return err,
+    };
+    failing.fail_index = std.math.maxInt(usize);
+
+    if (failed) {
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(
+            @as(usize, declaration_index_padding_count - 1),
+            state.function_def.vars.len,
+        );
+        _ = try state.defineVar(
+            declaration_atoms[declaration_index_padding_count - 1],
+            .const_,
+        );
+    } else {
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+    try std.testing.expectEqual(
+        @as(usize, declaration_index_padding_count),
+        state.function_def.vars.len,
+    );
+    return failed;
+}
+
+test "parser declaration index activation is retryable across allocation failures" {
+    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer cleanup_rt.destroy();
+
+    var fail_offset: usize = 0;
+    while (try runParserDeclarationIndexOomRetry(cleanup_rt, fail_offset)) {
+        fail_offset += 1;
+    }
+    try std.testing.expect(fail_offset > 0);
+}
+
 test "F10.1a FunctionDef: empty ordinary block does not create a scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

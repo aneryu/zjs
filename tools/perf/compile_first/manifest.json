@@ -1,0 +1,42 @@
+{
+  "anchors": [
+    {
+      "expected_checksum": "compile-first/minimal/v1",
+      "name": "minimal",
+      "payload_declarations": 0,
+      "relative_path": "anchors/minimal.js",
+      "source_bytes": 98,
+      "source_sha256": "275481588f5ad12dc5cd55a27fa465c60c2e83a9e9b758151175ed854496585c"
+    },
+    {
+      "expected_checksum": "compile-first/tiny/v1",
+      "name": "tiny",
+      "payload_declarations": 16,
+      "relative_path": "anchors/tiny.js",
+      "source_bytes": 421,
+      "source_sha256": "2826a8cc9140fc70bda32f74b8e155bc0bee45e42c4c4dc5f50ca13197f4df84"
+    },
+    {
+      "expected_checksum": "compile-first/linear-10k/v1",
+      "name": "linear-10k",
+      "payload_declarations": 466,
+      "relative_path": "anchors/linear-10k.js",
+      "source_bytes": 10243,
+      "source_sha256": "2f2d1d290f03a270267a6a99032359c53cb7dd5c06c23e389be13222e97207a6"
+    },
+    {
+      "expected_checksum": "compile-first/linear-100k/v1",
+      "name": "linear-100k",
+      "payload_declarations": 4496,
+      "relative_path": "anchors/linear-100k.js",
+      "source_bytes": 102400,
+      "source_sha256": "661287f231b9f9a3096c495beeabd9ac7c06a01d814e7e20642ed0006408d180"
+    }
+  ],
+  "encoding": "ASCII",
+  "generator": "generate_anchors.py",
+  "line_endings": "LF",
+  "padding": "none",
+  "schema_version": 1,
+  "shape": "One uncalled function with linearly many fixed-width local const declarations, plus a constant-work global run() checksum function."
+}

@@ -1605,13 +1605,13 @@ pub const Machine = struct {
         // `local_buf = alloca(alloca_size)` (17846); the VM stack arena is
         // zjs's C stack. Warm arm first: one `carveActiveMarked` snapshot
         // yields the watermark and the window behind a single capacity branch
-        // (the oversized-frame bound is subsumed — used never exceeds
-        // chunk_slots), and `entry.arena_mark` is published only after the
-        // carve, so LLVM no longer reloads chunk_count/active/used across a
-        // may-alias Entry store the way the previous mark()+carve() pair did.
-        // A miss is pure (arena untouched); the authoritative carve below
-        // keeps chunk switching and first use, with heap fallback only when
-        // the arena is exhausted.
+        // against the active chunk's actual length (4 KiB for the compact
+        // first chunk, chunk_slots thereafter), and `entry.arena_mark` is
+        // published only after the carve, so LLVM no longer reloads
+        // chunk_count/active/used across a may-alias Entry store the way the
+        // previous mark()+carve() pair did. A miss is pure (arena untouched);
+        // the authoritative carve below keeps chunk switching and first use,
+        // with heap fallback only when the arena is exhausted.
         var storage_on_heap = false;
         const slab_values = if (rt.vm_stack.carveActiveMarked(total)) |active_carve| blk: {
             entry.arena_mark = active_carve.mark;

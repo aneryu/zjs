@@ -532,9 +532,10 @@ fn createBytecodeFunctionObjectInternal(
     try object.setFunctionBytecodeValue(ctx.runtime, owned_bytecode);
     try attachFunctionCaptures(ctx, global, fb, object, capture_source);
 
-    // qjs js_closure2 publishes ordinary function properties only after the
-    // complete capture array is live. zjs propagates property OOM and tears the
-    // still-unexposed object down, rather than copying qjs's void-helper quirk.
+    // qjs js_closure publishes ordinary function properties only after
+    // js_closure2 has attached the complete capture array. zjs propagates
+    // property OOM and tears the still-unexposed object down, rather than
+    // copying qjs's void-helper quirk.
     const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
         fb.func_name
     else
@@ -549,7 +550,7 @@ fn createBytecodeFunctionObjectInternal(
     return object.value();
 }
 
-/// qjs `js_closure2` installs the generic function prototype policy. Class
+/// qjs `js_closure` installs the generic function prototype policy. Class
 /// constructors bypass this helper: OP_define_class creates their prototype
 /// and constructor backlink explicitly.
 fn installOrdinaryFunctionPrototype(

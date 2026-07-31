@@ -9,9 +9,13 @@ particular toolchain's codegen.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parent.parent / "compare_symbol_disassembly.py"
 _spec = importlib.util.spec_from_file_location("csd", MODULE_PATH)
@@ -49,6 +53,57 @@ def identity_of(lines: list[str]) -> dict:
         "symbols": symbols,
         "global_normalized_signature": csd.global_signature(symbols),
     }
+
+
+def write_macho64(path: Path, text: bytes) -> None:
+    """Write the smallest thin Mach-O needed to exercise section extraction."""
+    header_format = "<IiiIIIII"
+    segment_format = "<II16sQQQQiiII"
+    section_format = "<16s16sQQIIIIIIII"
+    command_size = struct.calcsize(segment_format) + struct.calcsize(section_format)
+    text_offset = struct.calcsize(header_format) + command_size
+    file_size = text_offset + len(text)
+    header = struct.pack(
+        header_format,
+        0xFEEDFACF,
+        0x0100000C,
+        0,
+        2,
+        1,
+        command_size,
+        0,
+        0,
+    )
+    segment = struct.pack(
+        segment_format,
+        csd.LC_SEGMENT_64,
+        command_size,
+        b"__TEXT",
+        0x100000000,
+        file_size,
+        0,
+        file_size,
+        5,
+        5,
+        1,
+        0,
+    )
+    section = struct.pack(
+        section_format,
+        b"__text",
+        b"__TEXT",
+        0x100000000 + text_offset,
+        len(text),
+        text_offset,
+        2,
+        0,
+        0,
+        0x80000400,
+        0,
+        0,
+        0,
+    )
+    path.write_bytes(header + segment + section + text)
 
 
 class ComparatorContract(unittest.TestCase):
@@ -121,6 +176,73 @@ class ComparatorContract(unittest.TestCase):
                 disassembly(["0000000000400000 <hot>:", "  this is not disassembly"])
             )
 
+    def test_empty_disassembly_fails_closed_in_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "empty"
+            write_macho64(binary, b"\x00\x00\x00\x00")
+            empty = subprocess_result(
+                ["objdump"], "\nempty:\tfile format mach-o arm64\n"
+            )
+            with mock.patch.object(csd.subprocess, "run", return_value=empty):
+                with self.assertRaisesRegex(
+                    csd.ParseError, "disassembly produced no symbols"
+                ):
+                    csd.identity(binary)
+
+    def test_macho_text_hash_reads_section_without_objcopy(self) -> None:
+        text = bytes.fromhex("f85fbca9c0035fd6")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "thin-macho"
+            write_macho64(binary, text)
+            with mock.patch.object(
+                csd.subprocess,
+                "run",
+                side_effect=AssertionError("Mach-O must not invoke objcopy"),
+            ):
+                self.assertEqual(
+                    csd.text_sha256(binary),
+                    hashlib.sha256(text).hexdigest(),
+                )
+
+    def test_elf_text_hash_keeps_objcopy_failure_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "elf"
+            binary.write_bytes(csd.ELF_MAGIC + b"\x00" * 32)
+            with mock.patch.object(
+                csd.subprocess,
+                "run",
+                side_effect=FileNotFoundError("objcopy unavailable"),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    csd.text_sha256(binary)
+
+    def test_macho_identity_requests_native_text_section(self) -> None:
+        text = bytes.fromhex("c0035fd6")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "thin-macho"
+            write_macho64(binary, text)
+            objdump = subprocess_result(
+                ["objdump"],
+                "\n"
+                f"{binary}:\tfile format mach-o arm64\n"
+                "\nDisassembly of section __TEXT,__text:\n\n"
+                "00000001000000b8 <_hot>:\n"
+                "1000000b8: d65f03c0    \tret\n",
+            )
+            def run(command: list[str], **_: object) -> object:
+                if command[0] == "objdump":
+                    self.assertIn("--section=__text", command)
+                    return objdump
+                raise AssertionError(command)
+
+            with mock.patch.object(csd.subprocess, "run", side_effect=run):
+                result = csd.identity(binary)
+            self.assertEqual(set(result["symbols"]), {"_hot"})
+            self.assertEqual(result["symbols"]["_hot"]["size"], 4)
+            self.assertEqual(
+                result["text_sha256"], hashlib.sha256(text).hexdigest()
+            )
+
     def test_global_signature_tracks_body_and_size(self) -> None:
         base = identity_of(symbol("hot", 0x400000, [("d65f03c0", "ret")]))
         same = identity_of(symbol("hot", 0x900000, [("d65f03c0", "ret")]))
@@ -133,6 +255,10 @@ class ComparatorContract(unittest.TestCase):
             base["global_normalized_signature"],
             other["global_normalized_signature"],
         )
+
+
+def subprocess_result(command: list[str], stdout: str) -> object:
+    return csd.subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
 
 if __name__ == "__main__":

@@ -27,6 +27,72 @@ fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
     }
 }
 
+/// Internal diagnostics for the two stable sub-phases inside public
+/// `JSContext.createWithOptions`. The complete public-ready boundary remains
+/// the caller's outer measurement around `createWithOptionsMeasured`.
+pub const ContextCreateTiming = struct {
+    raw_create_ns: u64 = 0,
+    bootstrap_ns: u64 = 0,
+};
+
+fn elapsedNanosSince(start: u64) u64 {
+    const end = monotonicNanos();
+    return if (end > start) end - start else 0;
+}
+
+fn monotonicNanos() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+fn initWithOptionsImpl(
+    comptime measure: bool,
+    self: *JSContext,
+    rt: *JSRuntime,
+    options: core.ContextOptions,
+    timing: if (measure) *ContextCreateTiming else void,
+) !void {
+    ensureStandardGlobalsRegistered(rt);
+    // Public construction completes intrinsic bootstrap before publication.
+    // That bootstrap may run GC and tune its next threshold; preserve the
+    // embedder's configured Runtime threshold across this formerly-lazy
+    // construction boundary.
+    const gc_threshold = rt.gcThreshold();
+    defer rt.setGCThreshold(gc_threshold);
+
+    const raw_create_start = if (measure) monotonicNanos() else {};
+    self.* = .{ .core = try core.JSContext.createConstructingWithOptions(rt, options) };
+    errdefer self.core.destroy();
+    if (measure) timing.raw_create_ns += elapsedNanosSince(raw_create_start);
+
+    const bootstrap_start = if (measure) monotonicNanos() else {};
+    _ = try self.core.globalObject();
+    if (measure) timing.bootstrap_ns += elapsedNanosSince(bootstrap_start);
+}
+
+fn createWithOptionsImpl(
+    comptime measure: bool,
+    rt: *JSRuntime,
+    options: core.ContextOptions,
+    timing: if (measure) *ContextCreateTiming else void,
+) !*JSContext {
+    const ctx = try rt.memory.create(JSContext);
+    errdefer rt.memory.destroy(JSContext, ctx);
+    try initWithOptionsImpl(measure, ctx, rt, options, timing);
+    return ctx;
+}
+
+/// Internal measurement entry. It executes the exact public constructor
+/// implementation; only the two requested monotonic-clock reads are added.
+pub fn createWithOptionsMeasured(
+    rt: *JSRuntime,
+    options: core.ContextOptions,
+    timing: *ContextCreateTiming,
+) !*JSContext {
+    return createWithOptionsImpl(true, rt, options, timing);
+}
+
 pub const JSContext = struct {
     /// Stable heap identity; this pointer owns the initial RealmRef returned by
     /// `core.JSContext.createConstructingWithOptions` until `deinit`/`destroy`.
@@ -43,28 +109,11 @@ pub const JSContext = struct {
     }
 
     pub fn createWithOptions(rt: *JSRuntime, options: core.ContextOptions) !*JSContext {
-        const ctx = try rt.memory.create(JSContext);
-        errdefer rt.memory.destroy(JSContext, ctx);
-        ensureStandardGlobalsRegistered(rt);
-        // Public construction now completes intrinsic bootstrap before
-        // publication. That bootstrap may run GC and tune its next threshold;
-        // preserve the embedder's configured Runtime threshold across this
-        // formerly-lazy construction boundary.
-        const gc_threshold = rt.gcThreshold();
-        defer rt.setGCThreshold(gc_threshold);
-        ctx.core = try core.JSContext.createConstructingWithOptions(rt, options);
-        errdefer ctx.core.destroy();
-        _ = try ctx.core.globalObject();
-        return ctx;
+        return createWithOptionsImpl(false, rt, options, {});
     }
 
     pub fn init(self: *JSContext, rt: *JSRuntime, options: core.ContextOptions) !void {
-        ensureStandardGlobalsRegistered(rt);
-        const gc_threshold = rt.gcThreshold();
-        defer rt.setGCThreshold(gc_threshold);
-        self.* = .{ .core = try core.JSContext.createConstructingWithOptions(rt, options) };
-        errdefer self.core.destroy();
-        _ = try self.core.globalObject();
+        return initWithOptionsImpl(false, self, rt, options, {});
     }
 
     pub fn deinit(self: *JSContext) void {

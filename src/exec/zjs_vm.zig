@@ -82,7 +82,6 @@ pub fn runWithOutput(
             .var_refs = root_function_object.functionCaptures(),
             .output = output,
             .global = global_object,
-            .break_var_ref_cycles_on_exit = true,
             .strict_unresolved_get_var = function.isStrictMode(),
             .current_function_value = root_function_value,
             .direct_eval_vars_reach_global = true,

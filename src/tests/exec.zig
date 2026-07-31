@@ -9962,9 +9962,19 @@ test "Engine direct eval Annex B block function updates same-name parameter" {
     try std.testing.expectEqualStrings("123\nfunction\nundefined\n", stream.buffered());
 }
 
-test "Engine eval exit releases frame var-ref cycles before cycle collection" {
+test "Engine eval exit leaves closed var-ref cycles for explicit collection" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
+
+    const old_threshold = js.runtime.gcThreshold();
+    js.runtime.setGCThreshold(std.math.maxInt(usize));
+    defer js.runtime.setGCThreshold(old_threshold);
+
+    const warmup = try js.eval(";");
+    warmup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_live_objects = js.runtime.gc.liveCount();
+    const baseline_major_gc_count = js.runtime.gcStats().major_gc_count;
 
     const result = try js.eval(
         \\{
@@ -9973,6 +9983,10 @@ test "Engine eval exit releases frame var-ref cycles before cycle collection" {
     );
     result.free(js.runtime);
 
+    try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
+    try std.testing.expect(js.runtime.gc.liveCount() > baseline_live_objects);
+    try std.testing.expect(js.runtime.runObjectCycleRemoval() > 0);
+    try std.testing.expectEqual(baseline_live_objects, js.runtime.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), js.runtime.runObjectCycleRemoval());
 }
 
@@ -10683,6 +10697,73 @@ test "job queue symbol roots preserve weak map values" {
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expectEqual(@as(usize, 0), weak_map.weakCollectionEntries().len);
+}
+
+test "ordinary script entry points do not run full-heap cycle collection on exit" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const old_threshold = js.runtime.gcThreshold();
+    js.runtime.setGCThreshold(std.math.maxInt(usize));
+    defer js.runtime.setGCThreshold(old_threshold);
+
+    const baseline_major_gc_count = js.runtime.gcStats().major_gc_count;
+
+    // The direct-eval closure escapes the ordinary root through the global,
+    // then remains callable after that root Frame has closed its open VarRefs.
+    // This also pins the escaping/global/direct-eval ownership paths covered in
+    // more detail by "Engine direct eval shares top-level lexical cells across
+    // nested closures" and "escaped closure keeps its compile realm after
+    // facade destruction".
+    const ordinary = try js.eval(
+        \\globalThis.__evalExitClosure = (function () {
+        \\  let value = 40;
+        \\  return eval("() => ++value");
+        \\})();
+    );
+    ordinary.free(js.runtime);
+    try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
+
+    const escaped = try js.eval(
+        \\assert.sameValue(globalThis.__evalExitClosure(), 41);
+        \\delete globalThis.__evalExitClosure;
+    );
+    escaped.free(js.runtime);
+    try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
+
+    var context = zjs.JSContext.borrowCore(js.context);
+    const host_eval_script = try context.evalScriptSource(
+        "globalThis.__hostEvalExitProbe = 7; __hostEvalExitProbe",
+        .{ .filename = "no-exit-cycle-host-eval-script.js" },
+    );
+    try std.testing.expectEqual(@as(?i32, 7), host_eval_script.asInt32());
+    host_eval_script.free(js.runtime);
+    try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
+
+    const indirect = try js.eval(
+        \\(0, eval)("globalThis.__indirectEvalExitProbe = 9");
+        \\assert.sameValue(globalThis.__indirectEvalExitProbe, 9);
+        \\delete globalThis.__indirectEvalExitProbe;
+        \\delete globalThis.__hostEvalExitProbe;
+    );
+    indirect.free(js.runtime);
+    try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
+
+    // The public canonical-FB execution arm has no eval_entry/call wrapper.
+    // Exercise it independently so its former exit collection cannot regress.
+    var compiled = try engine.parser.compile(
+        .{ .realm = js.context },
+        "1 + 2",
+        .{ .mode = .script, .filename = "no-exit-cycle-run-with-output.js", .return_completion = true },
+    );
+    defer compiled.deinit();
+    const function = compiled.functionBytecode() orelse return error.TestExpectedEqual;
+    var stack = engine.exec.stack.Stack.init(&js.runtime.memory, js.context.stackLimit());
+    defer stack.deinit(js.runtime);
+    const canonical = try engine.exec.zjs_vm.runWithOutput(js.context, &stack, function, null);
+    try std.testing.expectEqual(@as(?i32, 3), canonical.asInt32());
+    canonical.free(js.runtime);
+    try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
 }
 
 test "Engine eval executes simple variable assignment and print" {
