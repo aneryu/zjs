@@ -1,0 +1,2168 @@
+{
+  "line": "P7-80",
+  "title": "string/URI decode attribution",
+  "date": "2026-07-31",
+  "baseline": "89fa82d5",
+  "quickjs": {
+    "commit": "04be2460",
+    "version": "2026-06-04"
+  },
+  "verdict": "Decision:\n    benchmark name is misleading;\n    URI decode is not the dominant cost;\n    residual string-construction cost is distributed;\n    no one-cut.",
+  "srcDiffAgainstBaseline": "empty",
+  "meta": {
+    "branch": "perf/qjs-align-p7-80-uri-attribution",
+    "toolCommit": "6884d9fdf8a94ecdf670c252af6cc6bcca5faacb",
+    "binaries": {
+      "zjs-A": {
+        "path": ".build-a/out/bin/zjs",
+        "sha256": "b4258dfc57f6836845ed2d706cfc5b9e0b46b63e943fed380ca7eb75597d867a"
+      },
+      "zjs-B": {
+        "path": ".build-b/out/bin/zjs",
+        "sha256": "7fca97a882d593a2095599cf68a15a9f722454ae21873769de65519e3ec61c7b"
+      },
+      "qjs-A": {
+        "path": "/home/aneryu/quickjs/qjs",
+        "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d"
+      },
+      "qjs-B": {
+        "path": "/home/aneryu/quickjs-zjs-ref/qjs",
+        "sha256": "5e331bf92e236c8e2c3bd88032b3c1ec2c2e9e0cfe2e1bd40b4ce2bbeaacd365"
+      }
+    },
+    "buildInstancesByteIdentical": false,
+    "noiseRuler": "none this round; the four build combinations agree to 0.28% on the suite geomean and to <=0.125 ms on every ladder rung gap",
+    "sampling": {
+      "cpu": 19,
+      "pmu": "armv8_pmuv3_1",
+      "iters": 8,
+      "warmup": 4,
+      "order": "ABBA per sample",
+      "combinations": [
+        "r2-zjsA-qjsA",
+        "r2-zjsA-qjsB",
+        "r2-zjsB-qjsA",
+        "r2-zjsB-qjsB"
+      ]
+    },
+    "validatorVerdicts": {
+      "r2-zjsA-qjsA": {
+        "complete": true,
+        "headline": 1.2326148550034315,
+        "policy": {
+          "policy_id": "qjs-align-p7-70-whole-process-measurement",
+          "policy_version": 1,
+          "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+          "path": "/home/aneryu/worktrees/zjs-p7-80-uri/tools/compare/measurement_policy.json"
+        }
+      },
+      "r2-zjsA-qjsB": {
+        "complete": true,
+        "headline": 1.2344780214403177,
+        "policy": {
+          "policy_id": "qjs-align-p7-70-whole-process-measurement",
+          "policy_version": 1,
+          "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+          "path": "/home/aneryu/worktrees/zjs-p7-80-uri/tools/compare/measurement_policy.json"
+        }
+      },
+      "r2-zjsB-qjsA": {
+        "complete": true,
+        "headline": 1.234352376807555,
+        "policy": {
+          "policy_id": "qjs-align-p7-70-whole-process-measurement",
+          "policy_version": 1,
+          "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+          "path": "/home/aneryu/worktrees/zjs-p7-80-uri/tools/compare/measurement_policy.json"
+        }
+      },
+      "r2-zjsB-qjsB": {
+        "complete": true,
+        "headline": 1.2359546939953394,
+        "policy": {
+          "policy_id": "qjs-align-p7-70-whole-process-measurement",
+          "policy_version": 1,
+          "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+          "path": "/home/aneryu/worktrees/zjs-p7-80-uri/tools/compare/measurement_policy.json"
+        }
+      }
+    }
+  },
+  "headline": {
+    "case": "p780_L3_full",
+    "identicalTo": "uri_decode_4byte",
+    "sourceSha256": "2b84f8b0dc7c3626cc7240486563560d56eb8daa71d5029857d6ec8961f4e298",
+    "p7_70Reference": {
+      "absoluteDeltaMs": 4.047,
+      "pairedRatio": 1.285
+    },
+    "reproduced": {
+      "absoluteDeltaMs": 4.0664,
+      "pairedRatioPerCombination": [
+        1.2916,
+        1.289,
+        1.2883,
+        1.2906
+      ]
+    }
+  },
+  "ladder": [
+    {
+      "stage": "loop nest and integer arithmetic",
+      "expression": "p780_L0_skeleton",
+      "qjsMs": 3.5863,
+      "zjsMs": 4.0136,
+      "gapMs": 0.4273,
+      "gapSpreadAcrossBuildCombinations": 0.1243,
+      "qjsNsPerIteration": 54.72,
+      "zjsNsPerIteration": 61.24,
+      "gapNsPerIteration": 6.52
+    },
+    {
+      "stage": "string building (whole)",
+      "expression": "p780_L1_build - p780_L0_skeleton",
+      "qjsMs": 5.6144,
+      "zjsMs": 7.5151,
+      "gapMs": 1.9007,
+      "gapSpreadAcrossBuildCombinations": 0.1227,
+      "qjsNsPerIteration": 85.67,
+      "zjsNsPerIteration": 114.67,
+      "gapNsPerIteration": 29
+    },
+    {
+      "stage": "decodeURI",
+      "expression": "p780_L2_decode - p780_L1_build",
+      "qjsMs": 2.6106,
+      "zjsMs": 3.7732,
+      "gapMs": 1.1626,
+      "gapSpreadAcrossBuildCombinations": 0.0415,
+      "qjsNsPerIteration": 39.83,
+      "zjsNsPerIteration": 57.57,
+      "gapNsPerIteration": 17.74
+    },
+    {
+      "stage": "String.fromCharCode + string equality",
+      "expression": "p780_L3_full - p780_L2_decode",
+      "qjsMs": 2.2346,
+      "zjsMs": 2.8103,
+      "gapMs": 0.5757,
+      "gapSpreadAcrossBuildCombinations": 0.0517,
+      "qjsNsPerIteration": 34.1,
+      "zjsNsPerIteration": 42.88,
+      "gapNsPerIteration": 8.78
+    },
+    {
+      "stage": "decode + fromCharCode + equality (whole)",
+      "expression": "p780_L3_full - p780_L1_build",
+      "qjsMs": 4.8451,
+      "zjsMs": 6.5835,
+      "gapMs": 1.7383,
+      "gapSpreadAcrossBuildCombinations": 0.0402,
+      "qjsNsPerIteration": 73.93,
+      "zjsNsPerIteration": 100.46,
+      "gapNsPerIteration": 26.52
+    },
+    {
+      "stage": "full case",
+      "expression": "p780_L3_full",
+      "qjsMs": 14.0458,
+      "zjsMs": 18.1122,
+      "gapMs": 4.0664,
+      "gapSpreadAcrossBuildCombinations": 0.0361,
+      "qjsNsPerIteration": 214.32,
+      "zjsNsPerIteration": 276.37,
+      "gapNsPerIteration": 62.05
+    },
+    {
+      "stage": "full component case",
+      "expression": "p780_L3c_full",
+      "qjsMs": 14.0571,
+      "zjsMs": 18.13,
+      "gapMs": 4.0728,
+      "gapSpreadAcrossBuildCombinations": 0.1024,
+      "qjsNsPerIteration": 214.49,
+      "zjsNsPerIteration": 276.64,
+      "gapNsPerIteration": 62.15
+    }
+  ],
+  "stringBuildingSubLadder": [
+    {
+      "stage": "helper call + constant string",
+      "expression": "p780_B0_call - p780_L0_skeleton",
+      "qjsMs": 1.1955,
+      "zjsMs": 1.5227,
+      "gapMs": 0.3272,
+      "gapSpreadAcrossBuildCombinations": 0.1298,
+      "qjsNsPerIteration": 18.24,
+      "zjsNsPerIteration": 23.23,
+      "gapNsPerIteration": 4.99
+    },
+    {
+      "stage": "two string index reads",
+      "expression": "p780_B1_index - p780_B0_call",
+      "qjsMs": 1.9393,
+      "zjsMs": 2.1699,
+      "gapMs": 0.2307,
+      "gapSpreadAcrossBuildCombinations": 0.0378,
+      "qjsNsPerIteration": 29.59,
+      "zjsNsPerIteration": 33.11,
+      "gapNsPerIteration": 3.52
+    },
+    {
+      "stage": "two short concatenations \"%\" + c + c",
+      "expression": "p780_B2_hexconcat - p780_B1_index",
+      "qjsMs": 1.1976,
+      "zjsMs": 1.5863,
+      "gapMs": 0.3887,
+      "gapSpreadAcrossBuildCombinations": 0.0922,
+      "qjsNsPerIteration": 18.27,
+      "zjsNsPerIteration": 24.21,
+      "gapNsPerIteration": 5.93
+    },
+    {
+      "stage": "outer 9 + 3 concatenation (hoisted operands)",
+      "expression": "p780_B3_outerconcat - p780_L0_skeleton",
+      "qjsMs": 1.273,
+      "zjsMs": 2.1636,
+      "gapMs": 0.8906,
+      "gapSpreadAcrossBuildCombinations": 0.1425,
+      "qjsNsPerIteration": 19.43,
+      "zjsNsPerIteration": 33.01,
+      "gapNsPerIteration": 13.59
+    }
+  ],
+  "cases": {
+    "p780_L0_skeleton": {
+      "notes": "Loop nest and integer arithmetic only; no string is created. Floor for every other rung. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "692758b645337885f1215a5f0fb45d8991070d55c655435ee375ee45e2ba0862",
+      "qjsMedianMs": 3.5863,
+      "zjsMedianMs": 4.0136,
+      "gapMs": 0.4273,
+      "pairedMedianPerCombination": [
+        1.1344,
+        1.1025,
+        1.133,
+        1.1252
+      ],
+      "pairedMedianSpread": 0.0319,
+      "qjsIqrMs": 0.0398,
+      "zjsIqrMs": 0.0679,
+      "round1PairedMedian": [
+        1.1195,
+        1.1247,
+        1.1085,
+        1.1106
+      ]
+    },
+    "p780_L1_build": {
+      "notes": "Adds the helper call, two string index reads and three concatenations; the built string is consumed by .length only. L1 - L0 is the string-building half. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "b0e8c1fea690c364875da8133aa7df91ecdb84d52581130aa2ada326917a2fea",
+      "qjsMedianMs": 9.2007,
+      "zjsMedianMs": 11.5287,
+      "gapMs": 2.3281,
+      "pairedMedianPerCombination": [
+        1.2536,
+        1.2541,
+        1.2531,
+        1.2547
+      ],
+      "pairedMedianSpread": 0.0016,
+      "qjsIqrMs": 0.0387,
+      "zjsIqrMs": 0.0341,
+      "round1PairedMedian": [
+        1.256,
+        1.2538,
+        1.2607,
+        1.2527
+      ]
+    },
+    "p780_L1f_build_flat": {
+      "notes": "Same as L1 but consumes the built string with charCodeAt(11), which forces a rope-backed result to flatten. L1f - L1 isolates any deferred flatten cost. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "e58b087ea74db819e4a0b5440c56c75b387a672ec9b37617f200a758716cc3b3",
+      "qjsMedianMs": 10.2546,
+      "zjsMedianMs": 13.1812,
+      "gapMs": 2.9266,
+      "pairedMedianPerCombination": [
+        1.2861,
+        1.2801,
+        1.2857,
+        1.2855
+      ],
+      "pairedMedianSpread": 0.006,
+      "qjsIqrMs": 0.0549,
+      "zjsIqrMs": 0.0514,
+      "round1PairedMedian": [
+        1.286,
+        1.2833,
+        1.2857,
+        1.284
+      ]
+    },
+    "p780_L2_decode": {
+      "notes": "Adds decodeURI over the built 12-byte string, consumed by .length. L2 - L1 is the decode half in isolation. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "35eb0802e3965eb66ca88cfa0141cbb4cce2a2a7c3dd52f630c44830162afdba",
+      "qjsMedianMs": 11.8112,
+      "zjsMedianMs": 15.3019,
+      "gapMs": 3.4907,
+      "pairedMedianPerCombination": [
+        1.2978,
+        1.296,
+        1.2961,
+        1.293
+      ],
+      "pairedMedianSpread": 0.0048,
+      "qjsIqrMs": 0.0414,
+      "zjsIqrMs": 0.0632,
+      "round1PairedMedian": [
+        1.2974,
+        1.2989,
+        1.2958,
+        1.3023
+      ]
+    },
+    "p780_L2s_fromcharcode": {
+      "notes": "Adds String.fromCharCode(H, L) instead of decodeURI, consumed by .length. L2s - L1 is the fromCharCode half in isolation. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "1be2f22cac69d8ba9af8fdd47cc235f9c4cc3a9c496ed314904c56717eba44fa",
+      "qjsMedianMs": 11.6648,
+      "zjsMedianMs": 15.0516,
+      "gapMs": 3.3868,
+      "pairedMedianPerCombination": [
+        1.2921,
+        1.2911,
+        1.2891,
+        1.29
+      ],
+      "pairedMedianSpread": 0.003,
+      "qjsIqrMs": 0.0318,
+      "zjsIqrMs": 0.0646,
+      "round1PairedMedian": [
+        1.2869,
+        1.2891,
+        1.2935,
+        1.2903
+      ]
+    },
+    "p780_L3_full": {
+      "notes": "The historical uri_decode_4byte source verbatim; its sourceSha256 must equal the historical case. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "2b84f8b0dc7c3626cc7240486563560d56eb8daa71d5029857d6ec8961f4e298",
+      "qjsMedianMs": 14.0458,
+      "zjsMedianMs": 18.1122,
+      "gapMs": 4.0664,
+      "pairedMedianPerCombination": [
+        1.2916,
+        1.289,
+        1.2883,
+        1.2906
+      ],
+      "pairedMedianSpread": 0.0033,
+      "qjsIqrMs": 0.0345,
+      "zjsIqrMs": 0.1054,
+      "round1PairedMedian": [
+        1.2932,
+        1.2864,
+        1.2891,
+        1.2894
+      ]
+    },
+    "p780_L3c_full": {
+      "notes": "The historical uri_component_decode_4byte source verbatim. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "0d931f0e6b08852c84729930eb0e2084b9b263f77b8e04fb00b632164fb572b9",
+      "qjsMedianMs": 14.0571,
+      "zjsMedianMs": 18.13,
+      "gapMs": 4.0728,
+      "pairedMedianPerCombination": [
+        1.2897,
+        1.2887,
+        1.2858,
+        1.293
+      ],
+      "pairedMedianSpread": 0.0072,
+      "qjsIqrMs": 0.066,
+      "zjsIqrMs": 0.0726,
+      "round1PairedMedian": [
+        1.2904,
+        1.2897,
+        1.2876,
+        1.288
+      ]
+    },
+    "p780_B0_call": {
+      "notes": "The helper is called twice per middle-loop trip and once per inner trip but returns a hoisted constant: isolates call plus constant-string materialization from indexing and concatenation. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "5675b99675fb3c5be2ac33345d5b3977625d627e4576cc4ebce7014f1cf05c02",
+      "qjsMedianMs": 4.7818,
+      "zjsMedianMs": 5.5363,
+      "gapMs": 0.7545,
+      "pairedMedianPerCombination": [
+        1.1656,
+        1.1587,
+        1.153,
+        1.1561
+      ],
+      "pairedMedianSpread": 0.0126,
+      "qjsIqrMs": 0.0218,
+      "zjsIqrMs": 0.0674,
+      "round1PairedMedian": [
+        1.1569,
+        1.1547,
+        1.1555,
+        1.1553
+      ]
+    },
+    "p780_B1_index": {
+      "notes": "B1 - B0 is the cost of the two single-character string index reads per inner iteration. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "d185990784f3a35e427cffaced3d1516fe7e2ea2f7e9988bede6cce29f79114e",
+      "qjsMedianMs": 6.721,
+      "zjsMedianMs": 7.7062,
+      "gapMs": 0.9852,
+      "pairedMedianPerCombination": [
+        1.15,
+        1.1431,
+        1.1461,
+        1.14
+      ],
+      "pairedMedianSpread": 0.01,
+      "qjsIqrMs": 0.0288,
+      "zjsIqrMs": 0.0597,
+      "round1PairedMedian": [
+        1.1468,
+        1.1466,
+        1.144,
+        1.1483
+      ]
+    },
+    "p780_B2_hexconcat": {
+      "notes": "The full decimalToPercentHexString, consumed by .length. B2 - B1 is the two short concatenations that build \"%XX\". Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "bae780d49fdbc34fa987abaebd08658f00ae826b63980eac8e93bd0efd138717",
+      "qjsMedianMs": 7.9187,
+      "zjsMedianMs": 9.2926,
+      "gapMs": 1.3739,
+      "pairedMedianPerCombination": [
+        1.1734,
+        1.1715,
+        1.1764,
+        1.1722
+      ],
+      "pairedMedianSpread": 0.0049,
+      "qjsIqrMs": 0.0401,
+      "zjsIqrMs": 0.0488,
+      "round1PairedMedian": [
+        1.18,
+        1.178,
+        1.1803,
+        1.1786
+      ]
+    },
+    "p780_B3_outerconcat": {
+      "notes": "Concatenates a hoisted 9-character string with a hoisted 3-character string. Isolates the 12-character result allocation from everything upstream. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "fd1350af98ff900123493876dc02123e2bd63fca6827bf29c51fcd686dc71ac9",
+      "qjsMedianMs": 4.8593,
+      "zjsMedianMs": 6.1772,
+      "gapMs": 1.3179,
+      "pairedMedianPerCombination": [
+        1.265,
+        1.2703,
+        1.2748,
+        1.2728
+      ],
+      "pairedMedianSpread": 0.0098,
+      "qjsIqrMs": 0.021,
+      "zjsIqrMs": 0.0234,
+      "round1PairedMedian": [
+        1.2669,
+        1.2792,
+        1.2754,
+        1.2764
+      ]
+    },
+    "p780_L4_decode_only": {
+      "notes": "Precomputes the 4096 distinct inputs and their expected results once, then runs the historical 65536 decode/fromCharCode/equality triples with zero per-iteration string building. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "5647ab64502618aaeabc26e6d3c1df25ef32153087efcbc5ff4fa9810d56f79b",
+      "qjsMedianMs": 7.6647,
+      "zjsMedianMs": 9.3124,
+      "gapMs": 1.6477,
+      "pairedMedianPerCombination": [
+        1.216,
+        1.2127,
+        1.215,
+        1.2121
+      ],
+      "pairedMedianSpread": 0.0039,
+      "qjsIqrMs": 0.072,
+      "zjsIqrMs": 0.0525,
+      "round1PairedMedian": [
+        1.2111,
+        1.209,
+        1.2117,
+        1.2122
+      ]
+    },
+    "p780_L4b_arrays_only": {
+      "notes": "The L4 setup and loop nest with the decode/fromCharCode/equality triple replaced by the three array reads it needs. L4 - L4b is decode + fromCharCode + equality with no string building at all. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "5a9a28da5da9ec3c70a41ce9ee8b0b9c607b363441a47ddd4476237136109023",
+      "qjsMedianMs": 3.5436,
+      "zjsMedianMs": 4.3753,
+      "gapMs": 0.8318,
+      "pairedMedianPerCombination": [
+        1.2372,
+        1.2332,
+        1.23,
+        1.2376
+      ],
+      "pairedMedianSpread": 0.0076,
+      "qjsIqrMs": 0.0221,
+      "zjsIqrMs": 0.0459,
+      "round1PairedMedian": [
+        1.2218,
+        1.2301,
+        1.2373,
+        1.2363
+      ]
+    },
+    "p780_dec_base": {
+      "notes": "65536 trips reading .length of a hoisted 12-byte string; the floor every decode control is measured against. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "eecd6cd75860924e7e0401a04dfb5c215132859cc1c60f152b47852ae2db80a0",
+      "qjsMedianMs": 1.4348,
+      "zjsMedianMs": 1.7645,
+      "gapMs": 0.3297,
+      "pairedMedianPerCombination": [
+        1.2098,
+        1.2294,
+        1.2478,
+        1.2257
+      ],
+      "pairedMedianSpread": 0.0379,
+      "qjsIqrMs": 0.0224,
+      "zjsIqrMs": 0.0306,
+      "round1PairedMedian": [
+        1.2251,
+        1.2195,
+        1.2249,
+        1.2276
+      ]
+    },
+    "p780_dec_plain12": {
+      "notes": "12 input bytes, no percent escape, 12 output characters: scan-dominated, no escape decoding. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "bb81fa249d30ae185aead4e11d3f0dd6feb50e119f5a1ba28934a645cdd2c0fc",
+      "qjsMedianMs": 6.1827,
+      "zjsMedianMs": 3.5343,
+      "gapMs": -2.6484,
+      "pairedMedianPerCombination": [
+        0.5651,
+        0.5736,
+        0.5751,
+        0.5703
+      ],
+      "pairedMedianSpread": 0.01,
+      "qjsIqrMs": 0.1487,
+      "zjsIqrMs": 0.0297,
+      "round1PairedMedian": [
+        0.5678,
+        0.5739,
+        0.5762,
+        0.5816
+      ]
+    },
+    "p780_dec_ascii1": {
+      "notes": "3 input bytes, one ASCII escape, 1 output character. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "0fba4bf59fc4d263af63ff5a76f8e087ee45d2910938f2dd468b843d70f55fac",
+      "qjsMedianMs": 3.298,
+      "zjsMedianMs": 5.2676,
+      "gapMs": 1.9697,
+      "pairedMedianPerCombination": [
+        1.599,
+        1.5968,
+        1.5953,
+        1.5987
+      ],
+      "pairedMedianSpread": 0.0037,
+      "qjsIqrMs": 0.0234,
+      "zjsIqrMs": 0.0227,
+      "round1PairedMedian": [
+        1.5964,
+        1.5983,
+        1.5987,
+        1.6009
+      ]
+    },
+    "p780_dec_ascii4": {
+      "notes": "12 input bytes, four ASCII escapes, 4 narrow output characters. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "22fea03c05f34754832f7da2db7b6b67f3580d861cf4381c4bf9a1646643993b",
+      "qjsMedianMs": 4.7432,
+      "zjsMedianMs": 6.4368,
+      "gapMs": 1.6936,
+      "pairedMedianPerCombination": [
+        1.3569,
+        1.3608,
+        1.3521,
+        1.3592
+      ],
+      "pairedMedianSpread": 0.0087,
+      "qjsIqrMs": 0.0203,
+      "zjsIqrMs": 0.0255,
+      "round1PairedMedian": [
+        1.358,
+        1.3549,
+        1.3517,
+        1.3608
+      ]
+    },
+    "p780_dec_ascii16": {
+      "notes": "48 input bytes, sixteen ASCII escapes, 16 narrow output characters. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "5e113187c3a9f7a8b3827b2b1a463b0a3818da2ba862db64862a6ccbddcdcea1",
+      "qjsMedianMs": 8.6733,
+      "zjsMedianMs": 13.2181,
+      "gapMs": 4.5448,
+      "pairedMedianPerCombination": [
+        1.5194,
+        1.5235,
+        1.5255,
+        1.5294
+      ],
+      "pairedMedianSpread": 0.0101,
+      "qjsIqrMs": 0.0586,
+      "zjsIqrMs": 0.0644,
+      "round1PairedMedian": [
+        1.5187,
+        1.5259,
+        1.5246,
+        1.5231
+      ]
+    },
+    "p780_dec_esc1": {
+      "notes": "12 input bytes, one four-byte UTF-8 escape, 2 wide output units. This is the exact input shape of the historical case. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "d183f8d2db8cf97b88d10f8ce4e62a2da72ec02efd581b31565e1b7329ac02b9",
+      "qjsMedianMs": 3.7235,
+      "zjsMedianMs": 4.0468,
+      "gapMs": 0.3232,
+      "pairedMedianPerCombination": [
+        1.0819,
+        1.0865,
+        1.087,
+        1.0881
+      ],
+      "pairedMedianSpread": 0.0062,
+      "qjsIqrMs": 0.0336,
+      "zjsIqrMs": 0.0315,
+      "round1PairedMedian": [
+        1.0899,
+        1.0921,
+        1.0817,
+        1.0894
+      ]
+    },
+    "p780_dec_esc2": {
+      "notes": "24 input bytes, two four-byte escapes, 4 wide output units. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "0e8d85629862bcc5e3aeda33ca51310aa1cfae90efbfbb3ea2e9b2ea6e4e0cbb",
+      "qjsMedianMs": 5.188,
+      "zjsMedianMs": 6.854,
+      "gapMs": 1.666,
+      "pairedMedianPerCombination": [
+        1.3234,
+        1.3276,
+        1.3179,
+        1.3189
+      ],
+      "pairedMedianSpread": 0.0097,
+      "qjsIqrMs": 0.0451,
+      "zjsIqrMs": 0.03,
+      "round1PairedMedian": [
+        1.3243,
+        1.3173,
+        1.3208,
+        1.3207
+      ]
+    },
+    "p780_dec_esc4": {
+      "notes": "48 input bytes, four four-byte escapes, 8 wide output units. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "45791f591800748e8b6de342a73c655803116bd56e5a6eade78c4a47ed8d6d85",
+      "qjsMedianMs": 7.3542,
+      "zjsMedianMs": 9.1755,
+      "gapMs": 1.8213,
+      "pairedMedianPerCombination": [
+        1.254,
+        1.2488,
+        1.2474,
+        1.2471
+      ],
+      "pairedMedianSpread": 0.0069,
+      "qjsIqrMs": 0.1134,
+      "zjsIqrMs": 0.0389,
+      "round1PairedMedian": [
+        1.2517,
+        1.2515,
+        1.2586,
+        1.24
+      ]
+    },
+    "p780_dec_esc8": {
+      "notes": "96 input bytes, eight four-byte escapes, 16 wide output units. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "d62142dc437859d9ea594c38b3428176fdfafecee23b731910c4b0ef9fe16064",
+      "qjsMedianMs": 11.0375,
+      "zjsMedianMs": 14.073,
+      "gapMs": 3.0355,
+      "pairedMedianPerCombination": [
+        1.2646,
+        1.2789,
+        1.2767,
+        1.2804
+      ],
+      "pairedMedianSpread": 0.0159,
+      "qjsIqrMs": 0.0808,
+      "zjsIqrMs": 0.0229,
+      "round1PairedMedian": [
+        1.2714,
+        1.2669,
+        1.2777,
+        1.2774
+      ]
+    },
+    "p780_deccomp_esc1": {
+      "notes": "decodeURIComponent counterpart of p780_dec_esc1. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "20b9549d07e8ae04d87502888089e7002d41c3d97a5c5c462fad4d7244fca5e6",
+      "qjsMedianMs": 3.7154,
+      "zjsMedianMs": 4.0467,
+      "gapMs": 0.3313,
+      "pairedMedianPerCombination": [
+        1.0879,
+        1.093,
+        1.0886,
+        1.0812
+      ],
+      "pairedMedianSpread": 0.0118,
+      "qjsIqrMs": 0.0302,
+      "zjsIqrMs": 0.0256,
+      "round1PairedMedian": [
+        1.0856,
+        1.0818,
+        1.0822,
+        1.0841
+      ]
+    },
+    "p780_dec_vary_base": {
+      "notes": "65536 trips reading .length of one of 64 precomputed 12-byte inputs; the floor for p780_dec_esc1_vary. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "e7a90de06611c7f9f886ec057a8f57ba274bd06b2097b6e9c7ebc50415803480",
+      "qjsMedianMs": 1.815,
+      "zjsMedianMs": 2.1374,
+      "gapMs": 0.3224,
+      "pairedMedianPerCombination": [
+        1.1687,
+        1.1807,
+        1.1713,
+        1.1935
+      ],
+      "pairedMedianSpread": 0.0248,
+      "qjsIqrMs": 0.0223,
+      "zjsIqrMs": 0.0345,
+      "round1PairedMedian": null
+    },
+    "p780_dec_esc1_vary": {
+      "notes": "65536 decodeURI calls cycling over 64 distinct 12-byte four-byte escapes: the input shape fast path still applies but a result cache keyed on the decoded units cannot hit. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "def879ee2f6e2c84a118cbf223087a6d20dadada3cbd5d607cea6c4bbec32a5a",
+      "qjsMedianMs": 4.1013,
+      "zjsMedianMs": 4.9647,
+      "gapMs": 0.8634,
+      "pairedMedianPerCombination": [
+        1.2056,
+        1.211,
+        1.217,
+        1.2131
+      ],
+      "pairedMedianSpread": 0.0114,
+      "qjsIqrMs": 0.0282,
+      "zjsIqrMs": 0.0265,
+      "round1PairedMedian": null
+    },
+    "p780_dec_3b1": {
+      "notes": "12 input bytes and 2 wide output units, exactly like p780_dec_esc1, but a three-byte escape plus an ASCII escape, so an input shape fast path keyed on a single four-byte escape cannot apply. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "ee444497880cfe10785e31138bf989836fbed8a7320a372ed1e3253c496fc733",
+      "qjsMedianMs": 3.7963,
+      "zjsMedianMs": 6.167,
+      "gapMs": 2.3707,
+      "pairedMedianPerCombination": [
+        1.6253,
+        1.6262,
+        1.6258,
+        1.629
+      ],
+      "pairedMedianSpread": 0.0037,
+      "qjsIqrMs": 0.0184,
+      "zjsIqrMs": 0.0419,
+      "round1PairedMedian": null
+    },
+    "p780_dec_esc1_13": {
+      "notes": "13 input bytes: one four-byte escape plus a literal character, so a length-12 input shape fast path cannot apply. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "b01fa18b29b99bc6562fb134b64bfe107354e892920c02a99cc12e8c6180c3d5",
+      "qjsMedianMs": 4.6124,
+      "zjsMedianMs": 6.2106,
+      "gapMs": 1.5982,
+      "pairedMedianPerCombination": [
+        1.3434,
+        1.3514,
+        1.3486,
+        1.3458
+      ],
+      "pairedMedianSpread": 0.008,
+      "qjsIqrMs": 0.0252,
+      "zjsIqrMs": 0.0173,
+      "round1PairedMedian": null
+    },
+    "p780_B2x_nonhex": {
+      "notes": "Identical in shape to p780_B2_hexconcat but the indexed alphabet is G..V, so a concatenation fast path keyed on the percent-hex-escape shape cannot apply. B2x - B2 is that fast path’s value. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "4510beb134943534cd190f361cd46169d97ebc6534709bf6fa8ce483adaed295",
+      "qjsMedianMs": 7.9341,
+      "zjsMedianMs": 10.2059,
+      "gapMs": 2.2719,
+      "pairedMedianPerCombination": [
+        1.2842,
+        1.2877,
+        1.2877,
+        1.2869
+      ],
+      "pairedMedianSpread": 0.0036,
+      "qjsIqrMs": 0.0228,
+      "zjsIqrMs": 0.0453,
+      "round1PairedMedian": null
+    },
+    "p780_B3f_outerconcat_flat": {
+      "notes": "The 9 + 3 outer concatenation consumed by charCodeAt(11) instead of .length. B3f - B3 exposes any deferred (rope) concatenation cost. Diagnostic only: not part of the 75-case compatibility geomean.",
+      "sourceSha256": "75a02c4bb6326f80fa692788bd3f6a864abaacf9fb2bf51d9ffba599df035f09",
+      "qjsMedianMs": 5.8843,
+      "zjsMedianMs": 7.6959,
+      "gapMs": 1.8117,
+      "pairedMedianPerCombination": [
+        1.3055,
+        1.3108,
+        1.3095,
+        1.3087
+      ],
+      "pairedMedianSpread": 0.0052,
+      "qjsIqrMs": 0.0312,
+      "zjsIqrMs": 0.0357,
+      "round1PairedMedian": null
+    }
+  },
+  "decisionTreeBranch": "A",
+  "decisionTreeEvaluation": {
+    "decode is the dominant cost (>=40%)": {
+      "measured": "24.7% of cycles, 28.6% of wall time",
+      "result": false,
+      "excludes": "branch D"
+    },
+    "the existing URI fusion fires": {
+      "measured": "admission 1.000/iteration, hit 0.992/iteration, miss 0.008 (inside the empty-script floor noise)",
+      "result": true,
+      "excludes": "branch C"
+    },
+    "one string-half mechanism is concentrated (>=40%)": {
+      "measured": "largest is the outer 9+3 concatenation at 21.4%; string indexing plus %XX construction is 23.0%",
+      "result": false,
+      "excludes": "branch B"
+    },
+    "largest single item": {
+      "measured": "24.7% (URI decode itself)",
+      "belowThreshold": true
+    }
+  },
+  "closureTable": {
+    "unit": "cycles per inner iteration, 65536 iterations, PMU counting mode, median of 8 ABBA samples, mean of two build-instance pairs",
+    "rows": [
+      {
+        "stage": "loop nest and integer arithmetic (present in every rung)",
+        "qjs": 208.4,
+        "zjs": 236.6,
+        "gapCycles": 28.3,
+        "shareOfGapPercent": 11.2,
+        "gapInstructions": 41.7
+      },
+      {
+        "stage": "string indexing and \"%XX\" construction",
+        "qjs": 259.2,
+        "zjs": 317.4,
+        "gapCycles": 58.2,
+        "shareOfGapPercent": 23,
+        "gapInstructions": -152.6
+      },
+      {
+        "stage": "the extra concatenation (9 + 3)",
+        "qjs": 78.2,
+        "zjs": 132.4,
+        "gapCycles": 54.2,
+        "shareOfGapPercent": 21.4,
+        "gapInstructions": 151.2
+      },
+      {
+        "stage": "URI decode / fusion",
+        "qjs": 153.9,
+        "zjs": 216.3,
+        "gapCycles": 62.4,
+        "shareOfGapPercent": 24.7,
+        "gapInstructions": 160.7
+      },
+      {
+        "stage": "String.fromCharCode + string comparison",
+        "qjs": 135,
+        "zjs": 176.8,
+        "gapCycles": 41.8,
+        "shareOfGapPercent": 16.5,
+        "gapInstructions": -48.3,
+        "note": "could not be split further: subtracting the standalone fromCharCode rung leaves a -0.484 ms residual because the consuming statements of the three rungs overlap; this cell resolves only to the group"
+      },
+      {
+        "stage": "unattributed",
+        "gapCycles": 7.8,
+        "shareOfGapPercent": 3.1
+      }
+    ],
+    "totalGapCycles": 252.7,
+    "totalGapInstructions": 196.7,
+    "decompositionErrorPercent": 3.1,
+    "acceptableErrorPercent": "10-15 per the line contract"
+  },
+  "phase1EventCountsPerInnerIteration": {
+    "method": "gdb breakpoint hit counts on a reduced 256-iteration workload minus an empty-script floor; no source modification, no compiled-in counter, no change to the measured binary",
+    "validation": "every counter was first proven able to detect its event on a control where the event is known present (probe_miss) before any zero was trusted",
+    "stringIndexReads": {
+      "qjs": 2,
+      "zjs": 2,
+      "evidence": "qjs js_new_string8_len 2.098/iteration; zjs allocates none (single_byte_strings cache)"
+    },
+    "concatenations": {
+      "qjs": 3,
+      "zjs": 3,
+      "evidence": "qjs JS_ConcatStringInPlace 3.047 (1 success) plus JS_ConcatString1 2.031; zjs concatFlatStringBodiesOwned 3.047"
+    },
+    "decodeCalls": {
+      "qjs": 1,
+      "zjs": 1
+    },
+    "fromCharCodeCalls": {
+      "qjs": 1,
+      "zjs": 1
+    },
+    "stringEqualityCount": {
+      "qjs": 1,
+      "zjs": 1,
+      "caveat": "inferred from the source shape; not separately instrumented"
+    },
+    "uriFusionAdmission": {
+      "zjs": 1
+    },
+    "uriFusionHit": {
+      "zjs": 0.992
+    },
+    "uriFusionMiss": {
+      "zjs": 0.008,
+      "caveat": "inside the empty-script floor noise (17 versus 15 absolute hits)"
+    },
+    "resultCacheHitMiss": {
+      "zjs": "1 hit / 2 miss of 3.016 recentTwoUnitString calls"
+    }
+  },
+  "scopeNote": "Phase 2-4 collection had already completed when the line was narrowed to close on Phase 1. The collected, validated data is retained under supportingEvidence rather than discarded; it does not change the verdict and is not part of the closure requirement.",
+  "supportingEvidence": {
+    "allocationTopology": {
+      "meta": {
+        "workload": "reduced uri_decode_4byte, 1 repeat x 4 indexB3 x 64 indexB4 = 256 inner iterations",
+        "baseline": "empty.js (print(0)) subtracted",
+        "method": "gdb breakpoint hit counts, no source modification, no compiled-in counter",
+        "validation": "probe_hit / probe_miss are 256-call decode controls that prove each counter can detect the event before any zero is trusted"
+      },
+      "perInnerIteration": {
+        "zjs": {
+          "allocAlignedBytesNoTrigger": 3.371,
+          "freeAlignedBytes": 3.027,
+          "recentTwoUnitString": 3.016,
+          "singleByteString": 0.066,
+          "createLatin1Concat": 1.016,
+          "createUtf8": 0.008,
+          "decodeAsciiBytes": 1,
+          "concatFlatStringBodiesOwned": 3.047
+        },
+        "qjs": {
+          "js_alloc_string": 6.141,
+          "JS_ConcatString1": 2.031,
+          "JS_ConcatStringInPlace": 3.047,
+          "js_new_string8_len": 2.098,
+          "js_new_string16_len": 0,
+          "string_buffer_end": 2.012,
+          "js_global_decodeURI": 1,
+          "js_string_fromCharCode": 1,
+          "__js_malloc": 6.594,
+          "__js_free": 6.598,
+          "js_realloc2": 2.109
+        }
+      },
+      "raw": {
+        "zjs": {
+          "empty": {
+            "allocAlignedBytesNoTrigger": 162,
+            "freeAlignedBytes": 9,
+            "recentTwoUnitString": 0,
+            "singleByteString": 0,
+            "createLatin1Concat": 0,
+            "createUtf8": 15,
+            "decodeAsciiBytes": 0,
+            "concatFlatStringBodiesOwned": 0
+          },
+          "reduced": {
+            "allocAlignedBytesNoTrigger": 1025,
+            "freeAlignedBytes": 784,
+            "recentTwoUnitString": 772,
+            "singleByteString": 17,
+            "createLatin1Concat": 260,
+            "createUtf8": 17,
+            "decodeAsciiBytes": 256,
+            "concatFlatStringBodiesOwned": 780
+          },
+          "probe_hit": {
+            "allocAlignedBytesNoTrigger": 168,
+            "freeAlignedBytes": 12,
+            "recentTwoUnitString": 256,
+            "singleByteString": 0,
+            "createLatin1Concat": 0,
+            "createUtf8": 16,
+            "decodeAsciiBytes": 256,
+            "concatFlatStringBodiesOwned": 0
+          },
+          "probe_miss": {
+            "allocAlignedBytesNoTrigger": 423,
+            "freeAlignedBytes": 268,
+            "recentTwoUnitString": 0,
+            "singleByteString": 0,
+            "createLatin1Concat": 0,
+            "createUtf8": 272,
+            "decodeAsciiBytes": 256,
+            "concatFlatStringBodiesOwned": 0
+          }
+        },
+        "qjs": {
+          "empty": {
+            "js_alloc_string": 376,
+            "JS_ConcatString1": 0,
+            "JS_ConcatStringInPlace": 0,
+            "js_new_string8_len": 376,
+            "js_new_string16_len": 0,
+            "string_buffer_end": 0,
+            "js_global_decodeURI": 0,
+            "js_string_fromCharCode": 0,
+            "__js_malloc": 1257,
+            "__js_free": 1273,
+            "js_realloc2": 25
+          },
+          "reduced": {
+            "js_alloc_string": 1948,
+            "JS_ConcatString1": 520,
+            "JS_ConcatStringInPlace": 780,
+            "js_new_string8_len": 913,
+            "js_new_string16_len": 0,
+            "string_buffer_end": 515,
+            "js_global_decodeURI": 256,
+            "js_string_fromCharCode": 256,
+            "__js_malloc": 2945,
+            "__js_free": 2962,
+            "js_realloc2": 565
+          },
+          "probe_hit": {
+            "js_alloc_string": 639,
+            "JS_ConcatString1": 0,
+            "JS_ConcatStringInPlace": 0,
+            "js_new_string8_len": 382,
+            "js_new_string16_len": 0,
+            "string_buffer_end": 257,
+            "js_global_decodeURI": 256,
+            "js_string_fromCharCode": 0,
+            "__js_malloc": 1559,
+            "__js_free": 1572,
+            "js_realloc2": 292
+          },
+          "probe_miss": {
+            "js_alloc_string": 639,
+            "JS_ConcatString1": 0,
+            "JS_ConcatStringInPlace": 0,
+            "js_new_string8_len": 382,
+            "js_new_string16_len": 0,
+            "string_buffer_end": 257,
+            "js_global_decodeURI": 256,
+            "js_string_fromCharCode": 0,
+            "__js_malloc": 1559,
+            "__js_free": 1572,
+            "js_realloc2": 292
+          }
+        }
+      },
+      "probeControls": {
+        "zjs": {
+          "probe_hit_256_calls": {
+            "allocAlignedBytesNoTrigger": 168,
+            "freeAlignedBytes": 12,
+            "recentTwoUnitString": 256,
+            "singleByteString": 0,
+            "createLatin1Concat": 0,
+            "createUtf8": 16,
+            "decodeAsciiBytes": 256,
+            "concatFlatStringBodiesOwned": 0
+          },
+          "probe_miss_256_calls": {
+            "allocAlignedBytesNoTrigger": 423,
+            "freeAlignedBytes": 268,
+            "recentTwoUnitString": 0,
+            "singleByteString": 0,
+            "createLatin1Concat": 0,
+            "createUtf8": 272,
+            "decodeAsciiBytes": 256,
+            "concatFlatStringBodiesOwned": 0
+          },
+          "empty": {
+            "allocAlignedBytesNoTrigger": 162,
+            "freeAlignedBytes": 9,
+            "recentTwoUnitString": 0,
+            "singleByteString": 0,
+            "createLatin1Concat": 0,
+            "createUtf8": 15,
+            "decodeAsciiBytes": 0,
+            "concatFlatStringBodiesOwned": 0
+          }
+        }
+      }
+    },
+    "ipcTriangle": {
+      "perOperation": {
+        "p780_L0_skeleton": {
+          "instructionsPerOp": {
+            "qjs": 1105.693,
+            "zjs": 1147.345
+          },
+          "cyclesPerOp": {
+            "qjs": 208.368,
+            "zjs": 236.628
+          },
+          "stall_backendPerOp": {
+            "qjs": 55.695,
+            "zjs": 51.96
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.619,
+            "zjs": 3.206
+          },
+          "l1d_cachePerOp": {
+            "qjs": 401.964,
+            "zjs": 548.765
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.281,
+            "zjs": 0.327
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.06,
+            "zjs": 0.142
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.262,
+            "zjs": 0.361
+          },
+          "ipc": {
+            "qjs": 5.306,
+            "zjs": 4.849
+          },
+          "stall_frontendPerOp": {
+            "qjs": 11.988,
+            "zjs": 22.952
+          },
+          "mem_accessPerOp": {
+            "qjs": 402.342,
+            "zjs": 549.778
+          }
+        },
+        "p780_L1_build": {
+          "instructionsPerOp": {
+            "qjs": 3224.451,
+            "zjs": 3308.737
+          },
+          "cyclesPerOp": {
+            "qjs": 543.795,
+            "zjs": 692.285
+          },
+          "stall_backendPerOp": {
+            "qjs": 152.304,
+            "zjs": 249.513
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 3.659,
+            "zjs": 4.416
+          },
+          "l1d_cachePerOp": {
+            "qjs": 1065.273,
+            "zjs": 1601.076
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.29,
+            "zjs": 0.394
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.075,
+            "zjs": 0.16
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.286,
+            "zjs": 1.054
+          },
+          "ipc": {
+            "qjs": 5.93,
+            "zjs": 4.779
+          },
+          "stall_frontendPerOp": {
+            "qjs": 14.056,
+            "zjs": 31.074
+          },
+          "mem_accessPerOp": {
+            "qjs": 1065.675,
+            "zjs": 1600.842
+          }
+        },
+        "p780_L2_decode": {
+          "instructionsPerOp": {
+            "qjs": 4207.975,
+            "zjs": 4452.929
+          },
+          "cyclesPerOp": {
+            "qjs": 697.722,
+            "zjs": 908.601
+          },
+          "stall_backendPerOp": {
+            "qjs": 175.424,
+            "zjs": 302.447
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 3.135,
+            "zjs": 4.569
+          },
+          "l1d_cachePerOp": {
+            "qjs": 1352.15,
+            "zjs": 2094.26
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.294,
+            "zjs": 0.397
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.072,
+            "zjs": 0.168
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.901,
+            "zjs": 1.013
+          },
+          "ipc": {
+            "qjs": 6.031,
+            "zjs": 4.901
+          },
+          "stall_frontendPerOp": {
+            "qjs": 17.109,
+            "zjs": 42.603
+          },
+          "mem_accessPerOp": {
+            "qjs": 1352.335,
+            "zjs": 2093.686
+          }
+        },
+        "p780_L3_full": {
+          "instructionsPerOp": {
+            "qjs": 4978.514,
+            "zjs": 5175.213
+          },
+          "cyclesPerOp": {
+            "qjs": 832.72,
+            "zjs": 1085.448
+          },
+          "stall_backendPerOp": {
+            "qjs": 213.833,
+            "zjs": 329.204
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 4.285,
+            "zjs": 5.733
+          },
+          "l1d_cachePerOp": {
+            "qjs": 1639.889,
+            "zjs": 2430.367
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.296,
+            "zjs": 0.418
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.086,
+            "zjs": 0.19
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.902,
+            "zjs": 1.345
+          },
+          "ipc": {
+            "qjs": 5.979,
+            "zjs": 4.768
+          },
+          "stall_frontendPerOp": {
+            "qjs": 23.748,
+            "zjs": 63.082
+          },
+          "mem_accessPerOp": {
+            "qjs": 1640.515,
+            "zjs": 2432.91
+          }
+        },
+        "p780_B3_outerconcat": {
+          "instructionsPerOp": {
+            "qjs": 1569.343,
+            "zjs": 1762.15
+          },
+          "cyclesPerOp": {
+            "qjs": 286.585,
+            "zjs": 369.023
+          },
+          "stall_backendPerOp": {
+            "qjs": 84.683,
+            "zjs": 140.722
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.819,
+            "zjs": 3.749
+          },
+          "l1d_cachePerOp": {
+            "qjs": 548.075,
+            "zjs": 828.662
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.285,
+            "zjs": 0.34
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.069,
+            "zjs": 0.156
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.268,
+            "zjs": 0.373
+          },
+          "ipc": {
+            "qjs": 5.476,
+            "zjs": 4.775
+          },
+          "stall_frontendPerOp": {
+            "qjs": 11.779,
+            "zjs": 19.363
+          },
+          "mem_accessPerOp": {
+            "qjs": 547.891,
+            "zjs": 828.577
+          }
+        },
+        "p780_B2_hexconcat": {
+          "instructionsPerOp": {
+            "qjs": 2792.89,
+            "zjs": 2681.96
+          },
+          "cyclesPerOp": {
+            "qjs": 467.589,
+            "zjs": 554.022
+          },
+          "stall_backendPerOp": {
+            "qjs": 125.404,
+            "zjs": 183.91
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.931,
+            "zjs": 3.965
+          },
+          "l1d_cachePerOp": {
+            "qjs": 933.928,
+            "zjs": 1301.314
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.285,
+            "zjs": 0.391
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.069,
+            "zjs": 0.145
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.281,
+            "zjs": 0.873
+          },
+          "ipc": {
+            "qjs": 5.973,
+            "zjs": 4.841
+          },
+          "stall_frontendPerOp": {
+            "qjs": 13.658,
+            "zjs": 28.775
+          },
+          "mem_accessPerOp": {
+            "qjs": 934.133,
+            "zjs": 1301.24
+          }
+        },
+        "p780_B2x_nonhex": {
+          "instructionsPerOp": {
+            "qjs": 2792.478,
+            "zjs": 3071.987
+          },
+          "cyclesPerOp": {
+            "qjs": 468.89,
+            "zjs": 606.513
+          },
+          "stall_backendPerOp": {
+            "qjs": 126.239,
+            "zjs": 202.778
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 3.424,
+            "zjs": 4.291
+          },
+          "l1d_cachePerOp": {
+            "qjs": 934.019,
+            "zjs": 1409.951
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.293,
+            "zjs": 0.378
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.078,
+            "zjs": 0.183
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.278,
+            "zjs": 0.416
+          },
+          "ipc": {
+            "qjs": 5.956,
+            "zjs": 5.065
+          },
+          "stall_frontendPerOp": {
+            "qjs": 13.806,
+            "zjs": 29.228
+          },
+          "mem_accessPerOp": {
+            "qjs": 934.049,
+            "zjs": 1410.468
+          }
+        },
+        "p780_L4_decode_only": {
+          "instructionsPerOp": {
+            "qjs": 2651.309,
+            "zjs": 2701.279
+          },
+          "cyclesPerOp": {
+            "qjs": 449.512,
+            "zjs": 549.918
+          },
+          "stall_backendPerOp": {
+            "qjs": 121.192,
+            "zjs": 214.95
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 4.015,
+            "zjs": 4.802
+          },
+          "l1d_cachePerOp": {
+            "qjs": 899.529,
+            "zjs": 1190.516
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 1.114,
+            "zjs": 1.976
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.079,
+            "zjs": 0.171
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.446,
+            "zjs": 0.506
+          },
+          "ipc": {
+            "qjs": 5.898,
+            "zjs": 4.912
+          }
+        },
+        "p780_L4b_arrays_only": {
+          "instructionsPerOp": {
+            "qjs": 1007.153,
+            "zjs": 1150.809
+          },
+          "cyclesPerOp": {
+            "qjs": 207.49,
+            "zjs": 260.808
+          },
+          "stall_backendPerOp": {
+            "qjs": 72.587,
+            "zjs": 100.693
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 3.486,
+            "zjs": 4.223
+          },
+          "l1d_cachePerOp": {
+            "qjs": 368.812,
+            "zjs": 536.513
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.878,
+            "zjs": 1.105
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.082,
+            "zjs": 0.164
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.289,
+            "zjs": 0.483
+          },
+          "ipc": {
+            "qjs": 4.854,
+            "zjs": 4.412
+          }
+        },
+        "p780_dec_base": {
+          "instructionsPerOp": {
+            "qjs": 384.641,
+            "zjs": 417.933
+          },
+          "cyclesPerOp": {
+            "qjs": 81.978,
+            "zjs": 103.627
+          },
+          "stall_backendPerOp": {
+            "qjs": 27.145,
+            "zjs": 36.535
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.389,
+            "zjs": 3.169
+          },
+          "l1d_cachePerOp": {
+            "qjs": 140.025,
+            "zjs": 191.192
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.263,
+            "zjs": 0.308
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.064,
+            "zjs": 0.153
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.226,
+            "zjs": 0.32
+          },
+          "ipc": {
+            "qjs": 4.692,
+            "zjs": 4.033
+          },
+          "stall_frontendPerOp": {
+            "qjs": 8.634,
+            "zjs": 13.457
+          },
+          "mem_accessPerOp": {
+            "qjs": 139.924,
+            "zjs": 191.136
+          }
+        },
+        "p780_dec_esc1": {
+          "instructionsPerOp": {
+            "qjs": 1363.962,
+            "zjs": 1149.624
+          },
+          "cyclesPerOp": {
+            "qjs": 217.59,
+            "zjs": 241.299
+          },
+          "stall_backendPerOp": {
+            "qjs": 47.002,
+            "zjs": 93.166
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.926,
+            "zjs": 3.439
+          },
+          "l1d_cachePerOp": {
+            "qjs": 425.153,
+            "zjs": 506.067
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.273,
+            "zjs": 0.326
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.063,
+            "zjs": 0.157
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.233,
+            "zjs": 0.321
+          },
+          "ipc": {
+            "qjs": 6.268,
+            "zjs": 4.764
+          },
+          "stall_frontendPerOp": {
+            "qjs": 9.557,
+            "zjs": 15.044
+          },
+          "mem_accessPerOp": {
+            "qjs": 425.226,
+            "zjs": 505.785
+          }
+        },
+        "p780_dec_esc1_vary": {
+          "instructionsPerOp": {
+            "qjs": 1462.086,
+            "zjs": 1460.742
+          },
+          "cyclesPerOp": {
+            "qjs": 240.474,
+            "zjs": 296.485
+          },
+          "stall_backendPerOp": {
+            "qjs": 53.696,
+            "zjs": 111.924
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.853,
+            "zjs": 3.893
+          },
+          "l1d_cachePerOp": {
+            "qjs": 462.379,
+            "zjs": 636.042
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.289,
+            "zjs": 0.378
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.075,
+            "zjs": 0.163
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.381,
+            "zjs": 0.385
+          },
+          "ipc": {
+            "qjs": 6.08,
+            "zjs": 4.927
+          },
+          "stall_frontendPerOp": {
+            "qjs": 10.318,
+            "zjs": 15.909
+          },
+          "mem_accessPerOp": {
+            "qjs": 462.473,
+            "zjs": 636.088
+          }
+        },
+        "p780_dec_vary_base": {
+          "instructionsPerOp": {
+            "qjs": 480.266,
+            "zjs": 519.117
+          },
+          "cyclesPerOp": {
+            "qjs": 103.485,
+            "zjs": 127.397
+          },
+          "stall_backendPerOp": {
+            "qjs": 34.9,
+            "zjs": 44.332
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.618,
+            "zjs": 3.68
+          },
+          "l1d_cachePerOp": {
+            "qjs": 177.223,
+            "zjs": 241.326
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.288,
+            "zjs": 0.362
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.079,
+            "zjs": 0.164
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.251,
+            "zjs": 0.382
+          },
+          "ipc": {
+            "qjs": 4.641,
+            "zjs": 4.075
+          },
+          "stall_frontendPerOp": {
+            "qjs": 9.198,
+            "zjs": 16.687
+          },
+          "mem_accessPerOp": {
+            "qjs": 176.738,
+            "zjs": 241.321
+          }
+        },
+        "p780_dec_3b1": {
+          "instructionsPerOp": {
+            "qjs": 1400.884,
+            "zjs": 1733.919
+          },
+          "cyclesPerOp": {
+            "qjs": 222.904,
+            "zjs": 365.97
+          },
+          "stall_backendPerOp": {
+            "qjs": 44.221,
+            "zjs": 150.353
+          },
+          "stall_backend_memPerOp": {
+            "qjs": 2.969,
+            "zjs": 3.744
+          },
+          "l1d_cachePerOp": {
+            "qjs": 433.314,
+            "zjs": 670.413
+          },
+          "l1d_cache_refillPerOp": {
+            "qjs": 0.276,
+            "zjs": 0.331
+          },
+          "ll_cache_miss_rdPerOp": {
+            "qjs": 0.061,
+            "zjs": 0.153
+          },
+          "br_mis_pred_retiredPerOp": {
+            "qjs": 0.23,
+            "zjs": 0.326
+          },
+          "ipc": {
+            "qjs": 6.285,
+            "zjs": 4.738
+          },
+          "stall_frontendPerOp": {
+            "qjs": 9.244,
+            "zjs": 16.581
+          },
+          "mem_accessPerOp": {
+            "qjs": 432.975,
+            "zjs": 670.192
+          }
+        }
+      },
+      "note": "counting mode only; no frequency sampling; fully qualified armv8_pmuv3_1 events so no <not counted> row can appear"
+    },
+    "symbolAttribution": {
+      "method": "perf record -e armv8_pmuv3_1/cycles/ -c 10007 (fixed count period; 10007 is prime, the inner loop is 833 cycles on qjs and 1085 on zjs, so the period is co-prime with both), 3 records per side, symbol-scoped aggregation only",
+      "totalCyclesPerIteration": {
+        "qjs": 832.7,
+        "zjs": 1085.4
+      },
+      "buckets": {
+        "qjs": {
+          "interpreter loop": {
+            "percentPerRecord": [
+              44.73,
+              45.99,
+              46.21
+            ],
+            "meanPercent": 45.64,
+            "spreadPercentagePoints": 1.48,
+            "cyclesPerIteration": 380.1
+          },
+          "allocator": {
+            "percentPerRecord": [
+              16.12,
+              15.9,
+              16.78
+            ],
+            "meanPercent": 16.27,
+            "spreadPercentagePoints": 0.88,
+            "cyclesPerIteration": 135.5
+          },
+          "string concat": {
+            "percentPerRecord": [
+              6.75,
+              5.27,
+              6.49
+            ],
+            "meanPercent": 6.17,
+            "spreadPercentagePoints": 1.48,
+            "cyclesPerIteration": 51.4
+          },
+          "URI decode": {
+            "percentPerRecord": [
+              5.32,
+              3.73,
+              4.46
+            ],
+            "meanPercent": 4.5,
+            "spreadPercentagePoints": 1.59,
+            "cyclesPerIteration": 37.5
+          },
+          "string build/alloc": {
+            "percentPerRecord": [
+              10.13,
+              8.68,
+              8.17
+            ],
+            "meanPercent": 8.99,
+            "spreadPercentagePoints": 1.96,
+            "cyclesPerIteration": 74.9
+          },
+          "libc mem": {
+            "percentPerRecord": [
+              1.44,
+              1.46,
+              0.75
+            ],
+            "meanPercent": 1.22,
+            "spreadPercentagePoints": 0.71,
+            "cyclesPerIteration": 10.1
+          },
+          "fromCharCode": {
+            "percentPerRecord": [
+              1.27,
+              1.3,
+              1.77
+            ],
+            "meanPercent": 1.45,
+            "spreadPercentagePoints": 0.5,
+            "cyclesPerIteration": 12
+          },
+          "property/index read": {
+            "percentPerRecord": [
+              3.54,
+              3.09,
+              3.37
+            ],
+            "meanPercent": 3.33,
+            "spreadPercentagePoints": 0.45,
+            "cyclesPerIteration": 27.8
+          },
+          "call machinery": {
+            "percentPerRecord": [
+              0.93,
+              0.97,
+              1.6
+            ],
+            "meanPercent": 1.17,
+            "spreadPercentagePoints": 0.67,
+            "cyclesPerIteration": 9.7
+          },
+          "value free": {
+            "percentPerRecord": [
+              0.76,
+              1.05,
+              1.09
+            ],
+            "meanPercent": 0.97,
+            "spreadPercentagePoints": 0.33,
+            "cyclesPerIteration": 8
+          },
+          "other": {
+            "percentPerRecord": [
+              8.73,
+              12.44,
+              9.03
+            ],
+            "meanPercent": 10.07,
+            "spreadPercentagePoints": 3.71,
+            "cyclesPerIteration": 83.8
+          }
+        },
+        "zjs": {
+          "interpreter loop": {
+            "percentPerRecord": [
+              48.47,
+              46.94,
+              48.84
+            ],
+            "meanPercent": 48.08,
+            "spreadPercentagePoints": 1.9,
+            "cyclesPerIteration": 521.9
+          },
+          "allocator": {
+            "percentPerRecord": [
+              8.92,
+              7.39,
+              7.15
+            ],
+            "meanPercent": 7.82,
+            "spreadPercentagePoints": 1.77,
+            "cyclesPerIteration": 84.9
+          },
+          "string concat": {
+            "percentPerRecord": [
+              5.82,
+              5.63,
+              5.32
+            ],
+            "meanPercent": 5.59,
+            "spreadPercentagePoints": 0.5,
+            "cyclesPerIteration": 60.7
+          },
+          "property/index read": {
+            "percentPerRecord": [
+              5.82,
+              7.34,
+              7.53
+            ],
+            "meanPercent": 6.9,
+            "spreadPercentagePoints": 1.71,
+            "cyclesPerIteration": 74.9
+          },
+          "call machinery": {
+            "percentPerRecord": [
+              9.44,
+              9.82,
+              12.1
+            ],
+            "meanPercent": 10.45,
+            "spreadPercentagePoints": 2.66,
+            "cyclesPerIteration": 113.5
+          },
+          "string build/alloc": {
+            "percentPerRecord": [
+              2.09,
+              1.96,
+              1.77
+            ],
+            "meanPercent": 1.94,
+            "spreadPercentagePoints": 0.32,
+            "cyclesPerIteration": 21.1
+          },
+          "URI decode": {
+            "percentPerRecord": [
+              3.42,
+              3.86,
+              3.86
+            ],
+            "meanPercent": 3.71,
+            "spreadPercentagePoints": 0.44,
+            "cyclesPerIteration": 40.3
+          },
+          "other": {
+            "percentPerRecord": [
+              13.94,
+              14.62,
+              10.61
+            ],
+            "meanPercent": 13.06,
+            "spreadPercentagePoints": 4.01,
+            "cyclesPerIteration": 141.7
+          },
+          "value free": {
+            "percentPerRecord": [
+              1.14,
+              1.33,
+              1.71
+            ],
+            "meanPercent": 1.39,
+            "spreadPercentagePoints": 0.57,
+            "cyclesPerIteration": 15.1
+          },
+          "libc mem": {
+            "percentPerRecord": [
+              0.44,
+              0.13,
+              0.57
+            ],
+            "meanPercent": 0.38,
+            "spreadPercentagePoints": 0.44,
+            "cyclesPerIteration": 4.1
+          },
+          "fromCharCode": {
+            "percentPerRecord": [
+              0.25,
+              0.63,
+              0.38
+            ],
+            "meanPercent": 0.42,
+            "spreadPercentagePoints": 0.38,
+            "cyclesPerIteration": 4.6
+          }
+        }
+      },
+      "caveat": "qjs JS_CallInternal is a monolith that inlines property reads and concat dispatch, so only the grouping (interpreter loop + call machinery + property/index read) is safely comparable across engines"
+    },
+    "perCallVersusPerByteRegression": {
+      "asciiEscapeFamily": {
+        "points": "p780_dec_ascii1 (1 escape) / p780_dec_ascii16 (16 escapes)",
+        "qjsSlopeNsPerEscape": 5.47,
+        "zjsSlopeNsPerEscape": 8.09,
+        "qjsInterceptNsPerCall": 22.96,
+        "zjsInterceptNsPerCall": 45.37
+      },
+      "fourByteEscapeFamily": {
+        "points": "p780_dec_esc2 (2 groups) / p780_dec_esc8 (8 groups); p780_dec_esc1 is deliberately excluded because the shape fast path breaks the line",
+        "qjsSlopeNsPerGroup": 14.88,
+        "zjsSlopeNsPerGroup": 18.36,
+        "qjsInterceptNsPerCall": 27.52,
+        "zjsInterceptNsPerCall": 40.94
+      }
+    },
+    "controls": [
+      {
+        "stage": "decode, precomputed flat inputs (decode + fromCharCode + equality)",
+        "expression": "p780_L4_decode_only - p780_L4b_arrays_only",
+        "qjsMs": 4.1211,
+        "zjsMs": 4.9371,
+        "gapMs": 0.816,
+        "gapSpreadAcrossBuildCombinations": 0.0744,
+        "qjsNsPerIteration": 62.88,
+        "zjsNsPerIteration": 75.33,
+        "gapNsPerIteration": 12.45
+      },
+      {
+        "stage": "12B input, no percent escape",
+        "expression": "p780_dec_plain12 - p780_dec_base",
+        "qjsMs": 4.748,
+        "zjsMs": 1.7699,
+        "gapMs": -2.9781,
+        "gapSpreadAcrossBuildCombinations": 0.0483,
+        "qjsNsPerIteration": 72.45,
+        "zjsNsPerIteration": 27.01,
+        "gapNsPerIteration": -45.44
+      },
+      {
+        "stage": "3B input, 1 ASCII escape",
+        "expression": "p780_dec_ascii1 - p780_dec_base",
+        "qjsMs": 1.8632,
+        "zjsMs": 3.5032,
+        "gapMs": 1.64,
+        "gapSpreadAcrossBuildCombinations": 0.0653,
+        "qjsNsPerIteration": 28.43,
+        "zjsNsPerIteration": 53.45,
+        "gapNsPerIteration": 25.02
+      },
+      {
+        "stage": "12B input, 4 ASCII escapes",
+        "expression": "p780_dec_ascii4 - p780_dec_base",
+        "qjsMs": 3.3084,
+        "zjsMs": 4.6723,
+        "gapMs": 1.364,
+        "gapSpreadAcrossBuildCombinations": 0.0741,
+        "qjsNsPerIteration": 50.48,
+        "zjsNsPerIteration": 71.29,
+        "gapNsPerIteration": 20.81
+      },
+      {
+        "stage": "48B input, 16 ASCII escapes",
+        "expression": "p780_dec_ascii16 - p780_dec_base",
+        "qjsMs": 7.2385,
+        "zjsMs": 11.4536,
+        "gapMs": 4.2151,
+        "gapSpreadAcrossBuildCombinations": 0.0989,
+        "qjsNsPerIteration": 110.45,
+        "zjsNsPerIteration": 174.77,
+        "gapNsPerIteration": 64.32
+      },
+      {
+        "stage": "12B input, 1 four-byte escape, constant (shape hit + cache hit)",
+        "expression": "p780_dec_esc1 - p780_dec_base",
+        "qjsMs": 2.2888,
+        "zjsMs": 2.2823,
+        "gapMs": -0.0065,
+        "gapSpreadAcrossBuildCombinations": 0.0415,
+        "qjsNsPerIteration": 34.92,
+        "zjsNsPerIteration": 34.83,
+        "gapNsPerIteration": -0.1
+      },
+      {
+        "stage": "12B input, 1 four-byte escape, varying (shape hit + cache miss)",
+        "expression": "p780_dec_esc1_vary - p780_dec_vary_base",
+        "qjsMs": 2.2863,
+        "zjsMs": 2.8273,
+        "gapMs": 0.541,
+        "gapSpreadAcrossBuildCombinations": 0.0559,
+        "qjsNsPerIteration": 34.89,
+        "zjsNsPerIteration": 43.14,
+        "gapNsPerIteration": 8.26
+      },
+      {
+        "stage": "12B input, 3-byte + ASCII escape (shape miss, same 2-unit wide output)",
+        "expression": "p780_dec_3b1 - p780_dec_base",
+        "qjsMs": 2.3616,
+        "zjsMs": 4.4025,
+        "gapMs": 2.041,
+        "gapSpreadAcrossBuildCombinations": 0.0405,
+        "qjsNsPerIteration": 36.03,
+        "zjsNsPerIteration": 67.18,
+        "gapNsPerIteration": 31.14
+      },
+      {
+        "stage": "13B input, four-byte escape + literal (shape miss)",
+        "expression": "p780_dec_esc1_13 - p780_dec_base",
+        "qjsMs": 3.1777,
+        "zjsMs": 4.4462,
+        "gapMs": 1.2685,
+        "gapSpreadAcrossBuildCombinations": 0.0219,
+        "qjsNsPerIteration": 48.49,
+        "zjsNsPerIteration": 67.84,
+        "gapNsPerIteration": 19.36
+      },
+      {
+        "stage": "24B input, 2 four-byte escapes",
+        "expression": "p780_dec_esc2 - p780_dec_base",
+        "qjsMs": 3.7532,
+        "zjsMs": 5.0895,
+        "gapMs": 1.3363,
+        "gapSpreadAcrossBuildCombinations": 0.0756,
+        "qjsNsPerIteration": 57.27,
+        "zjsNsPerIteration": 77.66,
+        "gapNsPerIteration": 20.39
+      },
+      {
+        "stage": "48B input, 4 four-byte escapes",
+        "expression": "p780_dec_esc4 - p780_dec_base",
+        "qjsMs": 5.9194,
+        "zjsMs": 7.411,
+        "gapMs": 1.4916,
+        "gapSpreadAcrossBuildCombinations": 0.1201,
+        "qjsNsPerIteration": 90.32,
+        "zjsNsPerIteration": 113.08,
+        "gapNsPerIteration": 22.76
+      },
+      {
+        "stage": "96B input, 8 four-byte escapes",
+        "expression": "p780_dec_esc8 - p780_dec_base",
+        "qjsMs": 9.6027,
+        "zjsMs": 12.3085,
+        "gapMs": 2.7059,
+        "gapSpreadAcrossBuildCombinations": 0.0846,
+        "qjsNsPerIteration": 146.53,
+        "zjsNsPerIteration": 187.81,
+        "gapNsPerIteration": 41.29
+      },
+      {
+        "stage": "percent-hex concatenation cache value",
+        "expression": "p780_B2x_nonhex - p780_B2_hexconcat",
+        "qjsMs": 0.0154,
+        "zjsMs": 0.9134,
+        "gapMs": 0.898,
+        "gapSpreadAcrossBuildCombinations": 0.1096,
+        "qjsNsPerIteration": 0.23,
+        "zjsNsPerIteration": 13.94,
+        "gapNsPerIteration": 13.7
+      },
+      {
+        "stage": "forced flatten of the 12-character concatenation result",
+        "expression": "p780_B3f_outerconcat_flat - p780_B3_outerconcat",
+        "qjsMs": 1.0249,
+        "zjsMs": 1.5187,
+        "gapMs": 0.4938,
+        "gapSpreadAcrossBuildCombinations": 0.027,
+        "qjsNsPerIteration": 15.64,
+        "zjsNsPerIteration": 23.17,
+        "gapNsPerIteration": 7.53
+      }
+    ]
+  }
+}

@@ -101,6 +101,18 @@ try {
     // no amplified corpus in this tree
 }
 
+// The P7-80 URI attribution corpus is optional for the same reason.
+try {
+    const p780Uri = await import('./p780_uri_cases.js');
+    suites['p780-uri'] = {
+        cases: p780Uri.cases,
+        categories: p780Uri.categories,
+        description: 'P7-80 URI decode attribution ladder; diagnostic-only, never part of the 75-case compatibility geomean',
+    };
+} catch {
+    // no P7-80 corpus in this tree
+}
+
 const measurementLock = {
     path: process.env.ZJS_MEASUREMENT_LOCK ?? null,
     mode: process.env.ZJS_MEASUREMENT_LOCK_MODE ?? null,
