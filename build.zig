@@ -842,6 +842,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-builtins", .description = "Run focused ECMAScript built-in tests", .root_source_file = "src/builtins_tests.zig", .filter = "tests.builtins" },
         .{ .name = "test-runtime", .description = "Run focused host runtime and plugin tests", .root_source_file = "src/runtime_tests.zig", .filter = "runtime.", .needs_plugin_fixtures = true },
         .{ .name = "test-runner", .description = "Run focused test262 runner tests", .root_source_file = "src/cli/run_test262.zig", .filter = "run_test262.test" },
+        .{ .name = "test-compiler-v2", .description = "Run focused compiler-v2 (QCP) tests", .root_source_file = "src/compiler_v2_tests.zig", .filter = "compiler_v2." },
     };
     inline for (scoped_test_configs) |config| {
         const scoped_root = b.createModule(.{
