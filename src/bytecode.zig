@@ -3451,6 +3451,10 @@ pub const function_def = struct {
 
         pub fn appendSourceLoc(self: *FunctionDefImpl, pc: u32, line_num: i32, col_num: i32) !void {
             if (line_num <= 0 or col_num <= 0) return;
+            // The phase-2 streaming source remap (P2-R1T) requires
+            // non-decreasing slot pcs; producers append at the emission end.
+            std.debug.assert(self.source_loc_slots.len == 0 or
+                self.source_loc_slots[self.source_loc_slots.len - 1].pc <= pc);
             const tail = try growSliceBy(pipeline_pc2line.SourceLocSlot, self.memory, &self.source_loc_slots, &self.source_loc_capacity, 1);
             tail[0] = .{ .pc = pc, .line_num = line_num, .col_num = col_num };
             self.source_loc_count = @intCast(self.source_loc_slots.len);
@@ -6322,6 +6326,117 @@ pub const pipeline_resolve_variables = struct {
     /// targets, the stored absolute values go stale. We collect each
     /// jump's operand position here during the main walk, then rewrite
     /// the targets at the end using the old→new pc map.
+    /// P2-R1T (2026-07-31): consumer-proportional relocation replacing the
+    /// dense usize[code.len+1] pc map (253MB/run alloc+memset with 10.9% of
+    /// slots ever queried — reports/perf/qjs-align/2026-07-31/code-load/
+    /// p2-00-survey.md). Source-loc remaps stream into a u32 transactional
+    /// scratch committed only at the no-fail install boundary; jump-target
+    /// relocations append to a strictly increasing (old,new) table whose
+    /// capacity is the phase-1 `is_target` census. Debug/ReleaseSafe keeps
+    /// the dense map alive as a per-item oracle; ReleaseFast carries no
+    /// dense allocation, memset, store, or branch.
+    const SparseRelocation = struct {
+        nodes: []const Phase1CfgNode,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        source_new_pcs: []u32,
+        target_old_pcs: []u32,
+        target_new_pcs: []u32,
+        target_len: usize = 0,
+        source_cursor: usize = 0,
+
+        /// Mirror one dense-map store for `old_pc`. Slots at pcs the write
+        /// pass never publishes keep the dense map's memset default (0),
+        /// exactly like the old remap read them.
+        fn publishPoint(self: *SparseRelocation, old_pc: usize, new_pc: usize) Error!void {
+            self.consumeSourceBelow(old_pc);
+            while (self.source_cursor < self.source_locs.len and
+                self.source_locs[self.source_cursor].pc == old_pc)
+            {
+                self.source_new_pcs[self.source_cursor] = @intCast(new_pc);
+                self.source_cursor += 1;
+            }
+            if (old_pc < self.nodes.len and self.nodes[old_pc].is_target) {
+                try self.appendTarget(old_pc, new_pc);
+            }
+        }
+
+        /// Mirror the dense per-byte fills over a consumed/dead range.
+        fn publishRange(self: *SparseRelocation, old_start: usize, old_end: usize, new_pc: usize) Error!void {
+            self.consumeSourceBelow(old_start);
+            while (self.source_cursor < self.source_locs.len and
+                self.source_locs[self.source_cursor].pc < old_end)
+            {
+                self.source_new_pcs[self.source_cursor] = @intCast(new_pc);
+                self.source_cursor += 1;
+            }
+            var pc = old_start;
+            while (pc < old_end) : (pc += 1) {
+                if (pc < self.nodes.len and self.nodes[pc].is_target) {
+                    try self.appendTarget(pc, new_pc);
+                }
+            }
+        }
+
+        /// Terminal `code.len -> new_pc` entry: published unconditionally
+        /// (never dependent on is_target). Remaining slots at exactly
+        /// code.len take the terminal pc; a slot beyond it keeps its old pc,
+        /// mirroring the dense remap's bounds-checked skip.
+        fn publishTerminal(self: *SparseRelocation, code_len: usize, new_pc: usize) Error!void {
+            self.consumeSourceBelow(code_len);
+            while (self.source_cursor < self.source_locs.len) : (self.source_cursor += 1) {
+                const slot_pc = self.source_locs[self.source_cursor].pc;
+                self.source_new_pcs[self.source_cursor] =
+                    if (slot_pc == code_len) @intCast(new_pc) else slot_pc;
+            }
+            try self.appendTarget(code_len, new_pc);
+        }
+
+        /// Slots at pcs below the next publication were never stored by the
+        /// dense map either: they read its memset default.
+        fn consumeSourceBelow(self: *SparseRelocation, old_pc: usize) void {
+            while (self.source_cursor < self.source_locs.len and
+                self.source_locs[self.source_cursor].pc < old_pc)
+            {
+                self.source_new_pcs[self.source_cursor] = 0;
+                self.source_cursor += 1;
+            }
+        }
+
+        fn appendTarget(self: *SparseRelocation, old_pc: usize, new_pc: usize) Error!void {
+            if (self.target_len >= self.target_old_pcs.len) return error.InvalidBytecode;
+            std.debug.assert(self.target_len == 0 or self.target_old_pcs[self.target_len - 1] < old_pc);
+            self.target_old_pcs[self.target_len] = @intCast(old_pc);
+            self.target_new_pcs[self.target_len] = @intCast(new_pc);
+            self.target_len += 1;
+        }
+
+        fn lookupTarget(self: *const SparseRelocation, old_pc: usize) ?u32 {
+            // Typical functions have few jump targets: scan small tables
+            // linearly, early-exiting once a key passes `old_pc` (the table
+            // is strictly increasing, see the appendTarget assert).
+            if (self.target_len <= 8) {
+                for (self.target_old_pcs[0..self.target_len], 0..) |key, i| {
+                    if (key == old_pc) return self.target_new_pcs[i];
+                    if (key > old_pc) return null;
+                }
+                return null;
+            }
+            var lo: usize = 0;
+            var hi: usize = self.target_len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                const key = self.target_old_pcs[mid];
+                if (key == old_pc) return self.target_new_pcs[mid];
+                if (key < old_pc) lo = mid + 1 else hi = mid;
+            }
+            return null;
+        }
+    };
+
+    /// The dense relocation map survives only as the R1 oracle.
+    const relocation_oracle_enabled =
+        @import("builtin").mode == .Debug or @import("builtin").mode == .ReleaseSafe;
+
     const JumpSite = struct {
         /// Byte offset within the *output* buffer where the u32 target
         /// operand begins. Always points to a 4-byte little-endian field.
@@ -7072,6 +7187,11 @@ pub const pipeline_resolve_variables = struct {
         nodes: []Phase1CfgNode,
         has_make_ref: bool,
         scope_var_count: usize,
+        /// Number of distinct pcs carrying `is_target` — a safe capacity
+        /// upper bound for the sparse relocation table (it may include
+        /// references from unreachable code and later-folded targets, so the
+        /// final table length is allowed to be smaller; never assert equal).
+        target_count: usize,
     };
 
     /// QuickJS `resolve_variables` phase-2 dead-code boundary
@@ -7152,6 +7272,7 @@ pub const pipeline_resolve_variables = struct {
         var pc: usize = 0;
         var atom_index: usize = 0;
         var has_make_ref = false;
+        var target_count: usize = 0;
         while (pc < func.code.len) {
             const op_id = func.code[pc];
             const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
@@ -7160,7 +7281,10 @@ pub const pipeline_resolve_variables = struct {
             if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
                 if (offset + 4 > size) return error.InvalidBytecode;
                 const target = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
-                if (target <= func.code.len) nodes[target].is_target = true;
+                if (target <= func.code.len and !nodes[target].is_target) {
+                    nodes[target].is_target = true;
+                    target_count += 1;
+                }
             }
             nodes[pc].size = instr.size;
             nodes[pc].is_temp = instr.is_temp;
@@ -7212,6 +7336,7 @@ pub const pipeline_resolve_variables = struct {
             .nodes = nodes,
             .has_make_ref = has_make_ref,
             .scope_var_count = scope_var_count,
+            .target_count = target_count,
         };
     }
 
@@ -7583,12 +7708,33 @@ pub const pipeline_resolve_variables = struct {
         if (atom_index != atoms.len) return error.InvalidBytecode;
     }
 
+    /// P2-R1T entry contract for the streaming source remap: slot pcs must be
+    /// in bounds, non-decreasing, and (except the code.len terminal) sit on a
+    /// phase-1 instruction boundary. Producers append at the emission end, so
+    /// a violation is a producer bug; fail closed rather than repairing.
+    fn validateSourceLocOrder(
+        slots: []const pipeline_pc2line.SourceLocSlot,
+        code_len: usize,
+        nodes: []const Phase1CfgNode,
+    ) Error!void {
+        var previous_pc: u32 = 0;
+        for (slots) |slot| {
+            if (slot.pc > code_len) return error.InvalidBytecode;
+            if (slot.pc < previous_pc) return error.InvalidBytecode;
+            if (slot.pc != code_len and nodes[slot.pc].size == 0) return error.InvalidBytecode;
+            previous_pc = slot.pc;
+        }
+    }
+
     pub fn run(ctx: *JSContext) !void {
         const func = ctx.function;
+        // P2-R1T: relocation and the source commit run in u32 pc space.
+        if (func.code.len >= std.math.maxInt(u32)) return error.BytecodeOverflow;
         try bindParserLabels(ctx);
         const phase1_topology = try computePhase1Topology(ctx);
         const phase1_reachability = phase1_topology.nodes;
         defer ctx.memory.free(Phase1CfgNode, phase1_reachability);
+        try validateSourceLocOrder(func.source_loc_slots, func.code.len, phase1_reachability);
         var inline_scope_var_plans: [inline_scope_var_plan_capacity]ScopeVarLoweringPlan = undefined;
         const scope_var_plans: []ScopeVarLoweringPlan = if (phase1_topology.scope_var_count <= inline_scope_var_plans.len)
             inline_scope_var_plans[0..phase1_topology.scope_var_count]
@@ -7887,9 +8033,23 @@ pub const pipeline_resolve_variables = struct {
         // enter/leave scope pair) map their old pc to the new pc of the
         // *next* kept instruction, so a jump that targets them still
         // lands on a valid instruction boundary.
-        const pc_map = try allocator.alloc(usize, func.code.len + 1);
-        defer allocator.free(pc_map);
-        @memset(pc_map, 0);
+        const target_capacity = phase1_topology.target_count + 1; // +1: unconditional terminal entry
+        const source_slot_count = func.source_loc_slots.len;
+        const reloc_words = try allocator.alloc(u32, source_slot_count + 2 * target_capacity);
+        defer allocator.free(reloc_words);
+        var reloc = SparseRelocation{
+            .nodes = phase1_reachability,
+            .source_locs = func.source_loc_slots,
+            .source_new_pcs = reloc_words[0..source_slot_count],
+            .target_old_pcs = reloc_words[source_slot_count..][0..target_capacity],
+            .target_new_pcs = reloc_words[source_slot_count + target_capacity ..][0..target_capacity],
+        };
+        const oracle_pc_map: []usize = if (comptime relocation_oracle_enabled)
+            try allocator.alloc(usize, func.code.len + 1)
+        else
+            &.{};
+        defer if (comptime relocation_oracle_enabled) allocator.free(oracle_pc_map);
+        if (comptime relocation_oracle_enabled) @memset(oracle_pc_map, 0);
         const jump_sites = try allocator.alloc(JumpSite, jump_count);
         defer allocator.free(jump_sites);
 
@@ -7919,19 +8079,26 @@ pub const pipeline_resolve_variables = struct {
             // pc_map for input pc i maps to output pc out_idx after declaration
             // instantiation and body-scope preparation, so jumps that reference
             // the lowered body resolve correctly.
-            pc_map[i] = out_idx;
+            if (comptime relocation_oracle_enabled) oracle_pc_map[i] = out_idx;
+            try reloc.publishPoint(i, out_idx);
             const op = func.code[i];
             const node = phase1_reachability[i];
             const input_size: usize = node.size;
             if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
             if (!isPhase1Reachable(phase1_reachability, i)) {
-                for (i + 1..i + input_size) |dead_pc| pc_map[dead_pc] = out_idx;
+                if (comptime relocation_oracle_enabled) {
+                    for (i + 1..i + input_size) |dead_pc| oracle_pc_map[dead_pc] = out_idx;
+                }
+                try reloc.publishRange(i + 1, i + input_size, out_idx);
                 if (topologyInstructionHasAtom(op, node.is_temp)) in_atom_idx += 1;
                 i += input_size;
                 continue;
             }
             if (isPhase2EmptyGosub(func.code, phase1_reachability, i)) {
-                for (i + 1..i + input_size) |consumed_pc| pc_map[consumed_pc] = out_idx;
+                if (comptime relocation_oracle_enabled) {
+                    for (i + 1..i + input_size) |consumed_pc| oracle_pc_map[consumed_pc] = out_idx;
+                }
+                try reloc.publishRange(i + 1, i + input_size, out_idx);
                 i += input_size;
                 continue;
             }
@@ -7952,10 +8119,12 @@ pub const pipeline_resolve_variables = struct {
                 continue;
             }
             if (discardedIndexedStoreOp(func.code, phase1_reachability, i)) |put_op| {
-                pc_map[i + 1] = out_idx;
+                if (comptime relocation_oracle_enabled) oracle_pc_map[i + 1] = out_idx;
+                try reloc.publishPoint(i + 1, out_idx);
                 output[out_idx] = put_op;
                 out_idx += 1;
-                pc_map[i + 2] = out_idx;
+                if (comptime relocation_oracle_enabled) oracle_pc_map[i + 2] = out_idx;
+                try reloc.publishPoint(i + 2, out_idx);
                 i += 3;
                 continue;
             }
@@ -7965,7 +8134,10 @@ pub const pipeline_resolve_variables = struct {
                 jump_sites[out_jump_idx] = .{ .operand_pos = out_idx + 1 };
                 out_jump_idx += 1;
                 out_idx += 5;
-                for (i + 1..logical.end_pc) |consumed_pc| pc_map[consumed_pc] = out_idx;
+                if (comptime relocation_oracle_enabled) {
+                    for (i + 1..logical.end_pc) |consumed_pc| oracle_pc_map[consumed_pc] = out_idx;
+                }
+                try reloc.publishRange(i + 1, logical.end_pc, out_idx);
                 i = logical.end_pc;
                 continue;
             }
@@ -8110,12 +8282,14 @@ pub const pipeline_resolve_variables = struct {
                         const loc_idx = local_ref_tail_indices[tail_pc];
                         if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                         if (make_ref_reads_value[i]) {
-                            pc_map[i + 11] = out_idx;
+                            if (comptime relocation_oracle_enabled) oracle_pc_map[i + 11] = out_idx;
+                            try reloc.publishPoint(i + 11, out_idx);
                             writeSelectedLocForm(output, &out_idx, localRefGetForm(ctx, loc_idx), loc_idx);
                         }
                     } else if (kind == GLOBAL_REF_TAIL_PUT or kind == GLOBAL_REF_TAIL_DUP_PUT) {
                         if (make_ref_reads_value[i]) {
-                            pc_map[i + 11] = out_idx;
+                            if (comptime relocation_oracle_enabled) oracle_pc_map[i + 11] = out_idx;
+                            try reloc.publishPoint(i + 11, out_idx);
                             try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.get_var, atom_id);
                         }
                     }
@@ -8206,10 +8380,12 @@ pub const pipeline_resolve_variables = struct {
             return error.InvalidBytecode;
         }
         try ctx.validateExactScopeBindingVersion();
-        // Terminal entry: pc_map[old_len] == out_idx handles jumps that
-        // target exactly one-past-the-end (e.g. loop exit to the next
-        // instruction after the final byte).
-        pc_map[func.code.len] = out_idx;
+        // Terminal entry: `old_len -> out_idx` handles jumps that target
+        // exactly one-past-the-end (e.g. loop exit to the next instruction
+        // after the final byte). Published unconditionally, never gated on
+        // is_target.
+        if (comptime relocation_oracle_enabled) oracle_pc_map[func.code.len] = out_idx;
+        try reloc.publishTerminal(func.code.len, out_idx);
 
         // Patch jump targets using the pc map. Each site stored an
         // absolute u32 target that was valid against the *input* code
@@ -8218,11 +8394,18 @@ pub const pipeline_resolve_variables = struct {
             const old_target = std.mem.readInt(u32, output[site.operand_pos..][0..4], .little);
             // Targets outside `[0, func.code.len]` indicate a parser bug,
             // but we treat them as identity rather than panicking so the
-            // pipeline stays robust to unfamiliar inputs.
-            const new_target: u32 = if (old_target <= func.code.len)
-                @intCast(pc_map[old_target])
-            else
-                old_target;
+            // pipeline stays robust to unfamiliar inputs. An IN-range target
+            // with no relocation row is different: it means a publisher
+            // missed a semantic boundary, and silently mapping it to 0 (the
+            // old dense default) would emit a jump to the entry — fail
+            // closed instead.
+            const new_target: u32 = if (old_target <= func.code.len) blk: {
+                const mapped = reloc.lookupTarget(old_target) orelse return error.InvalidBytecode;
+                if (comptime relocation_oracle_enabled) {
+                    std.debug.assert(mapped == oracle_pc_map[old_target]);
+                }
+                break :blk mapped;
+            } else old_target;
             std.mem.writeInt(u32, output[site.operand_pos..][0..4], new_target, .little);
         }
 
@@ -8247,9 +8430,25 @@ pub const pipeline_resolve_variables = struct {
         var atoms_to_install_owned = atoms_to_install.len != 0 and atoms_to_install.ptr != output_atoms.ptr;
         errdefer if (atoms_to_install_owned) ctx.memory.free(atom.Atom, atoms_to_install);
 
+        // P2-R1T no-fail commit boundary: every fallible step (write
+        // validation, exact-scope version, jump patch, both trims) has
+        // succeeded. Only now may the transactional source remap touch the
+        // function; on any earlier error the original slots are untouched.
+        if (comptime relocation_oracle_enabled) {
+            std.debug.assert(reloc.source_cursor == func.source_loc_slots.len);
+            for (func.source_loc_slots, reloc.source_new_pcs) |slot, new_pc| {
+                const dense: u32 = if (slot.pc < oracle_pc_map.len) @intCast(oracle_pc_map[slot.pc]) else slot.pc;
+                std.debug.assert(new_pc == dense);
+            }
+            for (reloc.target_old_pcs[0..reloc.target_len], reloc.target_new_pcs[0..reloc.target_len]) |old_pc, new_pc| {
+                std.debug.assert(new_pc == oracle_pc_map[old_pc]);
+            }
+        }
+        for (func.source_loc_slots, reloc.source_new_pcs) |*slot, new_pc| {
+            slot.pc = new_pc;
+        }
         // Replace the old code buffer. `installCode` frees any prior buffer,
         // including capacity allocated by the parser via geometric growth.
-        func.remapSourceLocs(pc_map);
         if (code_to_install.ptr != output.ptr and output_owned) {
             ctx.memory.free(u8, output);
             output_owned = false;
@@ -12618,16 +12817,12 @@ const function_mod = struct {
 
         pub fn appendSourceLoc(self: *BytecodeImpl, pc: u32, line_num: i32, col_num: i32) !void {
             if (line_num <= 0 or col_num <= 0) return;
+            // See FunctionDefImpl.appendSourceLoc: P2-R1T streaming remap
+            // requires non-decreasing slot pcs.
+            std.debug.assert(self.source_loc_slots.len == 0 or
+                self.source_loc_slots[self.source_loc_slots.len - 1].pc <= pc);
             const tail = try growSliceBy(pipeline_pc2line.SourceLocSlot, self.memory, &self.source_loc_slots, &self.source_loc_capacity, 1);
             tail[0] = .{ .pc = pc, .line_num = line_num, .col_num = col_num };
-        }
-
-        pub fn remapSourceLocs(self: *BytecodeImpl, old_to_new_pc: []const usize) void {
-            if (self.source_loc_slots.len == 0) return;
-            for (self.source_loc_slots) |*slot| {
-                if (slot.pc >= old_to_new_pc.len) continue;
-                slot.pc = @intCast(old_to_new_pc[slot.pc]);
-            }
         }
 
         /// Remap source slots after final layout and discard entries that no
