@@ -6443,6 +6443,137 @@ pub const pipeline_resolve_variables = struct {
         operand_pos: usize,
     };
 
+    /// Phase-2 output builder. Its arrays grow geometrically during the write
+    /// loop. On success, the code and atom backings will be transferred to the
+    /// function via the WithCapacity installers; on failure,
+    /// `deinitUncommitted` releases all owned storage and atom references.
+    pub const Phase2Builder = struct {
+        memory: *memory.MemoryAccount,
+        atoms: *atom.AtomTable,
+        code: []u8,
+        code_capacity: usize,
+        code_len: usize,
+        atom_operands: []atom.Atom,
+        atom_capacity: usize,
+        atom_len: usize,
+        jump_sites: []JumpSite,
+        jump_capacity: usize,
+        jump_len: usize,
+
+        pub fn init(
+            mem: *memory.MemoryAccount,
+            atoms_table: *atom.AtomTable,
+            initial_code_capacity: usize,
+            initial_atom_capacity: usize,
+            initial_jump_capacity: usize,
+        ) !Phase2Builder {
+            var builder: Phase2Builder = .{
+                .memory = mem,
+                .atoms = atoms_table,
+                .code = &.{},
+                .code_capacity = 0,
+                .code_len = 0,
+                .atom_operands = &.{},
+                .atom_capacity = 0,
+                .atom_len = 0,
+                .jump_sites = &.{},
+                .jump_capacity = 0,
+                .jump_len = 0,
+            };
+
+            if (initial_code_capacity != 0) {
+                builder.code = try mem.alloc(u8, initial_code_capacity);
+                builder.code_capacity = initial_code_capacity;
+            }
+            errdefer if (builder.code_capacity != 0) mem.free(u8, builder.code);
+
+            if (initial_atom_capacity != 0) {
+                builder.atom_operands = try mem.alloc(atom.Atom, initial_atom_capacity);
+                builder.atom_capacity = initial_atom_capacity;
+            }
+            errdefer if (builder.atom_capacity != 0) mem.free(atom.Atom, builder.atom_operands);
+
+            if (initial_jump_capacity != 0) {
+                builder.jump_sites = try mem.alloc(JumpSite, initial_jump_capacity);
+                builder.jump_capacity = initial_jump_capacity;
+            }
+
+            return builder;
+        }
+
+        pub fn deinitUncommitted(self: *Phase2Builder) void {
+            for (self.atom_operands[0..self.atom_len]) |atom_id| self.atoms.free(atom_id);
+            if (self.code_capacity != 0) self.memory.free(u8, self.code);
+            if (self.atom_capacity != 0) self.memory.free(atom.Atom, self.atom_operands);
+            if (self.jump_capacity != 0) self.memory.free(JumpSite, self.jump_sites);
+
+            self.code = &.{};
+            self.code_capacity = 0;
+            self.code_len = 0;
+            self.atom_operands = &.{};
+            self.atom_capacity = 0;
+            self.atom_len = 0;
+            self.jump_sites = &.{};
+            self.jump_capacity = 0;
+            self.jump_len = 0;
+        }
+
+        pub fn ensureAdditional(
+            self: *Phase2Builder,
+            code_need: usize,
+            atom_need: usize,
+            jump_need: usize,
+        ) !void {
+            const required_code = self.code_len + code_need;
+            if (required_code > self.code_capacity) {
+                const new_capacity = @max(required_code, self.code_capacity * 2);
+                const new_backing = try self.memory.alloc(u8, new_capacity);
+                @memcpy(new_backing[0..self.code_len], self.code[0..self.code_len]);
+                if (self.code_capacity != 0) self.memory.free(u8, self.code);
+                self.code = new_backing;
+                self.code_capacity = new_capacity;
+            }
+
+            const required_atoms = self.atom_len + atom_need;
+            if (required_atoms > self.atom_capacity) {
+                const new_capacity = @max(required_atoms, self.atom_capacity * 2);
+                const new_backing = try self.memory.alloc(atom.Atom, new_capacity);
+                @memcpy(new_backing[0..self.atom_len], self.atom_operands[0..self.atom_len]);
+                if (self.atom_capacity != 0) self.memory.free(atom.Atom, self.atom_operands);
+                self.atom_operands = new_backing;
+                self.atom_capacity = new_capacity;
+            }
+
+            const required_jumps = self.jump_len + jump_need;
+            if (required_jumps > self.jump_capacity) {
+                const new_capacity = @max(required_jumps, self.jump_capacity * 2);
+                const new_backing = try self.memory.alloc(JumpSite, new_capacity);
+                @memcpy(new_backing[0..self.jump_len], self.jump_sites[0..self.jump_len]);
+                if (self.jump_capacity != 0) self.memory.free(JumpSite, self.jump_sites);
+                self.jump_sites = new_backing;
+                self.jump_capacity = new_capacity;
+            }
+        }
+
+        pub fn appendCodeAssumeCapacity(self: *Phase2Builder, bytes: []const u8) void {
+            std.debug.assert(self.code_len + bytes.len <= self.code_capacity);
+            @memcpy(self.code[self.code_len..][0..bytes.len], bytes);
+            self.code_len += bytes.len;
+        }
+
+        pub fn appendAtomAssumeCapacity(self: *Phase2Builder, owned_id: atom.Atom) void {
+            std.debug.assert(self.atom_len < self.atom_capacity);
+            self.atom_operands[self.atom_len] = owned_id;
+            self.atom_len += 1;
+        }
+
+        pub fn appendJumpAssumeCapacity(self: *Phase2Builder, site: JumpSite) void {
+            std.debug.assert(self.jump_len < self.jump_capacity);
+            self.jump_sites[self.jump_len] = site;
+            self.jump_len += 1;
+        }
+    };
+
     const GLOBAL_REF_TAIL_NONE: u8 = 0;
     const GLOBAL_REF_TAIL_PUT: u8 = 1;
     const GLOBAL_REF_TAIL_DUP_PUT: u8 = 2;
@@ -12872,6 +13003,21 @@ const function_mod = struct {
             self.code_capacity = owned.len;
         }
 
+        /// Transfer variant of `installCode`: take ownership of a backing
+        /// allocation of `owned_capacity` elements while exposing only the
+        /// used prefix `owned_used`. `deinit`, `setCode`, `installCode`, and
+        /// the growable append helpers all free `code.ptr[0..code_capacity]`,
+        /// so the full backing is released on every later path — including
+        /// `owned_used.len == 0` with `owned_capacity > 0`, where the caller
+        /// passes `backing.ptr[0..0]` so the pointer still names the backing.
+        pub fn installCodeWithCapacity(self: *BytecodeImpl, owned_used: []u8, owned_capacity: usize) void {
+            std.debug.assert(owned_used.len <= owned_capacity);
+            std.debug.assert(owned_capacity != 0 or owned_used.len == 0);
+            freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
+            self.code = owned_used;
+            self.code_capacity = owned_capacity;
+        }
+
         pub fn installPc2Line(self: *BytecodeImpl, owned: []u8) void {
             const old = self.pc2line_buf;
             const old_owned = self.owns_pc2line_buf;
@@ -12888,6 +13034,19 @@ const function_mod = struct {
             freeGrowableSlice(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity);
             self.atom_operands = owned;
             self.atom_operands_capacity = owned.len;
+        }
+
+        /// Transfer variant of `installAtomOperands`. As with
+        /// `installAtomOperands`, atom refcounts held by the previous
+        /// `atom_operands` entries are NOT released here; callers release
+        /// them explicitly before installing. When `owned_capacity` is
+        /// nonzero, `owned_used.ptr` must name the head of the backing.
+        pub fn installAtomOperandsWithCapacity(self: *BytecodeImpl, owned_used: []atom.Atom, owned_capacity: usize) void {
+            std.debug.assert(owned_used.len <= owned_capacity);
+            std.debug.assert(owned_capacity != 0 or owned_used.len == 0);
+            freeGrowableSlice(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity);
+            self.atom_operands = owned_used;
+            self.atom_operands_capacity = owned_capacity;
         }
 
         pub fn addConstant(self: *BytecodeImpl, value: JSValue) !u32 {

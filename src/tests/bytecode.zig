@@ -9923,3 +9923,243 @@ test "P2-R1T relocation: mid-instruction source slot pc fails closed" {
 
     try std.testing.expectEqual(@as(u32, 2), function.source_loc_slots[0].pc);
 }
+
+test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full backing across replacement and deinit" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-replacement");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const pre_install_refs = rt.atoms.refCount(name).?;
+
+    const first_code = [_]u8{ 1, 2, 3, 4, 5 };
+    const first_code_backing = try rt.memory.alloc(u8, 16);
+    @memcpy(first_code_backing[0..first_code.len], &first_code);
+    bc.installCodeWithCapacity(first_code_backing[0..first_code.len], first_code_backing.len);
+    try std.testing.expectEqual(@as(usize, 5), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 16), bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &first_code, bc.code);
+
+    const first_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
+    for (first_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    bc.installAtomOperandsWithCapacity(first_atom_backing[0..3], first_atom_backing.len);
+    try std.testing.expectEqual(@as(usize, 3), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 8), bc.atom_operands_capacity);
+    try std.testing.expectEqual(pre_install_refs + 3, rt.atoms.refCount(name).?);
+
+    const second_code = [_]u8{ 9, 8 };
+    const second_code_backing = try rt.memory.alloc(u8, 6);
+    @memcpy(second_code_backing[0..second_code.len], &second_code);
+    const second_atom_backing = try rt.memory.alloc(core.atom.Atom, 6);
+    for (second_atom_backing[0..2]) |*slot| slot.* = rt.atoms.dup(name);
+
+    for (bc.atom_operands) |old| rt.atoms.free(old);
+    bc.installAtomOperandsWithCapacity(second_atom_backing[0..2], second_atom_backing.len);
+    bc.installCodeWithCapacity(second_code_backing[0..second_code.len], second_code_backing.len);
+
+    try std.testing.expectEqual(@as(usize, 2), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 6), bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &second_code, bc.code);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 6), bc.atom_operands_capacity);
+    try std.testing.expectEqual(pre_install_refs + 2, rt.atoms.refCount(name).?);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "capacity-carry install with zero used length still owns and frees the backing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-zero-used");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+
+    const code_backing = try rt.memory.alloc(u8, 12);
+    bc.installCodeWithCapacity(code_backing.ptr[0..0], code_backing.len);
+    const atom_backing = try rt.memory.alloc(core.atom.Atom, 4);
+    bc.installAtomOperandsWithCapacity(atom_backing.ptr[0..0], atom_backing.len);
+
+    try std.testing.expectEqual(@as(usize, 0), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 12), bc.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 4), bc.atom_operands_capacity);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "phase-3 exact-fit replacement frees the carried capacity once and releases atom refs once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-phase-3-replacement");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+
+    const carried_code = [_]u8{ 1, 3, 5, 7, 9 };
+    const carried_code_backing = try rt.memory.alloc(u8, 16);
+    @memcpy(carried_code_backing[0..carried_code.len], &carried_code);
+    bc.installCodeWithCapacity(carried_code_backing[0..carried_code.len], carried_code_backing.len);
+
+    const carried_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
+    for (carried_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    bc.installAtomOperandsWithCapacity(carried_atom_backing[0..3], carried_atom_backing.len);
+    const carried_refs = rt.atoms.refCount(name).?;
+
+    const fresh_code = try rt.memory.alloc(u8, bc.code.len);
+    @memcpy(fresh_code, bc.code);
+    const fresh_atoms = try rt.memory.alloc(core.atom.Atom, bc.atom_operands.len);
+    for (fresh_atoms) |*slot| slot.* = rt.atoms.dup(name);
+    const bytes_with_both_generations = rt.memory.allocated_bytes;
+    const count_with_both_generations = rt.memory.allocation_count;
+
+    for (bc.atom_operands) |old| rt.atoms.free(old);
+    bc.installCode(fresh_code);
+    bc.installAtomOperands(fresh_atoms);
+
+    try std.testing.expectEqual(carried_refs, rt.atoms.refCount(name).?);
+    const carried_backing_bytes =
+        16 * @sizeOf(u8) + 8 * @sizeOf(core.atom.Atom);
+    try std.testing.expectEqual(
+        bytes_with_both_generations - carried_backing_bytes,
+        rt.memory.allocated_bytes,
+    );
+    try std.testing.expectEqual(count_with_both_generations - 2, rt.memory.allocation_count);
+    try std.testing.expectEqual(
+        base_bytes + fresh_code.len * @sizeOf(u8) + fresh_atoms.len * @sizeOf(core.atom.Atom),
+        rt.memory.allocated_bytes,
+    );
+    try std.testing.expectEqual(base_count + 2, rt.memory.allocation_count);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "Phase2Builder grows geometrically, moves atom ownership with the backing, and deinitUncommitted releases everything" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("phase-2-builder-growth");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var builder = try bytecode.pipeline_resolve_variables.Phase2Builder.init(
+        &rt.memory,
+        &rt.atoms,
+        4,
+        2,
+        1,
+    );
+    var builder_live = true;
+    defer if (builder_live) builder.deinitUncommitted();
+
+    const first_code = [_]u8{ 1, 2, 3, 4 };
+    builder.appendCodeAssumeCapacity(&first_code);
+    builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 7 });
+    const refs_before_grow = rt.atoms.refCount(name).?;
+    try std.testing.expectEqual(base_refs + 2, refs_before_grow);
+
+    try builder.ensureAdditional(8, 3, 2);
+    try std.testing.expectEqual(@as(usize, 12), builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 5), builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 3), builder.jump_capacity);
+    try std.testing.expectEqual(builder.code_capacity, builder.code.len);
+    try std.testing.expectEqual(builder.atom_capacity, builder.atom_operands.len);
+    try std.testing.expectEqual(builder.jump_capacity, builder.jump_sites.len);
+    try std.testing.expectEqualSlices(u8, &first_code, builder.code[0..builder.code_len]);
+    try std.testing.expectEqual(name, builder.atom_operands[0]);
+    try std.testing.expectEqual(name, builder.atom_operands[1]);
+    try std.testing.expectEqual(refs_before_grow, rt.atoms.refCount(name).?);
+
+    const second_code = [_]u8{ 5, 6, 7, 8, 9, 10, 11, 12 };
+    builder.appendCodeAssumeCapacity(&second_code);
+    for (0..3) |_| builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 11 });
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 19 });
+
+    try std.testing.expectEqual(@as(usize, 12), builder.code_len);
+    try std.testing.expectEqual(@as(usize, 5), builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 3), builder.jump_len);
+    try std.testing.expectEqual(@as(usize, 7), builder.jump_sites[0].operand_pos);
+
+    builder.deinitUncommitted();
+    builder_live = false;
+    try std.testing.expectEqual(@as(usize, 0), builder.code.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.code_len);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_sites.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_len);
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+
+    var zero_builder = try bytecode.pipeline_resolve_variables.Phase2Builder.init(
+        &rt.memory,
+        &rt.atoms,
+        0,
+        0,
+        0,
+    );
+    var zero_builder_live = true;
+    defer if (zero_builder_live) zero_builder.deinitUncommitted();
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.code.len);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.jump_sites.len);
+
+    try zero_builder.ensureAdditional(1, 1, 1);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.jump_capacity);
+    zero_builder.appendCodeAssumeCapacity(&.{42});
+    zero_builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    zero_builder.appendJumpAssumeCapacity(.{ .operand_pos = 23 });
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.code_len);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.jump_len);
+
+    zero_builder.deinitUncommitted();
+    zero_builder_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
