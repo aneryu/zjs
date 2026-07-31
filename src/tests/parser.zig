@@ -1671,6 +1671,36 @@ test "F4: unary +/-/~/! lower to plus/neg/not/lnot" {
     try std.testing.expectEqual(op.lnot, lnot_bc.code[lnot_bc.code.len - 1]);
 }
 
+// P7-61 pin: op.lnot has a dedicated hot dispatch handler, so the shapes that do
+// and do not reach it are load-bearing. zjs (like qjs, quickjs.c:27620) folds no
+// negation into branch context: `if (!x)` really does execute one OP_lnot, while a
+// bare condition or a comparison executes none. A future peephole that changed
+// this would silently stop exercising that handler; this test fails first.
+test "F4: `!` emits exactly one lnot; plain and comparison conditions emit none" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_]struct { src: []const u8, hits: usize }{
+        .{ .src = "if (x) { y(); }", .hits = 0 },
+        .{ .src = "if (x !== 0) { y(); }", .hits = 0 },
+        .{ .src = "while (x) { y(); }", .hits = 0 },
+        .{ .src = "if (!x) { y(); }", .hits = 1 },
+        .{ .src = "while (!x) { y(); }", .hits = 1 },
+        .{ .src = "for (; !x; ) { y(); }", .hits = 1 },
+        .{ .src = "u = !x;", .hits = 1 },
+        .{ .src = "u = !!x;", .hits = 2 },
+    };
+    for (cases) |c| {
+        var bc = try parseStatement(&env, c.src);
+        defer bc.deinit(env.rt);
+        const hits = countOpcode(bc.code, op.lnot);
+        std.testing.expectEqual(c.hits, hits) catch |err| {
+            std.debug.print("lnot count mismatch for `{s}`: expected {d}, got {d}\n", .{ c.src, c.hits, hits });
+            return err;
+        };
+    }
+}
+
 test "F4: typeof identifier uses get_var_undef + typeof" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

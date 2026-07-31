@@ -55,6 +55,23 @@ pub const Policy = struct {
     enable_concurrent_sweep: bool = false,
     enable_selective_evacuation: bool = false,
 
+    /// Whether any policy field actually consumes the OS-level memory
+    /// snapshot, i.e. whether `Registry.processMemoryRequest` can return
+    /// anything but null. Exactly the four fields that function reads, and
+    /// deliberately not `external_soft_limit` / `external_hard_limit`: those
+    /// are served by the registry's own external-byte counter and need no
+    /// `/proc` or cgroup read.
+    ///
+    /// Gating on the fields rather than on `mode` matters, because a caller may
+    /// set an RSS or cgroup limit while staying in `.balanced`; a mode test
+    /// would silently disable a pressure policy the embedder asked for.
+    pub inline fn needsProcessMemorySnapshot(self: Policy) bool {
+        return self.rss_soft_limit != null or
+            self.rss_hard_limit != null or
+            self.cgroup_soft_ratio_per_mille != 0 or
+            self.cgroup_hard_ratio_per_mille != 0;
+    }
+
     pub fn forMode(mode: Mode) Policy {
         var policy = Policy{
             .mode = mode,

@@ -1,0 +1,91 @@
+=== Phase 7 closeout gates (2026-07-31T02:47:17Z) ===
+HEAD: ca4837667ea096b0ee78efe4192533edc80d2bf4
+
+--- git diff --check ---
+clean (exit 0)
+
+--- zig fmt --check . ---
+clean
+
+--- src diff vs a5bbbe52 ---
+ src/core/gc.zig      | 17 ++++++++++
+ src/core/runtime.zig | 21 ++++++++++++-
+ src/tests/core.zig   | 88 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/tests/parser.zig | 30 ++++++++++++++++++
+ 4 files changed, 155 insertions(+), 1 deletion(-)
+
+--- P7-70 measurement-contract tests ---
+PASS  A6-06  a period that shares a factor with the inner loop is rejected
+PASS  A6-07  an unrecorded period is rejected
+
+43/43 contract tests passed
+
+--- red-team ---
+NOT RE-RUN AT CLOSEOUT, and not part of the closeout gate list.
+tools/compare/test_measurement_redteam.js is a Bun script (uses import.meta.dir)
+that spawns real runner/validator processes and therefore needs built zjs+qjs
+binaries and the exclusive host lock. It was executed in full during P7-70 with
+21/21 attacks held; see P7-70-measurement-contract/red-team-results.json for the
+per-attack exit codes and message text. An initial attempt to invoke it under
+node failed with ERR_INVALID_ARG_TYPE (import.meta.dir is undefined outside Bun);
+that is a harness invocation error, not a contract failure.
+
+--- perf-self-check ---
+compatible cases: 75/75
+unsupported cases: 0
+skipped cases: 0
+invalid cases: 0
+validation failures: 0
+paired geomean (zjs/qjs, primary): 1.00
+legacy ratio-of-averages geomean (zjs/qjs): 1.00
+startup baseline: qjs      1.034 ms, zjs      1.017 ms, zjs/qjs 0.98
+
+--- same-runtime P0 sentinel ---
+--- same-runtime P0 sentinel (samples=6, even per contract #3) ---
+[method_call_loop] sample 3/6 qjs->zjs
+[method_call_loop] sample 4/6 zjs->qjs
+[method_call_loop] sample 5/6 qjs->zjs
+[method_call_loop] sample 6/6 zjs->qjs
+[method_call_loop] collecting separate PMU samples
+[typed_array_read] validating checksums
+[typed_array_read] sample 1/6 qjs->zjs
+[typed_array_read] sample 2/6 zjs->qjs
+[typed_array_read] sample 3/6 qjs->zjs
+[typed_array_read] sample 4/6 zjs->qjs
+[typed_array_read] sample 5/6 qjs->zjs
+[typed_array_read] sample 6/6 zjs->qjs
+[typed_array_read] collecting separate PMU samples
+[typed_array_write] validating checksums
+[typed_array_write] sample 1/6 qjs->zjs
+[typed_array_write] sample 2/6 zjs->qjs
+[typed_array_write] sample 3/6 qjs->zjs
+[typed_array_write] sample 4/6 zjs->qjs
+[typed_array_write] sample 5/6 qjs->zjs
+[typed_array_write] sample 6/6 zjs->qjs
+[typed_array_write] collecting separate PMU samples
+wrote /home/aneryu/zjs/.zig-cache/perf/qjs-align/same-runtime/summary.json
+
+same-runtime P0 sentinel summary (samples=6, taskset -c 19, exclusive lock):
+  global_write_loop    1.0411   order 3/3 balanced   comparable
+  prop_read_mono_loop  0.8746   order 3/3 balanced   comparable
+  fib_rec              1.2982   order 3/3 balanced   comparable   <-- over per-case 1.20
+  call_body_loop       1.1430   order 3/3 balanced   comparable
+  method_call_loop     1.1392   order 3/3 balanced   comparable
+  typed_array_read     0.9663   order 3/3 balanced   comparable
+  typed_array_write    1.0257   order 3/3 balanced   comparable
+
+  geomean 1.0622  vs exit line geomean <= 1.10   -> PASS
+  per-case exception: fib_rec 1.2982 > 1.20. This is the pre-existing exception
+  already recorded when Phase 1-6 was merged to main (fib_rec 1.30 was then the
+  only case over the per-case limit); it is not a Phase 7 regression.
+
+  Note: the runner defaults to --samples 5, which is odd and would violate
+  measurement contract #3 (ABBA balance). Run explicitly with an even count.
+
+=== closeout verdict ===
+  git diff --check            clean
+  zig fmt --check .           clean
+  perf-self-check             75/75 compatible, 0 validation failures
+  measurement-contract tests  43/43
+  same-runtime P0 sentinel    geomean 1.0622 PASS (fib_rec pre-existing exception)
+  red-team                    not re-run; 21/21 held in P7-70 (see above)

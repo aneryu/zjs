@@ -1,0 +1,153 @@
+{
+ "line": "P7-51A",
+ "title": "no-op property-redefinition census",
+ "date": "2026-07-30",
+ "kind": "census only (temporary instrumentation, reverted)",
+ "base": "fed6948a",
+ "purpose": "decide whether the same-flags shape-uniquing cut precedes the P7-41 builtin bridge; not a re-validation of the mechanism",
+ "spec_corrections": [
+  {
+   "claim": "bucket B \"unique hashed + same flags -> removeShapeHash\" occurs in replaceProperty",
+   "finding": "structurally impossible on this path",
+   "detail": "replaceProperty calls Object.ensureUniqueShapeForMutation (object.zig:11309), which is NOT shape.Registry.prepareUpdate (shape.zig:420). It has no removeShapeHash arm: it early-returns whenever refCount()==1 and otherwise clones. Only bucket A (shared shape) and bucket C (rc==1, early return) can occur."
+  },
+  {
+   "claim": "the cut must gate updatePropertyFlags as well",
+   "finding": "that second gate is redundant, though harmless",
+   "detail": "shape.Registry.updatePropertyFlags already early-returns on identical flags (shape.zig:578)."
+  }
+ ],
+ "corpus": {
+  "entries": 173,
+  "groups": [
+   "named_eval",
+   "microbench(75)",
+   "wrapped(same-runtime closure matrix, builtin bridge cases, P0 sentinels)",
+   "gbemu"
+  ],
+  "note": "counting only; no exclusive measurement lock taken"
+ },
+ "totals": {
+  "plain_total": 40594,
+  "plain_flags_changed": 519,
+  "plain_flags_same": 40075,
+  "plain_same_shared": 40075,
+  "plain_same_unique": 0,
+  "plain_same_unique_hashed": 0,
+  "varref_total": 0
+ },
+ "avoidable": {
+  "total": 40075,
+  "from_p7_50_synthetic": 40069,
+  "synthetic_share": 0.9998502807236431,
+  "from_everything_else": 6,
+  "entries_with_any": 9,
+  "max_outside_synthetic": 1,
+  "entries": [
+   {
+    "group": "named_eval",
+    "case": "named_eval_assign",
+    "avoidable": 20000,
+    "plain_total": 20003,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "microbench",
+    "case": "arrow_call_loop",
+    "avoidable": 1,
+    "plain_total": 4,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "microbench",
+    "case": "arrow_tail_recursion",
+    "avoidable": 1,
+    "plain_total": 4,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "wrapped",
+    "case": "closure_identity_probe",
+    "avoidable": 69,
+    "plain_total": 72,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "wrapped",
+    "case": "closure_identtarget_nocap_churn",
+    "avoidable": 20000,
+    "plain_total": 20003,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "wrapped",
+    "case": "closure_identtarget_reuse_churn",
+    "avoidable": 1,
+    "plain_total": 4,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "wrapped",
+    "case": "closure_reuse_churn",
+    "avoidable": 1,
+    "plain_total": 4,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "wrapped",
+    "case": "closure_reuse_retain",
+    "avoidable": 1,
+    "plain_total": 4,
+    "plain_flags_changed": 3
+   },
+   {
+    "group": "wrapped",
+    "case": "method_call_loop",
+    "avoidable": 1,
+    "plain_total": 4,
+    "plain_flags_changed": 3
+   }
+  ]
+ },
+ "gbemu": {
+  "avoidable_events_whole_run": 21,
+  "cost_per_event_cycles": 423.6,
+  "estimated_total_cycles": 8895.6,
+  "note": "cost per event is the NamedEvaluation figure from P7-50 and is the most expensive class"
+ },
+ "class_costs": {
+  "A_shared_same_flags": {
+   "occurs": true,
+   "cost_cycles_per_event": 423.6,
+   "source": "P7-50 NamedEvaluation measurement"
+  },
+  "B_unique_hashed_same_flags": {
+   "occurs": false,
+   "reason": "no removeShapeHash arm on this path"
+  },
+  "C_unique_unhashed_same_flags": {
+   "occurs": false,
+   "observed_count": 0,
+   "note": "rc==1 never observed with same flags in this corpus; would be near-free anyway"
+  }
+ },
+ "thresholds": {
+  "two_unrelated_workloads": {
+   "met": false,
+   "why": "both high-count entries are the same P7-50 synthetic NamedEvaluation shape"
+  },
+  "ten_percent_of_a_pareto_case": {
+   "met": false,
+   "why": "arrow_call_loop shows 1 event across 200,000 iterations"
+  },
+  "absolute_total_beats_bridge": {
+   "met": false,
+   "why": "6 events across the other 170 corpus entries; 21 in a whole gbemu run"
+  },
+  "high_frequency_path_outside_named_evaluation": {
+   "met": false,
+   "why": "the var-ref branch never fired anywhere in the corpus"
+  }
+ },
+ "verdict": "defer: legitimate qjs-alignment cleanup, but not the current largest item; do P7-42 builtin bridge phase attribution first"
+}

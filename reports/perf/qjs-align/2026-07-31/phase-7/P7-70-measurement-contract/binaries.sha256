@@ -1,0 +1,70 @@
+# P7-70 formal binaries
+
+Two independent cold-cache zjs ReleaseFast build instances and two independent
+pinned-qjs binary identities. Build A and build B are NOT byte-identical, so
+they are two build instances and compiler state is NOT claimed to be pairable;
+there is no free noise ruler this round.
+
+## sha256
+c5625b9977ebd1c2de212e973c03e6724ececb537c33d454d29cf8bc4c0dbd5b  .build-a/out/bin/zjs
+6d473ea2275500cd2f6642daab2e5c220a5413cb254eaa9c8ccd59f8f2d48d4f  .build-b/out/bin/zjs
+b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d  /home/aneryu/quickjs/qjs
+5e331bf92e236c8e2c3bd88032b3c1ec2c2e9e0cfe2e1bd40b4ce2bbeaacd365  /home/aneryu/quickjs-zjs-ref/qjs
+
+## identities
+
+| role | path | size (bytes) | .text (bytes) |
+|------|------|--------------|---------------|
+| `zjs-A` | `.build-a/out/bin/zjs` | 29564168 | 3855804 |
+| `zjs-B` | `.build-b/out/bin/zjs` | 29567272 | 3857060 |
+| `qjs-A` | `/home/aneryu/quickjs/qjs` | 5139280 | 725228 |
+| `qjs-B` | `/home/aneryu/quickjs-zjs-ref/qjs` | 5139288 | 725228 |
+
+## build commands (cold cache, independent global+local cache dirs)
+```sh
+set -e
+cd /home/aneryu/worktrees/zjs-p7-measurement-contract
+export TMPDIR="$PWD/.tmp"
+export ZIG_GLOBAL_CACHE_DIR="$PWD/.build-a/zig-global-cache"
+export ZJS_REPO_ROOT="$PWD"
+rm -rf .build-a
+mkdir -p .build-a/zig-global-cache
+zig build zjs -Doptimize=ReleaseFast \
+  --cache-dir "$PWD/.build-a/zig-local-cache" \
+  --global-cache-dir "$PWD/.build-a/zig-global-cache" \
+  --prefix "$PWD/.build-a/out" 2>&1 | tail -20
+sha256sum "$PWD/.build-a/out/bin/zjs"
+```
+```sh
+set -e
+cd /home/aneryu/worktrees/zjs-p7-measurement-contract
+export TMPDIR="$PWD/.tmp"
+export ZJS_REPO_ROOT="$PWD"
+rm -rf .build-b
+mkdir -p .build-b/zig-global-cache
+export ZIG_GLOBAL_CACHE_DIR="$PWD/.build-b/zig-global-cache"
+zig build zjs -Doptimize=ReleaseFast \
+  --cache-dir "$PWD/.build-b/zig-local-cache" \
+  --global-cache-dir "$PWD/.build-b/zig-global-cache" \
+  --prefix "$PWD/.build-b/out" 2>&1 | tail -20
+sha256sum "$PWD/.build-b/out/bin/zjs"
+```
+
+## compiler / toolchain
+zig 0.16.0
+bun 1.3.13
+
+## qjs identities
+/home/aneryu/quickjs: commit 04be246001599f5995fa2f2d8c91a0f198d3f34c VERSION 2026-06-04 dirty=false
+/home/aneryu/quickjs-zjs-ref: commit 04be246001599f5995fa2f2d8c91a0f198d3f34c VERSION 2026-06-04 dirty=false
+
+## binary build commit vs measurement-time HEAD
+Both zjs binaries were compiled while the worktree HEAD was `042e4962`. The
+formal artifacts record `meta.zjs.commit = 1fb79bc3` because the runner infers
+the commit from the binary's directory at *measurement* time, and the five
+tooling commits landed between the build and the run. Nothing under src/ moved:
+
+```
+$ git diff 042e4962 1fb79bc3 -- src/ | wc -l
+0
+```

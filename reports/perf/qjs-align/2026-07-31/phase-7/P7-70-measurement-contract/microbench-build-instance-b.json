@@ -1,0 +1,2816 @@
+{
+  "artifact": "microbench-build-instance-b",
+  "tool": "zjs-microbench",
+  "suite": "microbench",
+  "timestamp": "2026-07-30T18:02:52.421Z",
+  "complete": true,
+  "headline": 1.1589262520094008,
+  "summary": {
+    "compatible": 16,
+    "unsupported": 0,
+    "skipped": 0,
+    "invalid": 0,
+    "failed": 0,
+    "zjsFaster": 1,
+    "qjsFaster": 13,
+    "nearTie": 2,
+    "geometricMean": 1.15884503893702,
+    "geometricMeanIsArbitration": false,
+    "pairedGeomean": 1.1589262520094008,
+    "primaryMetric": "pairedGeomean",
+    "primaryRatio": 1.1589262520094008,
+    "compatibilityMetric": true,
+    "routePriorityMetric": false,
+    "startupAdjustedGeometricMean": null,
+    "startupAdjustedDiagnosticOnly": true,
+    "startupAdjustedHeadlineEligible": false,
+    "startupAdjustedGeometricMeanIsArbitration": false,
+    "startupAdjustedVoidReason": "P7-20/P7-70: with this suite composition the majority of denominators are at or below the noise band; unresolved cases are never aggregated and the aggregate is therefore not emitted"
+  },
+  "contract": {
+    "policyRef": {
+      "policy_id": "qjs-align-p7-70-whole-process-measurement",
+      "policy_version": 1,
+      "sha256": "020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68",
+      "path": "/home/aneryu/worktrees/zjs-p7-measurement-contract/tools/compare/measurement_policy.json"
+    },
+    "complete": true,
+    "errorClass": null,
+    "violations": [],
+    "sampleContract": {
+      "samples": 8,
+      "firstPositionCounts": {
+        "qjs": 4,
+        "zjs": 4
+      },
+      "positionCounts": [
+        {
+          "qjs": 4,
+          "zjs": 4
+        },
+        {
+          "qjs": 4,
+          "zjs": 4
+        }
+      ],
+      "declaredOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "executedOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ]
+    },
+    "affinityAttestation": {
+      "ok": true,
+      "errorClass": null,
+      "exitCode": 0,
+      "requestedCpu": 19,
+      "collectorStart": {
+        "mask": "19",
+        "cpus": [
+          19
+        ],
+        "unavailableReason": null
+      },
+      "collectorEnd": {
+        "mask": "19",
+        "cpus": [
+          19
+        ],
+        "unavailableReason": null
+      },
+      "children": [
+        {
+          "treatment": "qjs",
+          "pid": 2060738,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/quickjs-zjs-ref/qjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "pre"
+        },
+        {
+          "treatment": "zjs",
+          "pid": 2060741,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.build-b/out/bin/zjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "pre"
+        },
+        {
+          "treatment": "qjs",
+          "pid": 2061318,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/quickjs-zjs-ref/qjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "post"
+        },
+        {
+          "treatment": "zjs",
+          "pid": 2061319,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.build-b/out/bin/zjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "post"
+        }
+      ],
+      "pmu": {
+        "name": "armv8_pmuv3_1",
+        "cpus": [
+          5,
+          6,
+          7,
+          8,
+          9,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "mask": "5-9,15-19",
+        "type": 11,
+        "source": "/sys/devices/armv8_pmuv3_1/cpus",
+        "unavailableReason": null
+      },
+      "violations": []
+    }
+  },
+  "meta": {
+    "zjs": {
+      "commit": "1fb79bc39b3b4277a382d96283f18a41d53894cb",
+      "dirty": false,
+      "repository": "/home/aneryu/worktrees/zjs-p7-measurement-contract",
+      "binary": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.build-b/out/bin/zjs",
+      "sha256": "6d473ea2275500cd2f6642daab2e5c220a5413cb254eaa9c8ccd59f8f2d48d4f",
+      "buildMode": "ReleaseFast",
+      "jsvalueRepresentation": "16-byte payload+tag (zjs_nan_boxing=false, aarch64 default)",
+      "provenance": "repository commit and dirty state are inferred from the binary realpath; SHA-256 is the authoritative binary identity"
+    },
+    "qjs": {
+      "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+      "dirty": false,
+      "version": "2026-06-04",
+      "binary": "/home/aneryu/quickjs-zjs-ref/qjs",
+      "sha256": "5e331bf92e236c8e2c3bd88032b3c1ec2c2e9e0cfe2e1bd40b4ce2bbeaacd365",
+      "repository": "/home/aneryu/quickjs-zjs-ref",
+      "helpVersionLine": "QuickJS version 2026-06-04",
+      "helpExitCode": 1,
+      "versionCrossCheck": true,
+      "provenance": "repository commit and dirty state are inferred from the binary realpath; SHA-256 is the authoritative binary identity"
+    },
+    "toolRepoCommit": {
+      "commit": "1fb79bc39b3b4277a382d96283f18a41d53894cb",
+      "dirty": false,
+      "repository": "/home/aneryu/worktrees/zjs-p7-measurement-contract"
+    },
+    "toolchain": {
+      "zig": "0.16.0",
+      "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+      "bun": "1.3.13",
+      "node": "v24.15.0"
+    },
+    "host": {
+      "cpuModel": "Cortex-X925 / Cortex-A725",
+      "cpuModelProbeSource": "lscpu Model name",
+      "pinnedCpu": 19,
+      "requestedCpu": 19,
+      "affinitySource": "inherited",
+      "affinityMask": "19",
+      "affinityCpus": [
+        19
+      ],
+      "requestedCpuMatches": true,
+      "kernel": "6.17.0-1014-nvidia",
+      "arch": "arm64",
+      "pmuIdentity": {
+        "name": "armv8_pmuv3_1",
+        "cpus": [
+          5,
+          6,
+          7,
+          8,
+          9,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "mask": "5-9,15-19",
+        "type": 11,
+        "source": "/sys/devices/armv8_pmuv3_1/cpus",
+        "unavailableReason": null
+      }
+    },
+    "lock": {
+      "path": "/tmp/zjs-host-heavy.lock",
+      "mode": "exclusive",
+      "heldBy": "caller"
+    },
+    "environment": {
+      "ZIG_GLOBAL_CACHE_DIR": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.zig-global-cache",
+      "TMPDIR": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp",
+      "ZJS_REPO_ROOT": "/home/aneryu/worktrees/zjs-p7-measurement-contract"
+    },
+    "caseSources": {
+      "uri_component_decode_4byte": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/uri_component_decode_4byte.js",
+        "sourceSha256": "0d931f0e6b08852c84729930eb0e2084b9b263f77b8e04fb00b632164fb572b9",
+        "sourceBytes": 786
+      },
+      "uri_decode_4byte": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/uri_decode_4byte.js",
+        "sourceSha256": "2b84f8b0dc7c3626cc7240486563560d56eb8daa71d5029857d6ec8961f4e298",
+        "sourceBytes": 777
+      },
+      "arrow_call_loop": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/arrow_call_loop.js",
+        "sourceSha256": "066216e73e2edc9117eb3bdad10b2345b672ceae350496026526b6b42446d912",
+        "sourceBytes": 95
+      },
+      "call2_loop": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/call2_loop.js",
+        "sourceSha256": "85c876308b66c600e89814092a8ed362b9e61cf6d9488707a3d152222a4faf61",
+        "sourceBytes": 103
+      },
+      "closure_call_loop": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/closure_call_loop.js",
+        "sourceSha256": "48b782bb995502611c6304f49bcc1842db31e3f47454bc996dedf17fc6544d4f",
+        "sourceBytes": 143
+      },
+      "array_map_callback": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/array_map_callback.js",
+        "sourceSha256": "5f613a5054e8d571a7dd7c67a35c21049766765caa21f06747567c270805c6e5",
+        "sourceBytes": 115
+      },
+      "vm_int_sum_large": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/vm_int_sum_large.js",
+        "sourceSha256": "2df4340868e7393c8467edebee75dda06bb5c9e206fcb170e2ab1cbde98b4b69",
+        "sourceBytes": 63
+      },
+      "dense_array_write_read": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/dense_array_write_read.js",
+        "sourceSha256": "c40313f496b2fe43efa99843b92980f8294ce36ce2327c105124dd3a2034c154",
+        "sourceBytes": 124
+      },
+      "proto_read": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/proto_read.js",
+        "sourceSha256": "d9c91f10c64ff1e8f9f1577800f8a451960be23b9e779bda927689c58a0a5c99",
+        "sourceBytes": 113
+      },
+      "global_read_loop": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/global_read_loop.js",
+        "sourceSha256": "842ba09343b0f9d2c3367de7af53ac35e648a4464bda72e94ca5d6e879deb0cd",
+        "sourceBytes": 74
+      },
+      "math_min": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/math_min.js",
+        "sourceSha256": "ab8ac9324b347a7d749db5dcab3981c6894525469960e33748d19266349ec01e",
+        "sourceBytes": 82
+      },
+      "prop_read_poly3": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/prop_read_poly3.js",
+        "sourceSha256": "f1bb4fceeed5f03b88755414eeda8337518c6612f122d0aba7aa8f780bde562b",
+        "sourceBytes": 175
+      },
+      "prop_read_mono": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/prop_read_mono.js",
+        "sourceSha256": "08847d7e160a468ddf1fd6d584cd45f7256250390e8552c5c87920c81c43eeb3",
+        "sourceBytes": 97
+      },
+      "regexp_test_cached": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/regexp_test_cached.js",
+        "sourceSha256": "46a67eaa4f9a27d4854a5e132982c193602fffcc62ba2bb7080fb2d07aa944fe",
+        "sourceBytes": 96
+      },
+      "func_call": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/func_call.js",
+        "sourceSha256": "76f7066378e9c18f8f71443b57b06f3ebbafc0833d523c255af76ccc8bf07f26",
+        "sourceBytes": 102
+      },
+      "int_sum": {
+        "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/int_sum.js",
+        "sourceSha256": "776b71aa70195a58cbf3655476fd2085f55dfc7cafd207b5fbdbf6d2a4afaab2",
+        "sourceBytes": 67
+      }
+    },
+    "startupBaselineIdentity": {
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "scriptPath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__startup_empty.js",
+      "scriptSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "scriptBytes": 0,
+      "samples": 8,
+      "warmup": 4
+    },
+    "attestation": {
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "children": [
+        {
+          "treatment": "qjs",
+          "pid": 2060738,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/quickjs-zjs-ref/qjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "pre"
+        },
+        {
+          "treatment": "zjs",
+          "pid": 2060741,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.build-b/out/bin/zjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "pre"
+        },
+        {
+          "treatment": "qjs",
+          "pid": 2061318,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/quickjs-zjs-ref/qjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "post"
+        },
+        {
+          "treatment": "zjs",
+          "pid": 2061319,
+          "mask": "19",
+          "cpus": [
+            19
+          ],
+          "command": [
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.build-b/out/bin/zjs",
+            "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js"
+          ],
+          "exitCode": 0,
+          "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+          "phase": "post"
+        }
+      ],
+      "collectorStart": {
+        "mask": "19",
+        "cpus": [
+          19
+        ],
+        "unavailableReason": null
+      },
+      "collectorEnd": {
+        "mask": "19",
+        "cpus": [
+          19
+        ],
+        "unavailableReason": null
+      },
+      "probeScript": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__affinity_probe.js",
+      "probeSha256": "363b51b63e0020ab9c828e4cd4ea307da7f3c9983298e100ddb5957cea0b1896"
+    },
+    "sessions": {
+      "schemaVersion": 2,
+      "enabled": false,
+      "sessions": 1,
+      "interleaved": false,
+      "headlineEligible": false,
+      "legacyPathUnchanged": true,
+      "mixedWithLegacySamples": false,
+      "samplePool": "legacy",
+      "description": "legacy one-process-per-case ABBA path; session mode is off"
+    },
+    "sampling": {
+      "warmup": 4,
+      "iters": 8,
+      "samples": 8,
+      "order": "ABBA per-sample interleaved",
+      "orderDescription": "Warmup and timed rounds both alternate: zero-based even rounds run qjs then zjs; odd rounds run zjs then qjs. The two engines in each round are adjacent processes.",
+      "timed": {
+        "sampleOrders": [
+          "qjs->zjs",
+          "zjs->qjs",
+          "qjs->zjs",
+          "zjs->qjs",
+          "qjs->zjs",
+          "zjs->qjs",
+          "qjs->zjs",
+          "zjs->qjs"
+        ],
+        "firstPositionCounts": {
+          "qjs": 4,
+          "zjs": 4
+        },
+        "orderBalanced": true
+      },
+      "warmupOrder": {
+        "sampleOrders": [
+          "qjs->zjs",
+          "zjs->qjs",
+          "qjs->zjs",
+          "zjs->qjs"
+        ],
+        "firstPositionCounts": {
+          "qjs": 2,
+          "zjs": 2
+        },
+        "orderBalanced": true
+      },
+      "pmu": {
+        "sampleOrders": [
+          "qjs->zjs",
+          "zjs->qjs",
+          "qjs->zjs",
+          "zjs->qjs"
+        ],
+        "firstPositionCounts": {
+          "qjs": 2,
+          "zjs": 2
+        },
+        "orderBalanced": true
+      },
+      "peakRss": {
+        "sampleOrders": [
+          "qjs->zjs",
+          "zjs->qjs"
+        ],
+        "firstPositionCounts": {
+          "qjs": 1,
+          "zjs": 1
+        },
+        "orderBalanced": true
+      }
+    },
+    "lifecycle": {
+      "layer": "whole-process",
+      "includesParser": true,
+      "includesCompile": true,
+      "includesContextCreate": true,
+      "mode": "normal-cli",
+      "qjs": {
+        "actualEngine": "qjs",
+        "includesTeardown": true,
+        "leakCheck": false,
+        "extraFlags": [],
+        "reason": "Bellard qjs unconditionally frees handlers, context, and runtime before exit"
+      },
+      "zjs": {
+        "actualEngine": "zjs",
+        "includesTeardown": false,
+        "leakCheck": false,
+        "extraFlags": [],
+        "reason": "src/cli/zjs.zig deliberately skips runtime.deinit() on the happy path"
+      },
+      "comparable": false,
+      "comparisonReason": "qjs includes teardown while normal zjs intentionally relies on OS process cleanup"
+    },
+    "validation": {
+      "occursBeforeTiming": true,
+      "compares": [
+        "stdout",
+        "stderr",
+        "exitCode"
+      ],
+      "mismatchDisposition": "invalid and excluded from case and summary statistics"
+    },
+    "pmu": {
+      "enabled": false,
+      "runs": 4,
+      "events": [
+        "instructions",
+        "cycles",
+        "branches",
+        "branch-misses",
+        "cache-references",
+        "cache-misses"
+      ],
+      "aggregation": "arithmetic mean across individually collected process invocations; each invocation selects exactly one countable PMU row per event, and multiple countable PMUs invalidate that event",
+      "perfVersion": "perf version 6.17.9",
+      "pinnedCpu": 19,
+      "affinitySource": "inherited",
+      "affinityMask": "19",
+      "affinityPolicy": "perf stat and measured children inherit the outer runner affinity; no measured binary is wrapped in taskset",
+      "arbitrationMetricUnavailable": true,
+      "unavailableReason": "PMU collection disabled; pass --pmu to collect PRD 3.2 instructions-first arbitration metrics",
+      "arbitrationMetricUnavailableReason": "instructions were not collected because --pmu was not provided"
+    },
+    "peakRssKb": {
+      "enabled": true,
+      "runs": 2,
+      "collector": "/usr/bin/time -f %M",
+      "unit": "KiB",
+      "aggregation": "median across individually collected process invocations",
+      "affinityPolicy": "/usr/bin/time and measured children inherit the outer runner affinity; no measured binary is wrapped in taskset"
+    },
+    "allocations": {
+      "available": false,
+      "unavailableReason": "allocation count is not exposed by the whole-process runner"
+    },
+    "allocatedBytes": {
+      "available": false,
+      "unavailableReason": "allocated bytes are not exposed by the whole-process runner"
+    }
+  },
+  "startupBaseline": {
+    "status": "ok",
+    "identity": {
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "scriptPath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/__startup_empty.js",
+      "scriptSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "scriptBytes": 0,
+      "samples": 8,
+      "warmup": 4
+    },
+    "qjs": {
+      "samples": [
+        0.41999200000009296,
+        0.43328999999994267,
+        0.42909700000018347,
+        0.4273369999991701,
+        0.4361060000001089,
+        0.4387449999994715,
+        0.5128960000001825,
+        0.420231999999487
+      ],
+      "avg": 0.4397118749998299,
+      "median": 0.43119350000006307,
+      "p25": 0.4255607499992493,
+      "p75": 0.43676574999994955,
+      "min": 0.41999200000009296,
+      "max": 0.5128960000001825,
+      "stdev": 0.028384075453799038
+    },
+    "zjs": {
+      "samples": [
+        0.5481159999999363,
+        0.576231000000007,
+        0.5606929999994463,
+        0.5694460000004256,
+        0.5541480000001684,
+        0.5692230000004201,
+        0.5428189999993265,
+        0.5622460000004139
+      ],
+      "avg": 0.560365250000018,
+      "median": 0.5614694999999301,
+      "p25": 0.5526400000001104,
+      "p75": 0.5692787500004215,
+      "min": 0.5428189999993265,
+      "max": 0.576231000000007,
+      "stdev": 0.010682085655079786
+    },
+    "ratio": 1.2743918958300473,
+    "paired": {
+      "ratios": [
+        1.3050629535796276,
+        1.3298968358376222,
+        1.3066812399042795,
+        1.3325455085834634,
+        1.270672726355588,
+        1.29738914403835,
+        1.0583412621645194,
+        1.3379418987633027
+      ],
+      "median": 1.3058720967419535,
+      "p25": 1.2907100396176596,
+      "p75": 1.3305590040240824,
+      "geomean": 1.276610784326529
+    },
+    "pairs": [
+      {
+        "index": 0,
+        "order": "qjs->zjs",
+        "executedOrder": "qjs->zjs",
+        "qjsMs": 0.41999200000009296,
+        "zjsMs": 0.5481159999999363
+      },
+      {
+        "index": 1,
+        "order": "zjs->qjs",
+        "executedOrder": "zjs->qjs",
+        "qjsMs": 0.43328999999994267,
+        "zjsMs": 0.576231000000007
+      },
+      {
+        "index": 2,
+        "order": "qjs->zjs",
+        "executedOrder": "qjs->zjs",
+        "qjsMs": 0.42909700000018347,
+        "zjsMs": 0.5606929999994463
+      },
+      {
+        "index": 3,
+        "order": "zjs->qjs",
+        "executedOrder": "zjs->qjs",
+        "qjsMs": 0.4273369999991701,
+        "zjsMs": 0.5694460000004256
+      },
+      {
+        "index": 4,
+        "order": "qjs->zjs",
+        "executedOrder": "qjs->zjs",
+        "qjsMs": 0.4361060000001089,
+        "zjsMs": 0.5541480000001684
+      },
+      {
+        "index": 5,
+        "order": "zjs->qjs",
+        "executedOrder": "zjs->qjs",
+        "qjsMs": 0.4387449999994715,
+        "zjsMs": 0.5692230000004201
+      },
+      {
+        "index": 6,
+        "order": "qjs->zjs",
+        "executedOrder": "qjs->zjs",
+        "qjsMs": 0.5128960000001825,
+        "zjsMs": 0.5428189999993265
+      },
+      {
+        "index": 7,
+        "order": "zjs->qjs",
+        "executedOrder": "zjs->qjs",
+        "qjsMs": 0.420231999999487,
+        "zjsMs": 0.5622460000004139
+      }
+    ],
+    "executedOrders": [
+      [
+        "qjs",
+        "zjs"
+      ],
+      [
+        "zjs",
+        "qjs"
+      ],
+      [
+        "qjs",
+        "zjs"
+      ],
+      [
+        "zjs",
+        "qjs"
+      ],
+      [
+        "qjs",
+        "zjs"
+      ],
+      [
+        "zjs",
+        "qjs"
+      ],
+      [
+        "qjs",
+        "zjs"
+      ],
+      [
+        "zjs",
+        "qjs"
+      ]
+    ],
+    "validation": {
+      "stdoutMatch": true,
+      "stderrMatch": true,
+      "exitCodeMatch": true,
+      "exitCode": 0
+    }
+  },
+  "cases": [
+    {
+      "name": "uri_component_decode_4byte",
+      "quickjsName": "decodeURIComponent 4-byte sweep",
+      "category": "uri",
+      "subsystem": "string/URI",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/uri_component_decode_4byte.js",
+      "sourceSha256": "0d931f0e6b08852c84729930eb0e2084b9b263f77b8e04fb00b632164fb572b9",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        14.066017999999985,
+        14.062737999999968,
+        14.009405000000015,
+        14.063857999999982,
+        14.056721000000039,
+        14.039424000000054,
+        14.020909000000074,
+        14.060176999999953
+      ],
+      "zjsSamplesMs": [
+        18.283946000000014,
+        18.312973000000056,
+        18.087718999999993,
+        18.103672999999958,
+        18.073509999999942,
+        18.166046999999935,
+        18.12775600000009,
+        18.134140000000002
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 14.058448999999996,
+        "p25": 14.034795250000059,
+        "p75": 14.063017999999971,
+        "iqr": 0.028222749999912367,
+        "min": 14.009405000000015,
+        "max": 14.066017999999985
+      },
+      "zjs": {
+        "median": 18.130948000000046,
+        "p25": 18.099684499999967,
+        "p75": 18.195521749999955,
+        "iqr": 0.09583724999998822,
+        "min": 18.073509999999942,
+        "max": 18.312973000000056
+      },
+      "paired": {
+        "ratios": [
+          1.2998665293901965,
+          1.302233818193875,
+          1.2911125775862695,
+          1.287247994113705,
+          1.28575576053618,
+          1.2939310758048097,
+          1.2929087550600318,
+          1.2897518999938666
+        ],
+        "median": 1.2920106663231508,
+        "p25": 1.2891259235238262,
+        "p75": 1.2954149392011565,
+        "geomean": 1.2928398126619658
+      },
+      "absoluteDeltaMs": 4.07249900000005,
+      "startupShareQjs": 0.03067148445750048,
+      "startupShareZjs": 0.03096746513199027,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 13.627255499999933,
+        "zjsAvg": 17.569478500000116,
+        "ratio": 1.2892895785215301,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "zjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "uri_decode_4byte",
+      "quickjsName": "decodeURI 4-byte sweep",
+      "category": "uri",
+      "subsystem": "string/URI",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/uri_decode_4byte.js",
+      "sourceSha256": "2b84f8b0dc7c3626cc7240486563560d56eb8daa71d5029857d6ec8961f4e298",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        14.025374000000056,
+        14.010107999999946,
+        14.047345000000178,
+        14.000492000000122,
+        14.218096999999943,
+        14.07169799999997,
+        14.001387000000022,
+        14.093300999999883
+      ],
+      "zjsSamplesMs": [
+        18.062484999999924,
+        18.08831199999986,
+        18.040865999999824,
+        18.019536000000016,
+        18.02136100000007,
+        18.040306999999984,
+        18.02758599999993,
+        18.075318000000152
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 14.036359500000117,
+        "p25": 14.007927749999965,
+        "p75": 14.077098749999948,
+        "iqr": 0.069170999999983,
+        "min": 14.000492000000122,
+        "max": 14.218096999999943
+      },
+      "zjs": {
+        "median": 18.040586499999904,
+        "p25": 18.026029749999964,
+        "p75": 18.06569324999998,
+        "iqr": 0.03966350000001739,
+        "min": 18.019536000000016,
+        "max": 18.08831199999986
+      },
+      "paired": {
+        "ratios": [
+          1.2878433758700376,
+          1.2910901186486163,
+          1.284290091828712,
+          1.2870644831624387,
+          1.2674945880591575,
+          1.2820277268599727,
+          1.2875571541590771,
+          1.282546792976344
+        ],
+        "median": 1.2856772874955753,
+        "p25": 1.2824170264472512,
+        "p75": 1.2876287095868173,
+        "geomean": 1.283721422955101
+      },
+      "absoluteDeltaMs": 4.004226999999787,
+      "startupShareQjs": 0.030719753223765713,
+      "startupShareZjs": 0.031122574645781782,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 13.605166000000054,
+        "zjsAvg": 17.479116999999974,
+        "ratio": 1.2847411784611746,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "zjsStdoutSha256": "0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "arrow_call_loop",
+      "quickjsName": "arrow_call_loop",
+      "category": "function",
+      "subsystem": "call",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/arrow_call_loop.js",
+      "sourceSha256": "066216e73e2edc9117eb3bdad10b2345b672ceae350496026526b6b42446d912",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        13.56550100000004,
+        13.510023000000047,
+        13.51784900000007,
+        13.497045999999955,
+        13.46307499999989,
+        13.531321999999818,
+        13.438529000000017,
+        13.526841000000104
+      ],
+      "zjsSamplesMs": [
+        16.891902000000073,
+        16.85933900000009,
+        16.904175000000123,
+        16.80978200000004,
+        16.78133099999991,
+        16.904015000000072,
+        17.12609999999995,
+        16.850280999999995
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 13.513936000000058,
+        "p25": 13.488553249999939,
+        "p75": 13.527961250000033,
+        "iqr": 0.039408000000094034,
+        "min": 13.438529000000017,
+        "max": 13.56550100000004
+      },
+      "zjs": {
+        "median": 16.875620500000082,
+        "p25": 16.840156250000007,
+        "p75": 16.904055000000085,
+        "iqr": 0.06389875000007805,
+        "min": 16.78133099999991,
+        "max": 17.12609999999995
+      },
+      "paired": {
+        "ratios": [
+          1.2452103317083552,
+          1.2479134195404429,
+          1.2505077545991257,
+          1.2454415581009428,
+          1.2464708842519296,
+          1.2492508123005497,
+          1.2744028754932872,
+          1.2456922499495533
+        ],
+        "median": 1.2471921518961864,
+        "p25": 1.2456295769874006,
+        "p75": 1.2495650478751936,
+        "geomean": 1.2505779719736225
+      },
+      "absoluteDeltaMs": 3.361684500000024,
+      "startupShareQjs": 0.03190732144950673,
+      "startupShareZjs": 0.03327104327807842,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 13.082742499999995,
+        "zjsAvg": 16.31415100000015,
+        "ratio": 1.2469977911741486,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "zjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "call2_loop",
+      "quickjsName": "call2_loop",
+      "category": "function",
+      "subsystem": "call",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/call2_loop.js",
+      "sourceSha256": "85c876308b66c600e89814092a8ed362b9e61cf6d9488707a3d152222a4faf61",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        13.55129100000022,
+        14.33032699999967,
+        13.65362099999993,
+        13.536473999999998,
+        13.562797000000046,
+        13.607408999999734,
+        13.559835999999905,
+        13.673031000000265
+      ],
+      "zjsSamplesMs": [
+        17.03433099999984,
+        17.03097099999968,
+        16.90233500000022,
+        16.917664999999943,
+        16.933490000000347,
+        16.885789999999815,
+        17.021547000000282,
+        16.915216000000328
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 13.58510299999989,
+        "p25": 13.557699749999983,
+        "p75": 13.658473500000014,
+        "iqr": 0.1007737500000303,
+        "min": 13.536473999999998,
+        "max": 14.33032699999967
+      },
+      "zjs": {
+        "median": 16.925577500000145,
+        "p25": 16.9119957500003,
+        "p75": 17.023903000000132,
+        "iqr": 0.11190724999983104,
+        "min": 16.885789999999815,
+        "max": 17.03433099999984
+      },
+      "paired": {
+        "ratios": [
+          1.2570264338651986,
+          1.1884565509216973,
+          1.2379379067282084,
+          1.2497837324549912,
+          1.2485249170949244,
+          1.240926174850785,
+          1.255291509425365,
+          1.237122624822543
+        ],
+        "median": 1.2447255459728548,
+        "p25": 1.237734086251792,
+        "p75": 1.2511606766975847,
+        "geomean": 1.2392109536037557
+      },
+      "absoluteDeltaMs": 3.340474500000255,
+      "startupShareQjs": 0.03174017156881818,
+      "startupShareZjs": 0.03317284151751545,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 13.153909499999827,
+        "zjsAvg": 16.364108000000215,
+        "ratio": 1.2440490030739857,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "zjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "closure_call_loop",
+      "quickjsName": "closure_call_loop",
+      "category": "function",
+      "subsystem": "closure/function-creation",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/closure_call_loop.js",
+      "sourceSha256": "48b782bb995502611c6304f49bcc1842db31e3f47454bc996dedf17fc6544d4f",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        13.619102000000112,
+        13.63420700000006,
+        13.610251999999946,
+        13.659200999999939,
+        13.615709000000152,
+        13.606220000000121,
+        13.682052000000112,
+        13.714997999999923
+      ],
+      "zjsSamplesMs": [
+        16.72575199999983,
+        16.78249300000016,
+        16.75609200000008,
+        17.533942000000025,
+        16.799582999999984,
+        16.775116999999682,
+        16.76057200000014,
+        16.781902000000173
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 13.626654500000086,
+        "p25": 13.6143447500001,
+        "p75": 13.664913749999982,
+        "iqr": 0.05056899999988218,
+        "min": 13.606220000000121,
+        "max": 13.714997999999923
+      },
+      "zjs": {
+        "median": 16.778509499999927,
+        "p25": 16.759452000000124,
+        "p75": 16.786765500000115,
+        "iqr": 0.02731349999999111,
+        "min": 16.72575199999983,
+        "max": 17.533942000000025
+      },
+      "paired": {
+        "ratios": [
+          1.2281097534918008,
+          1.2309108259835049,
+          1.2311375277989083,
+          1.2836725954907686,
+          1.2338382819432905,
+          1.2329006145718306,
+          1.225004261056748,
+          1.2236168025690026
+        ],
+        "median": 1.2310241768912067,
+        "p25": 1.2273333803830377,
+        "p75": 1.2331350314146956,
+        "geomean": 1.236016430988193
+      },
+      "absoluteDeltaMs": 3.1518549999998413,
+      "startupShareQjs": 0.031643386863595926,
+      "startupShareZjs": 0.03346361010195408,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 13.195461000000023,
+        "zjsAvg": 16.217039999999997,
+        "ratio": 1.2289862400411755,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "zjsStdoutSha256": "bae0095c5de5a56754e6be43fc5227fca8bd204eb128d5d84761cf1391bb850d",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "array_map_callback",
+      "quickjsName": "array_map_callback",
+      "category": "array",
+      "subsystem": "array",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/array_map_callback.js",
+      "sourceSha256": "5f613a5054e8d571a7dd7c67a35c21049766765caa21f06747567c270805c6e5",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        5.484814999999799,
+        5.47807899999998,
+        5.418264999999792,
+        5.428698000000168,
+        5.520962999999938,
+        5.549766000000091,
+        5.457773000000088,
+        5.521395000000211
+      ],
+      "zjsSamplesMs": [
+        7.439532000000327,
+        7.454620999999861,
+        7.390695000000051,
+        7.381734000000051,
+        7.540901000000304,
+        7.504273000000012,
+        7.439436000000114,
+        7.392662999999629
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 5.481446999999889,
+        "p25": 5.450504250000108,
+        "p75": 5.521071000000006,
+        "iqr": 0.07056674999989809,
+        "min": 5.418264999999792,
+        "max": 5.549766000000091
+      },
+      "zjs": {
+        "median": 7.4394840000002205,
+        "p25": 7.392170999999735,
+        "p75": 7.467033999999899,
+        "iqr": 0.07486300000016399,
+        "min": 7.381734000000051,
+        "max": 7.540901000000304
+      },
+      "paired": {
+        "ratios": [
+          1.3563870431364777,
+          1.3608093275032886,
+          1.3640335051903762,
+          1.359761401352557,
+          1.3658669692226497,
+          1.3521782720208184,
+          1.3630900369069938,
+          1.3389121770855636
+        ],
+        "median": 1.3602853644279227,
+        "p25": 1.3553348503575628,
+        "p75": 1.3633259039778394,
+        "geomean": 1.3576050848723606
+      },
+      "absoluteDeltaMs": 1.9580370000003313,
+      "startupShareQjs": 0.07866417389424211,
+      "startupShareZjs": 0.07547156496336486,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 5.050253499999826,
+        "zjsAvg": 6.87801450000029,
+        "ratio": 1.3619147038857609,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e",
+        "zjsStdoutSha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "vm_int_sum_large",
+      "quickjsName": "vm_int_sum_large",
+      "category": "control",
+      "subsystem": "call",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/vm_int_sum_large.js",
+      "sourceSha256": "2df4340868e7393c8467edebee75dda06bb5c9e206fcb170e2ab1cbde98b4b69",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        12.05223100000012,
+        12.135053999999855,
+        12.201636999999664,
+        12.123885999999857,
+        12.219367000000148,
+        12.397656000000097,
+        12.180964000000131,
+        12.047430000000077
+      ],
+      "zjsSamplesMs": [
+        13.594699000000219,
+        13.54130299999997,
+        13.524437000000034,
+        13.592858999999862,
+        13.592635000000428,
+        13.621533999999883,
+        13.625517999999829,
+        13.544598999999835
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 12.158008999999993,
+        "p25": 12.105972249999922,
+        "p75": 12.206069499999785,
+        "iqr": 0.10009724999986247,
+        "min": 12.047430000000077,
+        "max": 12.397656000000097
+      },
+      "zjs": {
+        "median": 13.592747000000145,
+        "p25": 13.543774999999869,
+        "p75": 13.601407750000135,
+        "iqr": 0.05763275000026624,
+        "min": 13.524437000000034,
+        "max": 13.625517999999829
+      },
+      "paired": {
+        "ratios": [
+          1.1279819479065814,
+          1.1158832090899746,
+          1.108411682793088,
+          1.1211635444279189,
+          1.112384544960493,
+          1.0987184996905686,
+          1.118591106582343,
+          1.1242728947169436
+        ],
+        "median": 1.1172371578361588,
+        "p25": 1.1113913294186417,
+        "p75": 1.121940882000175,
+        "geomean": 1.1158913986732546
+      },
+      "absoluteDeltaMs": 1.4347380000001522,
+      "startupShareQjs": 0.035465798717541935,
+      "startupShareZjs": 0.04130655120704624,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 11.72681549999993,
+        "zjsAvg": 13.031277500000215,
+        "ratio": 1.111237530768715,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "dbb4498f673634c698bd6e593ef54bdadf465654b13fb7bfe689016e602e7ef8",
+        "zjsStdoutSha256": "dbb4498f673634c698bd6e593ef54bdadf465654b13fb7bfe689016e602e7ef8",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "dense_array_write_read",
+      "quickjsName": "dense_array_write_read",
+      "category": "array",
+      "subsystem": "array",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/dense_array_write_read.js",
+      "sourceSha256": "c40313f496b2fe43efa99843b92980f8294ce36ce2327c105124dd3a2034c154",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        4.5440849999999955,
+        4.5183210000000145,
+        4.438968999999815,
+        4.490030000000388,
+        4.432248999999956,
+        4.514064999999846,
+        4.4870380000002115,
+        4.498239000000012
+      ],
+      "zjsSamplesMs": [
+        5.606811000000107,
+        5.624541000000136,
+        5.572950000000219,
+        5.581558999999743,
+        5.537251000000197,
+        5.594567999999981,
+        5.595031999999719,
+        5.553379999999834
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 4.4941345000002,
+        "p25": 4.4750207500001125,
+        "p75": 4.515128999999888,
+        "iqr": 0.04010824999977558,
+        "min": 4.432248999999956,
+        "max": 4.5440849999999955
+      },
+      "zjs": {
+        "median": 5.588063499999862,
+        "p25": 5.568057500000123,
+        "p75": 5.597976749999816,
+        "iqr": 0.02991924999969342,
+        "min": 5.537251000000197,
+        "max": 5.624541000000136
+      },
+      "paired": {
+        "ratios": [
+          1.2338701850867915,
+          1.2448298826046484,
+          1.255460445882918,
+          1.24310060289113,
+          1.249309549170241,
+          1.2393636334435087,
+          1.2469321632666037,
+          1.2345675718875362
+        ],
+        "median": 1.243965242747889,
+        "p25": 1.2381646180545156,
+        "p75": 1.247526509742513,
+        "geomean": 1.2434101578293377
+      },
+      "absoluteDeltaMs": 1.0939289999996618,
+      "startupShareQjs": 0.09594583784709688,
+      "startupShareZjs": 0.10047657833522185,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 4.062941000000137,
+        "zjsAvg": 5.026593999999932,
+        "ratio": 1.2371811453820674,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "f9cb6a31b60a88b69cb9a46e7873c7311a2a0ac9208ea9681cf8171c71ebfb7a",
+        "zjsStdoutSha256": "f9cb6a31b60a88b69cb9a46e7873c7311a2a0ac9208ea9681cf8171c71ebfb7a",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "proto_read",
+      "quickjsName": "proto_read",
+      "category": "object",
+      "subsystem": "binding/property",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/proto_read.js",
+      "sourceSha256": "d9c91f10c64ff1e8f9f1577800f8a451960be23b9e779bda927689c58a0a5c99",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        17.23694800000021,
+        17.274823000000197,
+        17.2137459999999,
+        17.246372000000065,
+        17.268325999999888,
+        17.33313300000009,
+        17.291481000000203,
+        17.28117599999996
+      ],
+      "zjsSamplesMs": [
+        18.322204000000056,
+        18.306330000000344,
+        18.712784999999712,
+        18.330621000000065,
+        18.341853999999785,
+        18.33836599999995,
+        18.35006199999998,
+        18.338940999999977
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 17.271574500000042,
+        "p25": 17.2440160000001,
+        "p75": 17.28375225000002,
+        "iqr": 0.03973624999991898,
+        "min": 17.2137459999999,
+        "max": 17.33313300000009
+      },
+      "zjs": {
+        "median": 18.338653499999964,
+        "p25": 18.328516750000063,
+        "p75": 18.343905999999834,
+        "iqr": 0.015389249999770982,
+        "min": 18.306330000000344,
+        "max": 18.712784999999712
+      },
+      "paired": {
+        "ratios": [
+          1.0629610299920746,
+          1.0597115814153428,
+          1.0870838340475002,
+          1.0628682368674407,
+          1.062167461976332,
+          1.0579948818254528,
+          1.0612197995070385,
+          1.061209086696416
+        ],
+        "median": 1.061693630741685,
+        "p25": 1.0608347103761475,
+        "p75": 1.0628914351485992,
+        "geomean": 1.0643667381300805
+      },
+      "absoluteDeltaMs": 1.0670789999999215,
+      "startupShareQjs": 0.024965500394886524,
+      "startupShareZjs": 0.03061672439581953,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 16.84038099999998,
+        "zjsAvg": 17.777184000000034,
+        "ratio": 1.0556283732535539,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "zjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "global_read_loop",
+      "quickjsName": "global_read_loop",
+      "category": "global",
+      "subsystem": "binding/property",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/global_read_loop.js",
+      "sourceSha256": "842ba09343b0f9d2c3367de7af53ac35e648a4464bda72e94ca5d6e879deb0cd",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        12.133451000000605,
+        12.056596000000354,
+        12.13821900000039,
+        12.144059999999627,
+        12.224787000000106,
+        12.164013999999952,
+        12.06016400000044,
+        12.151356000000305
+      ],
+      "zjsSamplesMs": [
+        13.107623999999305,
+        13.116809000000103,
+        13.113432999999532,
+        13.108663999999408,
+        13.12029799999982,
+        13.16372500000034,
+        13.069332000000031,
+        13.170925999999781
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 12.141139500000008,
+        "p25": 12.115129250000564,
+        "p75": 12.154520500000217,
+        "iqr": 0.039391249999653155,
+        "min": 12.056596000000354,
+        "max": 12.224787000000106
+      },
+      "zjs": {
+        "median": 13.115120999999817,
+        "p25": 13.108403999999382,
+        "p75": 13.13115474999995,
+        "iqr": 0.022750750000568587,
+        "min": 13.069332000000031,
+        "max": 13.170925999999781
+      },
+      "paired": {
+        "ratios": [
+          1.0802882048972424,
+          1.0879363462124565,
+          1.080342429148717,
+          1.0794301082174997,
+          1.0732537098601151,
+          1.0821859461852308,
+          1.083677800733021,
+          1.0839058620288509
+        ],
+        "median": 1.081264187666974,
+        "p25": 1.0800736807273068,
+        "p75": 1.0837348160569784,
+        "geomean": 1.0813701789835215
+      },
+      "absoluteDeltaMs": 0.9739814999998089,
+      "startupShareQjs": 0.035515076653230344,
+      "startupShareZjs": 0.042810851687905736,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 11.709945999999945,
+        "zjsAvg": 12.553651499999887,
+        "ratio": 1.0720503322560109,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "zjsStdoutSha256": "085c348f64a3b543e973a33749e90ba20847b99016a87e5228847597d61ce582",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "math_min",
+      "quickjsName": "math_min",
+      "category": "math",
+      "subsystem": "number/dtoa",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/math_min.js",
+      "sourceSha256": "ab8ac9324b347a7d749db5dcab3981c6894525469960e33748d19266349ec01e",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        2.1442839999999705,
+        2.2126429999998436,
+        2.1322040000004563,
+        2.219108000000233,
+        2.144956999999522,
+        2.1866079999999783,
+        2.161710000000312,
+        2.1631179999994856
+      ],
+      "zjsSamplesMs": [
+        2.8544810000003054,
+        2.895205000000715,
+        2.8436320000000705,
+        2.8911239999997633,
+        2.9140379999998913,
+        2.932184000000234,
+        2.8756829999992988,
+        2.905862000000525
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 2.162413999999899,
+        "p25": 2.144788749999634,
+        "p75": 2.1931167499999447,
+        "iqr": 0.04832800000031057,
+        "min": 2.1322040000004563,
+        "max": 2.219108000000233
+      },
+      "zjs": {
+        "median": 2.893164500000239,
+        "p25": 2.8703824999995504,
+        "p75": 2.9079060000003665,
+        "iqr": 0.03752350000081606,
+        "min": 2.8436320000000705,
+        "max": 2.932184000000234
+      },
+      "paired": {
+        "ratios": [
+          1.3312047284782913,
+          1.308482660782114,
+          1.3336585054710817,
+          1.3028315881874428,
+          1.358553108524106,
+          1.3409737822235457,
+          1.3302815826354524,
+          1.3433673058988072
+        ],
+        "median": 1.3324316169746866,
+        "p25": 1.3248318521721179,
+        "p75": 1.3415721631423612,
+        "geomean": 1.331059977951753
+      },
+      "absoluteDeltaMs": 0.7307505000003403,
+      "startupShareQjs": 0.19940376819613786,
+      "startupShareZjs": 0.19406760313832266,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 1.7312204999998357,
+        "zjsAvg": 2.331695000000309,
+        "ratio": 1.3468503867650194,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "ee7aba636a65e64ec010725d8b04dde5725c098a095777a42a3267d90fcc0c73",
+        "zjsStdoutSha256": "ee7aba636a65e64ec010725d8b04dde5725c098a095777a42a3267d90fcc0c73",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_read_poly3",
+      "quickjsName": "prop_read_poly3",
+      "category": "object",
+      "subsystem": "binding/property",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/prop_read_poly3.js",
+      "sourceSha256": "f1bb4fceeed5f03b88755414eeda8337518c6612f122d0aba7aa8f780bde562b",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        23.204695999999785,
+        23.30041699999947,
+        23.222154000000046,
+        23.296128999999382,
+        23.26698999999917,
+        23.300705000000562,
+        23.22354600000017,
+        23.26158099999975
+      ],
+      "zjsSamplesMs": [
+        22.80339400000048,
+        22.83272500000021,
+        22.780047999999624,
+        24.70562300000074,
+        22.810467000000244,
+        22.820082999999613,
+        22.879049000000123,
+        22.86768800000027
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 23.26428549999946,
+        "p25": 23.22319800000014,
+        "p75": 23.297200999999404,
+        "iqr": 0.07400299999926574,
+        "min": 23.204695999999785,
+        "max": 23.300705000000562
+      },
+      "zjs": {
+        "median": 22.82640399999991,
+        "p25": 22.808698750000303,
+        "p75": 22.870528250000234,
+        "iqr": 0.061829499999930704,
+        "min": 22.780047999999624,
+        "max": 24.70562300000074
+      },
+      "paired": {
+        "ratios": [
+          0.9827060005440577,
+          0.9799277412074097,
+          0.9809618866535628,
+          1.0605033565877575,
+          0.9803789402927091,
+          0.9793730704714326,
+          0.9851660465632577,
+          0.9830668001457217
+        ],
+        "median": 0.9818339435988102,
+        "p25": 0.9802661405213843,
+        "p75": 0.9835916117501057,
+        "geomean": 0.9911789149099058
+      },
+      "absoluteDeltaMs": -0.4378814999995484,
+      "startupShareQjs": 0.018534568792154527,
+      "startupShareZjs": 0.024597369782815213,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 22.833091999999397,
+        "zjsAvg": 22.26493449999998,
+        "ratio": 0.9751169267833095,
+        "winner": "tie",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "d2284d0c6608221b6ff7d74f2d4c6e07c0c7f7540ee4c15f820f46b7ae28f7b9",
+        "zjsStdoutSha256": "d2284d0c6608221b6ff7d74f2d4c6e07c0c7f7540ee4c15f820f46b7ae28f7b9",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "prop_read_mono",
+      "quickjsName": "prop_read_mono",
+      "category": "object",
+      "subsystem": "binding/property",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/prop_read_mono.js",
+      "sourceSha256": "08847d7e160a468ddf1fd6d584cd45f7256250390e8552c5c87920c81c43eeb3",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        16.021850000000086,
+        16.003238000000238,
+        17.068919999999707,
+        16.050167999999758,
+        16.137872000000243,
+        16.010451000000103,
+        16.002242999999908,
+        16.02186100000017
+      ],
+      "zjsSamplesMs": [
+        16.76364900000044,
+        16.724221999999827,
+        16.994738000000325,
+        16.814399999999296,
+        16.745210000000043,
+        16.772012999999788,
+        16.77393200000006,
+        16.81336099999953
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 16.02185550000013,
+        "p25": 16.008647750000137,
+        "p75": 16.07209399999988,
+        "iqr": 0.06344624999974258,
+        "min": 16.002242999999908,
+        "max": 17.068919999999707
+      },
+      "zjs": {
+        "median": 16.772972499999923,
+        "p25": 16.759039250000342,
+        "p75": 16.813620749999473,
+        "iqr": 0.054581499999130756,
+        "min": 16.724221999999827,
+        "max": 16.994738000000325
+      },
+      "paired": {
+        "ratios": [
+          1.046299210141173,
+          1.0450523825240603,
+          0.9956539722490126,
+          1.0476152025324315,
+          1.0376343299785615,
+          1.0475665551207571,
+          1.0482238021257493,
+          1.0494012524512197
+        ],
+        "median": 1.0469328826309652,
+        "p25": 1.0431978693876856,
+        "p75": 1.047767352430761,
+        "geomean": 1.0395388305873365
+      },
+      "absoluteDeltaMs": 0.7511169999997946,
+      "startupShareQjs": 0.026912831662978087,
+      "startupShareZjs": 0.03347465692201741,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 15.590662000000066,
+        "zjsAvg": 16.211502999999993,
+        "ratio": 1.0398213366436861,
+        "winner": "tie",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "f5bbc9df805e66180e1640add85a5de00bf2e13d1f5415e22278318f2d82d5d1",
+        "zjsStdoutSha256": "f5bbc9df805e66180e1640add85a5de00bf2e13d1f5415e22278318f2d82d5d1",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "regexp_test_cached",
+      "quickjsName": "regexp_test_cached",
+      "category": "regexp",
+      "subsystem": "regexp",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/regexp_test_cached.js",
+      "sourceSha256": "46a67eaa4f9a27d4854a5e132982c193602fffcc62ba2bb7080fb2d07aa944fe",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        10.703370000000177,
+        10.730109000000084,
+        12.019014999999854,
+        11.125122999999803,
+        10.675880000000689,
+        10.7082190000001,
+        10.73444599999948,
+        10.650053000000298
+      ],
+      "zjsSamplesMs": [
+        8.559533999999985,
+        8.527068000000327,
+        8.504025000000183,
+        8.506073999999899,
+        8.480663000000277,
+        8.57035199999973,
+        8.59429,
+        8.598947000000408
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 10.719164000000092,
+        "p25": 10.696497500000305,
+        "p75": 10.83211524999956,
+        "iqr": 0.13561774999925547,
+        "min": 10.650053000000298,
+        "max": 12.019014999999854
+      },
+      "zjs": {
+        "median": 8.543301000000156,
+        "p25": 8.50556174999997,
+        "p75": 8.576336499999798,
+        "iqr": 0.07077474999982769,
+        "min": 8.480663000000277,
+        "max": 8.598947000000408
+      },
+      "paired": {
+        "ratios": [
+          0.7997045790250962,
+          0.7946860558453097,
+          0.7075475818942141,
+          0.7645824679871,
+          0.7943760139679099,
+          0.800352701042036,
+          0.8006272517464261,
+          0.8074088457588114
+        ],
+        "median": 0.7971953174352029,
+        "p25": 0.7869276274727074,
+        "p75": 0.8004213387181336,
+        "geomean": 0.7830095722706459
+      },
+      "absoluteDeltaMs": -2.1758629999999357,
+      "startupShareQjs": 0.04022641131342513,
+      "startupShareZjs": 0.06572043990957592,
+      "resolvabilityClass": "execution-dominant",
+      "startupAdjusted": {
+        "qjsAvg": 10.287970500000029,
+        "zjsAvg": 7.981831500000226,
+        "ratio": 0.7758412118308663,
+        "winner": "zjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "b80500a01f984c764f1a3b486622d0ef7cc5b13fa9bd57ec9015113eaf875597",
+        "zjsStdoutSha256": "b80500a01f984c764f1a3b486622d0ef7cc5b13fa9bd57ec9015113eaf875597",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "func_call",
+      "quickjsName": "func_call",
+      "category": "function",
+      "subsystem": "call",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/func_call.js",
+      "sourceSha256": "76f7066378e9c18f8f71443b57b06f3ebbafc0833d523c255af76ccc8bf07f26",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        2.006847000000562,
+        2.035345999999663,
+        2.008031000000301,
+        2.0226089999996475,
+        1.988125000000764,
+        2.070741000000453,
+        2.003551000000698,
+        2.04113899999993
+      ],
+      "zjsSamplesMs": [
+        2.5198559999998906,
+        2.5396979999995892,
+        2.5233760000000984,
+        2.5529310000001715,
+        2.5110709999999017,
+        2.528048000000126,
+        2.4892769999996744,
+        2.5536990000000515
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 2.0153199999999742,
+        "p25": 2.006023000000596,
+        "p75": 2.03679424999973,
+        "iqr": 0.030771249999133943,
+        "min": 1.988125000000764,
+        "max": 2.070741000000453
+      },
+      "zjs": {
+        "median": 2.5257120000001123,
+        "p25": 2.5176597499998934,
+        "p75": 2.543006249999735,
+        "iqr": 0.0253464999998414,
+        "min": 2.4892769999996744,
+        "max": 2.5536990000000515
+      },
+      "paired": {
+        "ratios": [
+          1.2556293529099056,
+          1.2477966891133054,
+          1.256641954232639,
+          1.2621969940807227,
+          1.2630347689400498,
+          1.2208422009317308,
+          1.2424325609873705,
+          1.2511146962554431
+        ],
+        "median": 1.2533720245826743,
+        "p25": 1.2464556570818217,
+        "p75": 1.25803071419466,
+        "geomean": 1.2498951901672817
+      },
+      "absoluteDeltaMs": 0.5103920000001381,
+      "startupShareQjs": 0.21395783299925997,
+      "startupShareZjs": 0.2223014738022012,
+      "resolvabilityClass": "partially-resolvable",
+      "startupAdjusted": {
+        "qjsAvg": 1.5841264999999112,
+        "zjsAvg": 1.9642425000001822,
+        "ratio": 1.2399530593044763,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "1fc848b51678051e902f2bf8f03975636a275603904d8edcc9fc26101336f41f",
+        "zjsStdoutSha256": "1fc848b51678051e902f2bf8f03975636a275603904d8edcc9fc26101336f41f",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    },
+    {
+      "name": "int_sum",
+      "quickjsName": "int_arith",
+      "category": "arithmetic",
+      "subsystem": "number/dtoa",
+      "status": "ok",
+      "sourcePath": "/home/aneryu/worktrees/zjs-p7-measurement-contract/.tmp/zjs-microbench-WrEq61/int_sum.js",
+      "sourceSha256": "776b71aa70195a58cbf3655476fd2085f55dfc7cafd207b5fbdbf6d2a4afaab2",
+      "generation": "2026-07-30T18:02:45.498Z#2060734",
+      "qjsSamplesMs": [
+        1.1499979999998686,
+        1.261543999999958,
+        1.1890409999996336,
+        1.158237999999983,
+        1.1625910000002477,
+        1.15452600000026,
+        1.1358039999995526,
+        1.151358000000073
+      ],
+      "zjsSamplesMs": [
+        1.3476479999999356,
+        1.3629300000002331,
+        1.3299030000007406,
+        1.343872000000374,
+        1.3208140000006097,
+        1.383444000000054,
+        1.302491999999802,
+        1.3232939999998052
+      ],
+      "executedOrders": [
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ],
+        [
+          "qjs",
+          "zjs"
+        ],
+        [
+          "zjs",
+          "qjs"
+        ]
+      ],
+      "warmupOrders": [
+        "qjs->zjs",
+        "zjs->qjs",
+        "qjs->zjs",
+        "zjs->qjs"
+      ],
+      "qjs": {
+        "median": 1.1563820000001215,
+        "p25": 1.1510180000000219,
+        "p75": 1.1692035000000942,
+        "iqr": 0.018185500000072352,
+        "min": 1.1358039999995526,
+        "max": 1.261543999999958
+      },
+      "zjs": {
+        "median": 1.3368875000005573,
+        "p25": 1.3226740000000063,
+        "p75": 1.35146850000001,
+        "iqr": 0.02879450000000361,
+        "min": 1.302491999999802,
+        "max": 1.383444000000054
+      },
+      "paired": {
+        "ratios": [
+          1.1718698641215806,
+          1.0803665983907644,
+          1.1184668989556712,
+          1.1602727591396533,
+          1.1360951529818555,
+          1.19827877414605,
+          1.1467577152398785,
+          1.1493332221600245
+        ],
+        "median": 1.1480454686999515,
+        "p25": 1.1316880894753094,
+        "p75": 1.1631720353851351,
+        "geomean": 1.1446968727986
+      },
+      "absoluteDeltaMs": 0.18050550000043586,
+      "startupShareQjs": 0.3728815391453843,
+      "startupShareZjs": 0.41998260885803484,
+      "resolvabilityClass": "partially-resolvable",
+      "startupAdjusted": {
+        "qjsAvg": 0.7251885000000584,
+        "zjsAvg": 0.7754180000006272,
+        "ratio": 1.0692640603106154,
+        "winner": "qjs",
+        "diagnosticOnly": true,
+        "headlineEligible": false,
+        "status": "resolved",
+        "unresolvedReasons": []
+      },
+      "validation": {
+        "stdoutMatch": true,
+        "stderrMatch": true,
+        "exitCodeMatch": true,
+        "exitCode": 0
+      },
+      "stdoutChecksum": {
+        "available": true,
+        "qjsStdoutSha256": "a417e8762feaab23b79cedb3c0f64136796f7bf7a5666eee3b3d929a5b704917",
+        "zjsStdoutSha256": "a417e8762feaab23b79cedb3c0f64136796f7bf7a5666eee3b3d929a5b704917",
+        "identical": true,
+        "qjsExitCode": 0,
+        "zjsExitCode": 0
+      }
+    }
+  ]
+}

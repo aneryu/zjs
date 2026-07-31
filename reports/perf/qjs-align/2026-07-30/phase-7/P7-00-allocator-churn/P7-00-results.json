@@ -1,0 +1,302 @@
+{
+ "line": "P7-00",
+ "title": "SmallObjectSlab arena churn \u7684\u6cdb\u5316\u6027\u88c1\u51b3",
+ "date": "2026-07-30",
+ "kind": "profiling-only",
+ "production_code_changed": false,
+ "verdict": "does not generalise \u2192 permanently close",
+ "verdict_scope": "The churn phenomenon does generalise to any transient allocation in a size class whose free-arena list is empty, but it generalises to qjs equally: the policy, constants and backing allocator are identical, and qjs churns at the same or a higher rate. It therefore does not generalise as a zjs-vs-qjs alignment defect, and no allocator-layer production line is authorised.",
+ "mechanism_equivalence": {
+  "arena_size": {
+   "qjs": 4096,
+   "zjs": 4096,
+   "source": "quickjs.c:244 JS_MALLOC_ARENA_SIZE / memory.zig arena_size"
+  },
+  "arena_header_bytes": {
+   "qjs": 40,
+   "zjs": 40
+  },
+  "block_header_bytes": {
+   "qjs": 8,
+   "zjs": 8,
+   "note": "quickjs.c comment \"8 byte header\"; zjs alignForward(@sizeOf(BlockHeader)=3, 8)"
+  },
+  "max_small_size": {
+   "qjs": 512,
+   "zjs": 512
+  },
+  "block_sizes_identical": true,
+  "class_mapping_formula": {
+   "qjs": "alignUp(size,8) + sizeof(JSMallocBlockHeader)",
+   "zjs": "alignForward(size,8) + block_header_size",
+   "identical": true
+  },
+  "blocks_per_arena_formula": "(4096 - 40) / block_size on both",
+  "release_policy": {
+   "qjs": "quickjs.c:1626-1630 list_del x2 + js_free(ar) when n_used_blocks hits 0",
+   "zjs": "memory.zig:190-204 releaseEmptyArena when used_blocks hits 0",
+   "identical": true
+  },
+  "backing_allocator": {
+   "qjs": "js_def_malloc -> glibc malloc",
+   "zjs": "init.gpa -> std.heap.c_allocator -> glibc malloc",
+   "note": "zjs links libc, so use_debug_allocator is false and c_allocator is selected"
+  },
+  "arena_init_cost": {
+   "qjs": "2 stores per block (free_next + block_size_idx)",
+   "zjs": "1 store per block (block_size_idx stamped at pop time)",
+   "note": "zjs arena construction is marginally cheaper per block, not more expensive"
+  },
+  "slab_active_in_qjs_benchmark_build": true,
+  "slab_active_note": "JS_MALLOC_LARGE_BLOCKS_ONLY is 1 only under __SANITIZE_ADDRESS__; the benchmark build has no ASAN so it is 0"
+ },
+ "trigger_condition": {
+  "original_framing": "the slab returns its arena as soon as a size class empties",
+  "corrected": "an arena is released when that arena reaches zero used blocks, and churn occurs when the class free-arena list is empty at the next allocation",
+  "consequence": "a resident population that exactly fills its arenas leaves the free list empty and churns anyway; measured directly (400 residents at 50 blocks/arena still churned, 411 did not)"
+ },
+ "instrument": {
+  "kind": "LD_PRELOAD malloc/free size counter",
+  "path": "tools/perf/allocator/arena_counter.c",
+  "why": "both engines route arena acquire/release to glibc, so one instrument counts both with no source change",
+  "arena_size_set": [
+   3624,
+   3784,
+   3880,
+   3912,
+   3992,
+   4000,
+   4008,
+   4040,
+   4072,
+   4080,
+   4088,
+   4096
+  ],
+  "caveat": "a payload allocation landing on one of the 12 arena sizes is counted as an arena; the full histogram is emitted so contamination is visible"
+ },
+ "baseline_arena_events": {
+  "qjs": 38,
+  "zjs": 32,
+  "note": "empty script; subtracted from every case"
+ },
+ "cases": {
+  "churn_object": {
+   "iterations": 200000,
+   "qjs_arena_events_net": 8,
+   "zjs_arena_events_net": 3,
+   "qjs_per_iteration": 4e-05,
+   "zjs_per_iteration": 1.5e-05
+  },
+  "resident_object": {
+   "iterations": 200000,
+   "qjs_arena_events_net": 19,
+   "zjs_arena_events_net": 22,
+   "qjs_per_iteration": 9.5e-05,
+   "zjs_per_iteration": 0.00011
+  },
+  "churn_map_callback": {
+   "iterations": 10000,
+   "qjs_arena_events_net": 5,
+   "zjs_arena_events_net": 10,
+   "qjs_per_iteration": 0.0005,
+   "zjs_per_iteration": 0.001
+  },
+  "resident_map_callback": {
+   "iterations": 10000,
+   "qjs_arena_events_net": 52,
+   "zjs_arena_events_net": 61,
+   "qjs_per_iteration": 0.0052,
+   "zjs_per_iteration": 0.0061
+  },
+  "churn_bigint_div": {
+   "iterations": 2000,
+   "qjs_arena_events_net": 9,
+   "zjs_arena_events_net": 2007,
+   "qjs_per_iteration": 0.0045,
+   "zjs_per_iteration": 1.0035
+  }
+ },
+ "transient_size_sweep": {
+  "8": {
+   "qjs_per_iteration": 2.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "16": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "24": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "32": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "40": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "48": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "56": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "64": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "72": {
+   "qjs_per_iteration": 2.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "80": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "96": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "112": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "128": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "160": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "192": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "224": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "256": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "320": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 1.0015
+  },
+  "384": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "448": {
+   "qjs_per_iteration": 1.003,
+   "zjs_per_iteration": 2.0015
+  },
+  "480": {
+   "qjs_per_iteration": 2.003,
+   "zjs_per_iteration": 2.0015
+  }
+ },
+ "bigint_localisation": {
+  "churning_arena_size": 4040,
+  "block_class_bytes": 80,
+  "zjs_allocation": "src/libs/bigint.zig:742 const u = try allocator.alloc(Limb, na + 1)",
+  "payload_bytes": 72,
+  "total_with_header": 80,
+  "why_only_one_event_per_division": "v (nb limbs -> 40B class) and q (quotient_len limbs -> 48B class) land in populated classes; only u lands in the unpopulated 80B class",
+  "qjs_counterpart": "js_bigint_divrem allocates r = js_bigint_new(na+2) = 10 limbs + 8B JSBigInt header = 88B payload -> 96B class, which is populated"
+ },
+ "in_situ_control": {
+  "method": "retain 411 Uint8Array(72) -- the JS-reachable shape that allocates in the 80-byte class -- and change nothing about the division",
+  "zjs_arena_events_per_div_before": 1.0002,
+  "zjs_arena_events_per_div_after": 0.0004,
+  "qjs_arena_events_per_div_before": 0.0002,
+  "qjs_arena_events_per_div_after": 0.0005,
+  "outputs_identical": true
+ },
+ "timing": {
+  "samples_per_config": 8,
+  "sampling": "ABBA-balanced, taskset -c 19, exclusive host lock",
+  "per_division": {
+   "zjs/bigint_div_long": {
+    "samples": 8,
+    "insn_per_div": 3259.92112,
+    "cycles_per_div": 721.58531,
+    "ns_per_div": 185.05432
+   },
+   "zjs/bigint_div_resident": {
+    "samples": 8,
+    "insn_per_div": 2426.254725,
+    "cycles_per_div": 574.47204,
+    "ns_per_div": 147.33124
+   },
+   "qjs/bigint_div_long": {
+    "samples": 8,
+    "insn_per_div": 1654.8141675,
+    "cycles_per_div": 347.36871,
+    "ns_per_div": 89.0938
+   },
+   "qjs/bigint_div_resident": {
+    "samples": 8,
+    "insn_per_div": 1662.99621,
+    "cycles_per_div": 349.726345,
+    "ns_per_div": 89.70016
+   }
+  },
+  "zjs_saving_from_removing_churn": {
+   "insn": 833.6663950000002,
+   "cycles": 147.11327000000006,
+   "ns": 37.72307999999998
+  },
+  "qjs_control_delta": {
+   "insn": -8.18204250000008,
+   "cycles": -2.3576349999999593,
+   "ns": -0.6063599999999951
+  },
+  "division_gap_ns": {
+   "with_churn": 95.96051999999999,
+   "without_churn": 57.63108000000001
+  },
+  "churn_share_of_division_gap": 0.3994292652853484,
+  "typed_array_context": {
+   "qjs/ta_churn": {
+    "samples": 6,
+    "insn": 737841051.5,
+    "cycles": 127879382.5,
+    "ms": 32.795608
+   },
+   "qjs/ta_resident": {
+    "samples": 6,
+    "insn": 473353061.5,
+    "cycles": 74898598.5,
+    "ms": 19.210168
+   },
+   "zjs/ta_churn": {
+    "samples": 6,
+    "insn": 9336175178.5,
+    "cycles": 3204752997.5,
+    "ms": 821.78504
+   },
+   "zjs/ta_resident": {
+    "samples": 6,
+    "insn": 9628831075.5,
+    "cycles": 3275342267.0,
+    "ms": 839.886224
+   }
+  },
+  "per_event_cost_note": "the typed-array A/B on qjs gives 1323 insn / 265 cyc / 67.9 ns per arena acquire+release; the in-situ BigInt figure is 834 insn / 147 cyc / 37.7 ns. The per-event cost is context-dependent and the in-situ number is the one that should be quoted for the division."
+ },
+ "refuted_hypothesis": {
+  "claim": "array_map_callback, the largest single item in the P7-20 Pareto, would show the churn",
+  "result": "refuted",
+  "zjs_per_iteration": 0.001,
+  "qjs_per_iteration": 0.0005,
+  "note": "10,000 map() calls produce 10 net arena events on zjs and 5 on qjs; its 2.618 ratio is not allocator churn"
+ }
+}
