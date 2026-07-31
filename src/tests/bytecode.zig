@@ -2376,9 +2376,9 @@ test "resolve_variables empty finalizer removal is transactional across every al
     // No scope_make_ref appears in this topology, so the five tail ledgers are
     // deliberately absent. Keep the remaining transactional allocation
     // surface exact: every one was failed, checked unchanged, and retried.
-    // P2-R1T added the Debug/ReleaseSafe relocation-oracle allocation to
-    // this segment (sparse words + oracle dense map + jump sites).
-    try std.testing.expectEqual(@as(usize, 8), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 12), fail_offset);
 }
 
 test "resolve_variables: scope_put_var → put_var" {
@@ -6963,8 +6963,9 @@ test "resolve_variables logical fold is transactional across every post-bind all
     }
     // The no-make-ref topology has six transactional allocations after
     // folding jump-target state into the CFG.
-    // P2-R1T: +1 for the Debug/ReleaseSafe relocation-oracle allocation.
-    try std.testing.expectEqual(@as(usize, 7), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 11), fail_offset);
 }
 
 fn runTaggedLogicalPhaseOwnerAllocationFailure(
@@ -7070,9 +7071,9 @@ test "resolve_variables tagged logical labels are leak-free and retryable across
     }
     // Tagged-label binding contributes one allocation before the same six
     // no-make-ref phase-owner allocations.
-    // P2-R1T added the Debug/ReleaseSafe relocation-oracle allocation to
-    // this segment (sparse words + oracle dense map + jump sites).
-    try std.testing.expectEqual(@as(usize, 8), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 12), fail_offset);
 }
 
 test "resolve_labels null comparison strict_eq folds both constants with QuickJS source mapping" {
