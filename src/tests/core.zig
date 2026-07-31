@@ -9853,11 +9853,9 @@ test "stored symbol value preserves and releases across GC without external valu
     const symbol_atom = try rt.atoms.newValueSymbol("gc-external-rooted-symbol");
     const rooted_value = try rt.symbolValue(symbol_atom);
 
-    try std.testing.expect(!try rt.registerExternalValueSymbolRoot(rooted_value));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    rt.unregisterExternalValueSymbolRoot(rooted_value);
     rooted_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -10924,3 +10922,4 @@ test "fused multiply-subtract matches the reference limb for limb" {
         try std.testing.expectEqualSlices(Limb, reference, under_test);
     }
 }
+

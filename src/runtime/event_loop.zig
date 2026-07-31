@@ -469,7 +469,6 @@ const Timer = struct {
     timeout_ms: u64,
     delay_ms: u64,
     repeats: bool,
-    callback_symbol_rooted: bool = false,
 
     fn init(ctx: *core.JSContext, id: i64, callback: zjs.JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) !Timer {
         const rt = ctx.runtimePtr();
@@ -481,12 +480,10 @@ const Timer = struct {
             .repeats = repeats,
         };
         errdefer timer.callback.free(rt);
-        timer.callback_symbol_rooted = try rt.registerExternalValueSymbolRoot(callback);
         return timer;
     }
 
     fn deinit(self: Timer, rt: *zjs.JSRuntime) void {
-        if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
         self.callback.free(rt);
     }
 
@@ -499,44 +496,24 @@ const RwHandler = struct {
     fd: i32,
     read_callback: zjs.JSValue = zjs.JSValue.nullValue(),
     write_callback: zjs.JSValue = zjs.JSValue.nullValue(),
-    symbol_root_mask: u2 = 0,
 
     fn deinit(self: RwHandler, rt: *zjs.JSRuntime) void {
-        if ((self.symbol_root_mask & 0b01) != 0) rt.unregisterExternalValueSymbolRoot(self.read_callback);
-        if ((self.symbol_root_mask & 0b10) != 0) rt.unregisterExternalValueSymbolRoot(self.write_callback);
         self.read_callback.free(rt);
         self.write_callback.free(rt);
     }
 
     fn setCallback(self: *RwHandler, rt: *zjs.JSRuntime, write_handler: bool, callback: zjs.JSValue) !void {
         const next_callback = callback.dup();
-        var next_rooted = false;
-        errdefer next_callback.free(rt);
-        next_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        errdefer if (next_rooted) rt.unregisterExternalValueSymbolRoot(next_callback);
-
-        const bit: u2 = if (write_handler) 0b10 else 0b01;
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
         const old_callback = slot.*;
-        const old_rooted = (self.symbol_root_mask & bit) != 0;
         slot.* = next_callback;
-        if (next_rooted) {
-            self.symbol_root_mask |= bit;
-        } else {
-            self.symbol_root_mask &= ~bit;
-        }
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
     }
 
     fn clearCallback(self: *RwHandler, rt: *zjs.JSRuntime, write_handler: bool) void {
-        const bit: u2 = if (write_handler) 0b10 else 0b01;
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
         const old_callback = slot.*;
-        const old_rooted = (self.symbol_root_mask & bit) != 0;
         slot.* = zjs.JSValue.nullValue();
-        self.symbol_root_mask &= ~bit;
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
     }
 
@@ -549,36 +526,23 @@ const RwHandler = struct {
 const SignalHandler = struct {
     sig: u32,
     callback: zjs.JSValue,
-    callback_symbol_rooted: bool = false,
 
     fn init(ctx: *core.JSContext, sig: u32, callback: zjs.JSValue) !SignalHandler {
-        const rt = ctx.runtimePtr();
-        var handler = SignalHandler{
+        _ = ctx;
+        return .{
             .sig = sig,
             .callback = callback.dup(),
         };
-        errdefer handler.callback.free(rt);
-        handler.callback_symbol_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        return handler;
     }
 
     fn deinit(self: SignalHandler, rt: *zjs.JSRuntime) void {
-        if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
         self.callback.free(rt);
     }
 
     fn setCallback(self: *SignalHandler, rt: *zjs.JSRuntime, callback: zjs.JSValue) !void {
         const next_callback = callback.dup();
-        var next_rooted = false;
-        errdefer next_callback.free(rt);
-        next_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        errdefer if (next_rooted) rt.unregisterExternalValueSymbolRoot(next_callback);
-
         const old_callback = self.callback;
-        const old_rooted = self.callback_symbol_rooted;
         self.callback = next_callback;
-        self.callback_symbol_rooted = next_rooted;
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
     }
 

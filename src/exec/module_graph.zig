@@ -49,31 +49,10 @@ pub const ModuleContinuation = struct {
     deferred_start: bool = false,
     awaited_normalized: bool = false,
     ready: bool = false,
-    symbol_root_mask: u2 = 0,
-
-    fn registerSymbolRoots(self: *ModuleContinuation, runtime: *core.JSRuntime) !void {
-        std.debug.assert(self.symbol_root_mask == 0);
-        errdefer self.unregisterSymbolRoots(runtime);
-        if (try runtime.registerExternalValueSymbolRoot(self.continuation)) self.symbol_root_mask |= 0b01;
-        if (try runtime.registerExternalValueSymbolRoot(self.awaited)) self.symbol_root_mask |= 0b10;
-    }
-
-    fn unregisterSymbolRoots(self: *ModuleContinuation, runtime: *core.JSRuntime) void {
-        if ((self.symbol_root_mask & 0b01) != 0) runtime.unregisterExternalValueSymbolRoot(self.continuation);
-        if ((self.symbol_root_mask & 0b10) != 0) runtime.unregisterExternalValueSymbolRoot(self.awaited);
-        self.symbol_root_mask = 0;
-    }
 
     fn replaceAwaited(self: *ModuleContinuation, runtime: *core.JSRuntime, replacement: core.JSValue) !void {
-        errdefer replacement.free(runtime);
-        const replacement_rooted = try runtime.registerExternalValueSymbolRoot(replacement);
-        if ((self.symbol_root_mask & 0b10) != 0) {
-            runtime.unregisterExternalValueSymbolRoot(self.awaited);
-            self.symbol_root_mask &= ~@as(u2, 0b10);
-        }
         const old = self.awaited;
         self.awaited = replacement;
-        if (replacement_rooted) self.symbol_root_mask |= 0b10;
         old.free(runtime);
     }
 };
@@ -1077,7 +1056,7 @@ fn appendModuleEvalStepRetainingOnError(
                 errdefer allocator.free(path_copy);
                 var realm = core.RealmRef.retain(context);
                 errdefer realm.deinit();
-                var continuation = ModuleContinuation{
+                const continuation = ModuleContinuation{
                     .realm = realm,
                     .path = path_copy,
                     .continuation = core.JSValue.undefinedValue(),
@@ -1085,8 +1064,6 @@ fn appendModuleEvalStepRetainingOnError(
                     .keep_result = true,
                     .completed = true,
                 };
-                try continuation.registerSymbolRoots(runtime);
-                errdefer continuation.unregisterSymbolRoots(runtime);
                 try continuations.append(allocator, continuation);
             } else {
                 value.free(runtime);
@@ -1097,15 +1074,13 @@ fn appendModuleEvalStepRetainingOnError(
             errdefer allocator.free(path_copy);
             var realm = core.RealmRef.retain(context);
             errdefer realm.deinit();
-            var continuation = ModuleContinuation{
+            const continuation = ModuleContinuation{
                 .realm = realm,
                 .path = path_copy,
                 .continuation = suspended.continuation,
                 .awaited = suspended.awaited,
                 .keep_result = keep_result,
             };
-            try continuation.registerSymbolRoots(runtime);
-            errdefer continuation.unregisterSymbolRoots(runtime);
             try continuations.append(allocator, continuation);
         },
     }
@@ -1126,7 +1101,7 @@ fn enqueueDeferredModuleStart(
     errdefer allocator.free(path_copy);
     var realm = core.RealmRef.retain(context);
     errdefer realm.deinit();
-    var continuation = ModuleContinuation{
+    const continuation = ModuleContinuation{
         .realm = realm,
         .path = path_copy,
         .continuation = core.JSValue.undefinedValue(),
@@ -1134,8 +1109,6 @@ fn enqueueDeferredModuleStart(
         .keep_result = keep_result,
         .deferred_start = true,
     };
-    try continuation.registerSymbolRoots(runtime);
-    errdefer continuation.unregisterSymbolRoots(runtime);
     try continuations.append(allocator, continuation);
     module_record.status = .evaluating;
 }
@@ -1334,7 +1307,6 @@ fn reinsertRemovedModuleStep(
     completion_rejected: bool,
 ) !void {
     var replacement = current;
-    replacement.unregisterSymbolRoots(runtime);
     replacement.continuation.free(runtime);
     replacement.awaited.free(runtime);
     replacement.completed = switch (step) {
@@ -1358,7 +1330,6 @@ fn reinsertRemovedModuleStep(
     }
 
     continuations.insertAssumeCapacity(index, replacement);
-    try continuations.items[index].registerSymbolRoots(runtime);
 }
 
 /// Transfer a step produced after a continuation was removed. A suspended step
@@ -1410,7 +1381,6 @@ fn retainRemovedModuleStep(
     // Move that node back to the removed slot without allocating, then release
     // the superseded path and settled await owners.
     var superseded = current;
-    superseded.unregisterSymbolRoots(runtime);
     allocator.free(superseded.path);
     superseded.continuation.free(runtime);
     superseded.awaited.free(runtime);
@@ -1444,7 +1414,6 @@ fn drainOneModuleContinuation(
             current.settle_waiters = false;
         }
         restore_current = false;
-        current.unregisterSymbolRoots(runtime);
         allocator.free(current.path);
         current.continuation.free(runtime);
         if (current.completion_rejected) {
@@ -1576,7 +1545,6 @@ fn freeModuleContinuations(
 ) void {
     for (continuations.items) |*item| {
         allocator.free(item.path);
-        item.unregisterSymbolRoots(runtime);
         item.continuation.free(runtime);
         item.awaited.free(runtime);
         item.realm.deinit();
