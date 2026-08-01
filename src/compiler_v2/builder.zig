@@ -19,9 +19,9 @@
 //!   - OOM anywhere leaves the builder consistent for deinit; no partial
 //!     state is observable by later passes.
 //!
-//! Liveness note: `last_opcode_pos` mirrors qjs fd->last_opcode_pos from
-//! day one, and label `ref_count` is the O(1) merge-liveness answer — the
-//! legacy FlowTailSummary machinery is deliberately NOT ported.
+//! Control-flow note: `last_opcode_pos` mirrors qjs fd->last_opcode_pos from
+//! day one. Label `ref_count` is relocation/short-form bookkeeping; exact
+//! liveness is computed later from the LabelId block CFG.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -458,6 +458,77 @@ pub const Builder = struct {
         self.reloc_len += 1;
         self.last_opcode_pos = @intCast(opcode_offset);
         self.code_len += 11;
+    }
+
+    /// Emit a final-format atom + auxiliary LabelId + u8 instruction. This is
+    /// the compact identity-coordinate twin of the legacy atom_label_u8 form.
+    /// Owned-atom sink with the same transactional guarantees as
+    /// emitScopeRefOpOwned.
+    pub fn emitAtomLabelOpU8Owned(
+        self: *Builder,
+        op_id: u8,
+        atom_id: core.atom.Atom,
+        label: LabelId,
+        value: u8,
+    ) Error!void {
+        if (label.index() >= self.label_len) {
+            self.atoms.free(atom_id);
+            return error.InvalidBytecode;
+        }
+
+        self.reserveCode(10) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+        reserve(
+            labels.RelocEntry,
+            self.memory,
+            &self.relocs,
+            &self.reloc_capacity,
+            self.reloc_len,
+            1,
+            8,
+        ) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+        reserve(
+            core.atom.Atom,
+            self.memory,
+            &self.atom_operands,
+            &self.atom_capacity,
+            self.atom_len,
+            1,
+            8,
+        ) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        const operand_offset = opcode_offset + 5;
+        self.atom_operands[self.atom_len] = atom_id;
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, self.code[opcode_index + 5 ..][0..4], label.index(), .little);
+        self.code[opcode_index + 9] = value;
+
+        const slot = &self.label_slots[label.index()];
+        const reloc_index = self.reloc_len;
+        self.relocs[reloc_index] = .{
+            .next = slot.first_reloc,
+            .operand_offset = operand_offset,
+            .kind = .aux32,
+        };
+        slot.first_reloc = reloc_index;
+        slot.ref_count += 1;
+        if (slot.flags.bound) slot.flags.backward_target = true;
+
+        self.atom_len += 1;
+        self.reloc_len += 1;
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 10;
     }
 
     /// Transfer ownership of the newest ledger atom back to the caller

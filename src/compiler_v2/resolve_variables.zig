@@ -1,14 +1,18 @@
-//! QCP-1 compiler-v2 Stage 3: QuickJS-shaped linear variable resolution.
+//! QCP-1 compiler-v2 Stage 3: identity-native variable resolution with exact
+//! block-CFG liveness.
 //!
-//! Pass A establishes the transactional output, label/dead-code bookkeeping,
-//! atom ownership, source carry, and the simple QuickJS rewrites. Pass B keeps
-//! that pass structure while delegating every binding decision and lowering
-//! writer to the legacy resolver's curated reuse surface.
+//! Pass A builds one immutable LabelId CFG from the read-only Builder, then
+//! establishes the transactional output, short-form label bookkeeping, atom
+//! ownership, source carry, and the simple QuickJS rewrites. Pass B keeps that
+//! pass structure while delegating every binding decision and lowering writer
+//! to the legacy resolver's curated reuse surface.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
+const cfg = @import("cfg.zig");
 const labels = @import("labels.zig");
 
 const opcode = bytecode.opcode;
@@ -25,7 +29,7 @@ pub const Error = error{
     ClosureVarNotFound,
 };
 
-/// Output of the linear resolve pass (qjs shape: a fresh growable output
+/// Output of the exact-CFG resolve pass (qjs shape: a fresh growable output
 /// buffer, quickjs.c resolve_variables bc_out, plus the function's label
 /// slots updated to output offsets as labels are passed).
 pub const ResolvedProduct = struct {
@@ -41,7 +45,8 @@ pub const ResolvedProduct = struct {
     /// Same label indices as the input builder (Pass B may append new ones).
     /// bound_offset = OUTPUT offset for labels passed in live code (qjs
     /// LabelSlot.pos2), labels.unbound for labels inside removed dead
-    /// regions; ref_count = live count after qjs update_label bookkeeping;
+    /// regions; ref_count = retained-reference count after qjs update_label
+    /// bookkeeping for Stage 4 short-form selection;
     /// first_reloc is always labels.no_reloc here (resolve_labels_v2 builds
     /// its own chains next stage); flags.backward_target carried from input.
     label_slots: []labels.LabelSlot = &.{},
@@ -105,111 +110,9 @@ fn reserve(
     if (old_capacity != 0) memory.free(T, old_backing);
 }
 
-const TempInstruction = struct {
-    size: u8,
-    is_temp: bool = false,
-    has_atom: bool = false,
-};
-
-fn tempAtomInstructionSize(op_id: u8) ?u8 {
-    return switch (op_id) {
-        op.scope_get_var_undef,
-        op.scope_get_var,
-        op.scope_put_var,
-        op.scope_delete_var,
-        op.scope_get_ref,
-        op.scope_put_var_init,
-        op.scope_get_var_checkthis,
-        op.scope_get_private_field,
-        op.scope_get_private_field2,
-        op.scope_put_private_field,
-        op.scope_in_private_field,
-        => 7,
-        op.scope_make_ref => 11,
-        op.get_field_opt_chain => 5,
-        else => null,
-    };
-}
-
-fn instructionHasAtom(op_id: u8, is_temp: bool) bool {
-    if (is_temp) return switch (op_id) {
-        op.scope_get_var_undef,
-        op.scope_get_var,
-        op.scope_put_var,
-        op.scope_delete_var,
-        op.scope_make_ref,
-        op.scope_get_ref,
-        op.scope_put_var_init,
-        op.scope_get_var_checkthis,
-        op.scope_get_private_field,
-        op.scope_get_private_field2,
-        op.scope_put_private_field,
-        op.scope_in_private_field,
-        op.get_field_opt_chain,
-        => true,
-        else => false,
-    };
-
-    return switch (opcode.formatOf(op_id)) {
-        .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
-        else => false,
-    };
-}
-
-/// Twin of parserPhaseInstruction for compact v2 temporary bytecode. Atom
-/// ledger equality disambiguates temporary atom opcodes from overlapping
-/// final short opcodes.
-fn tempInstruction(
-    code: []const u8,
-    atoms_ledger: []const core.atom.Atom,
-    pc: u32,
-    atom_index: u32,
-) Error!TempInstruction {
-    const pc_index: usize = @intCast(pc);
-    if (pc_index >= code.len) return error.InvalidBytecode;
-    const op_id = code[pc_index];
-
-    if (tempAtomInstructionSize(op_id)) |temp_size| {
-        const end = std.math.add(usize, pc_index, temp_size) catch
-            return error.InvalidBytecode;
-        if (end <= code.len and atom_index < atoms_ledger.len) {
-            const operand = std.mem.readInt(u32, code[pc_index + 1 ..][0..4], .little);
-            if (operand == atoms_ledger[atom_index]) {
-                return .{ .size = temp_size, .is_temp = true, .has_atom = true };
-            }
-        }
-    }
-
-    var instruction: TempInstruction = switch (op_id) {
-        // v2 labels and source positions are side-table entities.
-        op.label, op.line_num => return error.InvalidBytecode,
-        op.enter_scope,
-        op.leave_scope,
-        op.get_array_el_opt_chain,
-        op.set_class_name,
-        => .{ .size = opcode.sizeOfPhase1(op_id), .is_temp = true },
-        else => .{ .size = opcode.sizeOf(op_id) },
-    };
-    if (instruction.size == 0) return error.InvalidBytecode;
-    const end = std.math.add(usize, pc_index, instruction.size) catch
-        return error.InvalidBytecode;
-    if (end > code.len) return error.InvalidBytecode;
-    instruction.has_atom = instructionHasAtom(op_id, instruction.is_temp);
-    return instruction;
-}
-
-const BindEntry = struct {
-    input_offset: u32,
-    label_index: u32,
-    /// A zero-reference bind crossed by skip_dead_code must not become live
-    /// merely because another label at the same offset remains referenced.
-    dead_skipped: bool = false,
-};
-
-fn bindLessThan(_: void, lhs: BindEntry, rhs: BindEntry) bool {
-    if (lhs.input_offset != rhs.input_offset) return lhs.input_offset < rhs.input_offset;
-    return lhs.label_index < rhs.label_index;
-}
+const TempInstruction = cfg.TempInstruction;
+const tempInstruction = cfg.tempInstruction;
+const BindEntry = cfg.BindEntry;
 
 fn updateLabel(product: *ResolvedProduct, label_index: u32, delta: i32) Error!u32 {
     if (label_index >= product.label_len) return error.InvalidBytecode;
@@ -262,12 +165,14 @@ const Resolver = struct {
     input_sources: []const builder.SourceSlot,
     product: *ResolvedProduct,
     binds: []BindEntry,
+    graph: *const cfg.Graph,
 
     pending_tail_rewrites: []PendingTailRewrite = &.{},
     pending_tail_capacity: usize = 0,
     pending_tail_len: u32 = 0,
 
     bind_cursor: usize = 0,
+    block_cursor: usize = 0,
     atom_index: u32 = 0,
     source_cursor: u32 = 0,
     pending_source: ?SourcePoint = null,
@@ -891,9 +796,28 @@ const Resolver = struct {
         }
     }
 
-    /// qjs:34123-34133. Mark zero-reference binds as dead. A referenced bind
-    /// remains for the ordinary live bind pass at the returned position.
+    fn blockAt(self: *Resolver, input_pos: u32) Error!usize {
+        if (input_pos > self.input.code_len or self.graph.block_starts.len == 0)
+            return error.InvalidBytecode;
+        while (self.block_cursor + 1 < self.graph.block_starts.len and
+            self.graph.block_starts[self.block_cursor + 1] <= input_pos)
+        {
+            self.block_cursor += 1;
+        }
+        if (self.block_cursor >= self.graph.blocks.len or
+            self.graph.block_starts[self.block_cursor] > input_pos)
+        {
+            return error.InvalidBytecode;
+        }
+        return self.block_cursor;
+    }
+
+    /// Exact-CFG dead boundary with qjs ref_count bookkeeping retained for
+    /// Stage 4 short-form selection. Dead blocks discard every bind at their
+    /// start; at a reachable boundary, only zero-reference label positions are
+    /// suppressed before the ordinary live bind pass.
     fn deadBoundaryAt(self: *Resolver, input_pos: u32) Error!bool {
+        const block_index = try self.blockAt(input_pos);
         if (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].input_offset < input_pos)
         {
@@ -903,14 +827,10 @@ const Resolver = struct {
         while (end < self.binds.len and self.binds[end].input_offset == input_pos) : (end += 1) {}
         if (end == self.bind_cursor) return false;
 
-        var has_live = false;
-        for (self.binds[self.bind_cursor..end]) |entry| {
-            if (self.product.label_slots[entry.label_index].ref_count > 0) {
-                has_live = true;
-                break;
-            }
-        }
-        if (has_live) {
+        if (self.graph.block_starts[block_index] != input_pos)
+            return error.InvalidBytecode;
+        std.debug.assert(self.graph.block_starts[block_index] == input_pos);
+        if (self.graph.isReachable(block_index)) {
             for (self.binds[self.bind_cursor..end]) |*entry| {
                 if (self.product.label_slots[entry.label_index].ref_count == 0)
                     entry.dead_skipped = true;
@@ -1754,14 +1674,14 @@ fn buildBindIndex(
         };
         bind_index += 1;
     }
-    std.mem.sort(BindEntry, binds, {}, bindLessThan);
+    std.mem.sort(BindEntry, binds, {}, cfg.bindLessThan);
     return binds;
 }
 
-/// Linear resolve pass over fd.v2_builder. The input Builder is strictly
-/// read-only: every output atom is freshly retained, and every fallible output
-/// allocation is owned by the uncommitted product until the caller commits or
-/// deinitializes it.
+/// Exact block-CFG resolve pass over fd.v2_builder. The input Builder is
+/// strictly read-only: every output atom is freshly retained, and every
+/// fallible output allocation is owned by the uncommitted product or scratch
+/// topology until the caller commits or deinitializes it.
 pub fn run(
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,
@@ -1771,12 +1691,18 @@ pub fn run(
         return error.InvalidBytecode;
     try validateInput(input);
 
+    const binds = try buildBindIndex(fd.memory, input);
+    defer if (binds.len != 0) fd.memory.free(BindEntry, binds);
+
+    var graph = try cfg.build(fd.memory, input, binds);
+    defer graph.deinit();
+    if (comptime (builtin.mode == .Debug or builtin.mode == .ReleaseSafe)) {
+        try cfg.auditInstructionOwnership(fd.memory, input, &graph);
+    }
+
     var product: ResolvedProduct = .{ .memory = fd.memory, .atoms = fd.atoms };
     errdefer product.deinitUncommitted();
     try initializeLabels(&product, input);
-
-    const binds = try buildBindIndex(fd.memory, input);
-    defer if (binds.len != 0) fd.memory.free(BindEntry, binds);
 
     var ctx = legacy_pipeline.JSContext.initWithFunctionDef(function, fd);
     // QCP-1 S3: exact-scope accelerator deferred; the linked-chain fallback is
@@ -1790,6 +1716,7 @@ pub fn run(
         .input_sources = input.source_slots[0..input.source_len],
         .product = &product,
         .binds = binds,
+        .graph = &graph,
     };
     defer resolver.deinitScratch();
     try resolver.run();
@@ -2139,6 +2066,115 @@ test "compiler_v2.resolve_variables: label referenced only by dead code stays de
     try std.testing.expectEqual(@as(u32, 1), product.jump_size);
 }
 
+test "compiler_v2.resolve_variables: dead self-loop is skipped through to live merge" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const dead_loop = try input.newLabel();
+    const merge = try input.newLabel();
+    try input.emitJump(op.if_false, merge);
+    try input.emitOp(op.return_undef);
+    try input.bindLabel(dead_loop);
+    try input.emitJump(op.goto, dead_loop);
+    try input.bindLabel(merge);
+    try input.emitOp(op.return_undef);
+
+    var expected = [_]u8{
+        op.if_false,     0,               0, 0, 0,
+        op.return_undef, op.return_undef,
+    };
+    std.mem.writeInt(u32, expected[1..5], merge.index(), .little);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try expectProductCode(&product, &expected);
+    try expectProductLabel(&product, dead_loop, 0, labels.unbound);
+    try expectProductLabel(&product, merge, 1, 6);
+    try std.testing.expectEqual(@as(u32, 1), product.jump_size);
+}
+
+test "compiler_v2.resolve_variables: dead forward jump cannot retain another dead block" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const dead_source = try input.newLabel();
+    const dead_target = try input.newLabel();
+    const merge = try input.newLabel();
+    try input.emitJump(op.if_false, merge);
+    try input.emitOp(op.return_undef);
+    try input.bindLabel(dead_source);
+    try input.emitJump(op.goto, dead_target);
+    try input.bindLabel(dead_target);
+    try input.emitOp(op.drop);
+    try input.bindLabel(merge);
+    try input.emitOp(op.return_undef);
+
+    var expected = [_]u8{
+        op.if_false,     0,               0, 0, 0,
+        op.return_undef, op.return_undef,
+    };
+    std.mem.writeInt(u32, expected[1..5], merge.index(), .little);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try expectProductCode(&product, &expected);
+    try expectProductLabel(&product, dead_source, 0, labels.unbound);
+    try expectProductLabel(&product, dead_target, 0, labels.unbound);
+    try expectProductLabel(&product, merge, 1, 6);
+    try std.testing.expectEqual(@as(u32, 1), product.jump_size);
+}
+
+test "compiler_v2.resolve_variables: scope_make_ref after terminal owns nothing" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const local = try harness.rt.atoms.internString("qcp1-s3r-dead-make-ref");
+    defer harness.rt.atoms.free(local);
+    _ = try harness.fd.appendScope(-1);
+    _ = try harness.fd.addScopeVar(local, .normal, 0, false, false);
+    const base_refs = harness.rt.atoms.refCount(local).?;
+
+    const put_tail = try harness.input().newLabel();
+    try harness.input().emitOp(op.return_undef);
+    try harness.input().emitScopeRefOpOwned(
+        op.scope_make_ref,
+        harness.rt.atoms.dup(local),
+        put_tail,
+        0,
+    );
+    try harness.input().bindLabel(put_tail);
+    try harness.input().emitOp(op.nop);
+    try harness.input().emitOp(op.put_ref_value);
+    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(local).?);
+    var snapshot = try TestInputSnapshot.init(harness.input());
+    defer snapshot.deinit();
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try expectProductCode(&product, &.{op.return_undef});
+    try std.testing.expectEqual(@as(u32, 0), product.atom_len);
+    try expectProductLabel(&product, put_tail, 0, labels.unbound);
+    try std.testing.expectEqual(@as(usize, 0), harness.fd.closure_var.len);
+    try std.testing.expect(!harness.fd.vars[0].is_captured);
+    try snapshot.expectUnchanged(harness.input());
+
+    product.deinitUncommitted();
+    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(local).?);
+    harness.deinitInput();
+    try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(local).?);
+}
+
 test "compiler_v2.resolve_variables: empty gosub finalizer removal and non-empty retention" {
     try requireCompilerV2();
 
@@ -2274,7 +2310,7 @@ test "compiler_v2.resolve_variables: insert3 fold recognizes both put variants" 
     );
 }
 
-test "compiler_v2.resolve_variables: dup branch fold retargets and moves refs" {
+test "compiler_v2.resolve_variables: dup branch fold preserves precomputed live block" {
     try requireCompilerV2();
 
     var harness: ResolveTestHarness = undefined;
@@ -2294,15 +2330,24 @@ test "compiler_v2.resolve_variables: dup branch fold retargets and moves refs" {
     try input.bindLabel(target);
     try input.emitOp(op.return_undef);
 
-    var expected = [_]u8{ op.if_false, 0, 0, 0, 0, op.return_undef, op.return_undef };
+    // The fold moves the first branch reference to target, but the exact CFG
+    // was intentionally computed before the walk. The originally reachable
+    // `first` block therefore remains live and is copied; only its zero-ref
+    // label position is suppressed for Stage 4 bookkeeping.
+    var expected = [_]u8{
+        op.if_false,     0,               0,               0, 0,
+        op.return_undef, op.if_false,     0,               0, 0,
+        0,               op.return_undef, op.return_undef,
+    };
     std.mem.writeInt(u32, expected[1..5], target.index(), .little);
+    std.mem.writeInt(u32, expected[7..11], target.index(), .little);
 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
     try expectProductCode(&product, &expected);
     try expectProductLabel(&product, first, 0, labels.unbound);
-    try expectProductLabel(&product, target, 1, 6);
-    try std.testing.expectEqual(@as(u32, 1), product.jump_size);
+    try expectProductLabel(&product, target, 2, 12);
+    try std.testing.expectEqual(@as(u32, 2), product.jump_size);
 }
 
 test "compiler_v2.resolve_variables: scope_get_var global reuses legacy topology" {

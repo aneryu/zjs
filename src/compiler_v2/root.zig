@@ -1,13 +1,13 @@
-//! QCP-1 compiler-v2 (`compiler-v2-qjs` branch): a faithful port of the
-//! QuickJS production compilation model, built in parallel to the legacy
-//! Phase 1/2/3 pipeline and intended to REPLACE it wholesale once the final
+//! QCP-1 compiler-v2 (`compiler-v2-qjs` branch): the zjs identity-native
+//! compiler, using selected QuickJS production mechanisms while replacing the
+//! legacy absolute-PC Phase 1/2/3 pipeline wholesale once the final
 //! performance gate (code-load >= 0.58 vs pinned qjs) passes.
 //!
 //! Production shape (target):
 //!   compact temporary bytecode (no per-instruction object IR)
 //!   + parser-native LabelId / LabelSlot / RelocEntry
-//!   + linear resolve_variables_v2 (QuickJS-style linear liveness;
-//!     the legacy exact CFG survives only as a Debug/ReleaseSafe auditor)
+//!   + resolve_variables_v2 with exact LabelId block-CFG liveness
+//!     (a legacy-style instruction CFG is the Debug/ReleaseSafe proof oracle)
 //!   + resolve_labels_v2 + single final emission (short opcodes, jump
 //!     threading, pc2line generated directly at output positions)
 //!
@@ -50,6 +50,7 @@ fn resolveLabelsV2Stub(product: *ResolvedProduct) void {
 }
 
 test {
+    _ = @import("cfg.zig");
     _ = labels;
     _ = builder;
     _ = resolve_variables;

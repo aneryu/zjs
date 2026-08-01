@@ -28,23 +28,23 @@ pub const no_reloc: u32 = std.math.maxInt(u32);
 pub const LabelFlags = packed struct(u8) {
     /// Bound offsets refer to the temporary bytecode stream.
     bound: bool = false,
-    /// At least one backward jump resolved through this label while live
-    /// (feeds the linear liveness model's loop handling).
+    /// At least one backward jump resolved through this label while retained
+    /// (feeds resolve_labels_v2 short-form bookkeeping).
     backward_target: bool = false,
     reserved: u6 = 0,
 };
 
-/// One label. Mirrors quickjs.c LabelSlot: `ref_count` is the liveness
-/// oracle of the linear model (dead-code skip stops at a label with
-/// ref_count > 0); `first_reloc` heads an intrusive chain of operand
-/// positions awaiting the final relative rewrite.
+/// One label. `ref_count` is retained qjs update_label bookkeeping for the
+/// resolve_labels_v2 short-form pass; exact block-CFG reachability decides
+/// liveness. `first_reloc` heads an intrusive chain of operand positions
+/// awaiting the final relative rewrite.
 pub const LabelSlot = struct {
     /// Offset into the temporary bytecode where the label binds, or
     /// `unbound`.
     bound_offset: u32 = unbound,
-    /// Number of live references. resolve passes decrement when a
-    /// referencing instruction is removed as dead — a label referenced only
-    /// from dead code must itself go dead (quickjs.c update_label).
+    /// Number of retained references. Resolve passes decrement when a
+    /// referencing instruction is removed as dead; Stage 4 consumes the
+    /// resulting count for short-form selection, never as a liveness oracle.
     ref_count: u32 = 0,
     /// Head of this label's relocation chain (`no_reloc` when empty).
     first_reloc: u32 = no_reloc,

@@ -246,24 +246,105 @@ fn decodePhase1Instruction(
     return instruction;
 }
 
-/// Translate the straight-line subset of a real legacy parser phase-1 stream
-/// into a fresh v2 Builder. Label-bearing input is deliberately rejected: a
-/// seed becoming control-flow-shaped must fail rather than silently weaken the
-/// normalized-equivalence comparison.
+fn phase1LabelOperandOffset(op_id: u8, instruction: Phase1Instruction) ?usize {
+    if (instruction.is_temp) {
+        if (op_id == qop.scope_make_ref) return 5;
+        return null;
+    }
+    return switch (opcode.formatOf(op_id)) {
+        .label => 1,
+        .atom_label_u8, .atom_label_u16 => 5,
+        else => null,
+    };
+}
+
+fn u32LessThan(_: void, lhs: u32, rhs: u32) bool {
+    return lhs < rhs;
+}
+
+fn translatedTargetLabel(
+    targets: []const u32,
+    target_labels: []const labels.LabelId,
+    target_pc: u32,
+) !labels.LabelId {
+    if (targets.len != target_labels.len) return error.InvalidBytecode;
+    var lo: usize = 0;
+    var hi = targets.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (targets[mid] < target_pc)
+            lo = mid + 1
+        else
+            hi = mid;
+    }
+    if (lo >= targets.len or targets[lo] != target_pc)
+        return error.InvalidBytecode;
+    return target_labels[lo];
+}
+
+/// Translate a real legacy parser phase-1 stream into a fresh identity-native
+/// Builder. Every legacy label instruction and absolute-PC label operand is
+/// mapped to a LabelId; line/label bytes disappear while binds retain their
+/// exact normalized instruction boundary.
 fn translatePhase1ToV2(
     b: *builder_mod.Builder,
     code: []const u8,
     atoms: []const core.atom.Atom,
 ) !void {
+    if (b.code_len != 0 or b.atom_len != 0 or b.label_len != 0 or b.reloc_len != 0)
+        return error.InvalidBytecode;
+
+    var target_pcs: std.ArrayList(u32) = .empty;
+    defer target_pcs.deinit(std.testing.allocator);
+
     var pc: usize = 0;
     var atom_index: usize = 0;
     while (pc < code.len) {
         const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
         const op_id = code[pc];
+        if (instruction.is_temp and op_id == qop.label) {
+            try target_pcs.append(std.testing.allocator, @intCast(pc));
+        }
+        if (phase1LabelOperandOffset(op_id, instruction)) |operand_offset| {
+            if (operand_offset + 4 > instruction.size) return error.InvalidBytecode;
+            const target_pc = std.mem.readInt(u32, code[pc + operand_offset ..][0..4], .little);
+            if (target_pc > code.len) return error.InvalidBytecode;
+            try target_pcs.append(std.testing.allocator, target_pc);
+        }
+        if (instruction.has_atom) atom_index += 1;
+        pc += instruction.size;
+    }
+    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
+
+    std.mem.sort(u32, target_pcs.items, {}, u32LessThan);
+    var target_count: usize = 0;
+    for (target_pcs.items) |target_pc| {
+        if (target_count == 0 or target_pcs.items[target_count - 1] != target_pc) {
+            target_pcs.items[target_count] = target_pc;
+            target_count += 1;
+        }
+    }
+    const targets = target_pcs.items[0..target_count];
+    const target_labels = try std.testing.allocator.alloc(labels.LabelId, target_count);
+    defer std.testing.allocator.free(target_labels);
+    for (target_labels) |*label| label.* = try b.newLabel();
+
+    pc = 0;
+    atom_index = 0;
+    var bind_cursor: usize = 0;
+    while (pc < code.len) {
+        while (bind_cursor < targets.len and targets[bind_cursor] == pc) : (bind_cursor += 1) {
+            try b.bindLabel(target_labels[bind_cursor]);
+        }
+        if (bind_cursor < targets.len and targets[bind_cursor] < pc)
+            return error.InvalidBytecode;
+
+        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
+        const op_id = code[pc];
 
         if (instruction.is_temp) {
             switch (op_id) {
-                qop.line_num => {},
+                qop.label, qop.line_num => {},
                 qop.enter_scope, qop.leave_scope => {
                     if (instruction.size != 3) return error.InvalidBytecode;
                     try b.emitOpU16(
@@ -292,6 +373,21 @@ fn translatePhase1ToV2(
                         op_id,
                         b.atoms.dup(atom_id),
                         std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
+                    );
+                    atom_index += 1;
+                },
+                qop.scope_make_ref => {
+                    if (instruction.size != 11 or atom_index >= atoms.len)
+                        return error.InvalidBytecode;
+                    const atom_id = atoms[atom_index];
+                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                        return error.InvalidBytecode;
+                    const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
+                    try b.emitScopeRefOpOwned(
+                        op_id,
+                        b.atoms.dup(atom_id),
+                        try translatedTargetLabel(targets, target_labels, target_pc),
+                        std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
                     );
                     atom_index += 1;
                 },
@@ -351,17 +447,53 @@ fn translatePhase1ToV2(
                 }
                 atom_index += 1;
             },
-            .label8,
-            .label16,
-            .label,
-            .atom_label_u8,
-            .atom_label_u16,
-            .label_u16,
-            => return error.NonStraightLinePhase1,
+            .label => {
+                if (instruction.size != 5) return error.InvalidBytecode;
+                const target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                try b.emitJump(
+                    op_id,
+                    try translatedTargetLabel(targets, target_labels, target_pc),
+                );
+            },
+            .atom_label_u8, .atom_label_u16 => {
+                if (atom_index >= atoms.len) return error.InvalidBytecode;
+                const atom_id = atoms[atom_index];
+                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                    return error.InvalidBytecode;
+                const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
+                const target_label = try translatedTargetLabel(targets, target_labels, target_pc);
+                switch (format) {
+                    .atom_label_u8 => {
+                        if (instruction.size != 10) return error.InvalidBytecode;
+                        try b.emitAtomLabelOpU8Owned(
+                            op_id,
+                            b.atoms.dup(atom_id),
+                            target_label,
+                            code[pc + 9],
+                        );
+                    },
+                    .atom_label_u16 => {
+                        if (instruction.size != 11) return error.InvalidBytecode;
+                        try b.emitScopeRefOpOwned(
+                            op_id,
+                            b.atoms.dup(atom_id),
+                            target_label,
+                            std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
+                        );
+                    },
+                    else => unreachable,
+                }
+                atom_index += 1;
+            },
+            .label8, .label16, .label_u16 => return error.NonStraightLinePhase1,
         }
         pc += instruction.size;
     }
-    if (atom_index != atoms.len) return error.InvalidBytecode;
+    while (bind_cursor < targets.len and targets[bind_cursor] == code.len) : (bind_cursor += 1) {
+        try b.bindLabel(target_labels[bind_cursor]);
+    }
+    if (bind_cursor != targets.len or atom_index != atoms.len)
+        return error.InvalidBytecode;
 }
 
 fn attachTranslatedBuilder(
@@ -448,6 +580,45 @@ fn expectLoweredStreamEqual(
     );
 }
 
+const AtomBalanceRow = struct {
+    atom_id: core.atom.Atom,
+    before_release: usize,
+    owned_count: usize,
+};
+
+fn deinitProductAndExpectAtomBalance(
+    atoms: *core.atom.AtomTable,
+    product: *resolve_variables.ResolvedProduct,
+) !void {
+    var balances: std.ArrayList(AtomBalanceRow) = .empty;
+    defer balances.deinit(std.testing.allocator);
+    for (product.atom_operands[0..product.atom_len]) |atom_id| {
+        var found = false;
+        for (balances.items) |*row| {
+            if (row.atom_id != atom_id) continue;
+            row.owned_count += 1;
+            found = true;
+            break;
+        }
+        if (!found) {
+            try balances.append(std.testing.allocator, .{
+                .atom_id = atom_id,
+                .before_release = atoms.refCount(atom_id) orelse return error.InvalidBytecode,
+                .owned_count = 1,
+            });
+        }
+    }
+
+    product.deinitUncommitted();
+    for (balances.items) |row| {
+        try std.testing.expect(row.before_release >= row.owned_count);
+        try std.testing.expectEqual(
+            row.before_release - row.owned_count,
+            atoms.refCount(row.atom_id) orelse return error.InvalidBytecode,
+        );
+    }
+}
+
 fn runLegacyResolve(
     function: *bytecode_mod.Bytecode,
     fd: *bytecode_mod.function_def.FunctionDef,
@@ -505,9 +676,15 @@ fn expectRootNormalizedEquivalence(src: []const u8, kind: RootSeedKind) !void {
             try std.testing.expect(legacy.state.function_def.vars.len != 0);
         },
     }
+    try deinitProductAndExpectAtomBalance(&v2.rt.atoms, &product);
 }
 
-fn expectChildNormalizedEquivalence(src: []const u8) !void {
+const ExpectedChildShape = struct {
+    args: ?usize = null,
+    vars: ?usize = null,
+};
+
+fn expectChildNormalizedEquivalence(src: []const u8, expected_shape: ExpectedChildShape) !void {
     var legacy: LegacyParse = undefined;
     try legacy.init(src);
     defer legacy.deinit();
@@ -547,10 +724,14 @@ fn expectChildNormalizedEquivalence(src: []const u8) !void {
 
     try expectFdTopologyEqual(legacy_child, v2_child);
     try expectLoweredStreamEqual(&legacy_function, &product);
-    // Byte equality proves the selected loc/arg operands; var_idx equality in
-    // expectFdTopologyEqual proves closure-ref index order.
-    try std.testing.expectEqual(@as(usize, 1), legacy_child.args.len);
-    try std.testing.expectEqual(@as(usize, 1), legacy_child.vars.len);
+    // Byte equality proves selected loc/arg operands; var_idx equality in
+    // expectFdTopologyEqual proves closure-ref index order. Optional explicit
+    // shape checks keep seed-specific expectations out of the general helper.
+    if (expected_shape.args) |expected_args|
+        try std.testing.expectEqual(expected_args, legacy_child.args.len);
+    if (expected_shape.vars) |expected_vars|
+        try std.testing.expectEqual(expected_vars, legacy_child.vars.len);
+    try deinitProductAndExpectAtomBalance(&v2.rt.atoms, &product);
 }
 
 /// Validate every intrusive relocation chain, including unique coverage of the
@@ -3479,5 +3660,50 @@ test "compiler_v2.s3: normalized child loc arg indices equal legacy" {
     if (skip) return error.SkipZigTest;
     try expectChildNormalizedEquivalence(
         "function f(p) { var v; v = p; return v; }",
+        .{ .args = 1, .vars = 1 },
+    );
+}
+
+test "compiler_v2.s3r: normalized dead jump cycle equals legacy exact CFG" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectChildNormalizedEquivalence(
+        "function f(p) { return p; for (;;) { p = p + 1; } }",
+        .{ .args = 1 },
+    );
+}
+
+test "compiler_v2.s3r: normalized dead forward branch equals legacy exact CFG" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectChildNormalizedEquivalence(
+        "function f(p) { return p; if (p) { p = 1; } else { p = 2; } }",
+        .{ .args = 1 },
+    );
+}
+
+test "compiler_v2.s3r: normalized assignment after return equals legacy exact CFG" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectChildNormalizedEquivalence(
+        "function f(p) { return p; p = 1; }",
+        .{ .args = 1 },
+    );
+}
+
+test "compiler_v2.s3r: normalized dead binding events equal legacy exact CFG" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectChildNormalizedEquivalence(
+        "function f(p) { return p; { let b = 1; b; } }",
+        .{ .args = 1 },
+    );
+    try expectChildNormalizedEquivalence(
+        "function f(p) { return p; var v; v = p; }",
+        .{ .args = 1, .vars = 1 },
     );
 }
