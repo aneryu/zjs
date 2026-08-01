@@ -33,6 +33,8 @@ pub const CompareError = error{
 const Tier = enum {
     l0,
     structural,
+    cfg,
+    continuation,
     normalized,
 };
 
@@ -132,6 +134,8 @@ fn tierName(tier: Tier) []const u8 {
     return switch (tier) {
         .l0 => "L0",
         .structural => "1",
+        .cfg => "1.5",
+        .continuation => "1.75",
         .normalized => "2",
     };
 }
@@ -164,8 +168,8 @@ pub fn compareCompiles(
     try path.appendSlice(state.allocator, "root");
     try appendFunctionName(&state, &path, v2_root);
 
-    // Ordering is intentional and binding: no structural or normalized walk
-    // begins until the complete L0 ledger/tree scalar pass succeeds.
+    // Ordering is intentional and binding: every tier completes its whole-tree
+    // walk before the next tier begins.
     try compareL0(
         &state,
         legacy_root,
@@ -176,6 +180,8 @@ pub fn compareCompiles(
         &path,
     );
     try compareTier1(&state, legacy_root, v2_root, &path);
+    try compareTierCfg(&state, legacy_root, v2_root, &path);
+    try compareTierContinuation(&state, legacy_root, v2_root, &path);
     try compareTier2(&state, legacy_root, v2_root, &path);
 }
 
@@ -542,14 +548,44 @@ fn compareTier1(
 
     try compareVarDefs(state, legacy.allVarDefs(), v2.allVarDefs(), path.items);
     try compareClosureVars(state, legacy.closureVar(), v2.closureVar(), path.items);
+    const legacy_atom_counts_opt = codeAtomCounts(legacy);
+    const v2_atom_counts_opt = codeAtomCounts(v2);
+    if (legacy_atom_counts_opt == null or v2_atom_counts_opt == null)
+        return state.mismatch(
+            .structural,
+            path.items,
+            "code_atoms_decodable",
+            legacy_atom_counts_opt != null,
+            v2_atom_counts_opt != null,
+        );
+    const legacy_atom_counts = legacy_atom_counts_opt.?;
+    const v2_atom_counts = v2_atom_counts_opt.?;
     try compareScalar(
         state,
         usize,
         .structural,
         path.items,
-        "code_atom_owner_count",
-        countCodeAtomOwners(legacy),
-        countCodeAtomOwners(v2),
+        "legacy.code_atom_owner_count",
+        legacy_atom_counts.explicit,
+        legacy_atom_counts.owners,
+    );
+    try compareScalar(
+        state,
+        usize,
+        .structural,
+        path.items,
+        "v2.code_atom_owner_count",
+        v2_atom_counts.explicit,
+        v2_atom_counts.owners,
+    );
+    try compareScalar(
+        state,
+        usize,
+        .structural,
+        path.items,
+        "code_atom_semantic_count",
+        legacy_atom_counts.semantic(),
+        v2_atom_counts.semantic(),
     );
 
     for (legacy.cpoolSlice(), v2.cpoolSlice(), 0..) |legacy_value, v2_value, index| {
@@ -617,6 +653,39 @@ fn countCodeAtomOwners(function: *const bytecode.FunctionBytecode) usize {
     var count: usize = 0;
     while (iterator.next() != null) count +|= 1;
     return count;
+}
+
+const CodeAtomCounts = struct {
+    owners: usize,
+    explicit: usize,
+    implicit: usize,
+
+    fn semantic(self: @This()) usize {
+        return self.explicit +| self.implicit;
+    }
+};
+
+fn codeAtomCounts(function: *const bytecode.FunctionBytecode) ?CodeAtomCounts {
+    const code = function.byteCode();
+    var explicit: usize = 0;
+    var implicit: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const raw_op = code[pc];
+        const size: usize = opcode.sizeOf(raw_op);
+        if (raw_op == op.invalid or size == 0 or size > code.len - pc) return null;
+        explicit +|= @intFromBool(switch (opcode.formatOf(raw_op)) {
+            .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
+            else => false,
+        });
+        implicit +|= @intFromBool(foldOpcode(raw_op).implicit_atom != null);
+        pc += size;
+    }
+    return .{
+        .owners = countCodeAtomOwners(function),
+        .explicit = explicit,
+        .implicit = implicit,
+    };
 }
 
 fn canonicalNumberBits(value: JSValue) ?u64 {
@@ -869,6 +938,7 @@ fn setRelativeTarget(
 
 fn decodeFunction(
     state: *CompareState,
+    tier: Tier,
     function: *const bytecode.FunctionBytecode,
     path: []const u8,
     side: []const u8,
@@ -882,7 +952,7 @@ fn decodeFunction(
         const raw_op = code[pc];
         const size: usize = opcode.sizeOf(raw_op);
         if (raw_op == op.invalid or size == 0 or size > code.len - pc)
-            return decoderMismatch(state, path, side, pc, "opcode_size");
+            return decoderMismatch(state, tier, path, side, pc, "opcode_size");
         const folded = foldOpcode(raw_op);
         var instruction = NormalizedInstruction{
             .raw_op = raw_op,
@@ -893,7 +963,7 @@ fn decodeFunction(
         };
         if (folded.implicit_operand) |operand| {
             if (!instruction.addOperand(operand))
-                return decoderMismatch(state, path, side, pc, "operand_overflow");
+                return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
         }
 
         const operand_pos = pc + 1;
@@ -901,111 +971,111 @@ fn decodeFunction(
             .none => {},
             .none_int, .none_loc, .none_arg, .none_var_ref, .npopx => {
                 if (folded.implicit_operand == null)
-                    return decoderMismatch(state, path, side, pc, "unfolded_implicit");
+                    return decoderMismatch(state, tier, path, side, pc, "unfolded_implicit");
             },
             .u8, .loc8, .const8 => {
                 if (!instruction.addOperand(code[operand_pos]))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .i8 => {
                 if (!instruction.addOperand(@as(i8, @bitCast(code[operand_pos]))))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .label8 => {
                 const relative: i8 = @bitCast(code[operand_pos]);
                 if (!setRelativeTarget(&instruction, code.len, operand_pos, relative))
-                    return decoderMismatch(state, path, side, pc, "jump_target");
+                    return decoderMismatch(state, tier, path, side, pc, "jump_target");
             },
             .u16, .npop, .loc, .arg, .var_ref => {
                 const operand = readIntAt(u16, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "u16_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "u16_operand");
                 if (!instruction.addOperand(operand))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .i16 => {
                 const operand = readIntAt(i16, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "i16_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "i16_operand");
                 if (!instruction.addOperand(operand))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .label16 => {
                 const relative = readIntAt(i16, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "label16_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "label16_operand");
                 if (!setRelativeTarget(&instruction, code.len, operand_pos, relative))
-                    return decoderMismatch(state, path, side, pc, "jump_target");
+                    return decoderMismatch(state, tier, path, side, pc, "jump_target");
             },
             .npop_u16 => {
                 const first = readIntAt(u16, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "npop_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "npop_operand");
                 const second = readIntAt(u16, code, operand_pos + 2) orelse
-                    return decoderMismatch(state, path, side, pc, "u16_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "u16_operand");
                 if (!instruction.addOperand(first) or !instruction.addOperand(second))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .u32, .@"const" => {
                 const operand = readIntAt(u32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "u32_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "u32_operand");
                 if (!instruction.addOperand(operand))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .i32 => {
                 const operand = readIntAt(i32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "i32_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "i32_operand");
                 if (!instruction.addOperand(operand))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .label => {
                 const relative = readIntAt(i32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "label_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "label_operand");
                 if (!setRelativeTarget(&instruction, code.len, operand_pos, relative))
-                    return decoderMismatch(state, path, side, pc, "jump_target");
+                    return decoderMismatch(state, tier, path, side, pc, "jump_target");
             },
             .atom => {
                 instruction.atom_id = readIntAt(u32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "atom_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "atom_operand");
             },
             .atom_u8 => {
                 instruction.atom_id = readIntAt(u32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "atom_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "atom_operand");
                 if (!instruction.addOperand(code[operand_pos + 4]))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .atom_u16 => {
                 instruction.atom_id = readIntAt(u32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "atom_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "atom_operand");
                 const operand = readIntAt(u16, code, operand_pos + 4) orelse
-                    return decoderMismatch(state, path, side, pc, "u16_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "u16_operand");
                 if (!instruction.addOperand(operand))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
             .atom_label_u8, .atom_label_u16 => |format| {
                 instruction.atom_id = readIntAt(u32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "atom_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "atom_operand");
                 const label_pos = operand_pos + 4;
                 const relative = readIntAt(i32, code, label_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "label_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "label_operand");
                 if (!setRelativeTarget(&instruction, code.len, label_pos, relative))
-                    return decoderMismatch(state, path, side, pc, "jump_target");
+                    return decoderMismatch(state, tier, path, side, pc, "jump_target");
                 const trailing_pos = label_pos + 4;
                 if (format == .atom_label_u8) {
                     if (!instruction.addOperand(code[trailing_pos]))
-                        return decoderMismatch(state, path, side, pc, "operand_overflow");
+                        return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
                 } else {
                     const operand = readIntAt(u16, code, trailing_pos) orelse
-                        return decoderMismatch(state, path, side, pc, "u16_operand");
+                        return decoderMismatch(state, tier, path, side, pc, "u16_operand");
                     if (!instruction.addOperand(operand))
-                        return decoderMismatch(state, path, side, pc, "operand_overflow");
+                        return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
                 }
             },
             .label_u16 => {
                 const relative = readIntAt(i32, code, operand_pos) orelse
-                    return decoderMismatch(state, path, side, pc, "label_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "label_operand");
                 if (!setRelativeTarget(&instruction, code.len, operand_pos, relative))
-                    return decoderMismatch(state, path, side, pc, "jump_target");
+                    return decoderMismatch(state, tier, path, side, pc, "jump_target");
                 const operand = readIntAt(u16, code, operand_pos + 4) orelse
-                    return decoderMismatch(state, path, side, pc, "u16_operand");
+                    return decoderMismatch(state, tier, path, side, pc, "u16_operand");
                 if (!instruction.addOperand(operand))
-                    return decoderMismatch(state, path, side, pc, "operand_overflow");
+                    return decoderMismatch(state, tier, path, side, pc, "operand_overflow");
             },
         }
         try result.instructions.append(state.allocator, instruction);
@@ -1015,19 +1085,19 @@ fn decodeFunction(
     for (result.instructions.items) |*instruction| {
         if (instruction.target_pc) |target_pc| {
             instruction.target_ordinal = pcToOrdinal(result.instructions.items, code.len, target_pc) orelse
-                return decoderMismatch(state, path, side, instruction.pc, "jump_target_boundary");
+                return decoderMismatch(state, tier, path, side, instruction.pc, "jump_target_boundary");
         }
     }
 
     var iterator = Pc2LineIterator.init(function.pc2lineBuf()) catch
-        return decoderMismatch(state, path, side, 0, "pc2line_header");
+        return decoderMismatch(state, tier, path, side, 0, "pc2line_header");
     result.start_line = iterator.current.line;
     result.start_col = iterator.current.col;
     while (iterator.next() catch
-        return decoderMismatch(state, path, side, 0, "pc2line_event")) |event|
+        return decoderMismatch(state, tier, path, side, 0, "pc2line_event")) |event|
     {
         const ordinal = pcToOrdinal(result.instructions.items, code.len, event.pc) orelse
-            return decoderMismatch(state, path, side, event.pc, "pc2line_boundary");
+            return decoderMismatch(state, tier, path, side, event.pc, "pc2line_boundary");
         try result.events.append(state.allocator, .{
             .ordinal = ordinal,
             .line = event.line,
@@ -1058,26 +1128,407 @@ fn pcToOrdinal(
 
 fn decoderMismatch(
     state: *CompareState,
+    tier: Tier,
     path: []const u8,
     side: []const u8,
     pc: anytype,
     reason: []const u8,
 ) CompareError {
-    if (state.failed_tier == null) state.failed_tier = .normalized;
+    if (state.failed_tier == null) state.failed_tier = tier;
     if (state.opts.diag) {
         if (std.mem.eql(u8, side, "legacy")) {
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier=2 mode={s} fn={s} field=decoder legacy=pc:{d}:{s} v2=valid\n",
-                .{ state.mode, path, pc, reason },
+                "ZJS-DUAL-MISMATCH tier={s} mode={s} fn={s} field=decoder legacy=pc:{d}:{s} v2=valid\n",
+                .{ tierName(tier), state.mode, path, pc, reason },
             );
         } else {
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier=2 mode={s} fn={s} field=decoder legacy=valid v2=pc:{d}:{s}\n",
-                .{ state.mode, path, pc, reason },
+                "ZJS-DUAL-MISMATCH tier={s} mode={s} fn={s} field=decoder legacy=valid v2=pc:{d}:{s}\n",
+                .{ tierName(tier), state.mode, path, pc, reason },
             );
         }
     }
     return error.DualCompileMismatch;
+}
+
+const CfgEdgeKind = enum {
+    fallthrough,
+    goto,
+    branch_true,
+    branch_false,
+    other_label,
+};
+
+const CfgEdge = struct {
+    from_block: u32,
+    to_block: u32,
+    kind: CfgEdgeKind,
+};
+
+const NormalizedCfg = struct {
+    terminals: std.ArrayList(?u8) = .empty,
+    edges: std.ArrayList(CfgEdge) = .empty,
+    back_edges: std.ArrayList(CfgEdge) = .empty,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.terminals.deinit(allocator);
+        self.edges.deinit(allocator);
+        self.back_edges.deinit(allocator);
+    }
+};
+
+const ContinuationKind = enum {
+    @"catch",
+    gosub,
+    ret,
+    nip_catch,
+    for_await_of_start,
+    for_await_of_next,
+    initial_yield,
+    yield,
+    yield_star,
+    async_yield_star,
+    await,
+};
+
+const ContinuationRecord = struct {
+    kind: ContinuationKind,
+    ordinal: u32,
+    target: ?u32,
+};
+
+fn continuationKind(op_id: u8) ?ContinuationKind {
+    return switch (op_id) {
+        op.@"catch" => .@"catch",
+        op.gosub => .gosub,
+        op.ret => .ret,
+        op.nip_catch => .nip_catch,
+        op.for_await_of_start => .for_await_of_start,
+        op.for_await_of_next => .for_await_of_next,
+        op.initial_yield => .initial_yield,
+        op.yield => .yield,
+        op.yield_star => .yield_star,
+        op.async_yield_star => .async_yield_star,
+        op.await => .await,
+        else => null,
+    };
+}
+
+fn isLabelFormat(format: opcode.Format) bool {
+    return switch (format) {
+        .label, .label8, .label16, .label_u16, .atom_label_u8, .atom_label_u16 => true,
+        else => false,
+    };
+}
+
+fn plainEdgeKind(op_id: u8) ?CfgEdgeKind {
+    if (continuationKind(op_id) != null or !isLabelFormat(opcode.formatOf(op_id)))
+        return null;
+    return switch (op_id) {
+        op.goto => .goto,
+        op.if_true => .branch_true,
+        op.if_false => .branch_false,
+        else => .other_label,
+    };
+}
+
+/// Keep this terminal set synchronized with resolve_labels.Resolver.walk's
+/// qjs:34352-34378 dead-tail arm (including return_async and ret).
+fn isDeadTailTerminal(op_id: u8) bool {
+    return switch (op_id) {
+        op.tail_call,
+        op.tail_call_method,
+        op.@"return",
+        op.return_undef,
+        op.return_async,
+        op.throw,
+        op.throw_error,
+        op.ret,
+        => true,
+        else => false,
+    };
+}
+
+fn appendCfgEdge(
+    state: *CompareState,
+    cfg: *NormalizedCfg,
+    edge: CfgEdge,
+) CompareError!void {
+    try cfg.edges.append(state.allocator, edge);
+    if (edge.to_block <= edge.from_block)
+        try cfg.back_edges.append(state.allocator, edge);
+}
+
+fn blockForLeader(starts: []const u32, ordinal: u32) ?u32 {
+    for (starts, 0..) |start, index| {
+        if (start == ordinal) return @intCast(index);
+    }
+    return null;
+}
+
+fn buildCfg(
+    state: *CompareState,
+    function: *const NormalizedFunction,
+    path: []const u8,
+    side: []const u8,
+) CompareError!NormalizedCfg {
+    var result: NormalizedCfg = .{};
+    errdefer result.deinit(state.allocator);
+
+    const instruction_count = function.instructions.items.len;
+    const leader_count = std.math.add(usize, instruction_count, 1) catch
+        return decoderMismatch(state, .cfg, path, side, 0, "cfg_leader_count");
+    const leaders = try state.allocator.alloc(bool, leader_count);
+    defer state.allocator.free(leaders);
+    @memset(leaders, false);
+    leaders[0] = true;
+
+    for (function.instructions.items, 0..) |instruction, index| {
+        if (plainEdgeKind(instruction.semantic_op) != null) {
+            const target = instruction.target_ordinal orelse
+                return decoderMismatch(state, .cfg, path, side, instruction.pc, "cfg_target_missing");
+            if (target > instruction_count)
+                return decoderMismatch(state, .cfg, path, side, instruction.pc, "cfg_target_range");
+            leaders[target] = true;
+            if (index + 1 < instruction_count) leaders[index + 1] = true;
+        } else if (isDeadTailTerminal(instruction.semantic_op) and
+            index + 1 < instruction_count)
+        {
+            leaders[index + 1] = true;
+        }
+    }
+
+    var block_starts: std.ArrayList(u32) = .empty;
+    defer block_starts.deinit(state.allocator);
+    for (leaders, 0..) |is_leader, ordinal| {
+        if (is_leader) try block_starts.append(state.allocator, @intCast(ordinal));
+    }
+
+    for (block_starts.items, 0..) |start, block_index| {
+        const end: u32 = if (block_index + 1 < block_starts.items.len)
+            block_starts.items[block_index + 1]
+        else
+            @intCast(instruction_count);
+        if (start > end or end > instruction_count)
+            return decoderMismatch(state, .cfg, path, side, start, "cfg_block_range");
+
+        if (start == end) {
+            try result.terminals.append(state.allocator, null);
+            continue;
+        }
+
+        const last = function.instructions.items[end - 1];
+        const edge_kind = plainEdgeKind(last.semantic_op);
+        try result.terminals.append(
+            state.allocator,
+            if (edge_kind != null or isDeadTailTerminal(last.semantic_op))
+                last.semantic_op
+            else
+                null,
+        );
+
+        const from_block: u32 = @intCast(block_index);
+        if (edge_kind) |kind| {
+            const target_ordinal = last.target_ordinal orelse
+                return decoderMismatch(state, .cfg, path, side, last.pc, "cfg_target_missing");
+            const target_block = blockForLeader(block_starts.items, target_ordinal) orelse
+                return decoderMismatch(state, .cfg, path, side, last.pc, "cfg_target_leader");
+            try appendCfgEdge(state, &result, .{
+                .from_block = from_block,
+                .to_block = target_block,
+                .kind = kind,
+            });
+            if (kind != .goto and block_index + 1 < block_starts.items.len) {
+                try appendCfgEdge(state, &result, .{
+                    .from_block = from_block,
+                    .to_block = @intCast(block_index + 1),
+                    .kind = .fallthrough,
+                });
+            }
+        } else if (!isDeadTailTerminal(last.semantic_op) and
+            block_index + 1 < block_starts.items.len)
+        {
+            try appendCfgEdge(state, &result, .{
+                .from_block = from_block,
+                .to_block = @intCast(block_index + 1),
+                .kind = .fallthrough,
+            });
+        }
+    }
+    return result;
+}
+
+fn sequenceField(buffer: []u8, prefix: []const u8, index: usize) []const u8 {
+    return std.fmt.bufPrint(buffer, "{s}[{d}]", .{ prefix, index }) catch prefix;
+}
+
+fn compareCfgProducts(
+    state: *CompareState,
+    path: []const u8,
+    legacy: *const NormalizedCfg,
+    v2: *const NormalizedCfg,
+) CompareError!void {
+    try compareScalar(
+        state,
+        usize,
+        .cfg,
+        path,
+        "block_count",
+        legacy.terminals.items.len,
+        v2.terminals.items.len,
+    );
+
+    const edge_count = @max(legacy.edges.items.len, v2.edges.items.len);
+    for (0..edge_count) |index| {
+        const lhs: ?CfgEdge = if (index < legacy.edges.items.len)
+            legacy.edges.items[index]
+        else
+            null;
+        const rhs: ?CfgEdge = if (index < v2.edges.items.len)
+            v2.edges.items[index]
+        else
+            null;
+        if (!std.meta.eql(lhs, rhs)) {
+            var field_buf: [48]u8 = undefined;
+            return state.mismatch(.cfg, path, sequenceField(&field_buf, "edge", index), lhs, rhs);
+        }
+    }
+
+    for (legacy.terminals.items, v2.terminals.items, 0..) |lhs, rhs, index| {
+        if (lhs != rhs) {
+            var field_buf: [48]u8 = undefined;
+            return state.mismatch(.cfg, path, sequenceField(&field_buf, "terminal", index), lhs, rhs);
+        }
+    }
+
+    const back_edge_count = @max(legacy.back_edges.items.len, v2.back_edges.items.len);
+    for (0..back_edge_count) |index| {
+        const lhs: ?CfgEdge = if (index < legacy.back_edges.items.len)
+            legacy.back_edges.items[index]
+        else
+            null;
+        const rhs: ?CfgEdge = if (index < v2.back_edges.items.len)
+            v2.back_edges.items[index]
+        else
+            null;
+        if (!std.meta.eql(lhs, rhs)) {
+            var field_buf: [48]u8 = undefined;
+            return state.mismatch(.cfg, path, sequenceField(&field_buf, "back_edge", index), lhs, rhs);
+        }
+    }
+}
+
+fn compareTierCfg(
+    state: *CompareState,
+    legacy_function: *const bytecode.FunctionBytecode,
+    v2_function: *const bytecode.FunctionBytecode,
+    path: *std.ArrayList(u8),
+) CompareError!void {
+    var legacy_decoded = try decodeFunction(state, .cfg, legacy_function, path.items, "legacy");
+    defer legacy_decoded.deinit(state.allocator);
+    var v2_decoded = try decodeFunction(state, .cfg, v2_function, path.items, "v2");
+    defer v2_decoded.deinit(state.allocator);
+    var legacy_cfg = try buildCfg(state, &legacy_decoded, path.items, "legacy");
+    defer legacy_cfg.deinit(state.allocator);
+    var v2_cfg = try buildCfg(state, &v2_decoded, path.items, "v2");
+    defer v2_cfg.deinit(state.allocator);
+    try compareCfgProducts(state, path.items, &legacy_cfg, &v2_cfg);
+
+    for (legacy_function.cpoolSlice(), v2_function.cpoolSlice(), 0..) |legacy_value, v2_value, index| {
+        const legacy_child = functionBytecodeFromValue(legacy_value) orelse continue;
+        const v2_child = functionBytecodeFromValue(v2_value) orelse unreachable;
+        const restore_len = try pushChildPath(state, path, index, v2_child);
+        defer path.items.len = restore_len;
+        try compareTierCfg(state, legacy_child, v2_child, path);
+    }
+}
+
+fn collectContinuations(
+    state: *CompareState,
+    function: *const NormalizedFunction,
+    path: []const u8,
+    side: []const u8,
+) CompareError!std.ArrayList(ContinuationRecord) {
+    var records: std.ArrayList(ContinuationRecord) = .empty;
+    errdefer records.deinit(state.allocator);
+    for (function.instructions.items) |instruction| {
+        const kind = continuationKind(instruction.semantic_op) orelse continue;
+        const target: ?u32 = switch (kind) {
+            .@"catch", .gosub => instruction.target_ordinal orelse
+                return decoderMismatch(state, .continuation, path, side, instruction.pc, "continuation_target_missing"),
+            else => null,
+        };
+        try records.append(state.allocator, .{
+            .kind = kind,
+            .ordinal = instruction.ordinal,
+            .target = target,
+        });
+    }
+    return records;
+}
+
+fn compareContinuationProducts(
+    state: *CompareState,
+    path: []const u8,
+    legacy: []const ContinuationRecord,
+    v2: []const ContinuationRecord,
+) CompareError!void {
+    try compareScalar(state, usize, .continuation, path, "cont_count", legacy.len, v2.len);
+    for (legacy, v2, 0..) |lhs, rhs, index| {
+        var field_buf: [64]u8 = undefined;
+        try compareScalar(
+            state,
+            ContinuationKind,
+            .continuation,
+            path,
+            indexedField(&field_buf, "cont", index, "kind"),
+            lhs.kind,
+            rhs.kind,
+        );
+        try compareScalar(
+            state,
+            u32,
+            .continuation,
+            path,
+            indexedField(&field_buf, "cont", index, "ordinal"),
+            lhs.ordinal,
+            rhs.ordinal,
+        );
+        try compareScalar(
+            state,
+            ?u32,
+            .continuation,
+            path,
+            indexedField(&field_buf, "cont", index, "target"),
+            lhs.target,
+            rhs.target,
+        );
+    }
+}
+
+fn compareTierContinuation(
+    state: *CompareState,
+    legacy_function: *const bytecode.FunctionBytecode,
+    v2_function: *const bytecode.FunctionBytecode,
+    path: *std.ArrayList(u8),
+) CompareError!void {
+    var legacy_decoded = try decodeFunction(state, .continuation, legacy_function, path.items, "legacy");
+    defer legacy_decoded.deinit(state.allocator);
+    var v2_decoded = try decodeFunction(state, .continuation, v2_function, path.items, "v2");
+    defer v2_decoded.deinit(state.allocator);
+    var legacy_records = try collectContinuations(state, &legacy_decoded, path.items, "legacy");
+    defer legacy_records.deinit(state.allocator);
+    var v2_records = try collectContinuations(state, &v2_decoded, path.items, "v2");
+    defer v2_records.deinit(state.allocator);
+    try compareContinuationProducts(state, path.items, legacy_records.items, v2_records.items);
+
+    for (legacy_function.cpoolSlice(), v2_function.cpoolSlice(), 0..) |legacy_value, v2_value, index| {
+        const legacy_child = functionBytecodeFromValue(legacy_value) orelse continue;
+        const v2_child = functionBytecodeFromValue(v2_value) orelse unreachable;
+        const restore_len = try pushChildPath(state, path, index, v2_child);
+        defer path.items.len = restore_len;
+        try compareTierContinuation(state, legacy_child, v2_child, path);
+    }
 }
 
 fn firstNormalizedDifference(
@@ -1108,9 +1559,9 @@ fn compareTier2(
     v2_function: *const bytecode.FunctionBytecode,
     path: *std.ArrayList(u8),
 ) CompareError!void {
-    var legacy = try decodeFunction(state, legacy_function, path.items, "legacy");
+    var legacy = try decodeFunction(state, .normalized, legacy_function, path.items, "legacy");
     defer legacy.deinit(state.allocator);
-    var v2 = try decodeFunction(state, v2_function, path.items, "v2");
+    var v2 = try decodeFunction(state, .normalized, v2_function, path.items, "v2");
     defer v2.deinit(state.allocator);
 
     if (legacy.instructions.items.len != v2.instructions.items.len)
@@ -1285,6 +1736,159 @@ fn ledgerForFinalTree(root: *const bytecode.FunctionBytecode) CompareError!Ledge
     return ledger;
 }
 
+const TestByteMutation = struct {
+    code: []u8,
+    offset: usize,
+    len: u8,
+    previous: [4]u8,
+
+    fn restore(self: @This()) void {
+        @memcpy(
+            self.code[self.offset..][0..self.len],
+            self.previous[0..self.len],
+        );
+    }
+};
+
+const RelativeSlot = struct {
+    offset: usize,
+    len: u8,
+};
+
+fn relativeSlotForTest(raw_op: u8, pc: usize) ?RelativeSlot {
+    return switch (opcode.formatOf(raw_op)) {
+        .label8 => .{ .offset = pc + 1, .len = 1 },
+        .label16 => .{ .offset = pc + 1, .len = 2 },
+        .label, .label_u16 => .{ .offset = pc + 1, .len = 4 },
+        .atom_label_u8, .atom_label_u16 => .{ .offset = pc + 5, .len = 4 },
+        else => null,
+    };
+}
+
+fn relativeTargetForTest(code: []const u8, slot: RelativeSlot) ?usize {
+    if (slot.offset > code.len or code.len - slot.offset < slot.len) return null;
+    const relative: i64 = switch (slot.len) {
+        1 => @as(i8, @bitCast(code[slot.offset])),
+        2 => readIntAt(i16, code, slot.offset) orelse return null,
+        4 => readIntAt(i32, code, slot.offset) orelse return null,
+        else => return null,
+    };
+    const target = std.math.add(i64, @intCast(slot.offset), relative) catch return null;
+    if (target < 0 or target > code.len) return null;
+    return @intCast(target);
+}
+
+fn mutateRelativeTargetForTest(
+    code: []u8,
+    slot: RelativeSlot,
+    target_pc: usize,
+) ?TestByteMutation {
+    if (target_pc > code.len or slot.offset > code.len or code.len - slot.offset < slot.len)
+        return null;
+    const relative = std.math.sub(i64, @intCast(target_pc), @intCast(slot.offset)) catch
+        return null;
+    var previous: [4]u8 = @splat(0);
+    @memcpy(previous[0..slot.len], code[slot.offset..][0..slot.len]);
+    switch (slot.len) {
+        1 => {
+            if (relative < std.math.minInt(i8) or relative > std.math.maxInt(i8)) return null;
+            code[slot.offset] = @bitCast(@as(i8, @intCast(relative)));
+        },
+        2 => {
+            if (relative < std.math.minInt(i16) or relative > std.math.maxInt(i16)) return null;
+            std.mem.writeInt(i16, code[slot.offset..][0..2], @intCast(relative), .little);
+        },
+        4 => {
+            if (relative < std.math.minInt(i32) or relative > std.math.maxInt(i32)) return null;
+            std.mem.writeInt(i32, code[slot.offset..][0..4], @intCast(relative), .little);
+        },
+        else => return null,
+    }
+    return .{
+        .code = code,
+        .offset = slot.offset,
+        .len = slot.len,
+        .previous = previous,
+    };
+}
+
+fn perturbFirstForwardPlainTargetForTest(
+    function: *const bytecode.FunctionBytecode,
+) ?TestByteMutation {
+    const code = function.byteCode();
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const raw_op = code[pc];
+        const size: usize = opcode.sizeOf(raw_op);
+        if (size == 0 or size > code.len - pc) return null;
+        if (plainEdgeKind(foldOpcode(raw_op).semantic) != null) {
+            const slot = relativeSlotForTest(raw_op, pc) orelse return null;
+            const current_target = relativeTargetForTest(code, slot) orelse return null;
+            if (current_target > pc) {
+                if (mutateRelativeTargetForTest(code, slot, pc)) |mutation|
+                    return mutation;
+            }
+        }
+        pc += size;
+    }
+    for (function.cpoolSlice()) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        if (perturbFirstForwardPlainTargetForTest(child)) |mutation| return mutation;
+    }
+    return null;
+}
+
+fn perturbFirstContinuationTargetForTest(
+    function: *const bytecode.FunctionBytecode,
+) ?TestByteMutation {
+    const code = function.byteCode();
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const raw_op = code[pc];
+        const size: usize = opcode.sizeOf(raw_op);
+        if (size == 0 or size > code.len - pc) return null;
+        if (raw_op == op.@"catch" or raw_op == op.gosub) {
+            const slot = relativeSlotForTest(raw_op, pc) orelse return null;
+            const current_target = relativeTargetForTest(code, slot) orelse return null;
+            const target_pc = if (current_target != pc) pc else pc + size;
+            return mutateRelativeTargetForTest(code, slot, target_pc);
+        }
+        pc += size;
+    }
+    for (function.cpoolSlice()) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        if (perturbFirstContinuationTargetForTest(child)) |mutation| return mutation;
+    }
+    return null;
+}
+
+fn perturbFirstResumeOpcodeForTest(
+    function: *const bytecode.FunctionBytecode,
+) ?TestByteMutation {
+    const code = function.byteCode();
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const raw_op = code[pc];
+        const size: usize = opcode.sizeOf(raw_op);
+        if (size == 0 or size > code.len - pc) return null;
+        const kind = continuationKind(foldOpcode(raw_op).semantic);
+        if (kind == .initial_yield or kind == .yield or kind == .yield_star or
+            kind == .async_yield_star or kind == .await)
+        {
+            var previous: [4]u8 = @splat(0);
+            previous[0] = raw_op;
+            code[pc] = op.nop;
+            return .{ .code = code, .offset = pc, .len = 1, .previous = previous };
+        }
+        pc += size;
+    }
+    for (function.cpoolSlice()) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        if (perturbFirstResumeOpcodeForTest(child)) |mutation| return mutation;
+    }
+    return null;
+}
+
 fn expectedShortSemantic(op_id: u8) ?u8 {
     if (op_id >= op.push_minus1 and op_id <= op.push_7) return op.push_i32;
     if (op_id >= op.get_loc0 and op_id <= op.get_loc3) return op.get_loc;
@@ -1411,6 +2015,184 @@ test "compiler_v2.compare: tagged-template constants compare by frozen array pro
     try std.testing.expectEqual(Tier.structural, state.failed_tier.?);
 }
 
+test "compiler_v2.compare: plain branch target perturbation fails tier 1.5" {
+    const parser = @import("../parser.zig");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    const source = "(function (x) { if (x) return 1; return 2; });";
+    const before_first = atomStrongRefTotalForTest(rt);
+    var first = try parser.compile(
+        .{ .realm = realm },
+        source,
+        .{ .mode = .script, .filename = "compiler-v2-compare-cfg.js", .return_completion = true },
+    );
+    defer first.deinit();
+    try std.testing.expect(first.syntax_error == null);
+    const after_first = atomStrongRefTotalForTest(rt);
+    var second = try parser.compile(
+        .{ .realm = realm },
+        source,
+        .{ .mode = .script, .filename = "compiler-v2-compare-cfg.js", .return_completion = true },
+    );
+    defer second.deinit();
+    try std.testing.expect(second.syntax_error == null);
+    const after_second = atomStrongRefTotalForTest(rt);
+
+    const first_root = first.functionBytecode() orelse return error.TestExpectedEqual;
+    const second_root = second.functionBytecode() orelse return error.TestExpectedEqual;
+    const mutation = perturbFirstForwardPlainTargetForTest(second_root) orelse
+        return error.TestExpectedEqual;
+    defer mutation.restore();
+
+    var state = CompareState.init(rt, second_root, .{ .diag = false });
+    defer state.deinit();
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(state.allocator);
+    try path.appendSlice(state.allocator, "root");
+    try compareL0(
+        &state,
+        first_root,
+        second_root,
+        after_first - before_first,
+        after_second - after_first,
+        try ledgerForFinalTree(second_root),
+        &path,
+    );
+    try compareTier1(&state, first_root, second_root, &path);
+    try std.testing.expectError(
+        error.DualCompileMismatch,
+        compareTierCfg(&state, first_root, second_root, &path),
+    );
+    try std.testing.expectEqual(Tier.cfg, state.failed_tier.?);
+}
+
+test "compiler_v2.compare: finally target perturbation fails tier 1.75" {
+    const parser = @import("../parser.zig");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    const source = "(function (x) { try { return x + 1; } finally { x = x + 2; } });";
+    const before_first = atomStrongRefTotalForTest(rt);
+    var first = try parser.compile(
+        .{ .realm = realm },
+        source,
+        .{ .mode = .script, .filename = "compiler-v2-compare-cont.js", .return_completion = true },
+    );
+    defer first.deinit();
+    try std.testing.expect(first.syntax_error == null);
+    const after_first = atomStrongRefTotalForTest(rt);
+    var second = try parser.compile(
+        .{ .realm = realm },
+        source,
+        .{ .mode = .script, .filename = "compiler-v2-compare-cont.js", .return_completion = true },
+    );
+    defer second.deinit();
+    try std.testing.expect(second.syntax_error == null);
+    const after_second = atomStrongRefTotalForTest(rt);
+
+    const first_root = first.functionBytecode() orelse return error.TestExpectedEqual;
+    const second_root = second.functionBytecode() orelse return error.TestExpectedEqual;
+    const mutation = perturbFirstContinuationTargetForTest(second_root) orelse
+        return error.TestExpectedEqual;
+    defer mutation.restore();
+
+    var state = CompareState.init(rt, second_root, .{ .diag = false });
+    defer state.deinit();
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(state.allocator);
+    try path.appendSlice(state.allocator, "root");
+    try compareL0(
+        &state,
+        first_root,
+        second_root,
+        after_first - before_first,
+        after_second - after_first,
+        try ledgerForFinalTree(second_root),
+        &path,
+    );
+    try compareTier1(&state, first_root, second_root, &path);
+    try compareTierCfg(&state, first_root, second_root, &path);
+    try std.testing.expect(state.failed_tier == null);
+    try std.testing.expectError(
+        error.DualCompileMismatch,
+        compareTierContinuation(&state, first_root, second_root, &path),
+    );
+    try std.testing.expectEqual(Tier.continuation, state.failed_tier.?);
+}
+
+test "compiler_v2.compare: generator resume sequence is a tier 1.75 contract" {
+    const parser = @import("../parser.zig");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    const source = "(function* () { yield 1; yield* []; });";
+    const before_first = atomStrongRefTotalForTest(rt);
+    var first = try parser.compile(
+        .{ .realm = realm },
+        source,
+        .{ .mode = .script, .filename = "compiler-v2-compare-yield.js", .return_completion = true },
+    );
+    defer first.deinit();
+    try std.testing.expect(first.syntax_error == null);
+    const after_first = atomStrongRefTotalForTest(rt);
+    var second = try parser.compile(
+        .{ .realm = realm },
+        source,
+        .{ .mode = .script, .filename = "compiler-v2-compare-yield.js", .return_completion = true },
+    );
+    defer second.deinit();
+    try std.testing.expect(second.syntax_error == null);
+    const after_second = atomStrongRefTotalForTest(rt);
+
+    const first_root = first.functionBytecode() orelse return error.TestExpectedEqual;
+    const second_root = second.functionBytecode() orelse return error.TestExpectedEqual;
+    const ledger = try ledgerForFinalTree(second_root);
+    try compareCompiles(
+        rt,
+        first_root,
+        second_root,
+        after_first - before_first,
+        after_second - after_first,
+        ledger,
+        .{ .diag = false },
+    );
+
+    const mutation = perturbFirstResumeOpcodeForTest(second_root) orelse
+        return error.TestExpectedEqual;
+    defer mutation.restore();
+    var state = CompareState.init(rt, second_root, .{ .diag = false });
+    defer state.deinit();
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(state.allocator);
+    try path.appendSlice(state.allocator, "root");
+    try compareL0(
+        &state,
+        first_root,
+        second_root,
+        after_first - before_first,
+        after_second - after_first,
+        ledger,
+        &path,
+    );
+    try compareTier1(&state, first_root, second_root, &path);
+    try compareTierCfg(&state, first_root, second_root, &path);
+    try std.testing.expectError(
+        error.DualCompileMismatch,
+        compareTierContinuation(&state, first_root, second_root, &path),
+    );
+    try std.testing.expectEqual(Tier.continuation, state.failed_tier.?);
+}
+
 test "compiler_v2.compare: code perturbation first fails tier 2" {
     const parser = @import("../parser.zig");
 
@@ -1459,6 +2241,8 @@ test "compiler_v2.compare: code perturbation first fails tier 2" {
         &path,
     );
     try compareTier1(&state, first_root, second_root, &path);
+    try compareTierCfg(&state, first_root, second_root, &path);
+    try compareTierContinuation(&state, first_root, second_root, &path);
     try std.testing.expectError(
         error.DualCompileMismatch,
         compareTier2(&state, first_root, second_root, &path),

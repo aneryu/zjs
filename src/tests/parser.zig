@@ -1055,6 +1055,27 @@ fn countOpcodeRecursive(function: anytype, opcode: u8) usize {
     return count;
 }
 
+fn countSemanticOpcodeInFunctionBytecode(
+    fb: *const engine.bytecode.FunctionBytecode,
+    opcode_id: u8,
+) usize {
+    var count = countSemanticOpcode(fb.byteCode(), opcode_id);
+    for (fb.cpoolSlice()) |value| {
+        if (functionBytecodeFromValue(value)) |child|
+            count += countSemanticOpcodeInFunctionBytecode(child, opcode_id);
+    }
+    return count;
+}
+
+fn countSemanticOpcodeRecursive(function: anytype, opcode_id: u8) usize {
+    var count = countSemanticOpcode(rootCode(function), opcode_id);
+    for (rootConstants(function)) |value| {
+        if (functionBytecodeFromValue(value)) |fb|
+            count += countSemanticOpcodeInFunctionBytecode(fb, opcode_id);
+    }
+    return count;
+}
+
 fn countVarRefStoresRecursive(function: anytype) usize {
     var count: usize = 0;
     inline for ([_]u8{
@@ -1090,6 +1111,140 @@ fn expectOpcodeSequence(code: []const u8, expected: []const u8) !void {
         pc += size;
     }
     try std.testing.expectEqual(code.len, pc);
+}
+
+fn semanticOpcodeForTest(op_id: u8) u8 {
+    if (op_id >= op.push_minus1 and op_id <= op.push_7) return op.push_i32;
+    if (op_id >= op.get_loc0 and op_id <= op.get_loc3) return op.get_loc;
+    if (op_id >= op.put_loc0 and op_id <= op.put_loc3) return op.put_loc;
+    if (op_id >= op.set_loc0 and op_id <= op.set_loc3) return op.set_loc;
+    if (op_id >= op.get_arg0 and op_id <= op.get_arg3) return op.get_arg;
+    if (op_id >= op.put_arg0 and op_id <= op.put_arg3) return op.put_arg;
+    if (op_id >= op.set_arg0 and op_id <= op.set_arg3) return op.set_arg;
+    if (op_id >= op.get_var_ref0 and op_id <= op.get_var_ref3) return op.get_var_ref;
+    if (op_id >= op.put_var_ref0 and op_id <= op.put_var_ref3) return op.put_var_ref;
+    if (op_id >= op.set_var_ref0 and op_id <= op.set_var_ref3) return op.set_var_ref;
+    if (op_id >= op.call0 and op_id <= op.call3) return op.call;
+    return switch (op_id) {
+        op.push_i8, op.push_i16 => op.push_i32,
+        op.push_const8 => op.push_const,
+        op.fclosure8 => op.fclosure,
+        op.push_empty_string => op.push_atom_value,
+        op.get_loc8 => op.get_loc,
+        op.put_loc8 => op.put_loc,
+        op.set_loc8 => op.set_loc,
+        op.get_length => op.get_field,
+        op.if_false8 => op.if_false,
+        op.if_true8 => op.if_true,
+        op.goto8, op.goto16 => op.goto,
+        else => op_id,
+    };
+}
+
+fn expectSemanticOpcodeAt(code: []const u8, pc: usize, expected: u8) !void {
+    try std.testing.expect(pc < code.len);
+    try std.testing.expectEqual(expected, semanticOpcodeForTest(code[pc]));
+}
+
+fn expectSemanticOpcodeSequence(code: []const u8, expected: []const u8) !void {
+    var pc: usize = 0;
+    for (expected) |opcode_id| {
+        try expectSemanticOpcodeAt(code, pc, opcode_id);
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(size != 0 and size <= code.len - pc);
+        pc += size;
+    }
+    try std.testing.expectEqual(code.len, pc);
+}
+
+fn firstSemanticOpcodeOffset(code: []const u8, expected: u8) ?usize {
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        if (size == 0 or size > code.len - pc) return null;
+        if (semanticOpcodeForTest(code[pc]) == expected) return pc;
+        pc += size;
+    }
+    return null;
+}
+
+fn countSemanticOpcode(code: []const u8, expected: u8) usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        if (size == 0 or size > code.len - pc) break;
+        count += @intFromBool(semanticOpcodeForTest(code[pc]) == expected);
+        pc += size;
+    }
+    return count;
+}
+
+fn integerPushValueAtOpcode(code: []const u8, pc: usize) ?i32 {
+    if (pc >= code.len) return null;
+    const op_id = code[pc];
+    if (op_id >= op.push_minus1 and op_id <= op.push_7)
+        return @as(i32, op_id) - @as(i32, op.push_0);
+    return switch (op_id) {
+        op.push_i8 => @as(i8, @bitCast(code[pc + 1])),
+        op.push_i16 => std.mem.readInt(i16, code[pc + 1 ..][0..2], .little),
+        op.push_i32 => std.mem.readInt(i32, code[pc + 1 ..][0..4], .little),
+        else => null,
+    };
+}
+
+fn countIntegerPushValue(code: []const u8, expected: i32) usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        if (size == 0 or size > code.len - pc) break;
+        if (integerPushValueAtOpcode(code, pc)) |value|
+            count += @intFromBool(value == expected);
+        pc += size;
+    }
+    return count;
+}
+
+fn slotIndexAtOpcode(code: []const u8, pc: usize) ?u16 {
+    if (pc >= code.len) return null;
+    const op_id = code[pc];
+    inline for (.{
+        .{ op.get_loc0, op.get_loc3 },
+        .{ op.put_loc0, op.put_loc3 },
+        .{ op.set_loc0, op.set_loc3 },
+        .{ op.get_arg0, op.get_arg3 },
+        .{ op.put_arg0, op.put_arg3 },
+        .{ op.set_arg0, op.set_arg3 },
+        .{ op.get_var_ref0, op.get_var_ref3 },
+        .{ op.put_var_ref0, op.put_var_ref3 },
+        .{ op.set_var_ref0, op.set_var_ref3 },
+    }) |bounds| {
+        if (op_id >= bounds[0] and op_id <= bounds[1]) return op_id - bounds[0];
+    }
+    return switch (engine.bytecode.opcode.formatOf(op_id)) {
+        .loc8 => code[pc + 1],
+        .loc, .arg, .var_ref => std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+        else => null,
+    };
+}
+
+fn labelTargetAtOpcode(code: []const u8, pc: usize) ?usize {
+    if (pc >= code.len) return null;
+    const operand_pc = switch (engine.bytecode.opcode.formatOf(code[pc])) {
+        .label, .label8, .label16, .label_u16 => pc + 1,
+        .atom_label_u8, .atom_label_u16 => pc + 5,
+        else => return null,
+    };
+    const relative: i64 = switch (engine.bytecode.opcode.formatOf(code[pc])) {
+        .label8 => @as(i8, @bitCast(code[operand_pc])),
+        .label16 => std.mem.readInt(i16, code[operand_pc..][0..2], .little),
+        .label, .label_u16, .atom_label_u8, .atom_label_u16 => std.mem.readInt(i32, code[operand_pc..][0..4], .little),
+        else => return null,
+    };
+    const target = std.math.add(i64, @intCast(operand_pc), relative) catch return null;
+    if (target < 0 or target > code.len) return null;
+    return @intCast(target);
 }
 
 fn readU16AtOpcode(code: []const u8, op_offset: usize) u16 {
@@ -1430,8 +1585,8 @@ test "F4: regexp literal stores pattern then parse-time bytecode in the constant
     }
 
     try std.testing.expect(regexp_pc != null);
-    try std.testing.expectEqual(op.push_const8, code[previous_previous_pc.?]);
-    try std.testing.expectEqual(op.push_const8, code[previous_pc.?]);
+    try expectSemanticOpcodeAt(code, previous_previous_pc.?, op.push_const);
+    try expectSemanticOpcodeAt(code, previous_pc.?, op.push_const);
     try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.push_atom_value));
     try std.testing.expectEqual(@as(usize, 2), constants.len);
 
@@ -1486,8 +1641,8 @@ test "F4: regexp pattern constant decodes UTF-8 before the following constant" {
     }
 
     try std.testing.expect(regexp_pc != null);
-    try std.testing.expectEqual(op.push_const8, code[previous_previous_pc.?]);
-    try std.testing.expectEqual(op.push_const8, code[previous_pc.?]);
+    try expectSemanticOpcodeAt(code, previous_previous_pc.?, op.push_const);
+    try expectSemanticOpcodeAt(code, previous_pc.?, op.push_const);
     try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(code, previous_previous_pc.?));
     try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(code, previous_pc.?));
 
@@ -3659,13 +3814,13 @@ test "W5: numeric discarded immediates respect statement and completion boundari
     var control_root = try parseStatementWithTopLevelChildren(&env, "function numericControl(x){ if (x) (1); return x; }");
     defer control_root.deinit(env.rt);
     const control = findFunctionConstantNamed(&control_root, env.rt, "numericControl") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(control.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countIntegerPushValue(control.byteCode(), 1));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(control.byteCode(), op.drop));
 
     var update_root = try parseStatementWithTopLevelChildren(&env, "function numericUpdate(x){ for (; x; (1)) { x = 0; } return x; }");
     defer update_root.deinit(env.rt);
     const update = findFunctionConstantNamed(&update_root, env.rt, "numericUpdate") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(update.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countIntegerPushValue(update.byteCode(), 1));
 
     var completion = try compileForTest(env.rt, "1", .{
         .mode = .script,
@@ -3673,13 +3828,13 @@ test "W5: numeric discarded immediates respect statement and completion boundari
         .return_completion = true,
     });
     defer completion.deinit();
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(completion.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 1), countIntegerPushValue(completion.byteCode(), 1));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(completion.byteCode(), op.drop));
     try std.testing.expectEqual(op.@"return", completion.byteCode()[completion.byteCode().len - 1]);
 
     var module = try compileForTest(env.rt, "1;", .{ .mode = .module, .filename = "numeric-discard.mjs" });
     defer module.deinit();
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countIntegerPushValue(module.byteCode(), 1));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.drop));
     try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
 }
@@ -3710,9 +3865,9 @@ test "W5: tagged-int numeric strings use cpool without changing other string pro
     try std.testing.expectEqual(@as(usize, 2), numeric_constants.len);
     try std.testing.expectEqual(@as(usize, 0), countOpcode(numeric_code, op.push_atom_value));
 
-    const string_pc = firstOpcodeOffset(numeric_code, op.push_const8) orelse return error.TestExpectedEqual;
-    const number_pc = string_pc + engine.bytecode.opcode.sizeOf(op.push_const8);
-    try std.testing.expectEqual(op.push_const8, numeric_code[number_pc]);
+    const string_pc = firstSemanticOpcodeOffset(numeric_code, op.push_const) orelse return error.TestExpectedEqual;
+    const number_pc = string_pc + engine.bytecode.opcode.sizeOf(numeric_code[string_pc]);
+    try expectSemanticOpcodeAt(numeric_code, number_pc, op.push_const);
     try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(numeric_code, string_pc));
     try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(numeric_code, number_pc));
 
@@ -3735,7 +3890,7 @@ test "W5: tagged-int numeric strings use cpool without changing other string pro
 
     const numeric_template = findFunctionConstantNamed(&parsed, env.rt, "numericTemplate") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), numeric_template.cpoolSlice().len);
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(numeric_template.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(numeric_template.byteCode(), op.push_const));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(numeric_template.byteCode(), op.push_atom_value));
     const numeric_template_value = numeric_template.cpoolSlice()[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(numeric_template_value.eqlBytes("456"));
@@ -3808,7 +3963,7 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     });
     defer empty_matching_regexp.deinit();
     try std.testing.expectEqual(@as(usize, 0), countOpcode(empty_matching_regexp.byteCode(), op.push_atom_value));
-    try std.testing.expectEqual(@as(usize, 2), countOpcode(empty_matching_regexp.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 2), countSemanticOpcode(empty_matching_regexp.byteCode(), op.push_const));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.regexp));
     try std.testing.expectEqual(@as(usize, 2), empty_matching_regexp.constants().len);
 
@@ -3820,7 +3975,7 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     defer tagged_root.deinit();
     const tagged = findFunctionConstantNamed(&tagged_root, env.rt, "numericStringDiscard") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), tagged.cpoolSlice().len);
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(tagged.byteCode(), op.push_const));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged.byteCode(), op.drop));
 
     var discarded_root = try parseStatementWithTopLevelChildren(
@@ -3829,8 +3984,7 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     );
     defer discarded_root.deinit(env.rt);
     const discarded = findFunctionConstantNamed(&discarded_root, env.rt, "stringDiscard") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.push_atom_value));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 0), countSemanticOpcode(discarded.byteCode(), op.push_atom_value));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.drop));
 
     var boundary_root = try compileForTest(
@@ -3845,22 +3999,22 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     defer boundary_root.deinit();
 
     const template = findFunctionConstantNamed(&boundary_root, env.rt, "stringTemplate") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(template.byteCode(), op.push_atom_value));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.call_method));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.drop));
 
     const concat = findFunctionConstantNamed(&boundary_root, env.rt, "stringConcat") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 2), countOpcode(concat.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 2), countSemanticOpcode(concat.byteCode(), op.push_atom_value));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(concat.byteCode(), op.add));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(concat.byteCode(), op.drop));
 
     const symbol = findFunctionConstantNamed(&boundary_root, env.rt, "stringSymbol") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.push_atom_value));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.call1));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(symbol.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(symbol.byteCode(), op.call));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.drop));
 
     const eval_fn = findFunctionConstantNamed(&boundary_root, env.rt, "stringEval") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(eval_fn.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(eval_fn.byteCode(), op.push_atom_value));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(eval_fn.byteCode(), op.eval));
 
     var completion = try compileForTest(env.rt, "\"hello\"", .{
@@ -3869,7 +4023,7 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
         .return_completion = true,
     });
     defer completion.deinit();
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(completion.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(completion.byteCode(), op.push_atom_value));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(completion.byteCode(), op.drop));
     try std.testing.expectEqual(op.@"return", completion.byteCode()[completion.byteCode().len - 1]);
 
@@ -3878,8 +4032,7 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
         .filename = "string-discard.mjs",
     });
     defer module.deinit();
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_atom_value));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 0), countSemanticOpcode(module.byteCode(), op.push_atom_value));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.drop));
     try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
 }
@@ -7011,7 +7164,7 @@ test "nested function declarations fit the QuickJS native parser stack budget" {
     try std.testing.expect(parsed.syntax_error == null);
 }
 
-test "function expressions widen closure operands after constant index 255" {
+test "function expressions preserve closure operands across constant index 255" {
     var source: std.ArrayList(u8) = .empty;
     defer source.deinit(std.testing.allocator);
     try source.appendSlice(std.testing.allocator, "const functions = [");
@@ -7031,22 +7184,22 @@ test "function expressions widen closure operands after constant index 255" {
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error == null);
 
-    var saw_short_255 = false;
-    var saw_wide_256 = false;
+    var saw_255 = false;
+    var saw_256 = false;
     var pc: usize = 0;
     while (pc < parsed.byteCode().len) {
         const opcode_id = parsed.byteCode()[pc];
-        switch (opcode_id) {
-            op.fclosure8 => saw_short_255 = saw_short_255 or parsed.byteCode()[pc + 1] == 255,
-            op.fclosure => saw_wide_256 = saw_wide_256 or readU32(parsed.byteCode(), pc + 1) == 256,
-            else => {},
+        if (semanticOpcodeForTest(opcode_id) == op.fclosure) {
+            const index = readConstIndexAtOpcode(parsed.byteCode(), pc);
+            saw_255 = saw_255 or index == 255;
+            saw_256 = saw_256 or index == 256;
         }
         const size = engine.bytecode.opcode.sizeOf(opcode_id);
         try std.testing.expect(size != 0);
         pc += size;
     }
-    try std.testing.expect(saw_short_255);
-    try std.testing.expect(saw_wide_256);
+    try std.testing.expect(saw_255);
+    try std.testing.expect(saw_256);
 }
 
 test "QuickJS hoist metadata keeps only the final body local function initializer" {
@@ -7424,8 +7577,8 @@ test "dynamic global writes keep put_var distinct from plain var-ref stores" {
     for (global_cases) |case| {
         const writer = findFunctionConstantNamed(&parsed, rt, case.function_name) orelse
             return error.TestExpectedEqual;
-        try expectOpcodeSequence(writer.byteCode(), &.{
-            op.get_arg0,
+        try expectSemanticOpcodeSequence(writer.byteCode(), &.{
+            op.get_arg,
             op.dup,
             op.put_var,
             op.return_undef,
@@ -7435,15 +7588,17 @@ test "dynamic global writes keep put_var distinct from plain var-ref stores" {
         try std.testing.expectEqual(function_def.ClosureType.global_ref, capture.closureType());
         try std.testing.expectEqual(case.parent_idx, capture.var_idx);
         try std.testing.expectEqualStrings(case.binding_name, rt.atoms.name(capture.var_name) orelse "");
-        try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, writer.byteCode()[3..5], .little));
+        const put_pc = firstOpcodeOffset(writer.byteCode(), op.put_var) orelse
+            return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(writer.byteCode(), put_pc));
     }
 
     const make_local = findFunctionConstantNamed(&parsed, rt, "makeLocalWriter") orelse
         return error.TestExpectedEqual;
     const local_writer = findFunctionConstantNamed(make_local, rt, "writeLocal") orelse
         return error.TestExpectedEqual;
-    try expectOpcodeSequence(local_writer.byteCode(), &.{
-        op.get_arg0,
+    try expectSemanticOpcodeSequence(local_writer.byteCode(), &.{
+        op.get_arg,
         op.dup,
         op.put_var_ref_check,
         op.return_undef,
@@ -8105,16 +8260,25 @@ test "QuickJS module instantiation guard separates function hoists from the body
     // calls it with undefined and branches directly to the body. Besides
     // sharing one construction path, the return is a hard boundary that keeps
     // put_var_ref + body-leading get_var_ref from folding into set_var_ref.
-    try std.testing.expect(parsed.byteCode().len >= 8);
-    try std.testing.expectEqual(op.push_this, parsed.byteCode()[0]);
-    try std.testing.expectEqual(op.if_false8, parsed.byteCode()[1]);
-    const body_pc: isize = 2 + @as(i8, @bitCast(parsed.byteCode()[2]));
-    try std.testing.expectEqual(@as(isize, 7), body_pc);
-    try std.testing.expectEqual(op.fclosure8, parsed.byteCode()[3]);
-    try std.testing.expectEqual(@as(u8, 0), parsed.byteCode()[4]);
-    try std.testing.expectEqual(op.put_var_ref0, parsed.byteCode()[5]);
-    try std.testing.expectEqual(op.return_undef, parsed.byteCode()[6]);
-    try std.testing.expectEqual(op.get_var_ref0, parsed.byteCode()[7]);
+    const code = parsed.byteCode();
+    var pc: usize = 0;
+    try expectSemanticOpcodeAt(code, pc, op.push_this);
+    pc += engine.bytecode.opcode.sizeOf(code[pc]);
+    const branch_pc = pc;
+    try expectSemanticOpcodeAt(code, branch_pc, op.if_false);
+    const body_pc = labelTargetAtOpcode(code, branch_pc) orelse return error.TestExpectedEqual;
+    pc += engine.bytecode.opcode.sizeOf(code[pc]);
+    try expectSemanticOpcodeAt(code, pc, op.fclosure);
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(code, pc));
+    pc += engine.bytecode.opcode.sizeOf(code[pc]);
+    try expectSemanticOpcodeAt(code, pc, op.put_var_ref);
+    try std.testing.expectEqual(@as(u16, 0), slotIndexAtOpcode(code, pc).?);
+    pc += engine.bytecode.opcode.sizeOf(code[pc]);
+    try expectSemanticOpcodeAt(code, pc, op.return_undef);
+    pc += engine.bytecode.opcode.sizeOf(code[pc]);
+    try std.testing.expectEqual(pc, body_pc);
+    try expectSemanticOpcodeAt(code, body_pc, op.get_var_ref);
+    try std.testing.expectEqual(@as(u16, 0), slotIndexAtOpcode(code, body_pc).?);
 }
 
 test "QuickJS module instantiation guard excludes frame lexical preparation" {
@@ -8227,21 +8391,16 @@ test "QuickJS script global functions publish from bytecode through the first de
     var pc: usize = 0;
     for (0..2) |constant_index| {
         try std.testing.expect(pc < parsed.byteCode().len);
-        try std.testing.expect(parsed.byteCode()[pc] == op.fclosure8 or parsed.byteCode()[pc] == op.fclosure);
+        try expectSemanticOpcodeAt(parsed.byteCode(), pc, op.fclosure);
         try std.testing.expectEqual(@as(u32, @intCast(constant_index)), readConstIndexAtOpcode(parsed.byteCode(), pc));
         pc += engine.bytecode.opcode.sizeOf(parsed.byteCode()[pc]);
-        const put_opcode = parsed.byteCode()[pc];
         const expected_ref = first_f_ref orelse return error.TestExpectedEqual;
-        if (expected_ref < 4) {
-            try std.testing.expectEqual(op.put_var_ref0 + @as(u8, @intCast(expected_ref)), put_opcode);
-        } else {
-            try std.testing.expectEqual(op.put_var_ref, put_opcode);
-            try std.testing.expectEqual(expected_ref, readU16AtOpcode(parsed.byteCode(), pc));
-        }
-        pc += engine.bytecode.opcode.sizeOf(put_opcode);
+        try expectSemanticOpcodeAt(parsed.byteCode(), pc, op.put_var_ref);
+        try std.testing.expectEqual(expected_ref, slotIndexAtOpcode(parsed.byteCode(), pc).?);
+        pc += engine.bytecode.opcode.sizeOf(parsed.byteCode()[pc]);
     }
     try std.testing.expect(countVarOpcodeForAtom(&parsed, op.get_var, parsed.closureVars()[first_f_ref.?].var_name) > 0);
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.byteCode()[pc..], op.get_var_ref));
+    try std.testing.expectEqual(@as(usize, 0), countSemanticOpcode(parsed.byteCode()[pc..], op.get_var_ref));
 }
 
 test "QuickJS direct eval hoist target walk distinguishes closure var-object and lexical conflict" {
@@ -8261,9 +8420,10 @@ test "QuickJS direct eval hoist target walk distinguishes closure var-object and
     });
     defer closure_target.deinit();
     try std.testing.expect(closure_target.syntax_error == null);
-    try std.testing.expect(closure_target.byteCode()[0] == op.fclosure8 or closure_target.byteCode()[0] == op.fclosure);
+    try expectSemanticOpcodeAt(closure_target.byteCode(), 0, op.fclosure);
     const closure_put_pc = engine.bytecode.opcode.sizeOf(closure_target.byteCode()[0]);
-    try std.testing.expectEqual(op.put_var_ref0, closure_target.byteCode()[closure_put_pc]);
+    try expectSemanticOpcodeAt(closure_target.byteCode(), closure_put_pc, op.put_var_ref);
+    try std.testing.expectEqual(@as(u16, 0), slotIndexAtOpcode(closure_target.byteCode(), closure_put_pc).?);
     try std.testing.expectEqual(@as(usize, 0), countOpcode(closure_target.byteCode(), op.define_field));
 
     const var_object_seed = [_]parser.EvalClosureSeed{
@@ -8276,7 +8436,8 @@ test "QuickJS direct eval hoist target walk distinguishes closure var-object and
     });
     defer var_object_target.deinit();
     try std.testing.expect(var_object_target.syntax_error == null);
-    try std.testing.expectEqual(op.get_var_ref0, var_object_target.byteCode()[0]);
+    try expectSemanticOpcodeAt(var_object_target.byteCode(), 0, op.get_var_ref);
+    try std.testing.expectEqual(@as(u16, 0), slotIndexAtOpcode(var_object_target.byteCode(), 0).?);
     try std.testing.expectEqual(@as(usize, 1), countFunctionClosures(var_object_target.byteCode()));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(var_object_target.byteCode(), op.define_field));
 
@@ -8681,17 +8842,18 @@ test "empty finally producer reaches the phase2 and phase3 cascade" {
 
     const function = findFunctionConstantNamed(&parsed, rt, "emptyFinally") orelse
         return error.TestExpectedEqual;
-    try expectOpcodeSequence(function.byteCode(), &.{
+    try expectSemanticOpcodeSequence(function.byteCode(), &.{
         qop.@"catch",
-        qop.get_arg0,
-        qop.if_false8,
-        qop.push_1,
+        qop.get_arg,
+        qop.if_false,
+        qop.push_i32,
         qop.nip_catch,
         qop.@"return",
         qop.drop,
         qop.return_undef,
         qop.throw,
     });
+    try std.testing.expectEqual(@as(usize, 1), countIntegerPushValue(function.byteCode(), 1));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.undefined));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.gosub));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.ret));
@@ -10048,29 +10210,32 @@ test "add_loc finalization accepts only QuickJS RHS producers" {
     defer parsed.deinit();
 
     const empty_rhs = findFunctionConstantNamed(&parsed, rt, "emptyRhs") orelse return error.TestExpectedEqual;
-    try expectOpcodeSequence(empty_rhs.byteCode(), &.{
+    try expectSemanticOpcodeSequence(empty_rhs.byteCode(), &.{
         op.push_atom_value,
-        op.put_loc0,
+        op.put_loc,
         op.get_var,
-        op.call0,
+        op.call,
         op.drop,
-        op.push_empty_string,
+        op.push_atom_value,
         op.add_loc,
         op.get_var,
-        op.call0,
+        op.call,
         op.drop,
-        op.get_loc0,
+        op.get_loc,
         op.@"return",
     });
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_rhs.byteCode(), op.push_empty_string));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_rhs.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 2), countSemanticOpcode(empty_rhs.byteCode(), op.push_atom_value));
+    const short_empty_count = countOpcode(empty_rhs.byteCode(), op.push_empty_string);
+    try std.testing.expect(short_empty_count <= 1);
     var empty_rhs_atom_count: usize = 0;
+    var empty_rhs_empty_atom_count: usize = 0;
     var empty_rhs_atom_it = empty_rhs.atomOperandIterator();
     while (empty_rhs_atom_it.next()) |atom_id| {
-        try std.testing.expect(atom_id != core.atom.ids.empty_string);
         empty_rhs_atom_count += 1;
+        empty_rhs_empty_atom_count += @intFromBool(atom_id == core.atom.ids.empty_string);
     }
-    try std.testing.expectEqual(@as(usize, 1), empty_rhs_atom_count);
+    try std.testing.expectEqual(2 - short_empty_count, empty_rhs_atom_count);
+    try std.testing.expectEqual(1 - short_empty_count, empty_rhs_empty_atom_count);
 
     const atom_rhs = findFunctionConstantNamed(&parsed, rt, "atomRhs") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), countOpcode(atom_rhs.byteCode(), op.add_loc));
@@ -10083,12 +10248,12 @@ test "add_loc finalization accepts only QuickJS RHS producers" {
     const cpool_rhs = findFunctionConstantNamed(&parsed, rt, "cpoolRhs") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 0), countOpcode(cpool_rhs.byteCode(), op.add_loc));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(cpool_rhs.byteCode(), op.add));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(cpool_rhs.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(cpool_rhs.byteCode(), op.push_const));
 
     const tagged_rhs = findFunctionConstantNamed(&parsed, rt, "taggedRhs") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 0), countOpcode(tagged_rhs.byteCode(), op.add_loc));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged_rhs.byteCode(), op.add));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged_rhs.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcode(tagged_rhs.byteCode(), op.push_const));
     try std.testing.expectEqual(@as(usize, 1), tagged_rhs.cpoolSlice().len);
     const tagged_string = tagged_rhs.cpoolSlice()[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(tagged_string.eqlBytes("123"));
@@ -10118,7 +10283,9 @@ test "add_loc finalization attributes a multiline local RHS to the operator" {
         const op_id = code[pc];
         const size = engine.bytecode.opcode.sizeOf(op_id);
         if (size == 0 or pc + size > code.len) return error.TestExpectedEqual;
-        if (op_id == op.push_1 and pc + size < code.len and code[pc + size] == op.add_loc) {
+        if (integerPushValueAtOpcode(code, pc) == 1 and pc + size < code.len and
+            semanticOpcodeForTest(code[pc + size]) == op.add_loc)
+        {
             rhs_pc = pc;
             break;
         }
@@ -10340,7 +10507,7 @@ test "call consumers use final-op provenance for eval with super and comma tags"
     defer comma_tag.deinit();
     try std.testing.expect(comma_tag.syntax_error == null);
     try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&comma_tag, qop.call_method));
-    try std.testing.expectEqual(@as(usize, 1), countOpcodeRecursive(&comma_tag, qop.call1));
+    try std.testing.expectEqual(@as(usize, 1), countSemanticOpcodeRecursive(&comma_tag, qop.call));
 }
 
 test "quick parser lowers JSON stringify and parse to transitional JSON bytecode" {

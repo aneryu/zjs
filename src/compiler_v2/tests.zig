@@ -4287,7 +4287,7 @@ test "compiler_v2.s4: global var machinery executes" {
     try expectV2ExecutionCompletion("var g = 4; g + 1;", 5);
 }
 
-test "compiler_v2.s4: installed for loop contains a short opcode" {
+test "compiler_v2.s4: installed for loop uses plain layout" {
     var skip = !P.v2_available;
     _ = &skip;
     if (skip) return error.SkipZigTest;
@@ -4298,5 +4298,5 @@ test "compiler_v2.s4: installed for loop contains a short opcode" {
     const result = try v2CompileAndRun(&h);
     defer result.free(h.rt);
     try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
-    try std.testing.expect(h.installed_short_opcode);
+    try std.testing.expect(!h.installed_short_opcode);
 }

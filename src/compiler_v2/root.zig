@@ -8,7 +8,7 @@
 //!   + parser-native LabelId / LabelSlot / RelocEntry
 //!   + resolve_variables_v2 with exact LabelId block-CFG liveness
 //!     (a legacy-style instruction CFG is the Debug/ReleaseSafe proof oracle)
-//!   + resolve_labels_v2 + single final emission (short opcodes, jump
+//!   + resolve_labels_v2 + single layout-selectable final emission (jump
 //!     threading, pc2line generated directly at output positions)
 //!
 //! Selection: -Dzjs_compiler=legacy|v2|dual (dual compiles both, compares
@@ -51,7 +51,7 @@ pub fn compileFunctionV2(
     // Only dual compilation pays for the diagnostic walks. Ordinary v2 mode
     // passes null and performs exactly the S3 -> S4 pipeline work.
     const live_relocs = if (ledger != null) try countLiveRelocs(&product) else 0;
-    try resolve_labels.run(function, fd, &product);
+    try resolve_labels.run(resolve_labels.default_layout, function, fd, &product);
 
     if (ledger) |out| {
         try addLedger(&out.functions_lowered, 1);
