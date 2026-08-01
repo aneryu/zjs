@@ -20,8 +20,6 @@ const op = opcode.op;
 const legacy_pipeline = bytecode.pipeline_resolve_variables;
 const legacy = legacy_pipeline.v2;
 
-const audit_oracles = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
-
 pub const Error = error{
     OutOfMemory,
     InvalidBytecode,
@@ -172,16 +170,12 @@ const Resolver = struct {
     pending_tail_rewrites: []PendingTailRewrite = &.{},
     pending_tail_capacity: usize = 0,
     pending_tail_len: u32 = 0,
-    opt_boundaries: []cfg.OptimizationBoundary = &.{},
-    opt_boundary_capacity: usize = 0,
-    opt_boundary_len: u32 = 0,
 
     bind_cursor: usize = 0,
     block_cursor: usize = 0,
     atom_index: u32 = 0,
     source_cursor: u32 = 0,
-    pending_source: ?SourcePoint = null,
-    last_attached_source: ?SourcePoint = null,
+    source_attach_cursor: u32 = 0,
 
     fn deinitScratch(self: *Resolver) void {
         if (self.pending_tail_capacity != 0) {
@@ -190,42 +184,6 @@ const Resolver = struct {
         self.pending_tail_rewrites = &.{};
         self.pending_tail_capacity = 0;
         self.pending_tail_len = 0;
-        if (comptime audit_oracles) {
-            if (self.opt_boundary_capacity != 0) {
-                self.product.memory.free(cfg.OptimizationBoundary, self.opt_boundaries);
-            }
-            self.opt_boundaries = &.{};
-            self.opt_boundary_capacity = 0;
-            self.opt_boundary_len = 0;
-        }
-    }
-
-    fn recordOptimizationBoundary(
-        self: *Resolver,
-        kind: cfg.OptimizationBoundaryKind,
-        fold_start: u32,
-        consumed_end: u32,
-        replacement_start: u32,
-    ) Error!void {
-        if (comptime !audit_oracles) return;
-        if (self.opt_boundary_len == std.math.maxInt(u32))
-            return error.BytecodeOverflow;
-        try reserve(
-            cfg.OptimizationBoundary,
-            self.product.memory,
-            &self.opt_boundaries,
-            &self.opt_boundary_capacity,
-            self.opt_boundary_len,
-            1,
-            4,
-        );
-        self.opt_boundaries[self.opt_boundary_len] = .{
-            .kind = kind,
-            .fold_start = fold_start,
-            .consumed_end = consumed_end,
-            .replacement_start = replacement_start,
-        };
-        self.opt_boundary_len += 1;
     }
 
     fn prepareLegacyWrite(
@@ -244,8 +202,8 @@ const Resolver = struct {
         _ = std.math.add(u32, self.product.atom_len, @as(u32, @intCast(atom_need))) catch
             return error.BytecodeOverflow;
 
-        const attach_source = self.shouldAttachSource();
-        if (attach_source and self.product.source_len == std.math.maxInt(u32))
+        const pending_source_count = try self.pendingSourceUpperBound();
+        _ = std.math.add(u32, self.product.source_len, pending_source_count) catch
             return error.BytecodeOverflow;
 
         try reserve(
@@ -268,24 +226,17 @@ const Resolver = struct {
                 8,
             );
         }
-        if (attach_source) {
+        if (pending_source_count != 0) {
             try reserve(
                 builder.SourceSlot,
                 self.product.memory,
                 &self.product.source_slots,
                 &self.product.source_capacity,
                 self.product.source_len,
-                1,
+                pending_source_count,
                 8,
             );
-            const source = self.pending_source.?;
-            self.product.source_slots[self.product.source_len] = .{
-                .temp_offset = self.product.code_len,
-                .line = source.line,
-                .col = source.col,
-            };
-            self.product.source_len += 1;
-            self.last_attached_source = source;
+            self.attachPendingSourcesAssumeCapacity();
         }
     }
 
@@ -613,6 +564,87 @@ const Resolver = struct {
         if (out_idx != code_need) return error.InvalidBytecode;
     }
 
+    fn emitWideU16(self: *Resolver, op_id: u8, value: u16) Error!void {
+        var bytes: [3]u8 = undefined;
+        bytes[0] = op_id;
+        std.mem.writeInt(u16, bytes[1..3], value, .little);
+        try self.emitInstruction(&bytes, null);
+    }
+
+    fn emitWideU32(self: *Resolver, op_id: u8, value: u32) Error!void {
+        var bytes: [5]u8 = undefined;
+        bytes[0] = op_id;
+        std.mem.writeInt(u32, bytes[1..5], value, .little);
+        try self.emitInstruction(&bytes, null);
+    }
+
+    fn emitAtomWide(self: *Resolver, op_id: u8, atom_id: core.atom.Atom) Error!void {
+        var bytes: [5]u8 = undefined;
+        bytes[0] = op_id;
+        std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
+        try self.emitInstruction(&bytes, atom_id);
+    }
+
+    fn emitProductJump(self: *Resolver, op_id: u8, label_index: u32) Error!void {
+        if (label_index >= self.product.label_len) return error.InvalidBytecode;
+        try self.emitWideU32(op_id, label_index);
+        _ = try updateLabel(self.product, label_index, 1);
+        try self.incrementJumpSize();
+    }
+
+    /// qjs instantiate_hoisted_definitions at the function-body scope
+    /// (quickjs.c:34398-34409). Keep every branch operand label-native; Stage
+    /// 4 alone converts the module-body LabelId into a relative displacement.
+    fn emitBodyHoists(self: *Resolver) Error!void {
+        const fd = self.ctx.function_def orelse return error.NoFunctionDef;
+
+        for (fd.args, 0..) |arg, arg_idx| {
+            if (arg.func_pool_idx < 0) continue;
+            if (arg_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
+            try self.emitWideU32(op.fclosure, @intCast(arg.func_pool_idx));
+            try self.emitWideU16(op.put_arg, @intCast(arg_idx));
+        }
+        for (fd.vars, 0..) |vd, var_idx| {
+            if (vd.scope_level != 0 or vd.func_pool_idx < 0) continue;
+            if (var_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
+            try self.emitWideU32(op.fclosure, @intCast(vd.func_pool_idx));
+            try self.emitWideU16(op.put_loc, @intCast(var_idx));
+        }
+
+        const module_body = if (fd.is_module) try self.newProductLabel() else null;
+        if (module_body) |body_label| {
+            try self.emitInstruction(&.{op.push_this}, null);
+            try self.emitProductJump(op.if_false, body_label);
+        }
+
+        for (fd.global_vars) |gv| {
+            switch (gv.eval_target) {
+                .closure => |ref_idx| {
+                    if (gv.cpool_idx < 0) continue;
+                    try self.emitWideU32(op.fclosure, @intCast(gv.cpool_idx));
+                    try self.emitWideU16(op.put_var_ref, ref_idx);
+                },
+                .var_object => |ref_idx| {
+                    try self.emitWideU16(op.get_var_ref, ref_idx);
+                    if (gv.cpool_idx >= 0) {
+                        try self.emitWideU32(op.fclosure, @intCast(gv.cpool_idx));
+                    } else {
+                        try self.emitInstruction(&.{op.undefined}, null);
+                    }
+                    try self.emitAtomWide(op.define_field, gv.var_name);
+                    try self.emitInstruction(&.{op.drop}, null);
+                },
+                .global => {},
+                .unresolved => return error.InvalidBytecode,
+            }
+        }
+
+        if (module_body) |body_label| {
+            try self.emitInstruction(&.{op.return_undef}, null);
+            try self.bindProductLabel(body_label);
+        }
+    }
+
     fn registerPendingTailRewrite(
         self: *Resolver,
         input_offset: u32,
@@ -690,16 +722,33 @@ const Resolver = struct {
         while (self.source_cursor < self.input_sources.len and
             self.input_sources[self.source_cursor].temp_offset <= input_pos)
         {
-            const source = self.input_sources[self.source_cursor];
-            self.pending_source = .{ .line = source.line, .col = source.col };
             self.source_cursor += 1;
         }
     }
 
-    fn shouldAttachSource(self: *const Resolver) bool {
-        const pending = self.pending_source orelse return false;
-        const last = self.last_attached_source orelse return true;
-        return !sourcePointEqual(pending, last);
+    fn pendingSourceUpperBound(self: *const Resolver) Error!u32 {
+        if (self.source_attach_cursor > self.source_cursor)
+            return error.InvalidBytecode;
+        return self.source_cursor - self.source_attach_cursor;
+    }
+
+    /// Carry every parser source event consumed since the previous output
+    /// instruction. Stage 3 must not deduplicate even identical consecutive
+    /// points: Stage 4 can relocate or discard the earlier event while a later
+    /// equal event remains authoritative at a different output boundary.
+    /// Final-output attachment performs coordinate deduplication only after
+    /// those independent relocation decisions.
+    fn attachPendingSourcesAssumeCapacity(self: *Resolver) void {
+        while (self.source_attach_cursor < self.source_cursor) {
+            const slot = self.input_sources[self.source_attach_cursor];
+            self.source_attach_cursor += 1;
+            self.product.source_slots[self.product.source_len] = .{
+                .temp_offset = self.product.code_len,
+                .line = slot.line,
+                .col = slot.col,
+            };
+            self.product.source_len += 1;
+        }
     }
 
     fn emitInstruction(
@@ -721,8 +770,8 @@ const Resolver = struct {
             if (self.product.atom_len == std.math.maxInt(u32))
                 return error.BytecodeOverflow;
         }
-        const attach_source = self.shouldAttachSource();
-        if (attach_source and self.product.source_len == std.math.maxInt(u32))
+        const pending_source_count = try self.pendingSourceUpperBound();
+        _ = std.math.add(u32, self.product.source_len, pending_source_count) catch
             return error.BytecodeOverflow;
 
         try reserve(
@@ -745,28 +794,19 @@ const Resolver = struct {
                 8,
             );
         }
-        if (attach_source) {
+        if (pending_source_count != 0) {
             try reserve(
                 builder.SourceSlot,
                 self.product.memory,
                 &self.product.source_slots,
                 &self.product.source_capacity,
                 self.product.source_len,
-                1,
+                pending_source_count,
                 8,
             );
         }
 
-        if (attach_source) {
-            const source = self.pending_source.?;
-            self.product.source_slots[self.product.source_len] = .{
-                .temp_offset = self.product.code_len,
-                .line = source.line,
-                .col = source.col,
-            };
-            self.product.source_len += 1;
-            self.last_attached_source = source;
-        }
+        if (pending_source_count != 0) self.attachPendingSourcesAssumeCapacity();
 
         const output_start: usize = @intCast(self.product.code_len);
         @memcpy(self.product.code[output_start..][0..bytes.len], bytes);
@@ -873,7 +913,8 @@ const Resolver = struct {
         std.debug.assert(self.graph.block_starts[block_index] == input_pos);
         if (self.graph.isReachable(block_index)) {
             for (self.binds[self.bind_cursor..end]) |*entry| {
-                if (self.product.label_slots[entry.label_index].ref_count == 0)
+                const slot = self.product.label_slots[entry.label_index];
+                if (slot.ref_count == 0 and !slot.flags.match_barrier)
                     entry.dead_skipped = true;
             }
             return true;
@@ -1063,6 +1104,48 @@ const Resolver = struct {
         after: u32,
     };
 
+    /// The legacy phase-1 stream materializes a changed source position as an
+    /// inline `line_num` instruction. Its local indexed-store matcher requires
+    /// the three opcodes to be byte-adjacent, so an effective transition at an
+    /// interior offset is a fold barrier. Builder retains repeated marker calls
+    /// too; those are not barriers because legacy `emitSourcePos` suppresses an
+    /// unchanged source offset.
+    fn hasSourceTransitionAt(self: *const Resolver, input_pos: u32) bool {
+        var low: usize = 0;
+        var high: usize = self.input_sources.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (self.input_sources[middle].temp_offset < input_pos) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if (low == self.input_sources.len or
+            self.input_sources[low].temp_offset != input_pos)
+        {
+            return false;
+        }
+
+        var previous: ?SourcePoint = if (low == 0) null else .{
+            .line = self.input_sources[low - 1].line,
+            .col = self.input_sources[low - 1].col,
+        };
+        var index = low;
+        while (index < self.input_sources.len and
+            self.input_sources[index].temp_offset == input_pos) : (index += 1)
+        {
+            const current: SourcePoint = .{
+                .line = self.input_sources[index].line,
+                .col = self.input_sources[index].col,
+            };
+            if (previous == null or !sourcePointEqual(current, previous.?))
+                return true;
+            previous = current;
+        }
+        return false;
+    }
+
     fn matchInsertTail(self: *Resolver, start: u32) Error!?InsertTailMatch {
         if (start >= self.code.len) return null;
         const middle = try tempInstruction(self.code, self.atom_ledger, start, self.atom_index);
@@ -1074,6 +1157,8 @@ const Resolver = struct {
         const drop = try tempInstruction(self.code, self.atom_ledger, drop_pos, self.atom_index);
         if (self.code[drop_pos] != op.drop or drop.size != 1) return null;
         const after = drop_pos + drop.size;
+        if (self.hasSourceTransitionAt(start) or self.hasSourceTransitionAt(drop_pos))
+            return null;
         if (self.hasBindInRange(start, after, false)) return null;
         return .{ .middle_op = middle_op, .drop_pos = drop_pos, .after = after };
     }
@@ -1260,35 +1345,6 @@ const Resolver = struct {
                 try self.writeScopeVarAction(atom_id, fold.get_action);
                 next = std.math.add(u32, next, 1) catch return error.InvalidBytecode;
             }
-            if (comptime audit_oracles) {
-                const tail_end = std.math.add(u32, fold.tail_offset, 2) catch
-                    return error.InvalidBytecode;
-                // The head is recorded as one span per consumed instruction:
-                // a bind may legitimately sit at position_next (passBindsAt
-                // above re-homes it before the get action), so the folded
-                // get_ref_value keeps its own boundary identity instead of
-                // being swallowed into the make_ref span.
-                try self.recordOptimizationBoundary(
-                    .make_ref_head,
-                    position,
-                    position_next,
-                    position,
-                );
-                if (fold.reads_value) {
-                    try self.recordOptimizationBoundary(
-                        .make_ref_head,
-                        position_next,
-                        next,
-                        position_next,
-                    );
-                }
-                try self.recordOptimizationBoundary(
-                    .make_ref_tail,
-                    fold.tail_offset,
-                    tail_end,
-                    fold.tail_offset,
-                );
-            }
             return next;
         }
 
@@ -1391,12 +1447,6 @@ const Resolver = struct {
                         self.code[slot.bound_offset] == op.ret)
                     {
                         _ = try updateLabel(self.product, label_index, -1);
-                        try self.recordOptimizationBoundary(
-                            .gosub_empty,
-                            position,
-                            position_next,
-                            position,
-                        );
                     } else {
                         try self.copyInputInstruction(position, instruction, input_atom);
                     }
@@ -1457,12 +1507,6 @@ const Resolver = struct {
                             rewritten[0] = first.branch_op;
                             std.mem.writeInt(u32, rewritten[1..5], target.label_index, .little);
                             try self.emitInstruction(&rewritten, null);
-                            try self.recordOptimizationBoundary(
-                                .dup_branch_fold,
-                                position,
-                                first.after,
-                                position,
-                            );
                             self.absorbSourcesThrough(first.drop_pos);
                             position_next = first.after;
                         } else {
@@ -1477,12 +1521,6 @@ const Resolver = struct {
                 op.insert3 => {
                     if (try self.matchInsertTail(position_next)) |match| {
                         try self.emitInstruction(&.{match.middle_op}, null);
-                        try self.recordOptimizationBoundary(
-                            .insert_tail_fold,
-                            position,
-                            match.after,
-                            position,
-                        );
                         self.absorbSourcesThrough(match.drop_pos);
                         position_next = match.after;
                     } else {
@@ -1650,9 +1688,7 @@ const Resolver = struct {
                     if (instruction.size != 3) return error.InvalidBytecode;
                     const pc: usize = @intCast(position);
                     const scope = std.mem.readInt(u16, self.code[pc + 1 ..][0..2], .little);
-                    // QCP-1 S3: unlike qjs instantiate_hoisted_definitions here,
-                    // zjs finalization owns BODY hoists and the parser emits no
-                    // enter_scope marker for the function body.
+                    if (scope == fd.body_scope) try self.emitBodyHoists();
                     try self.writeEnterScopeRefresh(scope);
                 },
 
@@ -1736,7 +1772,10 @@ fn initializeLabels(product: *ResolvedProduct, input: *const builder.Builder) Er
             .bound_offset = labels.unbound,
             .ref_count = input_slot.ref_count,
             .first_reloc = labels.no_reloc,
-            .flags = .{ .backward_target = input_slot.flags.backward_target },
+            .flags = .{
+                .backward_target = input_slot.flags.backward_target,
+                .match_barrier = input_slot.flags.match_barrier,
+            },
         };
         product.label_len += 1;
     }
@@ -1778,14 +1817,15 @@ pub fn run(
     if (input.memory != fd.memory or input.atoms != fd.atoms)
         return error.InvalidBytecode;
     try validateInput(input);
+    try legacy.resolveEvalGlobalVarTargets(fd);
 
     const binds = try buildBindIndex(fd.memory, input);
     defer if (binds.len != 0) fd.memory.free(BindEntry, binds);
 
     var graph = try cfg.build(fd.memory, input, binds);
     defer graph.deinit();
-    if (comptime audit_oracles) {
-        try cfg.auditInstructionOwnership(fd.memory, input, &graph, binds);
+    if (comptime (builtin.mode == .Debug or builtin.mode == .ReleaseSafe)) {
+        try cfg.auditInstructionOwnership(fd.memory, input, &graph);
     }
 
     var product: ResolvedProduct = .{ .memory = fd.memory, .atoms = fd.atoms };
@@ -1808,15 +1848,6 @@ pub fn run(
     };
     defer resolver.deinitScratch();
     try resolver.run();
-    if (comptime audit_oracles) {
-        try cfg.auditBoundarySet(
-            fd.memory,
-            input,
-            &graph,
-            binds,
-            resolver.opt_boundaries[0..resolver.opt_boundary_len],
-        );
-    }
     return product;
 }
 
@@ -2098,11 +2129,39 @@ test "compiler_v2.resolve_variables: copy-through and source carry" {
     defer product.deinitUncommitted();
 
     try expectProductCode(&product, &expected_input);
+    try std.testing.expectEqual(@as(u32, 3), product.source_len);
+    try std.testing.expectEqual(@as(u32, 0), product.source_slots[0].temp_offset);
+    try std.testing.expectEqual(@as(i32, 10), product.source_slots[0].line);
+    try std.testing.expectEqual(@as(i32, 2), product.source_slots[0].col);
+    try std.testing.expectEqual(@as(u32, 1), product.source_slots[1].temp_offset);
+    try std.testing.expectEqual(@as(i32, 10), product.source_slots[1].line);
+    try std.testing.expectEqual(@as(i32, 2), product.source_slots[1].col);
+    try std.testing.expectEqual(@as(u32, 2), product.source_slots[2].temp_offset);
+    try std.testing.expectEqual(@as(i32, 20), product.source_slots[2].line);
+    try std.testing.expectEqual(@as(i32, 3), product.source_slots[2].col);
+}
+
+test "compiler_v2.resolve_variables: preserves ordered source transitions at one offset" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.addSourceMarker(10, 2);
+    try input.addSourceMarker(20, 3);
+    try input.emitOp(op.undefined);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+
+    try expectProductCode(&product, &.{op.undefined});
     try std.testing.expectEqual(@as(u32, 2), product.source_len);
     try std.testing.expectEqual(@as(u32, 0), product.source_slots[0].temp_offset);
     try std.testing.expectEqual(@as(i32, 10), product.source_slots[0].line);
     try std.testing.expectEqual(@as(i32, 2), product.source_slots[0].col);
-    try std.testing.expectEqual(@as(u32, 2), product.source_slots[1].temp_offset);
+    try std.testing.expectEqual(@as(u32, 0), product.source_slots[1].temp_offset);
     try std.testing.expectEqual(@as(i32, 20), product.source_slots[1].line);
     try std.testing.expectEqual(@as(i32, 3), product.source_slots[1].col);
 }
@@ -2381,24 +2440,6 @@ test "compiler_v2.resolve_variables: erased temp ops and optional-chain rewrites
     try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(field).?);
 }
 
-test "compiler_v2.resolve_variables: insert3 fold records a preserved boundary" {
-    try requireCompilerV2();
-
-    var harness: ResolveTestHarness = undefined;
-    try harness.init(std.testing.allocator);
-    defer harness.deinit();
-    const input = harness.input();
-
-    try input.emitOp(op.insert3);
-    try input.emitOp(op.put_array_el);
-    try input.emitOp(op.drop);
-    try input.emitOp(op.return_undef);
-
-    var product = try harness.resolve();
-    defer product.deinitUncommitted();
-    try expectProductCode(&product, &.{ op.put_array_el, op.return_undef });
-}
-
 test "compiler_v2.resolve_variables: insert3 fold recognizes both put variants" {
     try requireCompilerV2();
 
@@ -2422,6 +2463,47 @@ test "compiler_v2.resolve_variables: insert3 fold recognizes both put variants" 
     try expectProductCode(
         &product,
         &.{ op.put_array_el, op.put_ref_value, op.insert3, op.undefined, op.drop },
+    );
+}
+
+test "compiler_v2.resolve_variables: source transitions bound insert3 fold" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    // A changed source before either interior opcode is an inline `line_num`
+    // in the legacy phase-1 stream and therefore breaks its exact match.
+    try input.emitOp(op.insert3);
+    try input.addSourceMarker(10, 2);
+    try input.emitOp(op.put_array_el);
+    try input.emitOp(op.drop);
+    try input.addSourceMarker(20, 3);
+    try input.emitOp(op.insert3);
+    try input.emitOp(op.put_ref_value);
+    try input.addSourceMarker(30, 4);
+    try input.emitOp(op.drop);
+
+    // Repeated calls at the same source position are suppressed by legacy
+    // `emitSourcePos`, so they must not manufacture a fold barrier.
+    try input.addSourceMarker(40, 5);
+    try input.emitOp(op.insert3);
+    try input.addSourceMarker(40, 5);
+    try input.emitOp(op.put_array_el);
+    try input.addSourceMarker(40, 5);
+    try input.emitOp(op.drop);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try expectProductCode(
+        &product,
+        &.{
+            op.insert3,      op.put_array_el,  op.drop,
+            op.insert3,      op.put_ref_value, op.drop,
+            op.put_array_el,
+        },
     );
 }
 
@@ -3235,6 +3317,85 @@ test "compiler_v2.resolve_variables: direct eval redeclaration prefix equals leg
     );
     try snapshot.expectUnchanged(harness.input());
     try expectOwnedAtomRelease(&harness, &product, redeclared);
+}
+
+test "compiler_v2.resolve_variables: eval function declaration hoist enters v2 product" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const declared = try harness.rt.atoms.internString("qcp1-s3-eval-function-hoist");
+    defer harness.rt.atoms.free(declared);
+    harness.fd.is_eval = true;
+    harness.fd.body_scope = harness.fd.appendScope(-1) catch return error.OutOfMemory;
+    try harness.fd.appendGlobalVar(.{
+        .cpool_idx = 0,
+        .scope_level = 0,
+        .var_name = declared,
+    });
+    _ = try harness.fd.addClosureVar(.{
+        .closure_type = .global_decl,
+        .var_kind = .global_function_decl,
+        .var_idx = 0,
+        .var_name = declared,
+    });
+    try harness.input().emitOpU16(op.enter_scope, @intCast(harness.fd.body_scope));
+    try harness.input().emitOp(op.return_undef);
+    var snapshot = try TestInputSnapshot.init(harness.input());
+    defer snapshot.deinit();
+
+    var legacy_function = bytecode.Bytecode.init(
+        &harness.rt.memory,
+        &harness.rt.atoms,
+        harness.name_atom,
+    );
+    defer legacy_function.deinit(harness.rt);
+    var legacy_fd = bytecode.function_def.FunctionDef.init(
+        &harness.rt.memory,
+        &harness.rt.atoms,
+        harness.name_atom,
+    );
+    defer legacy_fd.deinit(harness.rt);
+    legacy_fd.is_eval = true;
+    legacy_fd.body_scope = legacy_fd.appendScope(-1) catch return error.OutOfMemory;
+    try legacy_fd.appendGlobalVar(.{
+        .cpool_idx = 0,
+        .scope_level = 0,
+        .var_name = declared,
+    });
+    _ = try legacy_fd.addClosureVar(.{
+        .closure_type = .global_decl,
+        .var_kind = .global_function_decl,
+        .var_idx = 0,
+        .var_name = declared,
+    });
+    const legacy_input = [_]u8{
+        op.enter_scope,  0, 0,
+        op.return_undef,
+    };
+    try runLegacyForComparison(&legacy_function, &legacy_fd, &legacy_input, &.{});
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    // Legacy phase 2 selects fclosure8 immediately. The v2 S3 product keeps
+    // the wide closure form so label-native S4 performs the one final
+    // shortening pass; both retain the same cpool/ref operands.
+    try expectProductCode(&product, &.{
+        op.fclosure,    0, 0, 0,               0,
+        op.put_var_ref, 0, 0, op.return_undef,
+    });
+    try std.testing.expectEqualSlices(u8, &.{
+        op.fclosure8,   0,
+        op.put_var_ref, 0,
+        0,              op.return_undef,
+    }, legacy_function.code);
+    try std.testing.expectEqualDeep(
+        bytecode.function_def.EvalBindingTarget{ .closure = 0 },
+        harness.fd.global_vars[0].eval_target,
+    );
+    try snapshot.expectUnchanged(harness.input());
 }
 
 test "compiler_v2.resolve_variables: deep logical chain falls back without error" {

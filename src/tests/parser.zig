@@ -96,6 +96,20 @@ test "F1: of remains an identifier in ordinary lexing" {
     try std.testing.expectEqualStrings("of", name);
 }
 
+test "F1: freeToken releases its identifier atom owner" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("lexer_token_owned_probe_s5");
+    var tok = try lx.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    const atom_id = tok.payload.ident.atom;
+    try std.testing.expectEqual(@as(usize, 1), env.rt.atoms.refCount(atom_id).?);
+
+    lx.freeToken(&tok);
+    try std.testing.expectEqual(@as(?usize, null), env.rt.atoms.refCount(atom_id));
+}
+
 test "F1: punctuators use raw ASCII for single-character tokens" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
@@ -9527,6 +9541,7 @@ test "for statement dispatch only scans top-level semicolons" {
 
     const cases = [_][]const u8{
         "for (let i = (function(){ return 0; })(); i < 1; i++) {}",
+        "function f(a){var d;for(d in a);}",
         "let value; for (value of [function(){ return 1; }]) { break; }",
         "let value; for (value of [`x${function(){ return ';'; }()}`]) { break; }",
         "let value; for (value of [/;/]) { break; }",

@@ -96,6 +96,7 @@ pub const DynamicImportError = error{
     DiskQuota,
     DivisionByZero,
     DuplicateClass,
+    DualCompileMismatch,
     DerivedConstructorReturn,
     DerivedThisUninitialized,
     EvalError,

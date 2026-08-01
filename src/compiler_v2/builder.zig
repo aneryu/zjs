@@ -235,6 +235,14 @@ pub const Builder = struct {
         slot.flags.bound = true;
     }
 
+    /// Bind an identity-native label while retaining the sequential matcher
+    /// barrier of a parser-emitted `OP_label`. Ordinary absolute-PC patch
+    /// targets use `bindLabel` and remain transparent after losing all refs.
+    pub fn bindLabelMatchBarrier(self: *Builder, label: LabelId) Error!void {
+        try self.bindLabel(label);
+        self.label_slots[label.index()].flags.match_barrier = true;
+    }
+
     /// Return the first unbound label in function-local creation order.
     pub fn firstUnboundLabel(self: *const Builder) ?LabelId {
         var label_index: u32 = 0;
@@ -285,6 +293,18 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.code[opcode_index] = op_id;
         std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], val, .little);
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 5;
+    }
+
+    /// Emit an opcode with an i32 immediate operand (compact temp encoding).
+    pub fn emitOpI32(self: *Builder, op_id: u8, val: i32) Error!void {
+        try self.reserveCode(5);
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(i32, self.code[opcode_index + 1 ..][0..4], val, .little);
         self.last_opcode_pos = @intCast(opcode_offset);
         self.code_len += 5;
     }
@@ -651,6 +671,38 @@ pub const Builder = struct {
         {
             self.source_len -= 1;
         }
+        self.code_len = new_code_len;
+        self.last_opcode_pos = -1;
+    }
+
+    /// Rewind one parser opcode emitted through a marker'd facade while
+    /// retaining older zero-width source events at the same compact offset.
+    /// Legacy OP_line_num bytes keep those older events physically before the
+    /// getter opcode; the compact v2 ledger represents them at one offset, so
+    /// only its newest slot belongs to the opcode being removed.
+    pub fn truncateLastMarkedOpcode(self: *Builder, new_code_len: u32) Error!void {
+        if (new_code_len > self.code_len or
+            self.last_opcode_pos < 0 or
+            @as(u32, @intCast(self.last_opcode_pos)) != new_code_len)
+        {
+            return error.InvalidBytecode;
+        }
+        if (self.reloc_len != 0 and
+            self.relocs[self.reloc_len - 1].operand_offset + 4 > new_code_len)
+        {
+            return error.InvalidBytecode;
+        }
+        for (self.label_slots[0..self.label_len]) |slot| {
+            if (slot.flags.bound and slot.bound_offset > new_code_len)
+                return error.InvalidBytecode;
+        }
+        if (self.source_len == 0 or
+            self.source_slots[self.source_len - 1].temp_offset != new_code_len)
+        {
+            return error.InvalidBytecode;
+        }
+
+        self.source_len -= 1;
         self.code_len = new_code_len;
         self.last_opcode_pos = -1;
     }
@@ -1096,6 +1148,14 @@ test "compiler_v2.builder: compact immediate emission and rollback" {
     b.rollback(empty);
     try std.testing.expectEqual(empty.code_len, b.code_len);
     try std.testing.expectEqual(empty.last_opcode_pos, b.last_opcode_pos);
+
+    try b.emitOpI32(0xc3, -2);
+    try std.testing.expectEqual(@as(u32, 5), b.code_len);
+    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqualSlices(u8, &.{ 0xc3, 0xfe, 0xff, 0xff, 0xff }, b.code[0..5]);
+    b.rollback(empty);
+    try std.testing.expectEqual(empty.code_len, b.code_len);
+    try std.testing.expectEqual(empty.last_opcode_pos, b.last_opcode_pos);
 }
 
 test "compiler_v2.builder: s2g4 compact atom immediates own refs" {
@@ -1187,6 +1247,28 @@ test "compiler_v2.builder: s2g4 take atom and truncate speculative tail" {
 
     table.free(returned_atom);
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+}
+
+test "compiler_v2.builder: marked opcode rewind preserves older same-offset source" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    try b.addSourceMarker(1, 10);
+    try b.addSourceMarker(1, 20);
+    try b.emitOp(0xd4);
+    try std.testing.expectEqual(@as(u32, 2), b.source_len);
+
+    try b.truncateLastMarkedOpcode(0);
+    try std.testing.expectEqual(@as(u32, 0), b.code_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
+    try std.testing.expectEqual(@as(i32, 1), b.source_slots[0].line);
+    try std.testing.expectEqual(@as(i32, 10), b.source_slots[0].col);
 }
 
 test "compiler_v2.builder: s2g4 detach and splice preserves global labels" {

@@ -1250,6 +1250,9 @@ pub const CompileContext = struct {
     realm: *core_context.RealmContext,
     policy: CompilePolicy = .{},
     timing: ?*CompileTiming = null,
+    /// Borrowed per-root dual-compile diagnostics. Published artifacts never
+    /// retain this pointer; ordinary legacy/v2 production leaves it null.
+    v2_ledger: ?*@import("compiler_v2/compare.zig").Ledger = null,
 
     pub inline fn artifactAllocator(self: CompileContext) @import("std").mem.Allocator {
         return self.realm.runtime.memory.persistent_allocator;
@@ -9315,6 +9318,7 @@ pub const pipeline_resolve_variables = struct {
         pub const leaveScopeCloseSize = pipeline_resolve_variables.leaveScopeCloseSize;
         pub const writeLeaveScopeClose = pipeline_resolve_variables.writeLeaveScopeClose;
 
+        pub const resolveEvalGlobalVarTargets = pipeline_resolve_variables.resolveEvalGlobalVarTargets;
         pub const hasDirectEvalLexicalRedeclaration = pipeline_resolve_variables.hasDirectEvalLexicalRedeclaration;
         pub const throw_error_instr_size = pipeline_resolve_variables.throw_error_instr_size;
         pub const writeThrowVarRedeclaration = pipeline_resolve_variables.writeThrowVarRedeclaration;
@@ -12728,7 +12732,7 @@ pub const pipeline_finalize = struct {
                 // (released by fd.deinit); the v2 product is installed directly
                 // on the lowered carrier at final positions, so no move happens.
                 if (fd.finalization_state != .prepared) return error.InvalidBytecode;
-                compiler_v2.compileFunctionV2(&lowered, fd) catch |err| switch (err) {
+                compiler_v2.compileFunctionV2(&lowered, fd, compile_context.v2_ledger) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
                     error.BytecodeOverflow => return error.BytecodeOverflow,

@@ -60,6 +60,8 @@ const JumpSlot = struct {
 const BindEntry = struct {
     bound_offset: u32,
     label_index: u32,
+    initially_referenced: bool,
+    match_barrier: bool,
     dead_skipped: bool = false,
 };
 
@@ -265,7 +267,7 @@ const Resolver = struct {
     jump_count: u32 = 0,
     atom_cursor: u32 = 0,
     source_cursor: u32 = 0,
-    pending_source: ?SourcePoint = null,
+    source_attach_cursor: u32 = 0,
     last_attached_source: ?SourcePoint = null,
 
     fn deinit(self: *Resolver) void {
@@ -318,6 +320,11 @@ const Resolver = struct {
                 self.binds[index] = .{
                     .bound_offset = slot.bound_offset,
                     .label_index = @intCast(label_index),
+                    // Stage 4's match barriers are defined by the immutable
+                    // input target topology, not by refcounts later consumed
+                    // while branches are threaded or folded.
+                    .initially_referenced = slot.ref_count != 0,
+                    .match_barrier = slot.flags.match_barrier,
                 };
                 index += 1;
             }
@@ -440,8 +447,6 @@ const Resolver = struct {
         while (self.source_cursor < self.input_sources.len and
             self.input_sources[self.source_cursor].temp_offset < limit)
         {
-            const source = self.input_sources[self.source_cursor];
-            self.pending_source = .{ .line = source.line, .col = source.col };
             self.source_cursor += 1;
         }
     }
@@ -450,21 +455,35 @@ const Resolver = struct {
         while (self.source_cursor < self.input_sources.len and
             self.input_sources[self.source_cursor].temp_offset <= self.product.code_len)
         {
-            const source = self.input_sources[self.source_cursor];
-            self.pending_source = .{ .line = source.line, .col = source.col };
             self.source_cursor += 1;
         }
     }
 
-    /// qjs:34547 add_pc2line_info. Pending-source equality supplies both the
-    /// source-position dedupe and nondecreasing-PC property without an old-PC
-    /// relocation table.
-    fn attachSource(self: *Resolver) Error!void {
-        const pending = self.pending_source orelse return;
-        if (self.last_attached_source) |last| {
-            if (sourcePointEqual(last, pending)) return;
+    fn hasInputSourceAt(self: *const Resolver, input_pos: u32) bool {
+        var low: usize = 0;
+        var high: usize = self.input_sources.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (self.input_sources[middle].temp_offset < input_pos) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
         }
-        if (self.output_source_len == std.math.maxInt(u32))
+        return low < self.input_sources.len and
+            self.input_sources[low].temp_offset == input_pos;
+    }
+
+    /// qjs:34547 add_pc2line_info. Preserve every source transition absorbed
+    /// across a peephole match at the replacement instruction's PC, exactly
+    /// like the legacy old-PC relocation table. Consecutive equal coordinates
+    /// still dedupe before pc2line encoding.
+    fn attachSource(self: *Resolver) Error!void {
+        if (self.source_attach_cursor > self.source_cursor)
+            return error.InvalidBytecode;
+        const pending_count = self.source_cursor - self.source_attach_cursor;
+        if (pending_count == 0) return;
+        _ = std.math.add(u32, self.output_source_len, pending_count) catch
             return error.BytecodeOverflow;
         try reserve(
             SourceLocSlot,
@@ -472,16 +491,71 @@ const Resolver = struct {
             &self.output_sources,
             &self.output_source_capacity,
             self.output_source_len,
-            1,
+            @intCast(pending_count),
             8,
         );
-        self.output_sources[self.output_source_len] = .{
-            .pc = self.output_len,
-            .line_num = pending.line,
-            .col_num = pending.col,
-        };
-        self.output_source_len += 1;
-        self.last_attached_source = pending;
+        while (self.source_attach_cursor < self.source_cursor) {
+            const source = self.input_sources[self.source_attach_cursor];
+            self.source_attach_cursor += 1;
+            const pending = SourcePoint{ .line = source.line, .col = source.col };
+            if (self.last_attached_source) |last| {
+                if (sourcePointEqual(last, pending)) continue;
+            }
+            self.output_sources[self.output_source_len] = .{
+                .pc = self.output_len,
+                .line_num = pending.line,
+                .col_num = pending.col,
+            };
+            self.output_source_len += 1;
+            self.last_attached_source = pending;
+        }
+    }
+
+    /// Publish an already-consumed input-source subrange at a later output
+    /// boundary. Legacy resolve_labels maps the source before the
+    /// push_atom_value consumed by the typeof-string fold to the instruction
+    /// after the replacement test; later consumed compare/branch markers map
+    /// backwards and are consequently not published. Keep that exact ordered
+    /// source contract without materializing old-PC relocation coordinates.
+    fn attachInputSourceRangeAt(
+        self: *Resolver,
+        start: u32,
+        end: u32,
+        output_pc: u32,
+    ) Error!void {
+        if (start > end or end > self.input_sources.len) return error.InvalidBytecode;
+        if (self.output_source_len != 0 and
+            self.output_sources[self.output_source_len - 1].pc > output_pc)
+        {
+            return error.InvalidBytecode;
+        }
+        const pending_count = end - start;
+        _ = std.math.add(u32, self.output_source_len, pending_count) catch
+            return error.BytecodeOverflow;
+        try reserve(
+            SourceLocSlot,
+            self.memory,
+            &self.output_sources,
+            &self.output_source_capacity,
+            self.output_source_len,
+            @intCast(pending_count),
+            8,
+        );
+        var index = start;
+        while (index < end) : (index += 1) {
+            const source = self.input_sources[index];
+            const pending = SourcePoint{ .line = source.line, .col = source.col };
+            if (self.last_attached_source) |last| {
+                if (sourcePointEqual(last, pending)) continue;
+            }
+            self.output_sources[self.output_source_len] = .{
+                .pc = output_pc,
+                .line_num = pending.line,
+                .col_num = pending.col,
+            };
+            self.output_source_len += 1;
+            self.last_attached_source = pending;
+        }
     }
 
     fn lowerBoundBind(self: *const Resolver, position: u32) usize {
@@ -499,8 +573,23 @@ const Resolver = struct {
 
     fn hasBindInRange(self: *const Resolver, start: u32, end: u32) bool {
         if (start >= end) return false;
-        const index = self.lowerBoundBind(start);
-        return index < self.binds.len and self.binds[index].bound_offset < end;
+        var index = self.lowerBoundBind(start);
+        while (index < self.binds.len and self.binds[index].bound_offset < end) : (index += 1) {
+            const label_index = self.binds[index].label_index;
+            std.debug.assert(label_index < self.product.label_len);
+            // Absolute-PC patch targets become transparent after losing every
+            // input reference. Explicit parser-label binds retain the physical
+            // OP_label sequential-match barrier even at ref_count zero. An
+            // original phase-2 target also remains a barrier after an earlier
+            // fold consumes its live refcount.
+            if (label_index < self.product.label_len and
+                (self.binds[index].initially_referenced or
+                    self.binds[index].match_barrier))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     fn readIndex(self: *const Resolver, position: u32) Error!u16 {
@@ -605,10 +694,26 @@ const Resolver = struct {
 
     /// qjs:34911-34939 OP_label, represented by the sorted bind side table.
     fn processBindsAt(self: *Resolver, position: u32) Error!void {
-        if (self.bind_cursor < self.binds.len and
+        // A peephole may span compact side-table binds that became
+        // unreferenced after its edge was threaded. Legacy absolute-PC joins
+        // have no materialized OP_label byte in that case, so consume those
+        // dead binds just as skipDeadCode does. A live or already-relocated
+        // bind remains a fail-closed interior target.
+        while (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].bound_offset < position)
         {
-            return error.InvalidBytecode;
+            const entry = self.binds[self.bind_cursor];
+            if (entry.label_index >= self.product.label_len)
+                return error.InvalidBytecode;
+            const slot = &self.product.label_slots[entry.label_index];
+            if (entry.match_barrier or slot.ref_count != 0 or
+                slot.first_reloc != labels.no_reloc or
+                self.addr[entry.label_index] != labels.unbound)
+            {
+                return error.InvalidBytecode;
+            }
+            self.binds[self.bind_cursor].dead_skipped = true;
+            self.bind_cursor += 1;
         }
         while (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].bound_offset == position)
@@ -705,11 +810,21 @@ const Resolver = struct {
                 continue;
             }
             if (target_op == op.drop) {
+                var source_blocked = false;
                 while (position < self.product.code_len and self.code[position] == op.drop) {
                     const drop = try decodeInstruction(self.code, position);
                     position += drop.size;
+                    // The canonical legacy Stage-4 topology scans the raw
+                    // drop run and rejects terminal threading when a source
+                    // slot sits after any consumed drop. Source markers are
+                    // side-table entries in v2, so enforce the same barrier
+                    // explicitly (qjs find_jump_target, quickjs.c:34661).
+                    if (self.hasInputSourceAt(position)) {
+                        source_blocked = true;
+                        break;
+                    }
                 }
-                if (position < self.product.code_len) {
+                if (!source_blocked and position < self.product.code_len) {
                     const after_drops = try decodeInstruction(self.code, position);
                     if (after_drops.op_id == op.return_undef)
                         target_op = op.return_undef;
@@ -723,6 +838,16 @@ const Resolver = struct {
         out_op.* = target_op;
         _ = try updateLabel(self.product, label_index, 1);
         return label_index;
+    }
+
+    /// Retarget a conditional edge consumed by a producer peephole through
+    /// the same bounded goto walk as an ordinary branch.  This reuses qjs's
+    /// `find_jump_target` refcount transaction (quickjs.c:34661-34710); the
+    /// canonical legacy resolver also applies it to nullish/typeof fold
+    /// targets before dead-code reachability is decided.
+    fn findFoldedBranchTarget(self: *Resolver, label_index: u32) Error!u32 {
+        var target_op: u8 = op.invalid;
+        return self.findJumpTarget(label_index, &target_op);
     }
 
     /// qjs:34112 skip_dead_code, with atoms and sources consumed from their
@@ -1186,12 +1311,18 @@ const Resolver = struct {
                 // Ordinary call still takes the default call0..3 selector.
                 op.call, op.call_method => try self.copyDefault(position, instruction),
 
-                // qjs:34960-34967.
+                // The Builder-native path has no preceding legacy
+                // resolve_bytecode walk, so this is the complete terminal set
+                // whose dead tails that walk removes (qjs:34352-34378), plus
+                // return_async as in resolve_labels (qjs:34960-34967).
+                op.tail_call,
+                op.tail_call_method,
                 op.@"return",
                 op.return_undef,
                 op.return_async,
                 op.throw,
                 op.throw_error,
+                op.ret,
                 => {
                     try self.emitRawInstruction(position, instruction);
                     position_next = try self.skipDeadCode(position_next);
@@ -1312,11 +1443,14 @@ const Resolver = struct {
                             op.if_true
                         else
                             op.if_false;
+                        const label_index = try self.findFoldedBranchTarget(
+                            try readU32At(self.code, match.positions[1], 1),
+                        );
                         position_next = try self.emitHasLabel(
                             position,
                             match.end,
                             inverted,
-                            try readU32At(self.code, match.positions[1], 1),
+                            label_index,
                         );
                     } else if (try self.matchSeq(position_next, &.{
                         .{ .options = &.{ op.if_false, op.if_true } },
@@ -1510,11 +1644,14 @@ const Resolver = struct {
                             op.if_true
                         else
                             op.if_false;
+                        const label_index = try self.findFoldedBranchTarget(
+                            try readU32At(self.code, match.positions[1], 1),
+                        );
                         position_next = try self.emitHasLabel(
                             position,
                             match.end,
                             inverted,
-                            try readU32At(self.code, match.positions[1], 1),
+                            label_index,
                         );
                     } else {
                         try self.copyDefault(position, instruction);
@@ -1531,7 +1668,8 @@ const Resolver = struct {
         self.absorbSourcesAtEnd();
         if (self.bind_cursor != self.binds.len or
             self.atom_cursor != self.input_atoms.len or
-            self.source_cursor != self.input_sources.len)
+            self.source_cursor != self.input_sources.len or
+            self.source_attach_cursor > self.source_cursor)
         {
             return error.InvalidBytecode;
         }
@@ -1554,12 +1692,18 @@ const Resolver = struct {
                     .{ .options = &.{op.put_field} },
                     .{ .options = &.{op.drop} },
                 })) |match| {
-                    self.absorbSources(match.end);
+                    // qjs:35352-35367. The marker owned by `insert2` maps to
+                    // the replacement store. Legacy's old-PC relocation maps
+                    // markers on either consumed tail instruction to the
+                    // boundary after that store, so publish them only once the
+                    // replacement bytes exist.
                     try self.attachSource();
                     const put_position = match.positions[0];
                     try self.appendByte(op.put_field);
                     try self.appendU32(try readU32At(self.code, put_position, 1));
                     try self.consumeAtomsRange(position, match.end, put_position);
+                    self.absorbSources(match.end);
+                    try self.attachSource();
                     position_next.* = match.end;
                 } else {
                     try self.copyDefault(position, instruction);
@@ -1583,6 +1727,7 @@ const Resolver = struct {
                     self.absorbSources(put_match.end);
                     var result_op = family.set;
                     var final_end = put_match.end;
+                    var delayed_source_end: ?u32 = null;
                     if (try self.matchSeq(final_end, &.{
                         .{ .options = &.{op.drop} },
                     })) |drop_match| {
@@ -1592,16 +1737,20 @@ const Resolver = struct {
                         if (try self.matchSeq(final_end, &.{
                             .{ .options = &.{family.get}, .idx = idx },
                         })) |get_match| {
-                            // S3 source slots are absorbed on matcher
-                            // acceptance, so this applies qjs's delayed line2
-                            // before attach instead of after it.
-                            self.absorbSources(get_match.end);
+                            // qjs:35382-35391 stores this matcher's source as
+                            // `line2`, emits the replacement using the earlier
+                            // line, and applies line2 only afterward.
+                            delayed_source_end = get_match.end;
                             result_op = family.set;
                             final_end = get_match.end;
                         }
                     }
                     try self.attachSource();
                     try self.putShortCode(result_op, idx);
+                    if (delayed_source_end) |source_end| {
+                        self.absorbSources(source_end);
+                        try self.attachSource();
+                    }
                     position_next.* = final_end;
                 } else {
                     try self.copyDefault(position, instruction);
@@ -1746,42 +1895,48 @@ const Resolver = struct {
                     const family = putFamily(store_match.ops[0]) orelse
                         return error.InvalidBytecode;
                     const idx = try self.readIndex(store_match.positions[0]);
-                    self.absorbSources(store_match.end);
                     var store_op = family.put;
                     var final_end = store_match.end;
                     if (try self.matchSeq(final_end, &.{
                         .{ .options = &.{family.get}, .idx = idx },
                     })) |get_match| {
-                        self.absorbSources(get_match.end);
                         store_op = family.set;
                         final_end = get_match.end;
                     }
+                    // Legacy final-layout relocation maps every source on the
+                    // consumed store/drop/optional-get tail to the boundary
+                    // after both replacement instructions. Only the post-op's
+                    // own marker belongs on the update (qjs:35501-35545).
                     try self.attachSource();
                     try self.appendByte(update_op);
                     try self.putShortCode(store_op, idx);
+                    self.absorbSources(final_end);
+                    try self.attachSource();
                     position_next.* = final_end;
                 } else if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{op.perm3} },
                     .{ .options = &.{op.put_field} },
                     .{ .options = &.{op.drop} },
                 })) |match| {
-                    self.absorbSources(match.end);
                     try self.attachSource();
                     const put_position = match.positions[1];
                     try self.appendByte(update_op);
                     try self.appendByte(op.put_field);
                     try self.appendU32(try readU32At(self.code, put_position, 1));
                     try self.consumeAtomsRange(position, match.end, put_position);
+                    self.absorbSources(match.end);
+                    try self.attachSource();
                     position_next.* = match.end;
                 } else if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{op.perm4} },
                     .{ .options = &.{op.put_array_el} },
                     .{ .options = &.{op.drop} },
                 })) |match| {
-                    self.absorbSources(match.end);
                     try self.attachSource();
                     try self.appendByte(update_op);
                     try self.appendByte(op.put_array_el);
+                    self.absorbSources(match.end);
+                    try self.attachSource();
                     position_next.* = match.end;
                 } else {
                     try self.copyDefault(position, instruction);
@@ -1808,8 +1963,17 @@ const Resolver = struct {
                     if (test_op) |selected_test| {
                         const compare_op = compare_match.ops[1];
                         if (compare_op == op.strict_eq or compare_op == op.eq) {
-                            self.absorbSources(compare_match.end);
+                            // Legacy old-PC relocation places the marker on
+                            // push_atom_value after the one-byte replacement,
+                            // while the later compare marker maps backwards
+                            // and is not published. Preserve that ordering
+                            // explicitly in the identity-coordinate stream.
                             try self.attachSource();
+                            const deferred_start = self.source_attach_cursor;
+                            self.absorbSources(compare_match.positions[1]);
+                            const deferred_end = self.source_cursor;
+                            self.absorbSources(compare_match.end);
+                            self.source_attach_cursor = self.source_cursor;
                             try self.appendByte(selected_test);
                             try self.consumeAtomsRange(
                                 position,
@@ -1817,28 +1981,45 @@ const Resolver = struct {
                                 null,
                             );
                             position_next.* = compare_match.end;
+                            try self.attachInputSourceRangeAt(
+                                deferred_start,
+                                deferred_end,
+                                self.output_len,
+                            );
                             return;
                         }
                         if (try self.matchSeq(compare_match.end, &.{
                             .{ .options = &.{op.if_false} },
                         })) |branch_match| {
-                            self.absorbSources(branch_match.end);
                             try self.attachSource();
+                            const deferred_start = self.source_attach_cursor;
+                            self.absorbSources(compare_match.positions[1]);
+                            const deferred_end = self.source_cursor;
+                            self.absorbSources(branch_match.end);
+                            self.source_attach_cursor = self.source_cursor;
                             try self.appendByte(selected_test);
                             try self.consumeAtomsRange(
                                 position,
                                 branch_match.end,
                                 null,
                             );
-                            position_next.* = try self.emitHasLabel(
-                                position,
-                                branch_match.end,
-                                op.if_true,
+                            const label_index = try self.findFoldedBranchTarget(
                                 try readU32At(
                                     self.code,
                                     branch_match.positions[0],
                                     1,
                                 ),
+                            );
+                            position_next.* = try self.emitHasLabel(
+                                position,
+                                branch_match.end,
+                                op.if_true,
+                                label_index,
+                            );
+                            try self.attachInputSourceRangeAt(
+                                deferred_start,
+                                deferred_end,
+                                self.output_len,
                             );
                             return;
                         }
@@ -2175,6 +2356,197 @@ test "compiler_v2.resolve_labels: straight-line slot shortening and source dedup
     );
 }
 
+test "compiler_v2.resolve_labels: put-get fold preserves both source transitions" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.addSourceMarker(10, 2);
+    try input.emitOpU16(op.put_loc, 0);
+    try input.addSourceMarker(20, 4);
+    try input.emitOpU16(op.get_loc, 0);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    try std.testing.expectEqualSlices(u8, &.{ op.set_loc0, op.@"return" }, harness.function.code);
+    try std.testing.expectEqualSlices(
+        SourceLocSlot,
+        &.{
+            .{ .pc = 0, .line_num = 10, .col_num = 2 },
+            .{ .pc = 0, .line_num = 20, .col_num = 4 },
+        },
+        harness.function.source_loc_slots,
+    );
+}
+
+test "compiler_v2.resolve_labels: dup put drop get delays getter source" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.addSourceMarker(10, 2);
+    try input.emitOp(op.dup);
+    try input.addSourceMarker(20, 4);
+    try input.emitOpU16(op.put_loc, 0);
+    try input.addSourceMarker(30, 6);
+    try input.emitOp(op.drop);
+    try input.addSourceMarker(40, 8);
+    try input.emitOpU16(op.get_loc, 0);
+    try input.emitOp(op.push_true);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.set_loc0, op.push_true },
+        harness.function.code,
+    );
+    try std.testing.expectEqualSlices(
+        SourceLocSlot,
+        &.{
+            .{ .pc = 0, .line_num = 10, .col_num = 2 },
+            .{ .pc = 0, .line_num = 20, .col_num = 4 },
+            .{ .pc = 0, .line_num = 30, .col_num = 6 },
+            .{ .pc = 1, .line_num = 40, .col_num = 8 },
+        },
+        harness.function.source_loc_slots,
+    );
+}
+
+test "compiler_v2.resolve_labels: discarded field store delays tail sources" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const field = try harness.rt.atoms.internString("qcp1-s4-field-store");
+    defer harness.rt.atoms.free(field);
+    try input.addSourceMarker(10, 2);
+    try input.emitOp(op.insert2);
+    try input.addSourceMarker(20, 4);
+    try input.emitAtomOpOwned(op.put_field, harness.rt.atoms.dup(field));
+    try input.addSourceMarker(30, 6);
+    try input.emitOp(op.drop);
+    try input.addSourceMarker(40, 8);
+    try input.emitOp(op.object);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    var expected = [_]u8{ op.put_field, 0, 0, 0, 0, op.object };
+    std.mem.writeInt(u32, expected[1..5], field, .little);
+    try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
+    try std.testing.expectEqualSlices(
+        SourceLocSlot,
+        &.{
+            .{ .pc = 0, .line_num = 10, .col_num = 2 },
+            .{ .pc = 5, .line_num = 20, .col_num = 4 },
+            .{ .pc = 5, .line_num = 30, .col_num = 6 },
+            .{ .pc = 5, .line_num = 40, .col_num = 8 },
+        },
+        harness.function.source_loc_slots,
+    );
+}
+
+test "compiler_v2.resolve_labels: typeof string fold preserves legacy source relocation order" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.addSourceMarker(10, 2);
+    try input.emitOp(op.typeof);
+    try input.addSourceMarker(20, 4);
+    try input.emitAtomOpOwned(
+        op.push_atom_value,
+        harness.rt.atoms.dup(core.atom.ids.undefined_),
+    );
+    try input.addSourceMarker(30, 6);
+    try input.emitOp(op.strict_eq);
+    try input.addSourceMarker(40, 8);
+    try input.emitOp(op.push_false);
+    try input.addSourceMarker(50, 10);
+    try input.emitOp(op.strict_eq);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.typeof_is_undefined, op.push_false, op.strict_eq, op.@"return" },
+        harness.function.code,
+    );
+    try std.testing.expectEqualSlices(
+        SourceLocSlot,
+        &.{
+            .{ .pc = 0, .line_num = 10, .col_num = 2 },
+            .{ .pc = 1, .line_num = 20, .col_num = 4 },
+            .{ .pc = 1, .line_num = 40, .col_num = 8 },
+            .{ .pc = 2, .line_num = 50, .col_num = 10 },
+        },
+        harness.function.source_loc_slots,
+    );
+}
+
+test "compiler_v2.resolve_labels: typeof branch keeps equal next-op source" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const else_path = try input.newLabel();
+    const done = try input.newLabel();
+    try input.addSourceMarker(10, 2);
+    try input.emitOp(op.typeof);
+    try input.addSourceMarker(20, 4);
+    try input.emitAtomOpOwned(
+        op.push_atom_value,
+        harness.rt.atoms.dup(core.atom.ids.undefined_),
+    );
+    try input.addSourceMarker(30, 6);
+    try input.emitOp(op.strict_neq);
+    try input.addSourceMarker(40, 8);
+    try input.emitJump(op.if_false, else_path);
+    // The parser can emit this same coordinate again for the first operand
+    // after `?`; Stage 3 must retain it even though the branch marker matches.
+    try input.addSourceMarker(40, 8);
+    try input.emitOp(op.object);
+    try input.emitJump(op.goto, done);
+    try input.bindLabel(else_path);
+    try input.emitOp(op.null);
+    try input.bindLabel(done);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    try std.testing.expectEqualSlices(
+        SourceLocSlot,
+        &.{
+            .{ .pc = 0, .line_num = 10, .col_num = 2 },
+            .{ .pc = 3, .line_num = 20, .col_num = 4 },
+            .{ .pc = 3, .line_num = 40, .col_num = 8 },
+        },
+        harness.function.source_loc_slots,
+    );
+}
+
 test "compiler_v2.resolve_labels: backward goto selects exact i8 and i16 encodings" {
     try requireCompilerV2();
 
@@ -2338,6 +2710,102 @@ test "compiler_v2.resolve_labels: next conditional drops and adjacent goto inver
     }
 }
 
+test "compiler_v2.resolve_labels: unreferenced compact bind does not block drop return fold" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const transparent = try input.newLabel();
+    try input.emitOp(op.drop);
+    try input.bindLabel(transparent);
+    try input.emitOp(op.return_undef);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        product.label_slots[transparent.index()].ref_count,
+    );
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, harness.function.code);
+}
+
+test "compiler_v2.resolve_labels: peephole consumes a spanned dead compact bind" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const transparent = try input.newLabel();
+    try input.emitOp(op.undefined);
+    try input.bindLabel(transparent);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        product.label_slots[transparent.index()].ref_count,
+    );
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, harness.function.code);
+}
+
+test "compiler_v2.resolve_labels: referenced compact bind blocks drop return fold" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const target = try input.newLabel();
+    try input.emitOp(op.object);
+    try input.emitJump(op.if_false, target);
+    try input.emitOp(op.drop);
+    try input.bindLabel(target);
+    try input.emitOp(op.return_undef);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(@as(u32, 1), product.label_slots[target.index()].ref_count);
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.object, op.if_false8, 2, op.drop, op.return_undef },
+        harness.function.code,
+    );
+}
+
+test "compiler_v2.resolve_labels: consumed refcount remains a target barrier" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const target = try input.newLabel();
+    try input.emitOp(op.push_false);
+    try input.emitJump(op.if_true, target);
+    try input.emitOp(op.object);
+    try input.emitOp(op.drop);
+    try input.bindLabel(target);
+    try input.emitOp(op.return_undef);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(@as(u32, 1), product.label_slots[target.index()].ref_count);
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.object, op.drop, op.return_undef },
+        harness.function.code,
+    );
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[target.index()].ref_count);
+}
+
 test "compiler_v2.resolve_labels: goto terminal fold skips live S3 fallthrough edges" {
     try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
@@ -2365,6 +2833,208 @@ test "compiler_v2.resolve_labels: goto terminal fold skips live S3 fallthrough e
         harness.function.code,
     );
     try std.testing.expectEqual(@as(u32, 0), product.label_slots[tail.index()].ref_count);
+}
+
+test "compiler_v2.resolve_labels: source after target drop blocks goto terminal fold" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const side = try input.newLabel();
+    const target = try input.newLabel();
+    try input.emitOp(op.push_true);
+    try input.emitJump(op.if_false, side);
+    try input.emitOp(op.object);
+    try input.emitOp(op.drop);
+    try input.emitJump(op.goto, target);
+    try input.bindLabel(side);
+    try input.emitOp(op.object);
+    try input.emitOp(op.drop);
+    try input.bindLabel(target);
+    try input.emitOp(op.drop);
+    try input.addSourceMarker(20, 4);
+    try input.emitOp(op.return_undef);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.object, op.drop, op.goto8, 1, op.return_undef },
+        harness.function.code,
+    );
+}
+
+test "compiler_v2.resolve_labels: folded typeof branch threads through dead goto" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const else_path = try input.newLabel();
+    const through = try input.newLabel();
+    const final = try input.newLabel();
+    try input.emitOp(op.object);
+    try input.emitJump(op.if_false, else_path);
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitOp(op.typeof);
+    try input.emitAtomOpOwned(
+        op.push_atom_value,
+        harness.rt.atoms.dup(core.atom.ids.undefined_),
+    );
+    try input.emitOp(op.neq);
+    try input.emitJump(op.if_false, through);
+    try input.emitOp(op.object);
+    try input.emitOp(op.@"return");
+    try input.bindLabel(through);
+    try input.emitJump(op.goto, final);
+    try input.bindLabel(else_path);
+    try input.emitOp(op.null);
+    try input.emitOp(op.@"return");
+    try input.bindLabel(final);
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{
+            op.object,
+            op.if_false8,
+            7,
+            op.get_arg0,
+            op.typeof_is_undefined,
+            op.if_true8,
+            5,
+            op.object,
+            op.@"return",
+            op.null,
+            op.@"return",
+            op.get_arg0,
+            op.@"return",
+        },
+        harness.function.code,
+    );
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[through.index()].ref_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.function.atom_operands.len);
+}
+
+test "compiler_v2.resolve_labels: folded nullish branches thread through dead goto" {
+    try requireCompilerV2();
+    const cases = [_]struct { literal: u8, test_op: u8 }{
+        .{ .literal = op.null, .test_op = op.is_null },
+        .{ .literal = op.undefined, .test_op = op.is_undefined },
+    };
+
+    for (cases) |case| {
+        var harness: ResolveLabelsTestHarness = undefined;
+        try harness.init(std.testing.allocator);
+        defer harness.deinit();
+        const input = harness.input();
+
+        const else_path = try input.newLabel();
+        const through = try input.newLabel();
+        const final = try input.newLabel();
+        try input.emitOp(op.object);
+        try input.emitJump(op.if_false, else_path);
+        try input.emitOpU16(op.get_arg, 0);
+        try input.emitOp(case.literal);
+        try input.emitOp(op.strict_neq);
+        try input.emitJump(op.if_false, through);
+        try input.emitOp(op.object);
+        try input.emitOp(op.@"return");
+        try input.bindLabel(through);
+        try input.emitJump(op.goto, final);
+        try input.bindLabel(else_path);
+        try input.emitOp(op.null);
+        try input.emitOp(op.@"return");
+        try input.bindLabel(final);
+        try input.emitOpU16(op.get_arg, 0);
+        try input.emitOp(op.@"return");
+
+        var product = try harness.resolve();
+        defer product.deinitUncommitted();
+        try run(&harness.function, null, &product);
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{
+                op.object,
+                op.if_false8,
+                7,
+                op.get_arg0,
+                case.test_op,
+                op.if_true8,
+                5,
+                op.object,
+                op.@"return",
+                op.null,
+                op.@"return",
+                op.get_arg0,
+                op.@"return",
+            },
+            harness.function.code,
+        );
+        try std.testing.expectEqual(@as(u32, 0), product.label_slots[through.index()].ref_count);
+    }
+}
+
+test "compiler_v2.resolve_labels: zero-ref parser label blocks nullish branch fold" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const parser_label = try input.newLabel();
+    const done = try input.newLabel();
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitOp(op.null);
+    try input.emitOp(op.strict_neq);
+    try input.bindLabelMatchBarrier(parser_label);
+    try input.emitJump(op.if_false, done);
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitOp(op.@"return");
+    try input.bindLabel(done);
+    try input.emitOp(op.undefined);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        product.label_slots[parser_label.index()].ref_count,
+    );
+    try std.testing.expect(product.label_slots[parser_label.index()].flags.bound);
+    try std.testing.expect(product.label_slots[parser_label.index()].flags.match_barrier);
+
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.get_arg0, op.null, op.strict_neq, op.if_false8 },
+        harness.function.code[0..4],
+    );
+    try std.testing.expect(std.mem.indexOfScalar(u8, harness.function.code, op.is_null) == null);
+}
+
+test "compiler_v2.resolve_labels: ret discards an unreachable tail" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.emitOp(op.ret);
+    try input.emitOp(op.object);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(u8, &.{op.ret}, harness.function.code);
 }
 
 test "compiler_v2.resolve_labels: two-hop goto threading targets the final label" {
@@ -2465,6 +3135,77 @@ test "compiler_v2.resolve_labels: dup put and local update peepholes use short f
         u8,
         &.{ op.put_loc0, op.set_loc1, op.inc_loc, 2 },
         harness.function.code,
+    );
+}
+
+test "compiler_v2.resolve_labels: post-update tails publish sources afterward" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const field = try harness.rt.atoms.internString("qcp1-s4-post-field");
+    defer harness.rt.atoms.free(field);
+
+    try input.addSourceMarker(10, 1);
+    try input.emitOp(op.post_inc);
+    try input.addSourceMarker(20, 2);
+    try input.emitOpU16(op.put_loc, 0);
+    try input.addSourceMarker(30, 3);
+    try input.emitOp(op.drop);
+
+    try input.addSourceMarker(40, 4);
+    try input.emitOp(op.post_dec);
+    try input.addSourceMarker(50, 5);
+    try input.emitOp(op.perm3);
+    try input.addSourceMarker(60, 6);
+    try input.emitAtomOpOwned(op.put_field, harness.rt.atoms.dup(field));
+    try input.addSourceMarker(70, 7);
+    try input.emitOp(op.drop);
+
+    try input.addSourceMarker(80, 8);
+    try input.emitOp(op.post_inc);
+    try input.addSourceMarker(90, 9);
+    try input.emitOp(op.perm4);
+    try input.addSourceMarker(100, 10);
+    try input.emitOp(op.put_array_el);
+    try input.addSourceMarker(110, 11);
+    try input.emitOp(op.drop);
+    try input.addSourceMarker(120, 12);
+    try input.emitOp(op.object);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    var expected = [_]u8{
+        op.inc,    op.put_loc0,
+        op.dec,    op.put_field,
+        0,         0,
+        0,         0,
+        op.inc,    op.put_array_el,
+        op.object,
+    };
+    std.mem.writeInt(u32, expected[4..8], field, .little);
+    try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
+    try std.testing.expectEqualSlices(
+        SourceLocSlot,
+        &.{
+            .{ .pc = 0, .line_num = 10, .col_num = 1 },
+            .{ .pc = 2, .line_num = 20, .col_num = 2 },
+            .{ .pc = 2, .line_num = 30, .col_num = 3 },
+            .{ .pc = 2, .line_num = 40, .col_num = 4 },
+            .{ .pc = 8, .line_num = 50, .col_num = 5 },
+            .{ .pc = 8, .line_num = 60, .col_num = 6 },
+            .{ .pc = 8, .line_num = 70, .col_num = 7 },
+            .{ .pc = 8, .line_num = 80, .col_num = 8 },
+            .{ .pc = 10, .line_num = 90, .col_num = 9 },
+            .{ .pc = 10, .line_num = 100, .col_num = 10 },
+            .{ .pc = 10, .line_num = 110, .col_num = 11 },
+            .{ .pc = 10, .line_num = 120, .col_num = 12 },
+        },
+        harness.function.source_loc_slots,
     );
 }
 

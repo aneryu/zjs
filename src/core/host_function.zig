@@ -96,6 +96,7 @@ pub const CallbackError = error{
     CodepointTooLarge,
     DivisionByZero,
     DuplicateClass,
+    DualCompileMismatch,
     EvalError,
     IncompatibleDescriptor,
     Interrupted,

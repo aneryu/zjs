@@ -31,7 +31,11 @@ pub const LabelFlags = packed struct(u8) {
     /// At least one backward jump resolved through this label while retained
     /// (feeds resolve_labels_v2 short-form bookkeeping).
     backward_target: bool = false,
-    reserved: u6 = 0,
+    /// The parser requested an explicit sequential-match barrier at this
+    /// bind. This is the identity-native analogue of a physical `OP_label`:
+    /// Stage 4 must not fold across it even after all incoming refs disappear.
+    match_barrier: bool = false,
+    reserved: u5 = 0,
 };
 
 /// One label. `ref_count` is retained qjs update_label bookkeeping for the
