@@ -41,6 +41,24 @@ pub const SourceSlot = struct {
     col: i32,
 };
 
+/// A detached tail segment. Owns its backings and the atom refs moved out of
+/// the builder ledger until spliceSegment (which consumes it) or
+/// discardSegment (which releases it). Offsets are segment-relative.
+pub const DetachedSegment = struct {
+    code: []u8 = &.{},
+    atoms: []core.atom.Atom = &.{},
+    /// operand_offset is segment-relative; kind is preserved (jump32/aux32).
+    relocs: []labels.RelocEntry = &.{},
+    /// Labels whose bind sits inside the segment, as (label, rel offset).
+    binds: []Bind = &.{},
+    sources: []SourceSlot = &.{},
+
+    pub const Bind = struct {
+        label_index: u32,
+        rel_offset: u32,
+    };
+};
+
 pub const Error = error{
     OutOfMemory,
     InvalidBytecode,
@@ -259,6 +277,18 @@ pub const Builder = struct {
         self.code_len += 3;
     }
 
+    /// Emit an opcode with a u32 immediate operand (compact temp encoding).
+    pub fn emitOpU32(self: *Builder, op_id: u8, val: u32) Error!void {
+        try self.reserveCode(5);
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], val, .little);
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 5;
+    }
+
     /// Emit an atom-bearing opcode; `atom_id` ownership (one retain)
     /// transfers into the builder ledger.
     pub fn emitAtomOpOwned(self: *Builder, op_id: u8, atom_id: core.atom.Atom) Error!void {
@@ -290,6 +320,152 @@ pub const Builder = struct {
         self.atom_len += 1;
         self.last_opcode_pos = @intCast(opcode_offset);
         self.code_len += 5;
+    }
+
+    /// Emit an atom-bearing opcode with a trailing u8 immediate (op + atom +
+    /// u8, the define_class/define_method temp encoding). `atom_id` ownership
+    /// (one retain) transfers into the builder ledger.
+    pub fn emitAtomOpU8Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u8) Error!void {
+        self.reserveCode(6) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+        reserve(
+            core.atom.Atom,
+            self.memory,
+            &self.atom_operands,
+            &self.atom_capacity,
+            self.atom_len,
+            1,
+            8,
+        ) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        self.atom_operands[self.atom_len] = atom_id;
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        self.code[opcode_index + 5] = val;
+
+        self.atom_len += 1;
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 6;
+    }
+
+    /// Emit an atom-bearing opcode with a trailing u16 immediate (op + atom +
+    /// scope operand, the scope_get_var-family temp encoding). Owned-atom sink.
+    pub fn emitAtomOpU16Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u16) Error!void {
+        self.reserveCode(7) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+        reserve(
+            core.atom.Atom,
+            self.memory,
+            &self.atom_operands,
+            &self.atom_capacity,
+            self.atom_len,
+            1,
+            8,
+        ) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        self.atom_operands[self.atom_len] = atom_id;
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u16, self.code[opcode_index + 5 ..][0..2], val, .little);
+
+        self.atom_len += 1;
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 7;
+    }
+
+    /// Emit a scope-ref opcode carrying an auxiliary label operand:
+    /// op + atom(4) + label(4) + scope(2), 11 bytes. The label operand holds the
+    /// LabelId until final emission; the RelocEntry is kind .aux32 at
+    /// opcode_offset + 5. Bumps ref_count (qjs update_label(fd, label, 1)) and
+    /// marks backward_target when the label is already bound. Owned-atom sink;
+    /// an invalid label fails closed after consuming the atom retain.
+    pub fn emitScopeRefOpOwned(
+        self: *Builder,
+        op_id: u8,
+        atom_id: core.atom.Atom,
+        label: LabelId,
+        scope: u16,
+    ) Error!void {
+        if (label.index() >= self.label_len) {
+            self.atoms.free(atom_id);
+            return error.InvalidBytecode;
+        }
+
+        self.reserveCode(11) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+        reserve(
+            labels.RelocEntry,
+            self.memory,
+            &self.relocs,
+            &self.reloc_capacity,
+            self.reloc_len,
+            1,
+            8,
+        ) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+        reserve(
+            core.atom.Atom,
+            self.memory,
+            &self.atom_operands,
+            &self.atom_capacity,
+            self.atom_len,
+            1,
+            8,
+        ) catch |err| {
+            self.atoms.free(atom_id);
+            return err;
+        };
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        const operand_offset = opcode_offset + 5;
+        self.atom_operands[self.atom_len] = atom_id;
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, self.code[opcode_index + 5 ..][0..4], label.index(), .little);
+        std.mem.writeInt(u16, self.code[opcode_index + 9 ..][0..2], scope, .little);
+
+        const slot = &self.label_slots[label.index()];
+        const reloc_index = self.reloc_len;
+        self.relocs[reloc_index] = .{
+            .next = slot.first_reloc,
+            .operand_offset = operand_offset,
+            .kind = .aux32,
+        };
+        slot.first_reloc = reloc_index;
+        slot.ref_count += 1;
+        if (slot.flags.bound) slot.flags.backward_target = true;
+
+        self.atom_len += 1;
+        self.reloc_len += 1;
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 11;
+    }
+
+    /// Transfer ownership of the newest ledger atom back to the caller
+    /// (the reverse of an owned-atom sink). Fails closed on an empty ledger.
+    pub fn takeLastAtomOwned(self: *Builder) Error!core.atom.Atom {
+        if (self.atom_len == 0) return error.InvalidBytecode;
+        self.atom_len -= 1;
+        return self.atom_operands[self.atom_len];
     }
 
     pub fn addSourceMarker(self: *Builder, line: i32, col: i32) Error!void {
@@ -381,10 +557,296 @@ pub const Builder = struct {
         self.last_opcode_pos = snap.last_opcode_pos;
     }
 
+    /// Drop the code tail beyond `new_code_len` — the qjs get_lvalue
+    /// `fd->byte_code.size = fd->last_opcode_pos` rewind. Only for tails that
+    /// carry no relocations and no label binds: the newest reloc's operand is the
+    /// high-water mark (operand offsets are emission-ordered), so the no-reloc
+    /// requirement is an O(1) check; binds beyond the boundary are a Debug scan.
+    /// Source markers at or beyond the boundary are dropped (legacy truncateCode
+    /// slot rule). Invalidates last_opcode_pos.
+    pub fn truncateTail(self: *Builder, new_code_len: u32) void {
+        std.debug.assert(new_code_len <= self.code_len);
+        std.debug.assert(self.reloc_len == 0 or
+            self.relocs[self.reloc_len - 1].operand_offset + 4 <= new_code_len);
+
+        if (builtin.mode == .Debug) {
+            for (self.label_slots[0..self.label_len]) |slot| {
+                std.debug.assert(!slot.flags.bound or slot.bound_offset <= new_code_len);
+            }
+        }
+
+        while (self.source_len > 0 and
+            self.source_slots[self.source_len - 1].temp_offset >= new_code_len)
+        {
+            self.source_len -= 1;
+        }
+        self.code_len = new_code_len;
+        self.last_opcode_pos = -1;
+    }
+
+    /// Detach the tail emitted since `mark` (a snapshot taken at the segment
+    /// start, BEFORE any emission or bind belonging to the segment). Captures
+    /// code bytes, ledger atoms (ownership moves out; nothing is released),
+    /// reloc entries (unchained from their labels with ref_count decremented,
+    /// exactly the rollback discipline — reloc indices >= mark.reloc_len are the
+    /// chain tails by construction), label binds strictly inside the segment
+    /// (bound_offset > mark.code_len; a bind exactly AT the mark stays put,
+    /// matching the rollback boundary rule), and source slots by ledger index
+    /// (>= mark.source_len), all made segment-relative. Labels themselves are
+    /// NOT captured: LabelIds are function-global and label_len is untouched.
+    /// The builder is truncated back to the mark with last_opcode_pos
+    /// invalidated. All allocations happen before any builder mutation: OOM
+    /// leaves the builder exactly as it was.
+    pub fn detachTail(self: *Builder, mark: Snapshot) Error!DetachedSegment {
+        const lengths_valid = mark.code_len <= self.code_len and
+            mark.atom_len <= self.atom_len and
+            mark.label_len <= self.label_len and
+            mark.reloc_len <= self.reloc_len and
+            mark.source_len <= self.source_len;
+        std.debug.assert(lengths_valid);
+        if (!lengths_valid) return error.InvalidBytecode;
+
+        if (mark.reloc_len != 0) {
+            const newest_survivor = self.relocs[mark.reloc_len - 1];
+            const survivor_valid = @as(u64, newest_survivor.operand_offset) + 4 <= mark.code_len;
+            std.debug.assert(survivor_valid);
+            if (!survivor_valid) return error.InvalidBytecode;
+        }
+        for (self.relocs[mark.reloc_len..self.reloc_len]) |entry| {
+            const entry_valid = entry.operand_offset >= mark.code_len and
+                @as(u64, entry.operand_offset) + 4 <= self.code_len;
+            std.debug.assert(entry_valid);
+            if (!entry_valid) return error.InvalidBytecode;
+        }
+        for (self.source_slots[mark.source_len..self.source_len]) |slot| {
+            const slot_valid = slot.temp_offset >= mark.code_len and slot.temp_offset <= self.code_len;
+            std.debug.assert(slot_valid);
+            if (!slot_valid) return error.InvalidBytecode;
+        }
+
+        var bind_count: usize = 0;
+        for (self.label_slots[0..self.label_len]) |slot| {
+            if (!slot.flags.bound) continue;
+            const bind_valid = slot.bound_offset <= self.code_len;
+            std.debug.assert(bind_valid);
+            if (!bind_valid) return error.InvalidBytecode;
+            if (slot.bound_offset > mark.code_len) bind_count += 1;
+        }
+
+        const code_count: usize = @intCast(self.code_len - mark.code_len);
+        const atom_count: usize = @intCast(self.atom_len - mark.atom_len);
+        const reloc_count: usize = @intCast(self.reloc_len - mark.reloc_len);
+        const source_count: usize = @intCast(self.source_len - mark.source_len);
+        var seg: DetachedSegment = .{};
+
+        if (code_count != 0) {
+            seg.code = self.memory.alloc(u8, code_count) catch return error.OutOfMemory;
+        }
+        errdefer if (seg.code.len != 0) self.memory.free(u8, seg.code);
+
+        if (atom_count != 0) {
+            seg.atoms = self.memory.alloc(core.atom.Atom, atom_count) catch return error.OutOfMemory;
+        }
+        errdefer if (seg.atoms.len != 0) self.memory.free(core.atom.Atom, seg.atoms);
+
+        if (reloc_count != 0) {
+            seg.relocs = self.memory.alloc(labels.RelocEntry, reloc_count) catch return error.OutOfMemory;
+        }
+        errdefer if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
+
+        if (bind_count != 0) {
+            seg.binds = self.memory.alloc(DetachedSegment.Bind, bind_count) catch return error.OutOfMemory;
+        }
+        errdefer if (seg.binds.len != 0) self.memory.free(DetachedSegment.Bind, seg.binds);
+
+        if (source_count != 0) {
+            seg.sources = self.memory.alloc(SourceSlot, source_count) catch return error.OutOfMemory;
+        }
+        errdefer if (seg.sources.len != 0) self.memory.free(SourceSlot, seg.sources);
+
+        @memcpy(seg.code, self.code[mark.code_len..self.code_len]);
+        @memcpy(seg.atoms, self.atom_operands[mark.atom_len..self.atom_len]);
+        for (self.relocs[mark.reloc_len..self.reloc_len], seg.relocs) |entry, *detached| {
+            detached.* = entry;
+            detached.operand_offset -= mark.code_len;
+        }
+        for (self.source_slots[mark.source_len..self.source_len], seg.sources) |slot, *detached| {
+            detached.* = slot;
+            detached.temp_offset -= mark.code_len;
+        }
+
+        for (self.label_slots[0..self.label_len]) |*slot| {
+            var head = slot.first_reloc;
+            while (head != labels.no_reloc and head >= mark.reloc_len) {
+                std.debug.assert(slot.ref_count > 0);
+                slot.ref_count -= 1;
+                head = self.relocs[head].next;
+            }
+            slot.first_reloc = head;
+        }
+
+        var bind_index: usize = 0;
+        for (self.label_slots[0..self.label_len], 0..) |*slot, label_index| {
+            if (!slot.flags.bound or slot.bound_offset <= mark.code_len) continue;
+            seg.binds[bind_index] = .{
+                .label_index = @intCast(label_index),
+                .rel_offset = slot.bound_offset - mark.code_len,
+            };
+            bind_index += 1;
+            slot.bound_offset = labels.unbound;
+            slot.flags.bound = false;
+        }
+        std.debug.assert(bind_index == bind_count);
+
+        self.code_len = mark.code_len;
+        self.atom_len = mark.atom_len;
+        self.reloc_len = mark.reloc_len;
+        self.source_len = mark.source_len;
+        self.last_opcode_pos = -1;
+        return seg;
+    }
+
+    /// Re-append a detached segment at the current position, shifting every
+    /// captured offset by the new base. Jump/aux operands are LabelIds and are
+    /// NOT rewritten (no target rebase exists in v2). Validates every captured
+    /// reloc against the segment bytes and reserves all destination capacity
+    /// before mutating; after success the segment is consumed (its backings are
+    /// freed and its atom ownership has moved back into the ledger), and
+    /// last_opcode_pos is invalidated. On error the segment is untouched and
+    /// still owned by the caller.
+    pub fn spliceSegment(self: *Builder, seg: *DetachedSegment) Error!void {
+        var previous_reloc_offset: ?u32 = null;
+        for (seg.relocs) |entry| {
+            const operand_end = @as(u64, entry.operand_offset) + 4;
+            if (operand_end > seg.code.len) return error.InvalidBytecode;
+            if (previous_reloc_offset) |previous| {
+                if (entry.operand_offset <= previous) return error.InvalidBytecode;
+            }
+            previous_reloc_offset = entry.operand_offset;
+
+            const operand_offset: usize = @intCast(entry.operand_offset);
+            const label_index = std.mem.readInt(u32, seg.code[operand_offset..][0..4], .little);
+            if (label_index >= self.label_len) return error.InvalidBytecode;
+        }
+        for (seg.binds) |bind| {
+            if (bind.label_index >= self.label_len) return error.InvalidBytecode;
+            if (self.label_slots[bind.label_index].flags.bound) return error.InvalidBytecode;
+            if (@as(u64, bind.rel_offset) > seg.code.len) return error.InvalidBytecode;
+        }
+        var previous_source_offset: ?u32 = null;
+        for (seg.sources) |slot| {
+            if (@as(u64, slot.temp_offset) > seg.code.len) return error.InvalidBytecode;
+            if (previous_source_offset) |previous| {
+                if (slot.temp_offset < previous) return error.InvalidBytecode;
+            }
+            previous_source_offset = slot.temp_offset;
+        }
+
+        if (seg.relocs.len > @as(usize, std.math.maxInt(u32) - self.reloc_len) or
+            seg.sources.len > @as(usize, std.math.maxInt(u32) - self.source_len) or
+            seg.atoms.len > @as(usize, std.math.maxInt(u32) - self.atom_len))
+        {
+            return error.BytecodeOverflow;
+        }
+
+        try self.reserveCode(seg.code.len);
+        try reserve(
+            labels.RelocEntry,
+            self.memory,
+            &self.relocs,
+            &self.reloc_capacity,
+            self.reloc_len,
+            seg.relocs.len,
+            8,
+        );
+        try reserve(
+            SourceSlot,
+            self.memory,
+            &self.source_slots,
+            &self.source_capacity,
+            self.source_len,
+            seg.sources.len,
+            8,
+        );
+        try reserve(
+            core.atom.Atom,
+            self.memory,
+            &self.atom_operands,
+            &self.atom_capacity,
+            self.atom_len,
+            seg.atoms.len,
+            8,
+        );
+
+        const new_base = self.code_len;
+        const code_index: usize = @intCast(new_base);
+        @memcpy(self.code[code_index..][0..seg.code.len], seg.code);
+
+        const atom_index: usize = @intCast(self.atom_len);
+        @memcpy(self.atom_operands[atom_index..][0..seg.atoms.len], seg.atoms);
+        self.atom_len += @intCast(seg.atoms.len);
+
+        for (seg.binds) |bind| {
+            const slot = &self.label_slots[bind.label_index];
+            slot.bound_offset = new_base + bind.rel_offset;
+            slot.flags.bound = true;
+        }
+
+        for (seg.sources) |source| {
+            var shifted = source;
+            shifted.temp_offset += new_base;
+            if (builtin.mode == .Debug) {
+                std.debug.assert(self.source_len == 0 or
+                    self.source_slots[self.source_len - 1].temp_offset <= shifted.temp_offset);
+            }
+            self.source_slots[self.source_len] = shifted;
+            self.source_len += 1;
+        }
+
+        for (seg.relocs) |entry| {
+            const relative_operand: usize = @intCast(entry.operand_offset);
+            const label_index = std.mem.readInt(u32, seg.code[relative_operand..][0..4], .little);
+            const slot = &self.label_slots[label_index];
+            const operand_offset = new_base + entry.operand_offset;
+            const reloc_index = self.reloc_len;
+            self.relocs[reloc_index] = .{
+                .next = slot.first_reloc,
+                .operand_offset = operand_offset,
+                .kind = entry.kind,
+            };
+            slot.first_reloc = reloc_index;
+            slot.ref_count += 1;
+            if (slot.flags.bound and slot.bound_offset < operand_offset) {
+                slot.flags.backward_target = true;
+            }
+            self.reloc_len += 1;
+        }
+
+        self.code_len += @intCast(seg.code.len);
+        self.invalidateLastOpcode();
+        self.freeSegmentBackings(seg);
+    }
+
+    /// Release a segment that will not be spliced (error paths): item-wise atom
+    /// release, then backings freed. Idempotent.
+    pub fn discardSegment(self: *Builder, seg: *DetachedSegment) void {
+        for (seg.atoms) |atom_id| self.atoms.free(atom_id);
+        self.freeSegmentBackings(seg);
+    }
+
     /// Control-flow merge: forget the last opcode so no peephole fuses across
     /// the join (qjs sets fd->last_opcode_pos = -1 at labels).
     pub fn invalidateLastOpcode(self: *Builder) void {
         self.last_opcode_pos = -1;
+    }
+
+    fn freeSegmentBackings(self: *Builder, seg: *DetachedSegment) void {
+        if (seg.code.len != 0) self.memory.free(u8, seg.code);
+        if (seg.atoms.len != 0) self.memory.free(core.atom.Atom, seg.atoms);
+        if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
+        if (seg.binds.len != 0) self.memory.free(DetachedSegment.Bind, seg.binds);
+        if (seg.sources.len != 0) self.memory.free(SourceSlot, seg.sources);
+        seg.* = .{};
     }
 
     fn reserveCode(self: *Builder, need: usize) Error!void {
@@ -404,6 +866,36 @@ pub const Builder = struct {
 
 test {
     _ = Builder;
+}
+
+fn expectRelocChain(
+    b: *const Builder,
+    label: LabelId,
+    expected_offsets: []const u32,
+    expected_kinds: []const labels.RelocKind,
+) !void {
+    try std.testing.expectEqual(expected_offsets.len, expected_kinds.len);
+    const slot = b.label_slots[label.index()];
+    try std.testing.expectEqual(@as(u32, @intCast(expected_offsets.len)), slot.ref_count);
+
+    var reloc_index = slot.first_reloc;
+    var previous_index = labels.no_reloc;
+    for (expected_offsets, expected_kinds) |expected_offset, expected_kind| {
+        try std.testing.expect(reloc_index != labels.no_reloc);
+        try std.testing.expect(reloc_index < b.reloc_len);
+        try std.testing.expect(reloc_index < previous_index);
+        const entry = b.relocs[reloc_index];
+        try std.testing.expectEqual(expected_offset, entry.operand_offset);
+        try std.testing.expectEqual(expected_kind, entry.kind);
+        const operand_offset: usize = @intCast(entry.operand_offset);
+        try std.testing.expectEqual(
+            label.index(),
+            std.mem.readInt(u32, b.code[operand_offset..][0..4], .little),
+        );
+        previous_index = reloc_index;
+        reloc_index = entry.next;
+    }
+    try std.testing.expectEqual(labels.no_reloc, reloc_index);
 }
 
 test "compiler_v2.builder: jump emission, bind, reloc chains" {
@@ -442,6 +934,72 @@ test "compiler_v2.builder: jump emission, bind, reloc chains" {
     try std.testing.expectError(error.InvalidBytecode, b.emitJump(0x21, @enumFromInt(99)));
 }
 
+test "compiler_v2.builder: s2g4 scope ref owns atom and chains aux relocation" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const atom_id = try table.internString("qcp1_s2g4_scope_ref");
+    defer table.free(atom_id);
+    const base_ref_count = table.refCount(atom_id).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    const label = try b.newLabel();
+    try b.emitJump(0x21, label);
+    const snap = b.snapshot();
+
+    try b.emitScopeRefOpOwned(0xd1, table.dup(atom_id), label, 0x1234);
+    try std.testing.expectEqual(@as(u32, 16), b.code_len);
+    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0xd1), b.code[5]);
+    try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[6..10], .little));
+    try std.testing.expectEqual(label.index(), std.mem.readInt(u32, b.code[10..14], .little));
+    try std.testing.expectEqual(@as(u16, 0x1234), std.mem.readInt(u16, b.code[14..16], .little));
+    try std.testing.expectEqual(@as(u32, 2), b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 2), b.label_slots[label.index()].ref_count);
+    try std.testing.expectEqual(@as(u32, 1), b.label_slots[label.index()].first_reloc);
+    try std.testing.expectEqual(@as(u32, 0), b.relocs[1].next);
+    try std.testing.expectEqual(@as(u32, 10), b.relocs[1].operand_offset);
+    try std.testing.expectEqual(labels.RelocKind.aux32, b.relocs[1].kind);
+    try std.testing.expect(!b.label_slots[label.index()].flags.backward_target);
+
+    try b.bindLabel(label);
+    try b.emitScopeRefOpOwned(0xd2, table.dup(atom_id), label, 0xabcd);
+    try std.testing.expectEqual(@as(u32, 27), b.code_len);
+    try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 3), b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_slots[label.index()].ref_count);
+    try std.testing.expectEqual(@as(u32, 2), b.label_slots[label.index()].first_reloc);
+    try std.testing.expectEqual(@as(u32, 1), b.relocs[2].next);
+    try std.testing.expectEqual(@as(u32, 21), b.relocs[2].operand_offset);
+    try std.testing.expectEqual(labels.RelocKind.aux32, b.relocs[2].kind);
+    try std.testing.expect(b.label_slots[label.index()].flags.backward_target);
+    try std.testing.expectEqual(base_ref_count + 2, table.refCount(atom_id).?);
+
+    b.rollback(snap);
+    try std.testing.expectEqual(snap.code_len, b.code_len);
+    try std.testing.expectEqual(snap.atom_len, b.atom_len);
+    try std.testing.expectEqual(snap.reloc_len, b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 1), b.label_slots[label.index()].ref_count);
+    try std.testing.expectEqual(@as(u32, 0), b.label_slots[label.index()].first_reloc);
+    try std.testing.expect(!b.label_slots[label.index()].flags.bound);
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+
+    const code_len_before_invalid = b.code_len;
+    const reloc_len_before_invalid = b.reloc_len;
+    const invalid_owned_atom = table.dup(atom_id);
+    try std.testing.expectEqual(base_ref_count + 1, table.refCount(atom_id).?);
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        b.emitScopeRefOpOwned(0xd3, invalid_owned_atom, @enumFromInt(99), 0),
+    );
+    try std.testing.expectEqual(code_len_before_invalid, b.code_len);
+    try std.testing.expectEqual(reloc_len_before_invalid, b.reloc_len);
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+}
+
 test "compiler_v2.builder: compact immediate emission and rollback" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
@@ -467,6 +1025,334 @@ test "compiler_v2.builder: compact immediate emission and rollback" {
     b.rollback(empty);
     try std.testing.expectEqual(empty.code_len, b.code_len);
     try std.testing.expectEqual(empty.last_opcode_pos, b.last_opcode_pos);
+}
+
+test "compiler_v2.builder: s2g4 compact atom immediates own refs" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const atom_id = try table.internString("qcp1_s2g4_compact_atom");
+    defer table.free(atom_id);
+    const base_ref_count = table.refCount(atom_id).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    const empty = b.snapshot();
+    try b.emitOpU32(0xc1, 0x78563412);
+    try std.testing.expectEqual(@as(u32, 5), b.code_len);
+    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqualSlices(u8, &.{ 0xc1, 0x12, 0x34, 0x56, 0x78 }, b.code[0..5]);
+
+    try b.emitAtomOpU8Owned(0xc2, table.dup(atom_id), 0xa5);
+    try std.testing.expectEqual(@as(u32, 11), b.code_len);
+    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0xc2), b.code[5]);
+    try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[6..10], .little));
+    try std.testing.expectEqual(@as(u8, 0xa5), b.code[10]);
+
+    try b.emitAtomOpU16Owned(0xc3, table.dup(atom_id), 0x1234);
+    try std.testing.expectEqual(@as(u32, 18), b.code_len);
+    try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0xc3), b.code[11]);
+    try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[12..16], .little));
+    try std.testing.expectEqualSlices(u8, &.{ 0x34, 0x12 }, b.code[16..18]);
+    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
+    try std.testing.expectEqual(atom_id, b.atom_operands[0]);
+    try std.testing.expectEqual(atom_id, b.atom_operands[1]);
+    try std.testing.expectEqual(base_ref_count + 2, table.refCount(atom_id).?);
+
+    b.rollback(empty);
+    try std.testing.expectEqual(@as(u32, 0), b.code_len);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+
+    try b.emitAtomOpU8Owned(0xc4, table.dup(atom_id), 0x5a);
+    try b.emitAtomOpU16Owned(0xc5, table.dup(atom_id), 0xabcd);
+    b.deinit();
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+}
+
+test "compiler_v2.builder: s2g4 take atom and truncate speculative tail" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const atom_id = try table.internString("qcp1_s2g4_truncate_atom");
+    defer table.free(atom_id);
+    const base_ref_count = table.refCount(atom_id).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    try b.addSourceMarker(1, 1);
+    const label = try b.newLabel();
+    try b.bindLabel(label);
+    try b.emitJump(0x21, label);
+    const op_start = b.code_len;
+    try std.testing.expectEqual(@as(u32, 5), op_start);
+    try b.addSourceMarker(2, 2);
+    try b.emitAtomOpOwned(0xd4, table.dup(atom_id));
+    try b.addSourceMarker(3, 3);
+    try std.testing.expectEqual(@as(u32, 3), b.source_len);
+    try std.testing.expectEqual(op_start, b.source_slots[1].temp_offset);
+    try std.testing.expectEqual(@as(u32, 10), b.source_slots[2].temp_offset);
+    try std.testing.expectEqual(base_ref_count + 1, table.refCount(atom_id).?);
+
+    const returned_atom = try b.takeLastAtomOwned();
+    try std.testing.expectEqual(atom_id, returned_atom);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(base_ref_count + 1, table.refCount(atom_id).?);
+    try std.testing.expectError(error.InvalidBytecode, b.takeLastAtomOwned());
+
+    b.truncateTail(op_start);
+    try std.testing.expectEqual(op_start, b.code_len);
+    try std.testing.expectEqual(@as(u32, 1), b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 1), b.label_slots[label.index()].ref_count);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
+
+    table.free(returned_atom);
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+}
+
+test "compiler_v2.builder: s2g4 detach and splice preserves global labels" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const pre_atom = try table.internString("qcp1_s2g4_pre_atom");
+    defer table.free(pre_atom);
+    const segment_atom = try table.internString("qcp1_s2g4_segment_atom");
+    defer table.free(segment_atom);
+    const scope_atom = try table.internString("qcp1_s2g4_scope_atom");
+    defer table.free(scope_atom);
+    const pre_atom_base = table.refCount(pre_atom).?;
+    const segment_atom_base = table.refCount(segment_atom).?;
+    const scope_atom_base = table.refCount(scope_atom).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    const label_a = try b.newLabel();
+    const label_c = try b.newLabel();
+    try b.bindLabel(label_a);
+    try b.emitJump(0xe0, label_a);
+    try b.emitAtomOpOwned(0xe1, table.dup(pre_atom));
+    try b.addSourceMarker(10, 10);
+    try b.bindLabel(label_c);
+    const mark = b.snapshot();
+    try std.testing.expectEqual(@as(u32, 10), mark.code_len);
+
+    try b.emitJump(0xe2, label_a);
+    const label_b = try b.newLabel();
+    try b.emitJump(0xe3, label_b);
+    try b.emitOp(0xe4);
+    try b.bindLabel(label_b);
+    try b.emitAtomOpOwned(0xe5, table.dup(segment_atom));
+    try b.addSourceMarker(20, 20);
+    try b.emitScopeRefOpOwned(0xe6, table.dup(scope_atom), label_c, 0x5678);
+
+    try std.testing.expectEqual(@as(u32, 37), b.code_len);
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 4), b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try std.testing.expectEqual(@as(u32, 2), b.source_len);
+    try expectRelocChain(&b, label_a, &.{ 11, 1 }, &.{ .jump32, .jump32 });
+    try expectRelocChain(&b, label_b, &.{16}, &.{.jump32});
+    try expectRelocChain(&b, label_c, &.{31}, &.{.aux32});
+    try std.testing.expectEqual(segment_atom_base + 1, table.refCount(segment_atom).?);
+    try std.testing.expectEqual(scope_atom_base + 1, table.refCount(scope_atom).?);
+
+    var seg = try b.detachTail(mark);
+    defer b.discardSegment(&seg);
+    try std.testing.expectEqual(mark.code_len, b.code_len);
+    try std.testing.expectEqual(mark.atom_len, b.atom_len);
+    try std.testing.expectEqual(mark.reloc_len, b.reloc_len);
+    try std.testing.expectEqual(mark.source_len, b.source_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectRelocChain(&b, label_a, &.{1}, &.{.jump32});
+    try expectRelocChain(&b, label_b, &.{}, &.{});
+    try expectRelocChain(&b, label_c, &.{}, &.{});
+    try std.testing.expect(!b.label_slots[label_b.index()].flags.bound);
+    try std.testing.expectEqual(labels.unbound, b.label_slots[label_b.index()].bound_offset);
+    try std.testing.expect(b.label_slots[label_c.index()].flags.bound);
+    try std.testing.expectEqual(mark.code_len, b.label_slots[label_c.index()].bound_offset);
+
+    try std.testing.expectEqual(@as(usize, 27), seg.code.len);
+    try std.testing.expectEqual(@as(usize, 2), seg.atoms.len);
+    try std.testing.expectEqual(segment_atom, seg.atoms[0]);
+    try std.testing.expectEqual(scope_atom, seg.atoms[1]);
+    try std.testing.expectEqual(@as(usize, 3), seg.relocs.len);
+    try std.testing.expectEqual(@as(u32, 1), seg.relocs[0].operand_offset);
+    try std.testing.expectEqual(labels.RelocKind.jump32, seg.relocs[0].kind);
+    try std.testing.expectEqual(@as(u32, 6), seg.relocs[1].operand_offset);
+    try std.testing.expectEqual(labels.RelocKind.jump32, seg.relocs[1].kind);
+    try std.testing.expectEqual(@as(u32, 21), seg.relocs[2].operand_offset);
+    try std.testing.expectEqual(labels.RelocKind.aux32, seg.relocs[2].kind);
+    try std.testing.expectEqual(@as(usize, 1), seg.binds.len);
+    try std.testing.expectEqual(label_b.index(), seg.binds[0].label_index);
+    try std.testing.expectEqual(@as(u32, 11), seg.binds[0].rel_offset);
+    try std.testing.expectEqual(@as(usize, 1), seg.sources.len);
+    try std.testing.expectEqual(@as(u32, 16), seg.sources[0].temp_offset);
+    try std.testing.expectEqual(segment_atom_base + 1, table.refCount(segment_atom).?);
+    try std.testing.expectEqual(scope_atom_base + 1, table.refCount(scope_atom).?);
+
+    var detached_bytes: [27]u8 = undefined;
+    @memcpy(detached_bytes[0..], seg.code);
+    try b.emitOp(0xef);
+    try b.addSourceMarker(30, 30);
+    const new_base = b.code_len;
+    try std.testing.expectEqual(@as(u32, 11), new_base);
+
+    try b.spliceSegment(&seg);
+    try std.testing.expectEqual(@as(u32, 38), b.code_len);
+    try std.testing.expectEqualSlices(u8, &detached_bytes, b.code[new_base..b.code_len]);
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
+    try std.testing.expectEqual(pre_atom, b.atom_operands[0]);
+    try std.testing.expectEqual(segment_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(scope_atom, b.atom_operands[2]);
+    try std.testing.expectEqual(@as(u32, 4), b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try std.testing.expect(b.label_slots[label_b.index()].flags.bound);
+    try std.testing.expectEqual(new_base + 11, b.label_slots[label_b.index()].bound_offset);
+    try expectRelocChain(&b, label_a, &.{ 12, 1 }, &.{ .jump32, .jump32 });
+    try expectRelocChain(&b, label_b, &.{17}, &.{.jump32});
+    try expectRelocChain(&b, label_c, &.{32}, &.{.aux32});
+    try std.testing.expectEqual(label_a.index(), std.mem.readInt(u32, b.code[12..16], .little));
+    try std.testing.expectEqual(label_b.index(), std.mem.readInt(u32, b.code[17..21], .little));
+    try std.testing.expectEqual(label_c.index(), std.mem.readInt(u32, b.code[32..36], .little));
+    try std.testing.expect(b.label_slots[label_a.index()].flags.backward_target);
+    try std.testing.expect(!b.label_slots[label_b.index()].flags.backward_target);
+    try std.testing.expect(b.label_slots[label_c.index()].flags.backward_target);
+    try std.testing.expectEqual(@as(u32, 3), b.source_len);
+    try std.testing.expectEqual(@as(u32, 10), b.source_slots[0].temp_offset);
+    try std.testing.expectEqual(@as(u32, 11), b.source_slots[1].temp_offset);
+    try std.testing.expectEqual(@as(u32, 27), b.source_slots[2].temp_offset);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(usize, 0), seg.code.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.atoms.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.relocs.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.binds.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.sources.len);
+
+    b.discardSegment(&seg);
+    b.deinit();
+    try std.testing.expectEqual(pre_atom_base, table.refCount(pre_atom).?);
+    try std.testing.expectEqual(segment_atom_base, table.refCount(segment_atom).?);
+    try std.testing.expectEqual(scope_atom_base, table.refCount(scope_atom).?);
+}
+
+test "compiler_v2.builder: s2g4 empty segment splice invalidates last opcode" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    try b.emitOp(0xf0);
+    const mark = b.snapshot();
+    var seg = try b.detachTail(mark);
+    defer b.discardSegment(&seg);
+    try std.testing.expectEqual(mark.code_len, b.code_len);
+    try std.testing.expectEqual(mark.atom_len, b.atom_len);
+    try std.testing.expectEqual(mark.reloc_len, b.reloc_len);
+    try std.testing.expectEqual(mark.source_len, b.source_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(usize, 0), seg.code.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.atoms.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.relocs.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.binds.len);
+    try std.testing.expectEqual(@as(usize, 0), seg.sources.len);
+
+    try b.emitOp(0xf1);
+    try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
+    try b.spliceSegment(&seg);
+    try std.testing.expectEqual(@as(u32, 2), b.code_len);
+    try std.testing.expectEqualSlices(u8, &.{ 0xf0, 0xf1 }, b.code[0..2]);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+
+    b.discardSegment(&seg);
+    b.discardSegment(&seg);
+}
+
+fn s2g4OomScript(allocator: std.mem.Allocator) !void {
+    var acct = core.memory.MemoryAccount.init(allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const atom_id = try table.internString("qcp1_s2g4_oom_atom");
+    defer table.free(atom_id);
+    const base_ref_count = table.refCount(atom_id).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    const label_c = try b.newLabel();
+    try b.bindLabel(label_c);
+    try b.emitOpU32(0x70, 0x12345678);
+    try b.emitAtomOpU8Owned(0x71, table.dup(atom_id), 0x9a);
+    try b.emitAtomOpU16Owned(0x72, table.dup(atom_id), 0xbcde);
+    const mark = b.snapshot();
+
+    const label_b = try b.newLabel();
+    try b.emitJump(0x80, label_b);
+    var jump_index: u8 = 0;
+    while (jump_index < 6) : (jump_index += 1) {
+        try b.emitJump(0x81 + jump_index, label_c);
+    }
+    try b.emitScopeRefOpOwned(0x90, table.dup(atom_id), label_c, 0x2468);
+    var atom_index: u8 = 0;
+    while (atom_index < 5) : (atom_index += 1) {
+        try b.emitAtomOpOwned(0xa0 + atom_index, table.dup(atom_id));
+    }
+    try b.bindLabel(label_b);
+    var marker_index: i32 = 0;
+    while (marker_index < 8) : (marker_index += 1) {
+        try b.addSourceMarker(100 + marker_index, 1);
+    }
+
+    try std.testing.expectEqual(@as(u32, 89), b.code_len);
+    try std.testing.expectEqual(@as(u32, 8), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 8), b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 8), b.source_len);
+
+    var seg: DetachedSegment = .{};
+    defer b.discardSegment(&seg);
+    seg = try b.detachTail(mark);
+    try std.testing.expectEqual(@as(usize, 71), seg.code.len);
+    try std.testing.expectEqual(@as(usize, 6), seg.atoms.len);
+    try std.testing.expectEqual(@as(usize, 8), seg.relocs.len);
+    try std.testing.expectEqual(@as(usize, 1), seg.binds.len);
+    try std.testing.expectEqual(@as(usize, 8), seg.sources.len);
+
+    var interim_index: u8 = 0;
+    while (interim_index < 40) : (interim_index += 1) {
+        try b.emitOp(0xc0 + interim_index);
+    }
+    try b.emitJump(0xe8, label_c);
+    try b.emitAtomOpOwned(0xe9, table.dup(atom_id));
+    try b.addSourceMarker(200, 1);
+
+    try b.spliceSegment(&seg);
+    try std.testing.expectEqual(@as(u32, 139), b.code_len);
+    try std.testing.expectEqual(@as(u32, 9), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 9), b.reloc_len);
+    try std.testing.expectEqual(@as(u32, 9), b.source_len);
+    try std.testing.expect(b.label_slots[label_b.index()].flags.bound);
+    try std.testing.expectEqual(@as(usize, 0), seg.code.len);
+
+    b.deinit();
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+}
+
+test "compiler_v2.builder: s2g4 allocation failure sweep balances detached atoms" {
+    try s2g4OomScript(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, s2g4OomScript, .{});
 }
 
 test "compiler_v2.builder: snapshot rollback restores chains, atoms, markers" {

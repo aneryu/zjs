@@ -4471,6 +4471,9 @@ pub const parser_core = struct {
 
             self.cur_func_stack = self.cur_func_stack.ptr[0..new_len];
             self.cur_func_stack[old_len] = fd;
+            if (v2_available and self.emit_v2 and fd.v2_builder == null) {
+                self.v2EnsureBuilderForFd(fd) catch return error.OutOfMemory;
+            }
         }
 
         /// Pop the current FunctionDef from the stack. Called when exiting
@@ -5933,17 +5936,35 @@ pub const parser_core = struct {
             // contains fclosure8. Keep parser output in the wide form until
             // resolve_labels shortens it after temp opcodes have been erased.
             if (self.emit_phase1_temp) {
-                try self.emitOpU32(opcode.op.fclosure, idx);
+                if (v2_available and self.emit_v2) {
+                    // qjs js_parse_function_decl2 (quickjs.c:36500): emit the
+                    // child closure with its parent constant-pool index.
+                    try v2FEmitOpU32(self, opcode.op.fclosure, idx);
+                } else {
+                    try self.emitOpU32(opcode.op.fclosure, idx);
+                }
                 return;
             }
-            try self.emitOpU8(opcode.op.fclosure8, idx);
+            if (v2_available and self.emit_v2) {
+                // qjs resolve_labels: the already-resolved short closure form
+                // keeps the same immediate child constant-pool index.
+                try v2FEmitOpU8(self, opcode.op.fclosure8, idx);
+            } else {
+                try self.emitOpU8(opcode.op.fclosure8, idx);
+            }
         }
 
         fn emitFClosure(self: *State, idx: u32) Error!void {
             if (idx < 256) {
                 try self.emitFClosure8(@intCast(idx));
             } else {
-                try self.emitOpU32(opcode.op.fclosure, idx);
+                if (v2_available and self.emit_v2) {
+                    // qjs js_parse_function_decl2 (quickjs.c:36500): large
+                    // constant-pool indices retain the wide closure operand.
+                    try v2FEmitOpU32(self, opcode.op.fclosure, idx);
+                } else {
+                    try self.emitOpU32(opcode.op.fclosure, idx);
+                }
             }
         }
 
@@ -6850,6 +6871,13 @@ pub const parser_core = struct {
             try self.v2Builder().emitOpU16(op_id, val);
         }
 
+        /// v2 mirror of `emitOpU32` (marker'd).
+        pub fn v2EmitOpU32(self: *State, op_id: u8, val: u32) compiler_v2.builder.Error!void {
+            const loc = self.currentSourcePosition();
+            try self.v2AddSourceMarker(loc.line_num, loc.col_num);
+            try self.v2Builder().emitOpU32(op_id, val);
+        }
+
         /// v2 mirror of the owned-atom emitters: marker first, then the
         /// atom-bearing opcode. Ownership of `atom_id` (one retain) transfers
         /// into the builder ledger even when the marker leg fails.
@@ -6861,6 +6889,19 @@ pub const parser_core = struct {
                 return err;
             };
             try v2b.emitAtomOpOwned(op_id, atom_id);
+        }
+
+        /// v2 mirror of `emitOpAtomU8` — marker first; ownership of `atom_id`
+        /// (one retain) transfers into the builder ledger even when the marker
+        /// leg fails (same contract as `v2EmitAtomOpOwned`).
+        pub fn v2EmitAtomOpU8Owned(self: *State, op_id: u8, atom_id: Atom, val: u8) compiler_v2.builder.Error!void {
+            const loc = self.currentSourcePosition();
+            const v2b = self.v2Builder();
+            v2b.addSourceMarker(@intCast(loc.line_num), @intCast(loc.col_num)) catch |err| {
+                v2b.atoms.free(atom_id);
+                return err;
+            };
+            try v2b.emitAtomOpU8Owned(op_id, atom_id, val);
         }
 
         /// v2 mirror of the jump emitters: marker first, then the jump holding
@@ -6886,17 +6927,24 @@ pub const parser_core = struct {
             v2b.invalidateLastOpcode();
         }
 
-        /// QCP-1 stage 2P TEST HOOK: begin v2 emission for the current
-        /// function, allocating its Builder on first use. Stage 5 replaces
-        /// this with the compile()-entry v2/dual wiring (dual parses twice).
-        pub fn beginV2EmissionForTest(self: *State) compiler_v2.builder.Error!void {
-            std.debug.assert(v2_available);
-            const fd = self.cur_func();
+        /// QCP-1 S2-G4: give `fd` its v2 Builder (idempotent). Every FunctionDef
+        /// emitted into during a v2 parse owns one; stage 5 replaces the
+        /// test-entry wiring, not this per-fd provisioning.
+        pub fn v2EnsureBuilderForFd(self: *State, fd: *function_def_mod.FunctionDef) compiler_v2.builder.Error!void {
+            _ = self;
             if (fd.v2_builder == null) {
                 const v2b = try fd.memory.create(compiler_v2.Builder);
                 v2b.* = compiler_v2.Builder.init(fd.memory, fd.atoms);
                 fd.v2_builder = v2b;
             }
+        }
+
+        /// QCP-1 stage 2P TEST HOOK: begin v2 emission for the current
+        /// function, allocating its Builder on first use. Stage 5 replaces
+        /// this with the compile()-entry v2/dual wiring (dual parses twice).
+        pub fn beginV2EmissionForTest(self: *State) compiler_v2.builder.Error!void {
+            std.debug.assert(v2_available);
+            try self.v2EnsureBuilderForFd(self.cur_func());
             self.emit_v2 = true;
         }
         // ===== end QCP-1 stage 2P veneer =====
@@ -7268,16 +7316,28 @@ pub const parser_core = struct {
         const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
         try parseAssignExpr2(s, rhs_flags);
         if (assign_opcode) |op_byte| {
-            const emission_snapshot = s.takeEmissionSnapshot();
-            errdefer s.rollbackEmission(emission_snapshot);
-            _ = try s.emitSourcePosAndLoc(operator_source.line_num, operator_source.col_num);
-            try s.emitOpNoSource(op_byte);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_assign_expr2 (quickjs.c:28218-28219): the
+                // compound op is pinned to the operator's source event.
+                try v2FEmitOpAt(s, op_byte, operator_source.line_num, operator_source.col_num);
+            } else {
+                const emission_snapshot = s.takeEmissionSnapshot();
+                errdefer s.rollbackEmission(emission_snapshot);
+                _ = try s.emitSourcePosAndLoc(operator_source.line_num, operator_source.col_num);
+                try s.emitOpNoSource(op_byte);
+            }
         }
 
         if (direct_lhs_atom != null and lvalue.owns_name and
             lvalue.name == direct_lhs_atom.? and s.last_anonymous_function_expr)
         {
-            try s.emitOpAtom(opcode.op.set_name, lvalue.name);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_assign_expr2 / set_object_name
+                // (quickjs.c:28207-28210,24918-24929): retain the inferred name.
+                try v2FEmitAtomOpOwned(s, opcode.op.set_name, s.function.atoms.dup(lvalue.name));
+            } else {
+                try s.emitOpAtom(opcode.op.set_name, lvalue.name);
+            }
             s.last_anonymous_function_expr = false;
         } else if (s.last_anonymous_function_expr) {
             s.last_anonymous_function_expr = false;
@@ -7370,6 +7430,9 @@ pub const parser_core = struct {
         name: Atom = atom_module.null_atom,
         owns_name: bool = false,
         label_offset: ?usize = null,
+        /// QCP-1 S2-G4: v2 twin of `label_offset` — the scope_make_ref aux label
+        /// travels as a LabelId; put binds it (qjs put_lvalue emit_label).
+        v2_ref_label: ?compiler_v2.LabelId = null,
         depth: u8,
 
         fn deinit(self: *LValue, s: *State) void {
@@ -7472,6 +7535,7 @@ pub const parser_core = struct {
     /// QuickJS `get_lvalue`: the emitter-maintained last opcode is the sole
     /// target fact. No token, source-tail, or byte-length classifier is used.
     fn getLValue(s: *State, keep: bool) Error!LValue {
+        if (v2_available and s.emit_v2) return v2GetLValue(s, keep);
         const fd = s.cur_func();
         if (fd.last_opcode_pos < 0) return Error.InvalidAssignmentTarget;
         const pos: usize = @intCast(fd.last_opcode_pos);
@@ -7575,8 +7639,159 @@ pub const parser_core = struct {
         return lvalue;
     }
 
+    /// QCP-1 S2-G4: v2 twin of `reemitLValueGetterAssumeCapacity` (all NoSource).
+    fn v2ReemitLValueGetter(s: *State, lvalue: *const LValue) Error!void {
+        switch (lvalue.opcode) {
+            .scope_var => {
+                std.debug.assert(s.emit_phase1_temp);
+                // qjs get_lvalue (quickjs.c:26009-26013): re-emit the retained
+                // scope getter while preserving the assignment target.
+                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_get_var, s.function.atoms.dup(lvalue.name), lvalue.scope);
+            },
+            .field => {
+                // qjs get_lvalue (quickjs.c:26015-26018): get_field2 preserves
+                // the base object beneath the loaded value.
+                try v2FEmitAtomOpOwnedNoSource(s, opcode.op.get_field2, s.function.atoms.dup(lvalue.name));
+            },
+            .private_field => {
+                std.debug.assert(s.emit_phase1_temp);
+                // qjs get_lvalue (quickjs.c:26019-26023): the private-field
+                // getter retains its base and phase-1 scope operand.
+                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_get_private_field2, s.function.atoms.dup(lvalue.name), lvalue.scope);
+            },
+            .array_element => {
+                // qjs get_lvalue (quickjs.c:26024-26026): get_array_el3 keeps
+                // both base and property key for the later setter.
+                try v2FEmitOpNoSource(s, opcode.op.get_array_el3);
+            },
+            .super_value => {
+                // qjs get_lvalue (quickjs.c:26027-26030): preserve the super
+                // receiver/base/key triple around the value load.
+                try v2FEmitOpNoSource(s, opcode.op.to_propkey);
+                try v2FEmitOpNoSource(s, opcode.op.dup3);
+                try v2FEmitOpNoSource(s, opcode.op.get_super_value);
+            },
+            .ref_value => {
+                // qjs get_lvalue (quickjs.c:26007-26008): load through the
+                // with-scope reference while retaining the ref pair.
+                try v2FEmitOpNoSource(s, opcode.op.get_ref_value);
+            },
+        }
+    }
+
+    /// QCP-1 S2-G4: v2 twin of `getLValue` — qjs get_lvalue (quickjs.c:25933)
+    /// over the v2 temp stream. Builder.last_opcode_pos is the sole target fact;
+    /// getter removal is the qjs `fd->byte_code.size = fd->last_opcode_pos`
+    /// rewind (Builder.truncateTail after the ledger take-back).
+    fn v2GetLValue(s: *State, keep: bool) Error!LValue {
+        const v2b = s.v2Builder();
+        if (v2b.last_opcode_pos < 0) return Error.InvalidAssignmentTarget;
+        const pos: u32 = @intCast(v2b.last_opcode_pos);
+        const op_id = v2b.code[pos];
+        const fd = s.cur_func();
+
+        var lvalue: LValue = undefined;
+        var lvalue_initialized = false;
+        errdefer if (lvalue_initialized) lvalue.deinit(s);
+        switch (op_id) {
+            opcode.op.scope_get_var => {
+                // qjs get_lvalue (quickjs.c:25948-26013): decode the phase-1
+                // scope getter and retain its atom across the rewind.
+                if (!s.emit_phase1_temp or pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
+                const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                const scope = std.mem.readInt(u16, v2b.code[pos + 5 ..][0..2], .little);
+                if ((s.is_strict or fd.is_strict_mode) and
+                    (atomNameEquals(s, name, "eval") or atomNameEquals(s, name, "arguments")))
+                {
+                    return Error.InvalidAssignmentTarget;
+                }
+                if (name == atom_this or name == atom_new_target) return Error.InvalidAssignmentTarget;
+                if (v2b.atom_len == 0 or v2b.atom_operands[v2b.atom_len - 1] != name) {
+                    return Error.UnexpectedToken;
+                }
+                try s.ensureClosureVar(name);
+                const with_scope = hasWithScopeFrom(fd, scope);
+                const owned_name = try v2FTakeLastAtomOwned(s);
+                v2b.truncateTail(pos);
+                lvalue = .{
+                    .opcode = .scope_var,
+                    .scope = scope,
+                    .name = owned_name,
+                    .owns_name = true,
+                    .depth = 0,
+                };
+                lvalue_initialized = true;
+                if (with_scope) {
+                    lvalue.opcode = .ref_value;
+                    lvalue.depth = 2;
+                    // qjs get_lvalue (quickjs.c:26000-26006): scope_make_ref carries the label
+                    // as an aux operand; update_label(fd, label, 1) is the emitter's ref_count
+                    // bump. The operand receives a borrowed duplicate; the descriptor keeps the
+                    // retained atom (legacy emitScopeMakeRefForLValueAssumeCapacity contract).
+                    const ref_label = try v2FNewLabel(s);
+                    try v2FEmitScopeRefOp(s, opcode.op.scope_make_ref, s.function.atoms.dup(owned_name), ref_label, scope);
+                    lvalue.v2_ref_label = ref_label;
+                }
+            },
+            opcode.op.get_field => {
+                // qjs get_lvalue (quickjs.c:25963-25966,26015-26018): take the
+                // field-name retain back before removing the getter.
+                if (pos + 5 != v2b.code_len) return Error.InvalidAssignmentTarget;
+                const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                if (v2b.atom_len == 0 or v2b.atom_operands[v2b.atom_len - 1] != name) {
+                    return Error.UnexpectedToken;
+                }
+                const owned_name = try v2FTakeLastAtomOwned(s);
+                v2b.truncateTail(pos);
+                lvalue = .{ .opcode = .field, .name = owned_name, .owns_name = true, .depth = 1 };
+                lvalue_initialized = true;
+            },
+            opcode.op.scope_get_private_field => {
+                // qjs get_lvalue (quickjs.c:25967-25971,26019-26023): retain
+                // the private name and scope across the getter rewind.
+                if (!s.emit_phase1_temp or pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
+                const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                const scope = std.mem.readInt(u16, v2b.code[pos + 5 ..][0..2], .little);
+                if (v2b.atom_len == 0 or v2b.atom_operands[v2b.atom_len - 1] != name) {
+                    return Error.UnexpectedToken;
+                }
+                const owned_name = try v2FTakeLastAtomOwned(s);
+                v2b.truncateTail(pos);
+                lvalue = .{
+                    .opcode = .private_field,
+                    .scope = scope,
+                    .name = owned_name,
+                    .owns_name = true,
+                    .depth = 1,
+                };
+                lvalue_initialized = true;
+            },
+            opcode.op.get_array_el => {
+                // qjs get_lvalue (quickjs.c:25972-25974,26024-26026): remove
+                // the one-byte array getter; its base/key remain on the stack.
+                if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
+                v2b.truncateTail(pos);
+                lvalue = .{ .opcode = .array_element, .depth = 2 };
+                lvalue_initialized = true;
+            },
+            opcode.op.get_super_value => {
+                // qjs get_lvalue (quickjs.c:25975-25977,26027-26030): remove
+                // the super getter and preserve its three-value target depth.
+                if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
+                v2b.truncateTail(pos);
+                lvalue = .{ .opcode = .super_value, .depth = 3 };
+                lvalue_initialized = true;
+            },
+            else => return Error.InvalidAssignmentTarget,
+        }
+
+        if (keep) try v2ReemitLValueGetter(s, &lvalue);
+        return lvalue;
+    }
+
     /// QuickJS `put_lvalue`, including the five stack-preservation modes.
     fn putLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
+        if (v2_available and s.emit_v2) return v2PutLValue(s, lvalue, mode);
         const shuffle_op: ?u8 = switch (lvalue.opcode) {
             .scope_var => switch (mode) {
                 .keep_top => opcode.op.dup,
@@ -7675,6 +7890,96 @@ pub const parser_core = struct {
         }
         if (ref_label_target) |target| {
             try s.publishParserLabelTarget(lvalue.label_offset.?, target);
+        }
+    }
+
+    /// QCP-1 S2-G4: v2 twin of QuickJS `put_lvalue` (quickjs.c:26077), with
+    /// LabelId binding replacing the legacy deferred absolute-target publish.
+    fn v2PutLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
+        const shuffle_op: ?u8 = switch (lvalue.opcode) {
+            .scope_var => switch (mode) {
+                .keep_top => opcode.op.dup,
+                .no_keep, .no_keep_depth, .keep_second, .no_keep_bottom => null,
+            },
+            .field, .private_field => switch (mode) {
+                .no_keep, .no_keep_depth => null,
+                .keep_top => opcode.op.insert2,
+                .keep_second => opcode.op.perm3,
+                .no_keep_bottom => opcode.op.swap,
+            },
+            .array_element, .ref_value => switch (mode) {
+                .no_keep => opcode.op.nop,
+                .no_keep_depth => null,
+                .keep_top => opcode.op.insert3,
+                .keep_second => opcode.op.perm4,
+                .no_keep_bottom => opcode.op.rot3l,
+            },
+            .super_value => switch (mode) {
+                .no_keep, .no_keep_depth => null,
+                .keep_top => opcode.op.insert4,
+                .keep_second => opcode.op.perm5,
+                .no_keep_bottom => opcode.op.rot4l,
+            },
+        };
+
+        switch (lvalue.opcode) {
+            .scope_var => if (!s.emit_phase1_temp or !lvalue.owns_name) return Error.InvalidAssignmentTarget,
+            .field => if (!lvalue.owns_name) return Error.InvalidAssignmentTarget,
+            .private_field => if (!s.emit_phase1_temp or !lvalue.owns_name) return Error.InvalidAssignmentTarget,
+            .ref_value => {
+                if (!lvalue.owns_name) return Error.InvalidAssignmentTarget;
+                if (lvalue.v2_ref_label == null) return Error.UnexpectedToken;
+            },
+            .array_element, .super_value => {},
+        }
+
+        if (lvalue.opcode == .ref_value) {
+            // qjs put_lvalue (quickjs.c:26118-26123): JS_FreeAtom(name) then
+            // emit_label(label) — the ref target binds here, before the mode
+            // shuffle; the bind is the provenance boundary the legacy arm expressed
+            // as invalidateLastOpcode + deferred absolute publish.
+            s.function.atoms.free(lvalue.name);
+            lvalue.owns_name = false;
+            try v2FBindLabel(s, lvalue.v2_ref_label.?);
+        }
+
+        // qjs put_lvalue (quickjs.c:26081-26161): apply the selected stack
+        // preservation shuffle before emitting the setter.
+        if (shuffle_op) |op_id| try v2FEmitOpNoSource(s, op_id);
+
+        switch (lvalue.opcode) {
+            .scope_var => {
+                // qjs put_lvalue (quickjs.c:26167-26170): transfer the retained
+                // binding atom into scope_put_var's phase-1 operand ledger.
+                lvalue.owns_name = false;
+                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_put_var, lvalue.name, lvalue.scope);
+            },
+            .field => {
+                // qjs put_lvalue (quickjs.c:26172-26175): transfer the retained
+                // field-name atom into put_field.
+                lvalue.owns_name = false;
+                try v2FEmitAtomOpOwnedNoSource(s, opcode.op.put_field, lvalue.name);
+            },
+            .private_field => {
+                // qjs put_lvalue (quickjs.c:26176-26179): transfer the retained
+                // private name and scope into the phase-1 setter.
+                lvalue.owns_name = false;
+                try v2FEmitAtomOpU16OwnedNoSource(s, opcode.op.scope_put_private_field, lvalue.name, lvalue.scope);
+            },
+            .array_element => {
+                // qjs put_lvalue (quickjs.c:26181-26183): consume base/key/value.
+                try v2FEmitOpNoSource(s, opcode.op.put_array_el);
+            },
+            .ref_value => {
+                // qjs put_lvalue (quickjs.c:26184-26186): store through the
+                // reference pair whose label was bound above.
+                try v2FEmitOpNoSource(s, opcode.op.put_ref_value);
+            },
+            .super_value => {
+                // qjs put_lvalue (quickjs.c:26187-26189): store through the
+                // preserved super receiver/base/key triple.
+                try v2FEmitOpNoSource(s, opcode.op.put_super_value);
+            },
         }
     }
 
@@ -8164,15 +8469,27 @@ pub const parser_core = struct {
             try parseUnary(s, .{ .in_accepted = flags.in_accepted });
             var lvalue = try getLValue(s, true);
             defer lvalue.deinit(s);
-            const emission_snapshot = s.takeEmissionSnapshot();
-            errdefer s.rollbackEmission(emission_snapshot);
-            _ = try s.emitSourcePosAndLoc(operator_source.line_num, operator_source.col_num);
-            try s.emitOpNoSource(update_op);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_unary (quickjs.c:27648-27649): prefix update is
+                // pinned to the operator's source event.
+                try v2FEmitOpAt(s, update_op, operator_source.line_num, operator_source.col_num);
+            } else {
+                const emission_snapshot = s.takeEmissionSnapshot();
+                errdefer s.rollbackEmission(emission_snapshot);
+                _ = try s.emitSourcePosAndLoc(operator_source.line_num, operator_source.col_num);
+                try s.emitOpNoSource(update_op);
+            }
             try putLValue(s, &lvalue, .keep_top);
             if (flags.pow_allowed and s.peekKind() == tok.TOK_POW) {
                 try s.advance();
                 try parseUnary(s, ParseFlags{ .in_accepted = flags.in_accepted, .pow_allowed = true });
-                try s.emitOp(opcode.op.pow);
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_unary (quickjs.c:27720-27726): emit the
+                    // exponentiation tail after its right operand.
+                    try v2FEmitOp(s, opcode.op.pow);
+                } else {
+                    try s.emitOp(opcode.op.pow);
+                }
             }
             return;
         }
@@ -8742,10 +9059,16 @@ pub const parser_core = struct {
         const update_op: u8 = if (k == tok.TOK_INC) opcode.op.post_inc else opcode.op.post_dec;
         try s.advance(); // consume `++` or `--`
 
-        const emission_snapshot = s.takeEmissionSnapshot();
-        errdefer s.rollbackEmission(emission_snapshot);
-        _ = try s.emitSourcePosAndLoc(operator_source.line_num, operator_source.col_num);
-        try s.emitOpNoSource(update_op);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_unary postfix arm (quickjs.c:27700-27702): postfix
+            // update is pinned to the operator's source event.
+            try v2FEmitOpAt(s, update_op, operator_source.line_num, operator_source.col_num);
+        } else {
+            const emission_snapshot = s.takeEmissionSnapshot();
+            errdefer s.rollbackEmission(emission_snapshot);
+            _ = try s.emitSourcePosAndLoc(operator_source.line_num, operator_source.col_num);
+            try s.emitOpNoSource(update_op);
+        }
         try putLValue(s, &lvalue, .keep_second);
     }
 
@@ -8897,13 +9220,26 @@ pub const parser_core = struct {
     /// `super()` receives the ordinary threaded captures.
     fn emitClassFieldInitCall(s: *State) Error!void {
         try s.emitScopeGetVar(atom_class_fields_init);
-        try s.emitOp(opcode.op.dup);
-        const skip_call = try emitForwardJump(s, opcode.op.if_false);
-        try s.emitScopeGetVar(atom_this);
-        try s.emitOp(opcode.op.swap);
-        try s.emitOpU16(opcode.op.call_method, 0);
-        try patchForwardJump(s, skip_call);
-        try s.emitOp(opcode.op.drop);
+        if (v2_available and s.emit_v2) {
+            // qjs emit_class_field_init (quickjs.c:25184-25207): the skip
+            // target is born as a LabelId bound at the shared drop.
+            try v2FEmitOp(s, opcode.op.dup);
+            const skip_call = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.if_false, skip_call);
+            try s.emitScopeGetVar(atom_this);
+            try v2FEmitOp(s, opcode.op.swap);
+            try v2FEmitOpU16(s, opcode.op.call_method, 0);
+            try v2FBindLabel(s, skip_call);
+            try v2FEmitOp(s, opcode.op.drop);
+        } else {
+            try s.emitOp(opcode.op.dup);
+            const skip_call = try emitForwardJump(s, opcode.op.if_false);
+            try s.emitScopeGetVar(atom_this);
+            try s.emitOp(opcode.op.swap);
+            try s.emitOpU16(opcode.op.call_method, 0);
+            try patchForwardJump(s, skip_call);
+            try s.emitOp(opcode.op.drop);
+        }
     }
 
     fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
@@ -10508,10 +10844,44 @@ pub const parser_core = struct {
         s.v2Builder().emitOp(op_id) catch |err| return v2MapBuilderError(err);
     }
 
+    /// v2 mirror of the `emitSourcePosAndLoc` + `emitOpNoSource` pair: one opcode
+    /// pinned to an explicit source event (assignment/update operators).
+    fn v2FEmitOpAt(s: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
+        s.v2AddSourceMarker(line_num, col_num) catch |err| return v2MapBuilderError(err);
+        s.v2Builder().emitOp(op_id) catch |err| return v2MapBuilderError(err);
+    }
+
     /// v2 mirror of `State.emitOpAtom` — ownership of `atom_id` (one retain)
     /// transfers into the builder ledger (marker'd).
     fn v2FEmitAtomOpOwned(s: *State, op_id: u8, atom_id: Atom) Error!void {
         s.v2EmitAtomOpOwned(op_id, atom_id) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `emitOpAtomNoSource` — owned-atom sink, no marker.
+    fn v2FEmitAtomOpOwnedNoSource(s: *State, op_id: u8, atom_id: Atom) Error!void {
+        s.v2Builder().emitAtomOpOwned(op_id, atom_id) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `emitOpAtomU16NoSource` — owned-atom sink, no marker.
+    fn v2FEmitAtomOpU16OwnedNoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
+        s.v2Builder().emitAtomOpU16Owned(op_id, atom_id, val) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 scope-ref emission (qjs get_lvalue OP_scope_make_ref): owned atom,
+    /// aux32 LabelId operand, scope operand; no marker (legacy emits it NoSource).
+    fn v2FEmitScopeRefOp(s: *State, op_id: u8, atom_id: Atom, label: compiler_v2.LabelId, scope: u16) Error!void {
+        s.v2Builder().emitScopeRefOpOwned(op_id, atom_id, label, scope) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 ledger take-back for the getter rewind.
+    fn v2FTakeLastAtomOwned(s: *State) Error!Atom {
+        return s.v2Builder().takeLastAtomOwned() catch |err| v2MapBuilderError(err);
+    }
+
+    /// v2 mirror of `State.emitOpAtomU8` — ownership of `atom_id` (one
+    /// retain) transfers into the builder ledger (marker'd).
+    fn v2FEmitAtomOpU8Owned(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
+        s.v2EmitAtomOpU8Owned(op_id, atom_id, val) catch |err| return v2MapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU8` (marker'd).
@@ -10524,9 +10894,23 @@ pub const parser_core = struct {
         s.v2EmitOpU16(op_id, val) catch |err| return v2MapBuilderError(err);
     }
 
+    /// v2 mirror of `State.emitOpU32` (marker'd).
+    fn v2FEmitOpU32(s: *State, op_id: u8, val: u32) Error!void {
+        s.v2EmitOpU32(op_id, val) catch |err| return v2MapBuilderError(err);
+    }
+
     /// v2 mirror of `State.emitOpU16NoSource`.
     fn v2FEmitOpU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
         s.v2Builder().emitOpU16(op_id, val) catch |err| return v2MapBuilderError(err);
+    }
+
+    /// v2 detach/splice facade over the Builder segment machinery.
+    fn v2FDetachTail(s: *State, mark: compiler_v2.builder.Snapshot) Error!compiler_v2.builder.DetachedSegment {
+        return s.v2Builder().detachTail(mark) catch |err| v2MapBuilderError(err);
+    }
+
+    fn v2FSpliceSegment(s: *State, seg: *compiler_v2.builder.DetachedSegment) Error!void {
+        s.v2Builder().spliceSegment(seg) catch |err| return v2MapBuilderError(err);
     }
 
     /// v2 mirror of `patchForwardJump` / `emitParserLabelNoSource`: bind at the
@@ -12575,18 +12959,26 @@ pub const parser_core = struct {
                     // for-head, then move its emitted bytes after the body.
                     const update_start = s.currentCodeLen();
                     const update_atom_start = s.currentAtomOperandLen();
+                    var v2_update_mark: compiler_v2.builder.Snapshot = undefined;
+                    if (v2_available and s.emit_v2) v2_update_mark = s.v2Builder().snapshot();
                     if (s.peekKind() != ')') {
-                        // QCP-1 S2-G2: the for-update detach/splice is stage G4; fail loud under v2.
-                        std.debug.assert(!(v2_available and s.emit_v2));
                         // Phase 1 keeps the normal expression result and emits
                         // the discard explicitly, like QuickJS. The final pass
                         // owns the `post_inc; put; drop` -> `inc_loc` rewrite.
                         try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = false });
-                        try s.emitOp(opcode.op.drop);
+                        if (v2_available and s.emit_v2) {
+                            // qjs TOK_FOR: discard the update expression value
+                            // before moving the complete update block.
+                            try v2FEmitOp(s, opcode.op.drop);
+                        } else {
+                            try s.emitOp(opcode.op.drop);
+                        }
                     }
                     const update_code = s.currentCode()[update_start..];
                     const update_atoms = s.currentAtomOperands()[update_atom_start..];
                     var saved_update: []u8 = &.{};
+                    var v2_update_seg: compiler_v2.builder.DetachedSegment = .{};
+                    defer if (v2_available and s.emit_v2) s.v2Builder().discardSegment(&v2_update_seg);
                     if (update_code.len != 0) {
                         saved_update = try s.function.memory.alloc(u8, update_code.len);
                         @memcpy(saved_update, update_code);
@@ -12604,8 +12996,12 @@ pub const parser_core = struct {
                         s.function.memory.free(Atom, saved_update_atoms);
                     };
                     if (v2_available and s.emit_v2) {
-                        // QCP-1 S2-G2: nothing was detached (G4 owns the update splice).
-                        std.debug.assert(update_code.len == 0);
+                        // qjs TOK_FOR: the update block is moved after the body. v2 detach keeps
+                        // LabelIds intact — only slot offsets shift at the splice. An empty
+                        // update detaches nothing (S2-G2 byte-shape preserved).
+                        if (s.v2Builder().code_len != v2_update_mark.code_len) {
+                            v2_update_seg = try v2FDetachTail(s, v2_update_mark);
+                        }
                     } else {
                         try s.truncateCode(update_start);
                         try s.truncateAtomOperands(update_atom_start);
@@ -12624,7 +13020,11 @@ pub const parser_core = struct {
                     try s.closeScopes(s.scope_level, block_scope_level);
                     try patchContinueFrame(s);
                     if (label_frame) |idx| try s.patchLabelContinues(idx);
-                    if (saved_update.len != 0) {
+                    if (v2_available and s.emit_v2) {
+                        // qjs TOK_FOR: append the detached update after the
+                        // body and patched continue exits.
+                        if (v2_update_seg.code.len != 0) try v2FSpliceSegment(s, &v2_update_seg);
+                    } else if (saved_update.len != 0) {
                         try s.appendMovedCodeWithAtoms(saved_update, saved_update_atoms, update_start);
                     }
 
@@ -15451,7 +15851,13 @@ pub const parser_core = struct {
         // contains super(). Keeping it out of the indexed super lowering is
         // required now that all super calls use phase-1 scope operands.
         if (capture_child and (func_kind == .class_constructor or func_kind == .derived_class_constructor)) {
-            try s.emitOp(opcode.op.check_ctor);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_function_decl2: OP_check_ctor guards the explicit
+                // constructor entry before parameter initializers.
+                try v2FEmitOp(s, opcode.op.check_ctor);
+            } else {
+                try s.emitOp(opcode.op.check_ctor);
+            }
         }
         if (capture_child and func_kind == .class_constructor) {
             try emitClassFieldInitCall(s);
@@ -17131,8 +17537,22 @@ pub const parser_core = struct {
                 const kind: ParseFunctionKind = if (is_getter) .get else .set;
                 try parseClassElementFunction(s, kind, element_source_start);
                 try markPrivateBrandNeeded(s);
-                if (s.is_static) try s.emitOp(opcode.op.perm3);
-                try s.emitOp(opcode.op.set_home_object);
+                if (s.is_static) {
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: rotate the static class stack
+                        // around a private accessor closure.
+                        try v2FEmitOp(s, opcode.op.perm3);
+                    } else {
+                        try s.emitOp(opcode.op.perm3);
+                    }
+                }
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: private accessors retain the class as
+                    // their home object for super and brand checks.
+                    try v2FEmitOp(s, opcode.op.set_home_object);
+                } else {
+                    try s.emitOp(opcode.op.set_home_object);
+                }
                 if (is_getter) {
                     try s.emitScopePutVarInit(private_atom);
                 } else {
@@ -17141,7 +17561,15 @@ pub const parser_core = struct {
                     _ = try addPrivateClassBinding(s, setter_atom, .private_setter);
                     try s.emitScopePutVarInit(setter_atom);
                 }
-                if (s.is_static) try s.emitOp(opcode.op.swap);
+                if (s.is_static) {
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: restore the static class stack
+                        // after storing the private accessor binding.
+                        try v2FEmitOp(s, opcode.op.swap);
+                    } else {
+                        try s.emitOp(opcode.op.swap);
+                    }
+                }
             } else if (s.peekKind() == '[') {
                 try emitClassComputedMethod(s, if (is_getter) .get else .set, if (is_getter) 1 else 2, element_source_start);
             } else {
@@ -17157,9 +17585,31 @@ pub const parser_core = struct {
                 // Parse parameters with proper function kind for getter/setter
                 const kind: ParseFunctionKind = if (is_getter) .get else .set;
                 try parseClassElementFunction(s, kind, element_source_start);
-                if (s.is_static) try s.emitOp(opcode.op.perm3);
-                try s.emitOpAtomU8(opcode.op.define_method, prop_atom, if (is_getter) 1 else 2);
-                if (s.is_static) try s.emitOp(opcode.op.swap);
+                if (s.is_static) {
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: rotate the static class stack
+                        // before defining a named accessor.
+                        try v2FEmitOp(s, opcode.op.perm3);
+                    } else {
+                        try s.emitOp(opcode.op.perm3);
+                    }
+                }
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: define a named getter/setter with
+                    // OP_DEFINE_METHOD_GETTER/SETTER flags.
+                    try v2FEmitAtomOpU8Owned(s, opcode.op.define_method, s.function.atoms.dup(prop_atom), if (is_getter) 1 else 2);
+                } else {
+                    try s.emitOpAtomU8(opcode.op.define_method, prop_atom, if (is_getter) 1 else 2);
+                }
+                if (s.is_static) {
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: restore the static class stack
+                        // after defining the accessor.
+                        try v2FEmitOp(s, opcode.op.swap);
+                    } else {
+                        try s.emitOp(opcode.op.swap);
+                    }
+                }
             }
             return;
         }
@@ -17176,11 +17626,39 @@ pub const parser_core = struct {
                 try parseClassElementFunction(s, method_kind_override orelse .method, element_source_start);
                 _ = try addPrivateClassBinding(s, private_atom, .private_method);
                 try markPrivateBrandNeeded(s);
-                if (s.is_static) try s.emitOp(opcode.op.perm3);
-                try s.emitOp(opcode.op.set_home_object);
-                try s.emitOpAtom(opcode.op.set_name, private_atom);
+                if (s.is_static) {
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: rotate the static class stack
+                        // around a private method closure.
+                        try v2FEmitOp(s, opcode.op.perm3);
+                    } else {
+                        try s.emitOp(opcode.op.perm3);
+                    }
+                }
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: private methods need the class home
+                    // object before their lexical binding is initialized.
+                    try v2FEmitOp(s, opcode.op.set_home_object);
+                } else {
+                    try s.emitOp(opcode.op.set_home_object);
+                }
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: give the private method closure its
+                    // private-symbol display name.
+                    try v2FEmitAtomOpOwned(s, opcode.op.set_name, s.function.atoms.dup(private_atom));
+                } else {
+                    try s.emitOpAtom(opcode.op.set_name, private_atom);
+                }
                 try s.emitScopePutVarInit(private_atom);
-                if (s.is_static) try s.emitOp(opcode.op.swap);
+                if (s.is_static) {
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: restore the static class stack
+                        // after storing the private method.
+                        try v2FEmitOp(s, opcode.op.swap);
+                    } else {
+                        try s.emitOp(opcode.op.swap);
+                    }
+                }
                 if (s.peekKind() == ';') try s.advance();
                 return;
             } else if (s.peekKind() == '=') {
@@ -17236,6 +17714,14 @@ pub const parser_core = struct {
                 }
                 const element_code_start = s.currentCodeLen();
                 const element_atom_start = s.currentAtomOperandLen();
+                var v2_ctor_snap: compiler_v2.builder.Snapshot = undefined;
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: the explicit constructor's closure expression is
+                    // discarded — the class references the child through push_const. Builder
+                    // snapshot taken BEFORE the emission it may roll back (no boundary bind
+                    // is pending here).
+                    v2_ctor_snap = s.v2Builder().snapshot();
+                }
                 // Parse parameters with proper function kind for constructor/method
                 const kind: ParseFunctionKind = if (is_constructor)
                     if (s.class_has_extends) .derived_class_constructor else .class_constructor
@@ -17244,17 +17730,45 @@ pub const parser_core = struct {
                 try parseClassElementFunction(s, kind, element_source_start);
                 if (is_constructor) {
                     if (s.last_function_child_index) |child_index| {
-                        try s.truncateCode(element_code_start);
-                        try s.truncateAtomOperands(element_atom_start);
+                        if (v2_available and s.emit_v2) {
+                            // qjs js_parse_class: discard the constructor's
+                            // ordinary fclosure expression from the parent.
+                            s.v2Builder().rollback(v2_ctor_snap);
+                        } else {
+                            try s.truncateCode(element_code_start);
+                            try s.truncateAtomOperands(element_atom_start);
+                        }
                         const cpool_idx = s.cur_func().child_list[child_index].parent_cpool_idx;
                         if (cpool_idx < 0 or cpool_idx > std.math.maxInt(u16)) return Error.UnexpectedToken;
                         s.class_constructor_cpool_idx = @intCast(cpool_idx);
                     }
                     s.in_constructor = saved_in_constructor;
                 } else {
-                    if (s.is_static) try s.emitOp(opcode.op.perm3);
-                    try s.emitOpAtomU8(opcode.op.define_method, prop_atom, 0);
-                    if (s.is_static) try s.emitOp(opcode.op.swap);
+                    if (s.is_static) {
+                        if (v2_available and s.emit_v2) {
+                            // qjs js_parse_class: rotate the static class stack
+                            // before defining a named method.
+                            try v2FEmitOp(s, opcode.op.perm3);
+                        } else {
+                            try s.emitOp(opcode.op.perm3);
+                        }
+                    }
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: define an ordinary named class
+                        // method with method flag zero.
+                        try v2FEmitAtomOpU8Owned(s, opcode.op.define_method, s.function.atoms.dup(prop_atom), 0);
+                    } else {
+                        try s.emitOpAtomU8(opcode.op.define_method, prop_atom, 0);
+                    }
+                    if (s.is_static) {
+                        if (v2_available and s.emit_v2) {
+                            // qjs js_parse_class: restore the static class
+                            // stack after defining the method.
+                            try v2FEmitOp(s, opcode.op.swap);
+                        } else {
+                            try s.emitOp(opcode.op.swap);
+                        }
+                    }
                 }
                 // Optional ASI semicolon after method
                 if (s.peekKind() == ';') try s.advance();
@@ -17340,7 +17854,13 @@ pub const parser_core = struct {
 
     fn addPrivateClassFieldBinding(s: *State, atom_id: Atom) Error!void {
         _ = try addPrivateClassBinding(s, atom_id, .private_field);
-        try s.emitOpAtom(opcode.op.private_symbol, atom_id);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: materialize the private field's unique
+            // symbol before initializing its lexical binding.
+            try v2FEmitAtomOpOwned(s, opcode.op.private_symbol, s.function.atoms.dup(atom_id));
+        } else {
+            try s.emitOpAtom(opcode.op.private_symbol, atom_id);
+        }
         try s.emitScopePutVarInit(atom_id);
     }
 
@@ -17376,13 +17896,25 @@ pub const parser_core = struct {
         const parent = s.cur_func();
         if (child_index >= parent.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent.child_list[child_index];
-        if (init_fd.byte_code.len == 0) return Error.UnexpectedToken;
-        switch (init_fd.byte_code[0]) {
-            opcode.op.push_false => init_fd.byte_code[0] = opcode.op.push_true,
-            // Multiple private methods/accessors share the same initializer
-            // prologue. Patching it is deliberately idempotent.
-            opcode.op.push_true => {},
-            else => return Error.UnexpectedToken,
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: enable the dormant instance-brand prologue
+            // after the first private method or accessor requires it.
+            const v2b = init_fd.v2_builder orelse return Error.UnexpectedToken;
+            if (v2b.code_len == 0) return Error.UnexpectedToken;
+            switch (v2b.code[0]) {
+                opcode.op.push_false => v2b.code[0] = opcode.op.push_true,
+                opcode.op.push_true => {},
+                else => return Error.UnexpectedToken,
+            }
+        } else {
+            if (init_fd.byte_code.len == 0) return Error.UnexpectedToken;
+            switch (init_fd.byte_code[0]) {
+                opcode.op.push_false => init_fd.byte_code[0] = opcode.op.push_true,
+                // Multiple private methods/accessors share the same initializer
+                // prologue. Patching it is deliberately idempotent.
+                opcode.op.push_true => {},
+                else => return Error.UnexpectedToken,
+            }
         }
     }
 
@@ -17466,24 +17998,76 @@ pub const parser_core = struct {
             try parseAssignExpr(s);
             if (s.last_anonymous_function_expr) {
                 if (is_computed) {
-                    try s.emitOp(opcode.op.set_name_computed);
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: infer a computed static field
+                        // name for an anonymous initializer value.
+                        try v2FEmitOp(s, opcode.op.set_name_computed);
+                    } else {
+                        try s.emitOp(opcode.op.set_name_computed);
+                    }
                 } else {
-                    try s.emitOpAtom(opcode.op.set_name, atom_id);
+                    if (v2_available and s.emit_v2) {
+                        // qjs js_parse_class: infer the named static field's
+                        // name for an anonymous initializer value.
+                        try v2FEmitAtomOpOwned(s, opcode.op.set_name, s.function.atoms.dup(atom_id));
+                    } else {
+                        try s.emitOpAtom(opcode.op.set_name, atom_id);
+                    }
                 }
                 s.last_anonymous_function_expr = false;
             }
         } else {
-            try s.emitOp(opcode.op.undefined);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: an uninitialized static field receives
+                // undefined in the static initializer child.
+                try v2FEmitOp(s, opcode.op.undefined);
+            } else {
+                try s.emitOp(opcode.op.undefined);
+            }
         }
         if (is_private) {
-            try s.emitOp(opcode.op.define_private_field);
-            try s.emitOp(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define the private static field on the
+                // constructor captured as this.
+                try v2FEmitOp(s, opcode.op.define_private_field);
+            } else {
+                try s.emitOp(opcode.op.define_private_field);
+            }
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: discard the private-field definition
+                // result in the initializer child.
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
         } else if (is_computed) {
-            try s.emitOp(opcode.op.define_array_el);
-            try s.emitOp(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define a computed static public field.
+                try v2FEmitOp(s, opcode.op.define_array_el);
+            } else {
+                try s.emitOp(opcode.op.define_array_el);
+            }
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: discard the computed field definition
+                // result in the initializer child.
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
         } else {
-            try s.emitOpAtom(opcode.op.define_field, atom_id);
-            try s.emitOp(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define a named static public field.
+                try v2FEmitAtomOpOwned(s, opcode.op.define_field, s.function.atoms.dup(atom_id));
+            } else {
+                try s.emitOpAtom(opcode.op.define_field, atom_id);
+            }
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: discard the named field definition
+                // result in the initializer child.
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
         }
 
         _ = s.popFunction();
@@ -17557,23 +18141,57 @@ pub const parser_core = struct {
             s.last_function_child_index = saved_last_function_child_index;
         }
 
-        try s.emitOp(opcode.op.push_this);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: instance field initializers begin from the
+            // receiver supplied as this.
+            try v2FEmitOp(s, opcode.op.push_this);
+        } else {
+            try s.emitOp(opcode.op.push_this);
+        }
         if (is_private) try s.emitScopeGetVar(atom_id);
         if (has_initializer) {
             try parseAssignExpr(s);
             if (s.last_anonymous_function_expr) {
-                try s.emitOpAtom(opcode.op.set_name, atom_id);
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: infer the instance field name for an
+                    // anonymous initializer value.
+                    try v2FEmitAtomOpOwned(s, opcode.op.set_name, s.function.atoms.dup(atom_id));
+                } else {
+                    try s.emitOpAtom(opcode.op.set_name, atom_id);
+                }
                 s.last_anonymous_function_expr = false;
             }
         } else {
-            try s.emitOp(opcode.op.undefined);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: an uninitialized instance field receives
+                // undefined in the fields initializer child.
+                try v2FEmitOp(s, opcode.op.undefined);
+            } else {
+                try s.emitOp(opcode.op.undefined);
+            }
         }
         if (is_private) {
-            try s.emitOp(opcode.op.define_private_field);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define the private instance field on
+                // this using its private symbol.
+                try v2FEmitOp(s, opcode.op.define_private_field);
+            } else {
+                try s.emitOp(opcode.op.define_private_field);
+            }
         } else {
-            try s.emitOpAtom(opcode.op.define_field, atom_id);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define the named public instance field.
+                try v2FEmitAtomOpOwned(s, opcode.op.define_field, s.function.atoms.dup(atom_id));
+            } else {
+                try s.emitOpAtom(opcode.op.define_field, atom_id);
+            }
         }
-        try s.emitOp(opcode.op.drop);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: discard the instance field definition result.
+            try v2FEmitOp(s, opcode.op.drop);
+        } else {
+            try s.emitOp(opcode.op.drop);
+        }
 
         _ = s.popFunction();
         s.emit_to_function_def = saved_emit_to_function_def;
@@ -17627,26 +18245,44 @@ pub const parser_core = struct {
         child_fd.super_allowed = true;
         child_fd.arguments_allowed = false;
         _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
+        if (v2_available and s.emit_v2) {
+            s.v2EnsureBuilderForFd(child_fd) catch return error.OutOfMemory;
+        }
         if (include_instance_brand_prologue) {
-            // QJS emits a dormant instance-brand prologue for every instance
-            // initializer child and patches only the first opcode when a
-            // private method or accessor appears. Static initialization brands
-            // the constructor before invoking its separate child.
-            var brand_prefix: [15]u8 = undefined;
-            brand_prefix[0] = opcode.op.push_false;
-            brand_prefix[1] = opcode.op.if_false;
-            // Keep this as a phase-1 absolute target. Resolving home_object may
-            // shrink the following scope opcode, and resolve_variables remaps
-            // this target before resolve_labels picks the final short branch.
-            std.mem.writeInt(u32, brand_prefix[2..6], brand_prefix.len, .little);
-            brand_prefix[6] = opcode.op.push_this;
-            brand_prefix[7] = opcode.op.scope_get_var;
-            std.mem.writeInt(u32, brand_prefix[8..12], atom_module.ids.home_object, .little);
-            std.mem.writeInt(u16, brand_prefix[12..14], 0, .little);
-            brand_prefix[14] = opcode.op.add_brand;
-            child_fd.flow_tail.valid = false;
-            try child_fd.appendByteCode(&brand_prefix);
-            try child_fd.appendAtomOperand(atom_module.ids.home_object);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: dormant instance-brand prologue (push_false patched to
+                // push_true by the first private method/accessor); the skip target is born
+                // as a LabelId instead of the legacy absolute base+15.
+                const v2b = child_fd.v2_builder.?;
+                v2b.emitOp(opcode.op.push_false) catch |err| return v2MapBuilderError(err);
+                const skip = v2b.newLabel() catch |err| return v2MapBuilderError(err);
+                v2b.emitJump(opcode.op.if_false, skip) catch |err| return v2MapBuilderError(err);
+                v2b.emitOp(opcode.op.push_this) catch |err| return v2MapBuilderError(err);
+                v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, s.function.atoms.dup(atom_module.ids.home_object), 0) catch |err| return v2MapBuilderError(err);
+                v2b.emitOp(opcode.op.add_brand) catch |err| return v2MapBuilderError(err);
+                v2b.bindLabel(skip) catch |err| return v2MapBuilderError(err);
+                v2b.invalidateLastOpcode();
+            } else {
+                // QJS emits a dormant instance-brand prologue for every instance
+                // initializer child and patches only the first opcode when a
+                // private method or accessor appears. Static initialization brands
+                // the constructor before invoking its separate child.
+                var brand_prefix: [15]u8 = undefined;
+                brand_prefix[0] = opcode.op.push_false;
+                brand_prefix[1] = opcode.op.if_false;
+                // Keep this as a phase-1 absolute target. Resolving home_object may
+                // shrink the following scope opcode, and resolve_variables remaps
+                // this target before resolve_labels picks the final short branch.
+                std.mem.writeInt(u32, brand_prefix[2..6], brand_prefix.len, .little);
+                brand_prefix[6] = opcode.op.push_this;
+                brand_prefix[7] = opcode.op.scope_get_var;
+                std.mem.writeInt(u32, brand_prefix[8..12], atom_module.ids.home_object, .little);
+                std.mem.writeInt(u16, brand_prefix[12..14], 0, .little);
+                brand_prefix[14] = opcode.op.add_brand;
+                child_fd.flow_tail.valid = false;
+                try child_fd.appendByteCode(&brand_prefix);
+                try child_fd.appendAtomOperand(atom_module.ids.home_object);
+            }
         }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         child_fd.parent_cpool_idx = cpool_idx;
@@ -17670,14 +18306,27 @@ pub const parser_core = struct {
         const parent_fd = s.cur_func();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
-        const code = init_fd.byte_code;
-        const needs_return = code.len == 0 or switch (code[code.len - 1]) {
-            opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.throw => false,
-            else => true,
-        };
-        if (!needs_return) return;
-        init_fd.flow_tail.valid = false;
-        try init_fd.appendByteCode(&.{opcode.op.return_undef});
+        if (v2_available and s.emit_v2) {
+            // qjs js_is_live_code shape over the child's temp stream: get_prev_opcode
+            // is Builder.last_opcode_pos (an invalidated merge answers live).
+            const v2b = init_fd.v2_builder orelse return Error.UnexpectedToken;
+            const needs_return = if (v2b.last_opcode_pos < 0)
+                true
+            else switch (v2b.code[@intCast(v2b.last_opcode_pos)]) {
+                opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.throw => false,
+                else => true,
+            };
+            if (needs_return) v2b.emitOp(opcode.op.return_undef) catch |err| return v2MapBuilderError(err);
+        } else {
+            const code = init_fd.byte_code;
+            const needs_return = code.len == 0 or switch (code[code.len - 1]) {
+                opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.throw => false,
+                else => true,
+            };
+            if (!needs_return) return;
+            init_fd.flow_tail.valid = false;
+            try init_fd.appendByteCode(&.{opcode.op.return_undef});
+        }
     }
 
     fn registerClassPrivateBoundName(s: *State, atom_id: Atom) Error!void {
@@ -17808,17 +18457,40 @@ pub const parser_core = struct {
     fn parseClassComputedName(s: *State) Error!void {
         try s.expectToken('[');
         try parseAssignExpr2(s, ParseFlags.default);
-        try s.emitOp(opcode.op.to_propkey);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: canonicalize a computed class element name
+            // before it is stored or consumed by define_method_computed.
+            try v2FEmitOp(s, opcode.op.to_propkey);
+        } else {
+            try s.emitOp(opcode.op.to_propkey);
+        }
         try expectPunct(s, ']');
     }
 
     fn emitStaticClassComputedElement(s: *State, kind: ParseFunctionKind, source_start: usize) Error!void {
-        try s.emitOp(opcode.op.swap);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: expose the static constructor while parsing
+            // its computed key and preserve the class stack.
+            try v2FEmitOp(s, opcode.op.swap);
+        } else {
+            try s.emitOp(opcode.op.swap);
+        }
         try parseClassComputedName(s);
         if (s.peekKind() == '(') {
             try parseClassElementFunction(s, kind, source_start);
-            try s.emitOpU8(opcode.op.define_method_computed, 0);
-            try s.emitOp(opcode.op.swap);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define an ordinary computed static method.
+                try v2FEmitOpU8(s, opcode.op.define_method_computed, 0);
+            } else {
+                try s.emitOpU8(opcode.op.define_method_computed, 0);
+            }
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: restore the class stack after defining
+                // the computed static method.
+                try v2FEmitOp(s, opcode.op.swap);
+            } else {
+                try s.emitOp(opcode.op.swap);
+            }
             return;
         }
         if (kind != .method) return Error.UnexpectedToken;
@@ -17827,7 +18499,13 @@ pub const parser_core = struct {
         defer s.function.atoms.free(key_atom);
         _ = try s.defineVar(key_atom, .const_);
         try s.emitScopePutVarInit(key_atom);
-        try s.emitOp(opcode.op.swap);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: restore the class stack after saving a
+            // computed static field key.
+            try v2FEmitOp(s, opcode.op.swap);
+        } else {
+            try s.emitOp(opcode.op.swap);
+        }
 
         if (s.peekKind() == '=') {
             try s.advance();
@@ -17882,19 +18560,47 @@ pub const parser_core = struct {
             s.last_function_child_index = saved_last_function_child_index;
         }
 
-        try s.emitOp(opcode.op.push_this);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: computed instance fields begin from the
+            // receiver supplied as this.
+            try v2FEmitOp(s, opcode.op.push_this);
+        } else {
+            try s.emitOp(opcode.op.push_this);
+        }
         try s.emitScopeGetVar(key_atom);
         if (has_initializer) {
             try parseAssignExpr(s);
             if (s.last_anonymous_function_expr) {
-                try s.emitOp(opcode.op.set_name_computed);
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: infer a computed field name for an
+                    // anonymous initializer value.
+                    try v2FEmitOp(s, opcode.op.set_name_computed);
+                } else {
+                    try s.emitOp(opcode.op.set_name_computed);
+                }
                 s.last_anonymous_function_expr = false;
             }
         } else {
-            try s.emitOp(opcode.op.undefined);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: an uninitialized computed field receives
+                // undefined in the fields initializer child.
+                try v2FEmitOp(s, opcode.op.undefined);
+            } else {
+                try s.emitOp(opcode.op.undefined);
+            }
         }
-        try s.emitOp(opcode.op.define_array_el);
-        try s.emitOp(opcode.op.drop);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: define the computed instance public field.
+            try v2FEmitOp(s, opcode.op.define_array_el);
+        } else {
+            try s.emitOp(opcode.op.define_array_el);
+        }
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: discard the computed field definition result.
+            try v2FEmitOp(s, opcode.op.drop);
+        } else {
+            try s.emitOp(opcode.op.drop);
+        }
 
         _ = s.popFunction();
         s.emit_to_function_def = saved_emit_to_function_def;
@@ -17914,7 +18620,12 @@ pub const parser_core = struct {
         try parseClassComputedName(s);
         if (s.peekKind() == '(') {
             try parseClassElementFunction(s, kind, source_start);
-            try s.emitOpU8(opcode.op.define_method_computed, 0);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define an ordinary computed instance method.
+                try v2FEmitOpU8(s, opcode.op.define_method_computed, 0);
+            } else {
+                try s.emitOpU8(opcode.op.define_method_computed, 0);
+            }
             return;
         }
         if (kind != .method) return Error.UnexpectedToken;
@@ -17934,12 +18645,34 @@ pub const parser_core = struct {
     }
 
     fn emitClassComputedMethod(s: *State, kind: ParseFunctionKind, define_flags: u8, source_start: usize) Error!void {
-        if (s.is_static) try s.emitOp(opcode.op.swap);
+        if (s.is_static) {
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: expose the static constructor before a
+                // computed accessor key is parsed.
+                try v2FEmitOp(s, opcode.op.swap);
+            } else {
+                try s.emitOp(opcode.op.swap);
+            }
+        }
         try parseClassComputedName(s);
         if (s.peekKind() != '(') return Error.UnexpectedToken;
         try parseClassElementFunction(s, kind, source_start);
-        try s.emitOpU8(opcode.op.define_method_computed, define_flags);
-        if (s.is_static) try s.emitOp(opcode.op.swap);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: define the computed getter/setter with its
+            // method-kind flag.
+            try v2FEmitOpU8(s, opcode.op.define_method_computed, define_flags);
+        } else {
+            try s.emitOpU8(opcode.op.define_method_computed, define_flags);
+        }
+        if (s.is_static) {
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: restore the class stack after defining
+                // the computed static accessor.
+                try v2FEmitOp(s, opcode.op.swap);
+            } else {
+                try s.emitOp(opcode.op.swap);
+            }
+        }
     }
 
     fn emitClassStaticBlock(s: *State) Error!void {
@@ -18001,9 +18734,27 @@ pub const parser_core = struct {
         try parseFunctionParamsAndBody(s, .class_static_block, null);
         s.last_anonymous_function_expr = false;
         try s.emitScopeGetVar(atom_this);
-        try s.emitOp(opcode.op.swap);
-        try s.emitOpU16(opcode.op.call_method, 0);
-        try s.emitOp(opcode.op.drop);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class (quickjs.c:25394): call the static-block
+            // closure with the class constructor as receiver.
+            try v2FEmitOp(s, opcode.op.swap);
+        } else {
+            try s.emitOp(opcode.op.swap);
+        }
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class (quickjs.c:25394): the static block takes no
+            // explicit arguments.
+            try v2FEmitOpU16(s, opcode.op.call_method, 0);
+        } else {
+            try s.emitOpU16(opcode.op.call_method, 0);
+        }
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class (quickjs.c:25394): discard the static block's
+            // completion value.
+            try v2FEmitOp(s, opcode.op.drop);
+        } else {
+            try s.emitOp(opcode.op.drop);
+        }
 
         _ = s.popFunction();
         s.emit_to_function_def = saved_emit_to_function_def;
@@ -18111,10 +18862,19 @@ pub const parser_core = struct {
     }
 
     fn emitClassLocalInitFromClassStack(s: *State, local_idx: u16) Error!void {
-        try s.emitOp(opcode.op.swap);
-        try s.emitOp(opcode.op.dup);
-        try s.emitOpU16(opcode.op.put_loc_check_init, local_idx);
-        try s.emitOp(opcode.op.swap);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: initialize the inner class-name binding
+            // while preserving the constructor/prototype stack order.
+            try v2FEmitOp(s, opcode.op.swap);
+            try v2FEmitOp(s, opcode.op.dup);
+            try v2FEmitOpU16(s, opcode.op.put_loc_check_init, local_idx);
+            try v2FEmitOp(s, opcode.op.swap);
+        } else {
+            try s.emitOp(opcode.op.swap);
+            try s.emitOp(opcode.op.dup);
+            try s.emitOpU16(opcode.op.put_loc_check_init, local_idx);
+            try s.emitOp(opcode.op.swap);
+        }
     }
 
     fn emitClassFieldsInitValue(s: *State, class_fields_init_child_index: ?u16) Error!void {
@@ -18124,15 +18884,33 @@ pub const parser_core = struct {
             const cpool_idx = parent_fd.child_list[child_index].parent_cpool_idx;
             if (cpool_idx < 0) return Error.UnexpectedToken;
             try s.emitFClosure(@intCast(cpool_idx));
-            try s.emitOp(opcode.op.set_home_object);
+            if (v2_available and s.emit_v2) {
+                // qjs emit_class_init_end: bind the initializer closure to the
+                // class home object.
+                try v2FEmitOp(s, opcode.op.set_home_object);
+            } else {
+                try s.emitOp(opcode.op.set_home_object);
+            }
         } else {
-            try s.emitOp(opcode.op.undefined);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: absent instance fields initialize the
+                // hidden class_fields_init binding with undefined.
+                try v2FEmitOp(s, opcode.op.undefined);
+            } else {
+                try s.emitOp(opcode.op.undefined);
+            }
         }
     }
 
     fn emitClassFieldsInitLocalInitFromClassStack(s: *State, fields_init_local_idx: u16, class_fields_init_child_index: ?u16) Error!void {
         try emitClassFieldsInitValue(s, class_fields_init_child_index);
-        try s.emitOpU16(opcode.op.put_loc_check_init, fields_init_local_idx);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: initialize the hidden fields-initializer
+            // lexical from the just-created closure or undefined.
+            try v2FEmitOpU16(s, opcode.op.put_loc_check_init, fields_init_local_idx);
+        } else {
+            try s.emitOpU16(opcode.op.put_loc_check_init, fields_init_local_idx);
+        }
     }
 
     fn emitClassStaticInitCall(s: *State, class_static_init_child_index: ?u16) Error!void {
@@ -18145,11 +18923,21 @@ pub const parser_core = struct {
         // The class constructor is the sole stack value here. Duplicate it as
         // the call receiver/home object, then invoke the lexical static
         // initializer immediately. Mirrors quickjs.c:25735-25744.
-        try s.emitOp(opcode.op.dup);
-        try s.emitFClosure(@intCast(cpool_idx));
-        try s.emitOp(opcode.op.set_home_object);
-        try s.emitOpU16(opcode.op.call_method, 0);
-        try s.emitOp(opcode.op.drop);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class (quickjs.c:25735-25744): invoke the static
+            // initializer with the constructor as home object and receiver.
+            try v2FEmitOp(s, opcode.op.dup);
+            try s.emitFClosure(@intCast(cpool_idx));
+            try v2FEmitOp(s, opcode.op.set_home_object);
+            try v2FEmitOpU16(s, opcode.op.call_method, 0);
+            try v2FEmitOp(s, opcode.op.drop);
+        } else {
+            try s.emitOp(opcode.op.dup);
+            try s.emitFClosure(@intCast(cpool_idx));
+            try s.emitOp(opcode.op.set_home_object);
+            try s.emitOpU16(opcode.op.call_method, 0);
+            try s.emitOp(opcode.op.drop);
+        }
     }
 
     /// The class stack is `[constructor, prototype]`. Private instance members
@@ -18158,22 +18946,47 @@ pub const parser_core = struct {
     /// the constructor itself. Both sequences preserve the class stack.
     fn emitClassPrivateBrands(s: *State, instance_needed: bool, static_needed: bool) Error!void {
         if (instance_needed) {
-            try s.emitOp(opcode.op.dup);
-            try s.emitOp(opcode.op.null);
-            try s.emitOp(opcode.op.swap);
-            try s.emitOp(opcode.op.add_brand);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: pre-create the instance brand on the
+                // prototype while preserving the class stack.
+                try v2FEmitOp(s, opcode.op.dup);
+                try v2FEmitOp(s, opcode.op.null);
+                try v2FEmitOp(s, opcode.op.swap);
+                try v2FEmitOp(s, opcode.op.add_brand);
+            } else {
+                try s.emitOp(opcode.op.dup);
+                try s.emitOp(opcode.op.null);
+                try s.emitOp(opcode.op.swap);
+                try s.emitOp(opcode.op.add_brand);
+            }
         }
         if (static_needed) {
-            try s.emitOp(opcode.op.swap);
-            try s.emitOp(opcode.op.dup);
-            try s.emitOp(opcode.op.dup);
-            try s.emitOp(opcode.op.add_brand);
-            try s.emitOp(opcode.op.swap);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: add the static private brand to the
+                // constructor and restore constructor/prototype order.
+                try v2FEmitOp(s, opcode.op.swap);
+                try v2FEmitOp(s, opcode.op.dup);
+                try v2FEmitOp(s, opcode.op.dup);
+                try v2FEmitOp(s, opcode.op.add_brand);
+                try v2FEmitOp(s, opcode.op.swap);
+            } else {
+                try s.emitOp(opcode.op.swap);
+                try s.emitOp(opcode.op.dup);
+                try s.emitOp(opcode.op.dup);
+                try s.emitOp(opcode.op.add_brand);
+                try s.emitOp(opcode.op.swap);
+            }
         }
     }
 
     fn emitClassDefineOperands(s: *State, cpool_idx: u16) Error!void {
-        try s.emitOpU32(opcode.op.push_const, cpool_idx);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class: push the constructor child constant before
+            // define_class consumes it.
+            try v2FEmitOpU32(s, opcode.op.push_const, cpool_idx);
+        } else {
+            try s.emitOpU32(opcode.op.push_const, cpool_idx);
+        }
     }
 
     /// Parse class declaration or expression
@@ -18278,23 +19091,42 @@ pub const parser_core = struct {
         // define_class instead of the normal fclosure expression path.
         const class_emit_start = s.currentCodeLen();
         const class_atom_start = s.currentAtomOperandLen();
+        var v2_class_mark: compiler_v2.builder.Snapshot = undefined;
+        if (v2_available and s.emit_v2) v2_class_mark = s.v2Builder().snapshot();
         try parseClassBodyAfterOpen(s);
         const class_source_end = s.last_token_end_offset;
         try finishClassFieldsInitFunction(s);
         try finishClassStaticInitFunction(s);
-        const runtime_code = s.currentCode()[class_emit_start..];
-        const saved_runtime_code = try s.function.memory.alloc(u8, runtime_code.len);
-        defer s.function.memory.free(u8, saved_runtime_code);
-        @memcpy(saved_runtime_code, runtime_code);
-        const runtime_atoms = s.currentAtomOperands()[class_atom_start..];
-        const saved_runtime_atoms = try s.function.memory.alloc(Atom, runtime_atoms.len);
-        defer s.function.memory.free(Atom, saved_runtime_atoms);
-        for (runtime_atoms, 0..) |atom_id, idx| {
-            saved_runtime_atoms[idx] = s.function.atoms.dup(atom_id);
+        var saved_runtime_code: []u8 = &.{};
+        var legacy_runtime_code_allocated = false;
+        defer if (legacy_runtime_code_allocated) s.function.memory.free(u8, saved_runtime_code);
+        var saved_runtime_atoms: []Atom = &.{};
+        var legacy_runtime_atoms_allocated = false;
+        defer if (legacy_runtime_atoms_allocated) {
+            for (saved_runtime_atoms) |atom_id| s.function.atoms.free(atom_id);
+            s.function.memory.free(Atom, saved_runtime_atoms);
+        };
+        var v2_runtime_seg: compiler_v2.builder.DetachedSegment = .{};
+        defer if (v2_available and s.emit_v2) s.v2Builder().discardSegment(&v2_runtime_seg);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class (quickjs.c:25274): the body's runtime bytecode is
+            // deferred and re-emitted after define_class; v2 detaches the builder
+            // tail — LabelIds are function-global, so no operand rebase exists.
+            v2_runtime_seg = try v2FDetachTail(s, v2_class_mark);
+        } else {
+            const runtime_code = s.currentCode()[class_emit_start..];
+            saved_runtime_code = try s.function.memory.alloc(u8, runtime_code.len);
+            legacy_runtime_code_allocated = true;
+            @memcpy(saved_runtime_code, runtime_code);
+            const runtime_atoms = s.currentAtomOperands()[class_atom_start..];
+            saved_runtime_atoms = try s.function.memory.alloc(Atom, runtime_atoms.len);
+            legacy_runtime_atoms_allocated = true;
+            for (runtime_atoms, 0..) |atom_id, idx| {
+                saved_runtime_atoms[idx] = s.function.atoms.dup(atom_id);
+            }
+            try s.truncateCode(class_emit_start);
+            try s.truncateAtomOperands(class_atom_start);
         }
-        defer for (saved_runtime_atoms) |atom_id| s.function.atoms.free(atom_id);
-        try s.truncateCode(class_emit_start);
-        try s.truncateAtomOperands(class_atom_start);
         const default_constructor_name = class_name orelse if (is_decl) s.function.name else atom_module.ids.empty_string;
         const class_constructor_cpool_idx = s.class_constructor_cpool_idx orelse
             try appendDefaultClassConstructor(s, default_constructor_name);
@@ -18347,16 +19179,50 @@ pub const parser_core = struct {
                 .global => top_level_class_binding = true,
                 .argument => unreachable,
             }
-            if (!class_has_extends) try s.emitOp(opcode.op.undefined);
-            if (class_fields_init_local_idx) |fields_idx| try s.emitOpU16(opcode.op.set_loc_uninitialized, fields_idx);
+            if (!class_has_extends) {
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: a base class supplies undefined as
+                    // the heritage operand to define_class.
+                    try v2FEmitOp(s, opcode.op.undefined);
+                } else {
+                    try s.emitOp(opcode.op.undefined);
+                }
+            }
+            if (class_fields_init_local_idx) |fields_idx| {
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: establish the hidden initializer
+                    // local's TDZ before defining the class.
+                    try v2FEmitOpU16(s, opcode.op.set_loc_uninitialized, fields_idx);
+                } else {
+                    try s.emitOpU16(opcode.op.set_loc_uninitialized, fields_idx);
+                }
+            }
             try emitClassDefineOperands(s, class_constructor_cpool_idx);
-            try s.emitOpAtomU8(opcode.op.define_class, name_atom, if (class_has_extends) 1 else 0);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define the declaration's class object
+                // with its heritage flag and retained name atom.
+                try v2FEmitAtomOpU8Owned(s, opcode.op.define_class, s.function.atoms.dup(name_atom), if (class_has_extends) 1 else 0);
+            } else {
+                try s.emitOpAtomU8(opcode.op.define_class, name_atom, if (class_has_extends) 1 else 0);
+            }
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
-            try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class (quickjs.c:25274): the deferred runtime
+                // block is spliced after define_class.
+                try v2FSpliceSegment(s, &v2_runtime_seg);
+            } else {
+                try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
+            }
             const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
             try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
-            try s.emitOp(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: drop the prototype after installing the
+                // fields initializer.
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
             try emitClassStaticInitCall(s, parsed_class_static_init_child_index);
             // Parsing restores the outer scope identity before emitting this
             // deferred class runtime sequence so the declaration binding is
@@ -18366,14 +19232,26 @@ pub const parser_core = struct {
             try s.emitLeaveScope(class_private_scope_level);
             try s.emitLeaveScope(class_outer_scope_level);
             if (class_decl_local_idx) |local_idx| {
-                try s.emitOpU16(opcode.op.set_loc, local_idx);
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: store the completed class into its
+                    // containing declaration binding while retaining the value.
+                    try v2FEmitOpU16(s, opcode.op.set_loc, local_idx);
+                } else {
+                    try s.emitOpU16(opcode.op.set_loc, local_idx);
+                }
             } else if (!top_level_class_binding) {
                 return Error.UnexpectedToken;
             }
             if (top_level_class_binding) {
                 try s.emitScopePutVarInit(name_atom);
             } else {
-                try s.emitOp(opcode.op.drop);
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: a local class declaration has no
+                    // expression result after its binding store.
+                    try v2FEmitOp(s, opcode.op.drop);
+                } else {
+                    try s.emitOp(opcode.op.drop);
+                }
             }
             if (s.namespace_export) {
                 if (s.current_namespace_atom) |ns_atom| {
@@ -18386,15 +19264,49 @@ pub const parser_core = struct {
             }
         } else {
             const expr_name_atom = class_name orelse s.pending_function_name orelse atom_module.ids.empty_string;
-            if (!class_has_extends) try s.emitOp(opcode.op.undefined);
-            if (class_fields_init_local_idx) |fields_idx| try s.emitOpU16(opcode.op.set_loc_uninitialized, fields_idx);
+            if (!class_has_extends) {
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: a base class expression supplies
+                    // undefined as the heritage operand.
+                    try v2FEmitOp(s, opcode.op.undefined);
+                } else {
+                    try s.emitOp(opcode.op.undefined);
+                }
+            }
+            if (class_fields_init_local_idx) |fields_idx| {
+                if (v2_available and s.emit_v2) {
+                    // qjs js_parse_class: establish the hidden initializer
+                    // local's TDZ before defining the class expression.
+                    try v2FEmitOpU16(s, opcode.op.set_loc_uninitialized, fields_idx);
+                } else {
+                    try s.emitOpU16(opcode.op.set_loc_uninitialized, fields_idx);
+                }
+            }
             try emitClassDefineOperands(s, class_constructor_cpool_idx);
-            try s.emitOpAtomU8(opcode.op.define_class, expr_name_atom, if (class_has_extends) 1 else 0);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: define the expression's class object
+                // with its inferred name and heritage flag.
+                try v2FEmitAtomOpU8Owned(s, opcode.op.define_class, s.function.atoms.dup(expr_name_atom), if (class_has_extends) 1 else 0);
+            } else {
+                try s.emitOpAtomU8(opcode.op.define_class, expr_name_atom, if (class_has_extends) 1 else 0);
+            }
             if (class_fields_init_local_idx) |fields_idx| try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
-            try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
-            try s.emitOp(opcode.op.drop);
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class (quickjs.c:25274): splice the expression's
+                // deferred runtime block after define_class.
+                try v2FSpliceSegment(s, &v2_runtime_seg);
+            } else {
+                try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
+            }
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class: drop the prototype while retaining the
+                // constructor as the class expression value.
+                try v2FEmitOp(s, opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
             try emitClassStaticInitCall(s, parsed_class_static_init_child_index);
             // Like QuickJS js_parse_class, leave both inner class scopes only
             // after their deferred initialization and static runtime work.
@@ -18424,23 +19336,39 @@ pub const parser_core = struct {
             opcode.op.get_loc_check
         else
             opcode.op.get_loc;
-        const base: u32 = @intCast(fd.byte_code.len);
-        var code: [21]u8 = undefined;
-        code[0] = opcode.op.scope_get_var;
-        std.mem.writeInt(u32, code[1..5], atom_class_fields_init, .little);
-        std.mem.writeInt(u16, code[5..7], @intCast(fd.scope_level), .little);
-        code[7] = opcode.op.dup;
-        code[8] = opcode.op.if_false;
-        std.mem.writeInt(u32, code[9..13], base + 20, .little); // target: the drop
-        code[13] = this_read_op;
-        std.mem.writeInt(u16, code[14..16], this_idx, .little);
-        code[16] = opcode.op.swap;
-        code[17] = opcode.op.call_method;
-        std.mem.writeInt(u16, code[18..20], 0, .little);
-        code[20] = opcode.op.drop;
-        try fd.appendAtomOperand(atom_class_fields_init);
-        fd.flow_tail.valid = false;
-        try fd.appendByteCode(&code);
+        if (v2_available and fd.v2_builder != null) {
+            // qjs emit_class_field_init (quickjs.c:25184-25207): the skip target is a
+            // LabelId bound at the shared drop (legacy absolute base+20).
+            const v2b = fd.v2_builder.?;
+            v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, fd.atoms.dup(atom_class_fields_init), @intCast(fd.scope_level)) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.dup) catch |err| return v2MapBuilderError(err);
+            const skip = v2b.newLabel() catch |err| return v2MapBuilderError(err);
+            v2b.emitJump(opcode.op.if_false, skip) catch |err| return v2MapBuilderError(err);
+            v2b.emitOpU16(this_read_op, this_idx) catch |err| return v2MapBuilderError(err);
+            v2b.emitOp(opcode.op.swap) catch |err| return v2MapBuilderError(err);
+            v2b.emitOpU16(opcode.op.call_method, 0) catch |err| return v2MapBuilderError(err);
+            v2b.bindLabel(skip) catch |err| return v2MapBuilderError(err);
+            v2b.invalidateLastOpcode();
+            v2b.emitOp(opcode.op.drop) catch |err| return v2MapBuilderError(err);
+        } else {
+            const base: u32 = @intCast(fd.byte_code.len);
+            var code: [21]u8 = undefined;
+            code[0] = opcode.op.scope_get_var;
+            std.mem.writeInt(u32, code[1..5], atom_class_fields_init, .little);
+            std.mem.writeInt(u16, code[5..7], @intCast(fd.scope_level), .little);
+            code[7] = opcode.op.dup;
+            code[8] = opcode.op.if_false;
+            std.mem.writeInt(u32, code[9..13], base + 20, .little); // target: the drop
+            code[13] = this_read_op;
+            std.mem.writeInt(u16, code[14..16], this_idx, .little);
+            code[16] = opcode.op.swap;
+            code[17] = opcode.op.call_method;
+            std.mem.writeInt(u16, code[18..20], 0, .little);
+            code[20] = opcode.op.drop;
+            try fd.appendAtomOperand(atom_class_fields_init);
+            fd.flow_tail.valid = false;
+            try fd.appendByteCode(&code);
+        }
     }
 
     fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
@@ -18474,46 +19402,86 @@ pub const parser_core = struct {
         const body_scope = child_fd.appendScope(0) catch return error.OutOfMemory;
         child_fd.body_scope = body_scope;
         child_fd.scope_level = body_scope;
+        if (v2_available and s.emit_v2) {
+            s.v2EnsureBuilderForFd(child_fd) catch return error.OutOfMemory;
+        }
         // Pinned qjs default base constructors enter through OP_check_ctor.
         // Default derived constructors use OP_init_ctor below, whose handler
         // performs the new.target gate while initializing derived state.
         if (!s.class_has_extends) {
-            child_fd.flow_tail.valid = false;
-            try child_fd.appendByteCode(&.{opcode.op.check_ctor});
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class_default_ctor (quickjs.c:25109): a base
+                // default constructor first verifies construct invocation.
+                const v2b = child_fd.v2_builder.?;
+                v2b.emitOp(opcode.op.check_ctor) catch |err| return v2MapBuilderError(err);
+            } else {
+                child_fd.flow_tail.valid = false;
+                try child_fd.appendByteCode(&.{opcode.op.check_ctor});
+            }
         }
-        var body_marker: [3]u8 = undefined;
-        body_marker[0] = opcode.op.enter_scope;
-        std.mem.writeInt(u16, body_marker[1..3], @intCast(body_scope), .little);
-        child_fd.flow_tail.valid = false;
-        try child_fd.appendByteCode(&body_marker);
+        if (v2_available and s.emit_v2) {
+            // qjs js_parse_class_default_ctor: enter the synthetic constructor
+            // body scope through the child builder without a source marker.
+            const v2b = child_fd.v2_builder.?;
+            v2b.emitOpU16(opcode.op.enter_scope, @intCast(body_scope)) catch |err| return v2MapBuilderError(err);
+        } else {
+            var body_marker: [3]u8 = undefined;
+            body_marker[0] = opcode.op.enter_scope;
+            std.mem.writeInt(u16, body_marker[1..3], @intCast(body_scope), .little);
+            child_fd.flow_tail.valid = false;
+            try child_fd.appendByteCode(&body_marker);
+        }
         const this_idx_i32 = child_fd.ensureThisBinding() catch return error.OutOfMemory;
         if (this_idx_i32 < 0 or this_idx_i32 > std.math.maxInt(u16)) return Error.UnexpectedToken;
         const this_idx: u16 = @intCast(this_idx_i32);
         if (s.class_has_extends) {
-            child_fd.flow_tail.valid = false;
-            try child_fd.appendByteCode(&.{
-                opcode.op.init_ctor,
-                opcode.op.put_loc_check_init,
-                @truncate(this_idx),
-                @truncate(this_idx >> 8),
-            });
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class_default_ctor (quickjs.c:25109): initialize
+                // derived-constructor state and its checked this binding.
+                const v2b = child_fd.v2_builder.?;
+                v2b.emitOp(opcode.op.init_ctor) catch |err| return v2MapBuilderError(err);
+                v2b.emitOpU16(opcode.op.put_loc_check_init, this_idx) catch |err| return v2MapBuilderError(err);
+            } else {
+                child_fd.flow_tail.valid = false;
+                try child_fd.appendByteCode(&.{
+                    opcode.op.init_ctor,
+                    opcode.op.put_loc_check_init,
+                    @truncate(this_idx),
+                    @truncate(this_idx >> 8),
+                });
+            }
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
             // qjs js_parse_class_default_ctor ends with emit_return(s, FALSE)
             // (quickjs.c:25152); the derived arm (quickjs.c:28455-28472)
             // reads `this` with scope_get_var_checkthis so an uninitialized
             // ReferenceError is raised in the caller context, lowered to
             // get_loc_checkthis (quickjs.c:33073-33077).
-            child_fd.flow_tail.valid = false;
-            try child_fd.appendByteCode(&.{
-                opcode.op.get_loc_checkthis,
-                @truncate(this_idx),
-                @truncate(this_idx >> 8),
-                opcode.op.@"return",
-            });
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class_default_ctor: return the initialized
+                // derived this value after running instance field setup.
+                const v2b = child_fd.v2_builder.?;
+                v2b.emitOpU16(opcode.op.get_loc_checkthis, this_idx) catch |err| return v2MapBuilderError(err);
+                v2b.emitOp(opcode.op.@"return") catch |err| return v2MapBuilderError(err);
+            } else {
+                child_fd.flow_tail.valid = false;
+                try child_fd.appendByteCode(&.{
+                    opcode.op.get_loc_checkthis,
+                    @truncate(this_idx),
+                    @truncate(this_idx >> 8),
+                    opcode.op.@"return",
+                });
+            }
         } else {
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
-            child_fd.flow_tail.valid = false;
-            try child_fd.appendByteCode(&.{opcode.op.return_undef});
+            if (v2_available and s.emit_v2) {
+                // qjs js_parse_class_default_ctor: a base default constructor
+                // completes with return_undef after instance field setup.
+                const v2b = child_fd.v2_builder.?;
+                v2b.emitOp(opcode.op.return_undef) catch |err| return v2MapBuilderError(err);
+            } else {
+                child_fd.flow_tail.valid = false;
+                try child_fd.appendByteCode(&.{opcode.op.return_undef});
+            }
         }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         child_fd.parent_cpool_idx = cpool_idx;
