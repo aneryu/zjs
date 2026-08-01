@@ -12151,6 +12151,9 @@ pub const pipeline_finalize = struct {
     const pc2line = pipeline_pc2line;
     const stack_size = pipeline_stack_size;
     const JSValue = @import("core/value.zig").JSValue;
+    const compiler_v2 = @import("compiler_v2/root.zig");
+    const compiler_v2_available =
+        !std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
 
     pub const FinalizeError = error{
         OutOfMemory,
@@ -12455,7 +12458,12 @@ pub const pipeline_finalize = struct {
             if (parent.finalization_state != .prepared) return error.InvalidBytecode;
         }
 
-        try validatePhase1View(fd, phase1_view);
+        if (!(comptime compiler_v2_available) or fd.v2_builder == null) {
+            try validatePhase1View(fd, phase1_view);
+        }
+        // QCP-1 v2: resolve_variables_v2 validates its own compact input
+        // (validateInput + fail-closed walk) when compileFunctionV2 consumes
+        // the attached builder; the phase-1 view is not the lowering input.
         fd.var_ref_count = 0;
         for (fd.vars) |*vd| {
             vd.is_captured = false;
@@ -12668,23 +12676,10 @@ pub const pipeline_finalize = struct {
         if (owner_index != owners.len) return error.InvalidBytecode;
     }
 
-    fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, compile_context: CompileContext) FinalizeError![]fb_mod.FunctionBytecode {
-        const rt = compile_context.realm.runtime;
-        // runPhases publishes arg/var counts to u16 fields, so malformed or
-        // oversized FunctionDefs must be rejected before it can cast them.
-        try validatePreLoweringArtifactShape(fd);
-        // The canonical lowering carrier has no diagnostic/name owners of its
-        // own. FunctionDef remains the source of those owners until commit.
-        var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, atom.null_atom);
-        defer lowered.deinit(rt);
-        lowered.line_num = fd.line_num;
-        lowered.col_num = fd.col_num;
-        // Finalization policy is fixed on FunctionDef before parsing and is
-        // visible to every lowering phase, not patched onto the published FB
-        // afterwards. This matters for strict-only frame geometry such as
-        // mapped-arguments capture decisions.
-        lowered.flags.is_strict = fd.is_strict_mode;
-        lowered.flags.runtime_strict = compile_context.policy.runtime_strict;
+    fn lowerLegacyPhase1(
+        lowered: *bytecode_function.Bytecode,
+        fd: *function_def_mod.FunctionDef,
+    ) FinalizeError!void {
         // Move the parser-built buffers instead of copying them. QuickJS runs
         // its passes directly on `fd->byte_code` and performs a single copy
         // into the packed JSFunctionBytecode (quickjs.c:36188/36226); moving
@@ -12707,7 +12702,50 @@ pub const pipeline_finalize = struct {
         fd.source_loc_slots = &.{};
         fd.source_loc_capacity = 0;
         fd.source_loc_count = 0;
-        try runPhases(&lowered, fd, fd, false);
+        try runPhases(lowered, fd, fd, false);
+    }
+
+    fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, compile_context: CompileContext) FinalizeError![]fb_mod.FunctionBytecode {
+        const rt = compile_context.realm.runtime;
+        // runPhases publishes arg/var counts to u16 fields, so malformed or
+        // oversized FunctionDefs must be rejected before it can cast them.
+        try validatePreLoweringArtifactShape(fd);
+        // The canonical lowering carrier has no diagnostic/name owners of its
+        // own. FunctionDef remains the source of those owners until commit.
+        var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, atom.null_atom);
+        defer lowered.deinit(rt);
+        lowered.line_num = fd.line_num;
+        lowered.col_num = fd.col_num;
+        // Finalization policy is fixed on FunctionDef before parsing and is
+        // visible to every lowering phase, not patched onto the published FB
+        // afterwards. This matters for strict-only frame geometry such as
+        // mapped-arguments capture decisions.
+        lowered.flags.is_strict = fd.is_strict_mode;
+        lowered.flags.runtime_strict = compile_context.policy.runtime_strict;
+        if (comptime compiler_v2_available) {
+            if (fd.v2_builder != null) {
+                // QCP-1 v2 lowering. The phase-1 buffers stay owned by fd
+                // (released by fd.deinit); the v2 product is installed directly
+                // on the lowered carrier at final positions, so no move happens.
+                if (fd.finalization_state != .prepared) return error.InvalidBytecode;
+                compiler_v2.compileFunctionV2(&lowered, fd) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
+                    error.BytecodeOverflow => return error.BytecodeOverflow,
+                    error.ClosureVarNotFound => return error.ClosureVarNotFound,
+                };
+                // Same bookkeeping runPhases performs between the two resolve
+                // passes.
+                fd.consumeGlobalVars();
+                fd.finalization_state = .resolved;
+                fd.use_short_opcodes = true;
+                try publishLoweredMetadata(&lowered, fd, fd, false);
+            } else {
+                try lowerLegacyPhase1(&lowered, fd);
+            }
+        } else {
+            try lowerLegacyPhase1(&lowered, fd);
+        }
 
         _ = try validateFinalArtifactShape(fd, &lowered);
         try validateFinalAtomOwners(lowered.code, lowered.atom_operands);
@@ -12948,6 +12986,16 @@ pub const pipeline_finalize = struct {
         else
             resolve_labels.JSContext.init(function);
         try resolve_labels.run(&labels_ctx);
+
+        try publishLoweredMetadata(function, fd, fd_mut, publish_mutable_metadata);
+    }
+
+    fn publishLoweredMetadata(
+        function: *bytecode_function.Bytecode,
+        fd: ?*const function_def_mod.FunctionDef,
+        fd_mut: ?*function_def_mod.FunctionDef,
+        publish_mutable_metadata: bool,
+    ) !void {
 
         // qjs captures every formal parameter before creating a mapped
         // arguments object. Do the same here, then assign one exact, stable

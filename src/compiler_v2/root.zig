@@ -25,6 +25,7 @@ const bytecode = @import("../bytecode.zig");
 pub const labels = @import("labels.zig");
 pub const builder = @import("builder.zig");
 pub const resolve_variables = @import("resolve_variables.zig");
+pub const resolve_labels = @import("resolve_labels.zig");
 
 pub const LabelId = labels.LabelId;
 pub const LabelSlot = labels.LabelSlot;
@@ -32,21 +33,18 @@ pub const RelocEntry = labels.RelocEntry;
 pub const Builder = builder.Builder;
 pub const ResolvedProduct = resolve_variables.ResolvedProduct;
 
-/// QCP-1 v2 pipeline entry: resolve_variables_v2 now; resolve_labels_v2 lands
-/// next stage, so its Stage 4 stub returns the resolved product unchanged.
+/// QCP-1 v2 per-function lowering: resolve_variables_v2 then resolve_labels_v2,
+/// installing final executable code/atoms/source slots on `function` (the
+/// finalize "lowered" carrier). Tree recursion and the packed FunctionBytecode
+/// ABI stay in pipeline_finalize (createFunctionBytecode), which dispatches
+/// here for every FunctionDef that carries a v2 builder.
 pub fn compileFunctionV2(
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,
-) resolve_variables.Error!ResolvedProduct {
+) resolve_variables.Error!void {
     var product = try resolve_variables.run(function, fd);
-    resolveLabelsV2Stub(&product);
-    return product;
-}
-
-/// QCP-1 Stage 4 placeholder. Label relocation and short-op emission will be
-/// installed here without changing the Stage 3 product ownership boundary.
-fn resolveLabelsV2Stub(product: *ResolvedProduct) void {
-    _ = product;
+    defer product.deinitUncommitted();
+    try resolve_labels.run(function, fd, &product);
 }
 
 test {
@@ -54,6 +52,7 @@ test {
     _ = labels;
     _ = builder;
     _ = resolve_variables;
+    _ = resolve_labels;
     _ = compileFunctionV2;
     _ = @import("tests.zig");
 }

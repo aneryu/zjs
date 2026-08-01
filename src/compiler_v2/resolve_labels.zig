@@ -1,0 +1,2692 @@
+//! QCP-1 compiler-v2 Stage 4: QuickJS resolve_labels port (single forward
+//! pass + relocation chains + short-opcode selection + bounded relaxation).
+//! Direct spec: quickjs.c resolve_labels (34796). Comment each arm qjs:<line>.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const core = @import("../core/root.zig");
+const bytecode = @import("../bytecode.zig");
+const builder = @import("builder.zig");
+const labels = @import("labels.zig");
+const resolve_variables = @import("resolve_variables.zig");
+
+const opcode = bytecode.opcode;
+const op = opcode.op;
+const SourceLocSlot = bytecode.pipeline_pc2line.SourceLocSlot;
+
+pub const Error = error{ OutOfMemory, InvalidBytecode, BytecodeOverflow };
+
+/// Kept private and duplicated from resolve_variables.zig deliberately: both
+/// compiler-v2 passes own independent growable outputs and neither frozen
+/// predecessor API should grow a shared allocation abstraction for Stage 4.
+fn reserve(
+    comptime T: type,
+    memory: *core.memory.MemoryAccount,
+    slice: *[]T,
+    capacity: *usize,
+    used: u32,
+    need: usize,
+    comptime min_capacity: usize,
+) Error!void {
+    const required = std.math.add(usize, @as(usize, used), need) catch
+        return error.OutOfMemory;
+    if (required <= capacity.*) return;
+
+    const doubled = std.math.mul(usize, capacity.*, 2) catch std.math.maxInt(usize);
+    const new_capacity = @max(@max(required, doubled), min_capacity);
+    const new_backing = memory.alloc(T, new_capacity) catch return error.OutOfMemory;
+    @memcpy(new_backing[0..used], slice.*[0..used]);
+
+    const old_backing = slice.*;
+    const old_capacity = capacity.*;
+    slice.* = new_backing;
+    capacity.* = new_capacity;
+    if (old_capacity != 0) memory.free(T, old_backing);
+}
+
+const FinalReloc = struct {
+    next: u32,
+    addr: u32,
+    size: u8,
+};
+
+const JumpSlot = struct {
+    op: u8,
+    size: u8,
+    pos: u32,
+    label: u32,
+};
+
+const BindEntry = struct {
+    bound_offset: u32,
+    label_index: u32,
+    dead_skipped: bool = false,
+};
+
+fn bindLessThan(_: void, lhs: BindEntry, rhs: BindEntry) bool {
+    if (lhs.bound_offset != rhs.bound_offset)
+        return lhs.bound_offset < rhs.bound_offset;
+    return lhs.label_index < rhs.label_index;
+}
+
+const SourcePoint = struct {
+    line: i32,
+    col: i32,
+};
+
+fn sourcePointEqual(lhs: SourcePoint, rhs: SourcePoint) bool {
+    return lhs.line == rhs.line and lhs.col == rhs.col;
+}
+
+const Instruction = struct {
+    op_id: u8,
+    size: u32,
+    format: opcode.Format,
+};
+
+fn decodeInstruction(code: []const u8, position: u32) Error!Instruction {
+    if (position >= code.len) return error.InvalidBytecode;
+    const op_id = code[position];
+    const size = opcode.sizeOf(op_id);
+    if (size == 0) return error.InvalidBytecode;
+    const end = std.math.add(u32, position, size) catch
+        return error.InvalidBytecode;
+    if (end > code.len) return error.InvalidBytecode;
+    return .{ .op_id = op_id, .size = size, .format = opcode.formatOf(op_id) };
+}
+
+fn isJumpOp(op_id: u8) bool {
+    return op_id == op.if_false or op_id == op.if_true or op_id == op.goto or
+        op_id == op.@"catch" or op_id == op.gosub;
+}
+
+fn isWithOp(op_id: u8) bool {
+    return op_id == op.with_get_var or op_id == op.with_put_var or
+        op_id == op.with_delete_var or op_id == op.with_make_ref or
+        op_id == op.with_get_ref;
+}
+
+fn hasAtomFormat(format: opcode.Format) bool {
+    return format == .atom or format == .atom_u8 or format == .atom_u16 or
+        format == .atom_label_u8 or format == .atom_label_u16;
+}
+
+fn readU16(code: []const u8, position: u32) Error!u16 {
+    const start = std.math.add(u32, position, 1) catch return error.InvalidBytecode;
+    if (@as(usize, start) + 2 > code.len) return error.InvalidBytecode;
+    return std.mem.readInt(u16, code[start..][0..2], .little);
+}
+
+fn readU32At(code: []const u8, position: u32, delta: u32) Error!u32 {
+    const start = std.math.add(u32, position, delta) catch
+        return error.InvalidBytecode;
+    if (@as(usize, start) + 4 > code.len) return error.InvalidBytecode;
+    return std.mem.readInt(u32, code[start..][0..4], .little);
+}
+
+fn readI32(code: []const u8, position: u32) Error!i32 {
+    const start = std.math.add(u32, position, 1) catch return error.InvalidBytecode;
+    if (@as(usize, start) + 4 > code.len) return error.InvalidBytecode;
+    return std.mem.readInt(i32, code[start..][0..4], .little);
+}
+
+fn validateProduct(product: *const resolve_variables.ResolvedProduct) Error!void {
+    if (product.code_len > product.code.len or
+        product.atom_len > product.atom_operands.len or
+        product.label_len > product.label_slots.len or
+        product.source_len > product.source_slots.len)
+    {
+        return error.InvalidBytecode;
+    }
+
+    var previous_source: u32 = 0;
+    for (product.source_slots[0..product.source_len], 0..) |source, index| {
+        if (source.temp_offset > product.code_len or source.line <= 0 or source.col <= 0 or
+            (index != 0 and source.temp_offset < previous_source))
+        {
+            return error.InvalidBytecode;
+        }
+        previous_source = source.temp_offset;
+    }
+
+    for (product.label_slots[0..product.label_len]) |slot| {
+        if (slot.first_reloc != labels.no_reloc) return error.InvalidBytecode;
+        if (slot.flags.bound) {
+            if (slot.bound_offset == labels.unbound or slot.bound_offset > product.code_len)
+                return error.InvalidBytecode;
+        } else if (slot.bound_offset != labels.unbound) {
+            return error.InvalidBytecode;
+        }
+    }
+
+    const code = product.code[0..product.code_len];
+    var atom_index: u32 = 0;
+    var position: u32 = 0;
+    while (position < product.code_len) {
+        const instruction = try decodeInstruction(code, position);
+        if (instruction.op_id == op.invalid) return error.InvalidBytecode;
+
+        switch (instruction.format) {
+            .label => {
+                if (!isJumpOp(instruction.op_id) or instruction.size != 5)
+                    return error.InvalidBytecode;
+                const label_index = try readU32At(code, position, 1);
+                if (label_index >= product.label_len) return error.InvalidBytecode;
+            },
+            .atom_label_u8 => {
+                if (!isWithOp(instruction.op_id) or instruction.size != 10)
+                    return error.InvalidBytecode;
+                const label_index = try readU32At(code, position, 5);
+                if (label_index >= product.label_len) return error.InvalidBytecode;
+            },
+            // S3 emits only wide logical LabelIds. Accepting a final short or
+            // another label-bearing format here would reinterpret a relative
+            // operand as an identity and silently corrupt the side table.
+            .label8, .label16, .label_u16, .atom_label_u16 => return error.InvalidBytecode,
+            else => {},
+        }
+
+        if (hasAtomFormat(instruction.format)) {
+            if (instruction.size < 5 or atom_index >= product.atom_len)
+                return error.InvalidBytecode;
+            const encoded = try readU32At(code, position, 1);
+            if (encoded != product.atom_operands[atom_index])
+                return error.InvalidBytecode;
+            atom_index += 1;
+        }
+        position += instruction.size;
+    }
+    if (position != product.code_len or atom_index != product.atom_len)
+        return error.InvalidBytecode;
+}
+
+fn updateLabel(
+    product: *resolve_variables.ResolvedProduct,
+    label_index: u32,
+    delta: i32,
+) Error!u32 {
+    if (label_index >= product.label_len) return error.InvalidBytecode;
+    const slot = &product.label_slots[label_index];
+    if (delta < 0) {
+        const amount: u32 = @intCast(-@as(i64, delta));
+        if (slot.ref_count < amount) return error.InvalidBytecode;
+        slot.ref_count -= amount;
+    } else if (delta > 0) {
+        const amount: u32 = @intCast(delta);
+        slot.ref_count = std.math.add(u32, slot.ref_count, amount) catch
+            return error.InvalidBytecode;
+    }
+    return slot.ref_count;
+}
+
+const PatternToken = struct {
+    options: []const u8,
+    idx: ?u16 = null,
+};
+
+const SeqMatch = struct {
+    end: u32,
+    count: u8,
+    positions: [8]u32 = [_]u32{0} ** 8,
+    ops: [8]u8 = [_]u8{0} ** 8,
+};
+
+const Resolver = struct {
+    function: *bytecode.Bytecode,
+    fd: ?*const bytecode.function_def.FunctionDef,
+    product: *resolve_variables.ResolvedProduct,
+    memory: *core.memory.MemoryAccount,
+    atoms: *core.atom.AtomTable,
+    code: []const u8,
+    input_atoms: []const core.atom.Atom,
+    input_sources: []const builder.SourceSlot,
+
+    addr: []u32 = &.{},
+    binds: []BindEntry = &.{},
+    jump_slots: []JumpSlot = &.{},
+
+    relocs: []FinalReloc = &.{},
+    reloc_capacity: usize = 0,
+    reloc_len: u32 = 0,
+
+    output: []u8 = &.{},
+    output_capacity: usize = 0,
+    output_len: u32 = 0,
+
+    output_atoms: []core.atom.Atom = &.{},
+    output_atom_capacity: usize = 0,
+    output_atom_len: u32 = 0,
+
+    output_sources: []SourceLocSlot = &.{},
+    output_source_capacity: usize = 0,
+    output_source_len: u32 = 0,
+
+    bind_cursor: usize = 0,
+    jump_count: u32 = 0,
+    atom_cursor: u32 = 0,
+    source_cursor: u32 = 0,
+    pending_source: ?SourcePoint = null,
+    last_attached_source: ?SourcePoint = null,
+
+    fn deinit(self: *Resolver) void {
+        for (self.output_atoms[0..self.output_atom_len]) |atom_id|
+            self.atoms.free(atom_id);
+        if (self.output_atom_capacity != 0)
+            self.memory.free(core.atom.Atom, self.output_atoms);
+        if (self.output_capacity != 0) self.memory.free(u8, self.output);
+        if (self.output_source_capacity != 0)
+            self.memory.free(SourceLocSlot, self.output_sources);
+        if (self.reloc_capacity != 0) self.memory.free(FinalReloc, self.relocs);
+        if (self.addr.len != 0) self.memory.free(u32, self.addr);
+        if (self.binds.len != 0) self.memory.free(BindEntry, self.binds);
+        if (self.jump_slots.len != 0) self.memory.free(JumpSlot, self.jump_slots);
+
+        self.output_atoms = &.{};
+        self.output_atom_capacity = 0;
+        self.output_atom_len = 0;
+        self.output = &.{};
+        self.output_capacity = 0;
+        self.output_len = 0;
+        self.output_sources = &.{};
+        self.output_source_capacity = 0;
+        self.output_source_len = 0;
+        self.relocs = &.{};
+        self.reloc_capacity = 0;
+        self.reloc_len = 0;
+        self.addr = &.{};
+        self.binds = &.{};
+        self.jump_slots = &.{};
+    }
+
+    fn initScratch(self: *Resolver) Error!void {
+        if (self.product.label_len != 0) {
+            self.addr = self.memory.alloc(u32, self.product.label_len) catch
+                return error.OutOfMemory;
+            @memset(self.addr, labels.unbound);
+        }
+
+        var bind_count: usize = 0;
+        for (self.product.label_slots[0..self.product.label_len]) |slot| {
+            if (slot.flags.bound) bind_count += 1;
+        }
+        if (bind_count != 0) {
+            self.binds = self.memory.alloc(BindEntry, bind_count) catch
+                return error.OutOfMemory;
+            var index: usize = 0;
+            for (self.product.label_slots[0..self.product.label_len], 0..) |slot, label_index| {
+                if (!slot.flags.bound) continue;
+                self.binds[index] = .{
+                    .bound_offset = slot.bound_offset,
+                    .label_index = @intCast(label_index),
+                };
+                index += 1;
+            }
+            std.mem.sort(BindEntry, self.binds, {}, bindLessThan);
+        }
+
+        if (self.product.jump_size != 0) {
+            self.jump_slots = self.memory.alloc(JumpSlot, self.product.jump_size) catch
+                return error.OutOfMemory;
+        }
+    }
+
+    fn ensureOutput(self: *Resolver, need: usize) Error!void {
+        if (need > std.math.maxInt(u32)) return error.BytecodeOverflow;
+        _ = std.math.add(u32, self.output_len, @as(u32, @intCast(need))) catch
+            return error.BytecodeOverflow;
+        try reserve(
+            u8,
+            self.memory,
+            &self.output,
+            &self.output_capacity,
+            self.output_len,
+            need,
+            32,
+        );
+    }
+
+    fn appendByte(self: *Resolver, value: u8) Error!void {
+        try self.ensureOutput(1);
+        self.output[self.output_len] = value;
+        self.output_len += 1;
+    }
+
+    fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
+        if (bytes.len == 0) return;
+        try self.ensureOutput(bytes.len);
+        const start: usize = @intCast(self.output_len);
+        @memcpy(self.output[start..][0..bytes.len], bytes);
+        self.output_len += @intCast(bytes.len);
+    }
+
+    fn appendU16(self: *Resolver, value: u16) Error!void {
+        try self.ensureOutput(2);
+        const start: usize = @intCast(self.output_len);
+        std.mem.writeInt(u16, self.output[start..][0..2], value, .little);
+        self.output_len += 2;
+    }
+
+    fn appendI16(self: *Resolver, value: i16) Error!void {
+        try self.ensureOutput(2);
+        const start: usize = @intCast(self.output_len);
+        std.mem.writeInt(i16, self.output[start..][0..2], value, .little);
+        self.output_len += 2;
+    }
+
+    fn appendU32(self: *Resolver, value: u32) Error!void {
+        try self.ensureOutput(4);
+        const start: usize = @intCast(self.output_len);
+        std.mem.writeInt(u32, self.output[start..][0..4], value, .little);
+        self.output_len += 4;
+    }
+
+    fn appendI32(self: *Resolver, value: i32) Error!void {
+        try self.ensureOutput(4);
+        const start: usize = @intCast(self.output_len);
+        std.mem.writeInt(i32, self.output[start..][0..4], value, .little);
+        self.output_len += 4;
+    }
+
+    fn appendOutputAtom(self: *Resolver, atom_id: core.atom.Atom) Error!void {
+        if (self.output_atom_len == std.math.maxInt(u32))
+            return error.BytecodeOverflow;
+        try reserve(
+            core.atom.Atom,
+            self.memory,
+            &self.output_atoms,
+            &self.output_atom_capacity,
+            self.output_atom_len,
+            1,
+            8,
+        );
+        self.output_atoms[self.output_atom_len] = self.atoms.dup(atom_id);
+        self.output_atom_len += 1;
+    }
+
+    fn consumeAtomsRange(
+        self: *Resolver,
+        start: u32,
+        end: u32,
+        keep_atom_position: ?u32,
+    ) Error!void {
+        if (start > end or end > self.product.code_len)
+            return error.InvalidBytecode;
+        var position = start;
+        var kept = false;
+        while (position < end) {
+            const instruction = try decodeInstruction(self.code, position);
+            const position_next = std.math.add(u32, position, instruction.size) catch
+                return error.InvalidBytecode;
+            if (position_next > end) return error.InvalidBytecode;
+            if (hasAtomFormat(instruction.format)) {
+                if (self.atom_cursor >= self.input_atoms.len)
+                    return error.InvalidBytecode;
+                const encoded = try readU32At(self.code, position, 1);
+                const ledger_atom = self.input_atoms[self.atom_cursor];
+                if (encoded != ledger_atom) return error.InvalidBytecode;
+                if (keep_atom_position != null and keep_atom_position.? == position) {
+                    try self.appendOutputAtom(ledger_atom);
+                    kept = true;
+                }
+                self.atom_cursor += 1;
+            }
+            position = position_next;
+        }
+        if (position != end or (keep_atom_position != null and !kept))
+            return error.InvalidBytecode;
+    }
+
+    fn absorbSources(self: *Resolver, limit: u32) void {
+        while (self.source_cursor < self.input_sources.len and
+            self.input_sources[self.source_cursor].temp_offset < limit)
+        {
+            const source = self.input_sources[self.source_cursor];
+            self.pending_source = .{ .line = source.line, .col = source.col };
+            self.source_cursor += 1;
+        }
+    }
+
+    fn absorbSourcesAtEnd(self: *Resolver) void {
+        while (self.source_cursor < self.input_sources.len and
+            self.input_sources[self.source_cursor].temp_offset <= self.product.code_len)
+        {
+            const source = self.input_sources[self.source_cursor];
+            self.pending_source = .{ .line = source.line, .col = source.col };
+            self.source_cursor += 1;
+        }
+    }
+
+    /// qjs:34547 add_pc2line_info. Pending-source equality supplies both the
+    /// source-position dedupe and nondecreasing-PC property without an old-PC
+    /// relocation table.
+    fn attachSource(self: *Resolver) Error!void {
+        const pending = self.pending_source orelse return;
+        if (self.last_attached_source) |last| {
+            if (sourcePointEqual(last, pending)) return;
+        }
+        if (self.output_source_len == std.math.maxInt(u32))
+            return error.BytecodeOverflow;
+        try reserve(
+            SourceLocSlot,
+            self.memory,
+            &self.output_sources,
+            &self.output_source_capacity,
+            self.output_source_len,
+            1,
+            8,
+        );
+        self.output_sources[self.output_source_len] = .{
+            .pc = self.output_len,
+            .line_num = pending.line,
+            .col_num = pending.col,
+        };
+        self.output_source_len += 1;
+        self.last_attached_source = pending;
+    }
+
+    fn lowerBoundBind(self: *const Resolver, position: u32) usize {
+        var low: usize = 0;
+        var high = self.binds.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (self.binds[middle].bound_offset < position)
+                low = middle + 1
+            else
+                high = middle;
+        }
+        return low;
+    }
+
+    fn hasBindInRange(self: *const Resolver, start: u32, end: u32) bool {
+        if (start >= end) return false;
+        const index = self.lowerBoundBind(start);
+        return index < self.binds.len and self.binds[index].bound_offset < end;
+    }
+
+    fn readIndex(self: *const Resolver, position: u32) Error!u16 {
+        const instruction = try decodeInstruction(self.code, position);
+        return switch (instruction.format) {
+            .u8, .i8, .loc8, .const8 => self.code[position + 1],
+            .u16, .npop, .loc, .arg, .var_ref => try readU16(self.code, position),
+            else => error.InvalidBytecode,
+        };
+    }
+
+    /// qjs:33881 code_match, with source markers already out of band. A bind
+    /// at any byte boundary in the candidate range rejects the match exactly
+    /// as an OP_label byte would have rejected QuickJS's sequential matcher.
+    fn matchSeq(
+        self: *const Resolver,
+        start: u32,
+        tokens: []const PatternToken,
+    ) Error!?SeqMatch {
+        if (tokens.len > 8) return error.InvalidBytecode;
+        var result: SeqMatch = .{ .end = start, .count = @intCast(tokens.len) };
+        var position = start;
+        for (tokens, 0..) |token, token_index| {
+            if (token.options.len == 0 or position >= self.product.code_len)
+                return null;
+            const instruction = try decodeInstruction(self.code, position);
+            var selected = false;
+            for (token.options) |candidate| {
+                if (instruction.op_id == candidate) {
+                    selected = true;
+                    break;
+                }
+            }
+            if (!selected) return null;
+            if (token.idx) |expected| {
+                if (try self.readIndex(position) != expected) return null;
+            }
+            result.positions[token_index] = position;
+            result.ops[token_index] = instruction.op_id;
+            position += instruction.size;
+        }
+        if (self.hasBindInRange(start, position)) return null;
+        result.end = position;
+        return result;
+    }
+
+    fn addReloc(self: *Resolver, label_index: u32, addr_value: u32, size: u8) Error!void {
+        if (label_index >= self.product.label_len) return error.InvalidBytecode;
+        if (self.reloc_len == labels.no_reloc) return error.BytecodeOverflow;
+        try reserve(
+            FinalReloc,
+            self.memory,
+            &self.relocs,
+            &self.reloc_capacity,
+            self.reloc_len,
+            1,
+            8,
+        );
+        const slot = &self.product.label_slots[label_index];
+        self.relocs[self.reloc_len] = .{
+            .next = slot.first_reloc,
+            .addr = addr_value,
+            .size = size,
+        };
+        slot.first_reloc = self.reloc_len;
+        self.reloc_len += 1;
+    }
+
+    fn writeRelative(self: *Resolver, operand_pos: u32, size: u8, diff: i64) Error!void {
+        if (@as(usize, operand_pos) + size > self.output_len)
+            return error.InvalidBytecode;
+        const start: usize = @intCast(operand_pos);
+        switch (size) {
+            1 => {
+                if (diff < std.math.minInt(i8) or diff > std.math.maxInt(i8))
+                    return error.InvalidBytecode;
+                self.output[start] = @bitCast(@as(i8, @intCast(diff)));
+            },
+            2 => {
+                if (diff < std.math.minInt(i16) or diff > std.math.maxInt(i16))
+                    return error.InvalidBytecode;
+                std.mem.writeInt(
+                    i16,
+                    self.output[start..][0..2],
+                    @intCast(diff),
+                    .little,
+                );
+            },
+            4 => {
+                if (diff < std.math.minInt(i32) or diff > std.math.maxInt(i32))
+                    return error.BytecodeOverflow;
+                std.mem.writeInt(
+                    i32,
+                    self.output[start..][0..4],
+                    @intCast(diff),
+                    .little,
+                );
+            },
+            else => return error.InvalidBytecode,
+        }
+    }
+
+    /// qjs:34911-34939 OP_label, represented by the sorted bind side table.
+    fn processBindsAt(self: *Resolver, position: u32) Error!void {
+        if (self.bind_cursor < self.binds.len and
+            self.binds[self.bind_cursor].bound_offset < position)
+        {
+            return error.InvalidBytecode;
+        }
+        while (self.bind_cursor < self.binds.len and
+            self.binds[self.bind_cursor].bound_offset == position)
+        {
+            const entry = self.binds[self.bind_cursor];
+            self.bind_cursor += 1;
+            if (entry.dead_skipped) continue;
+            if (entry.label_index >= self.product.label_len or
+                self.addr[entry.label_index] != labels.unbound)
+            {
+                return error.InvalidBytecode;
+            }
+            self.addr[entry.label_index] = self.output_len;
+            const slot = &self.product.label_slots[entry.label_index];
+            var reloc_index = slot.first_reloc;
+            var walked: u32 = 0;
+            while (reloc_index != labels.no_reloc) {
+                if (reloc_index >= self.reloc_len or walked >= self.reloc_len)
+                    return error.InvalidBytecode;
+                const relocation = self.relocs[reloc_index];
+                const diff = @as(i64, self.output_len) - @as(i64, relocation.addr);
+                try self.writeRelative(relocation.addr, relocation.size, diff);
+                reloc_index = relocation.next;
+                walked += 1;
+            }
+            slot.first_reloc = labels.no_reloc;
+        }
+    }
+
+    fn appendJumpSlot(
+        self: *Resolver,
+        op_id: u8,
+        size: u8,
+        operand_pos: u32,
+        label_index: u32,
+    ) Error!u32 {
+        if (self.jump_count >= self.jump_slots.len)
+            return error.InvalidBytecode;
+        const index = self.jump_count;
+        self.jump_slots[index] = .{
+            .op = op_id,
+            .size = size,
+            .pos = operand_pos,
+            .label = label_index,
+        };
+        self.jump_count += 1;
+        return index;
+    }
+
+    /// qjs:34633 code_has_label. Side-table binds replace adjacent OP_label
+    /// bytes; the immediately following goto case remains bytecode-native.
+    fn codeHasLabel(self: *const Resolver, position: u32, label_index: u32) Error!bool {
+        var index = self.lowerBoundBind(position);
+        while (index < self.binds.len and self.binds[index].bound_offset == position) : (index += 1) {
+            if (self.binds[index].label_index == label_index) return true;
+        }
+        if (position < self.product.code_len) {
+            const instruction = try decodeInstruction(self.code, position);
+            if (instruction.op_id == op.goto)
+                return try readU32At(self.code, position, 1) == label_index;
+        }
+        return false;
+    }
+
+    /// qjs:34661 find_jump_target. The line-output parameter is intentionally
+    /// absent: qjs's sole goto caller leaves its captured line unapplied.
+    fn findJumpTarget(
+        self: *Resolver,
+        label0: u32,
+        out_op: *u8,
+    ) Error!u32 {
+        var label_index = label0;
+        _ = try updateLabel(self.product, label_index, -1);
+        var target_op: u8 = op.invalid;
+        var iteration: u8 = 0;
+        while (iteration < 10) : (iteration += 1) {
+            if (label_index >= self.product.label_len)
+                return error.InvalidBytecode;
+            const slot = self.product.label_slots[label_index];
+            if (!slot.flags.bound or slot.bound_offset == labels.unbound or
+                slot.bound_offset > self.product.code_len)
+            {
+                return error.InvalidBytecode;
+            }
+            var position = slot.bound_offset;
+            if (position == self.product.code_len) {
+                target_op = op.invalid;
+                break;
+            }
+            const instruction = try decodeInstruction(self.code, position);
+            target_op = instruction.op_id;
+            if (target_op == op.goto) {
+                label_index = try readU32At(self.code, position, 1);
+                continue;
+            }
+            if (target_op == op.drop) {
+                while (position < self.product.code_len and self.code[position] == op.drop) {
+                    const drop = try decodeInstruction(self.code, position);
+                    position += drop.size;
+                }
+                if (position < self.product.code_len) {
+                    const after_drops = try decodeInstruction(self.code, position);
+                    if (after_drops.op_id == op.return_undef)
+                        target_op = op.return_undef;
+                }
+            }
+            break;
+        } else {
+            // qjs:34695-34708 cycle workaround: restore the original edge.
+            label_index = label0;
+        }
+        out_op.* = target_op;
+        _ = try updateLabel(self.product, label_index, 1);
+        return label_index;
+    }
+
+    /// qjs:34112 skip_dead_code, with atoms and sources consumed from their
+    /// side ledgers while dead labels remain unresolved.
+    fn skipDeadCode(self: *Resolver, start: u32) Error!u32 {
+        var position = start;
+        while (true) {
+            if (position > self.product.code_len) return error.InvalidBytecode;
+            if (self.bind_cursor < self.binds.len and
+                self.binds[self.bind_cursor].bound_offset < position)
+            {
+                return error.InvalidBytecode;
+            }
+
+            const bind_start = self.bind_cursor;
+            var bind_end = bind_start;
+            var has_live_bind = false;
+            while (bind_end < self.binds.len and
+                self.binds[bind_end].bound_offset == position)
+            {
+                const label_index = self.binds[bind_end].label_index;
+                if (label_index >= self.product.label_len)
+                    return error.InvalidBytecode;
+                const slot = &self.product.label_slots[label_index];
+                if (slot.ref_count > 0) {
+                    has_live_bind = true;
+                } else {
+                    if (slot.first_reloc != labels.no_reloc)
+                        return error.InvalidBytecode;
+                    self.binds[bind_end].dead_skipped = true;
+                }
+                bind_end += 1;
+            }
+            if (has_live_bind) return position;
+            self.bind_cursor = bind_end;
+            if (position == self.product.code_len) return position;
+
+            const instruction = try decodeInstruction(self.code, position);
+            const position_next = position + instruction.size;
+            self.absorbSources(position_next);
+            switch (instruction.op_id) {
+                op.if_false, op.if_true, op.goto, op.@"catch", op.gosub => {
+                    _ = try updateLabel(
+                        self.product,
+                        try readU32At(self.code, position, 1),
+                        -1,
+                    );
+                },
+                op.with_get_var,
+                op.with_put_var,
+                op.with_delete_var,
+                op.with_make_ref,
+                op.with_get_ref,
+                => {
+                    _ = try updateLabel(
+                        self.product,
+                        try readU32At(self.code, position, 5),
+                        -1,
+                    );
+                },
+                else => {},
+            }
+            try self.consumeAtomsRange(position, position_next, null);
+            position = position_next;
+        }
+    }
+
+    fn shortSlotOp(op_id: u8, idx: u16) ?u8 {
+        if (idx < 4) {
+            const base: ?u8 = switch (op_id) {
+                op.get_loc => op.get_loc0,
+                op.put_loc => op.put_loc0,
+                op.set_loc => op.set_loc0,
+                op.get_arg => op.get_arg0,
+                op.put_arg => op.put_arg0,
+                op.set_arg => op.set_arg0,
+                op.get_var_ref => op.get_var_ref0,
+                op.put_var_ref => op.put_var_ref0,
+                op.set_var_ref => op.set_var_ref0,
+                op.call => op.call0,
+                else => null,
+            };
+            if (base) |short_base| return short_base + @as(u8, @intCast(idx));
+        }
+        if (idx < 256) {
+            return switch (op_id) {
+                op.get_loc => op.get_loc8,
+                op.put_loc => op.put_loc8,
+                op.set_loc => op.set_loc8,
+                else => null,
+            };
+        }
+        return null;
+    }
+
+    /// qjs:34737 put_short_code plus the zjs legacy call0..3 lowering.
+    fn putShortCode(self: *Resolver, op_id: u8, idx: u16) Error!void {
+        if (shortSlotOp(op_id, idx)) |short_op| {
+            try self.appendByte(short_op);
+            if (short_op == op.get_loc8 or short_op == op.put_loc8 or
+                short_op == op.set_loc8)
+            {
+                try self.appendByte(@intCast(idx));
+            }
+            return;
+        }
+        try self.appendByte(op_id);
+        try self.appendU16(idx);
+    }
+
+    /// qjs:34715 push_short_int, using zjs's explicit push_minus1 row.
+    fn pushShortInt(self: *Resolver, value: i32) Error!void {
+        if (value >= -1 and value <= 7) {
+            try self.appendByte(@intCast(@as(i32, op.push_0) + value));
+        } else if (value >= std.math.minInt(i8) and value <= std.math.maxInt(i8)) {
+            try self.appendByte(op.push_i8);
+            try self.appendByte(@bitCast(@as(i8, @intCast(value))));
+        } else if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
+            try self.appendByte(op.push_i16);
+            try self.appendI16(@intCast(value));
+        } else {
+            try self.appendByte(op.push_i32);
+            try self.appendI32(value);
+        }
+    }
+
+    fn checkedSlotIndex(value: i32) Error!u16 {
+        if (value < 0 or value > std.math.maxInt(u16))
+            return error.InvalidBytecode;
+        return @intCast(value);
+    }
+
+    fn emitSpecialObject(self: *Resolver, subtype: u8, slot: i32) Error!void {
+        try self.appendByte(op.special_object);
+        try self.appendByte(subtype);
+        try self.putShortCode(op.put_loc, try checkedSlotIndex(slot));
+    }
+
+    /// qjs:34833-34896, following legacy emitFunctionPrologue. Argument
+    /// capture stays in zjs finalization and is deliberately absent here.
+    fn emitFunctionPrologue(self: *Resolver) Error!void {
+        const fd = self.fd orelse return;
+        const special = opcode.special_object_subtype;
+        if (fd.home_object_var_idx >= 0)
+            try self.emitSpecialObject(special.home_object, fd.home_object_var_idx);
+        if (fd.this_active_func_var_idx >= 0)
+            try self.emitSpecialObject(special.current_function, fd.this_active_func_var_idx);
+        if (fd.new_target_var_idx >= 0)
+            try self.emitSpecialObject(special.new_target, fd.new_target_var_idx);
+        if (fd.this_var_idx >= 0) {
+            const idx = try checkedSlotIndex(fd.this_var_idx);
+            if (fd.is_derived_class_constructor) {
+                // This opcode has no short form in zjs.
+                try self.appendByte(op.set_loc_uninitialized);
+                try self.appendU16(idx);
+            } else {
+                try self.appendByte(op.push_this);
+                try self.putShortCode(op.put_loc, idx);
+            }
+        }
+        if (fd.arguments_var_idx >= 0) {
+            try self.appendByte(op.special_object);
+            try self.appendByte(if (fd.is_strict_mode or !fd.has_simple_parameter_list)
+                special.arguments
+            else
+                special.mapped_arguments);
+            if (fd.arguments_arg_idx >= 0)
+                try self.putShortCode(
+                    op.set_loc,
+                    try checkedSlotIndex(fd.arguments_arg_idx),
+                );
+            try self.putShortCode(
+                op.put_loc,
+                try checkedSlotIndex(fd.arguments_var_idx),
+            );
+        }
+        if (fd.func_var_idx >= 0)
+            try self.emitSpecialObject(special.current_function, fd.func_var_idx);
+        if (fd.var_object_idx >= 0)
+            try self.emitSpecialObject(special.var_object, fd.var_object_idx);
+        if (fd.arg_var_object_idx >= 0)
+            try self.emitSpecialObject(special.var_object, fd.arg_var_object_idx);
+    }
+
+    fn shortJumpOp(op_id: u8) Error!u8 {
+        return switch (op_id) {
+            op.if_false => op.if_false8,
+            op.if_true => op.if_true8,
+            op.goto => op.goto8,
+            else => error.InvalidBytecode,
+        };
+    }
+
+    fn emitHasLabel(
+        self: *Resolver,
+        input_position: u32,
+        initial_next: u32,
+        op_id: u8,
+        label_index: u32,
+    ) Error!u32 {
+        try self.attachSource();
+        var position_next = initial_next;
+        if (op_id == op.goto)
+            position_next = try self.skipDeadCode(position_next);
+        if (label_index >= self.product.label_len)
+            return error.InvalidBytecode;
+        const slot = &self.product.label_slots[label_index];
+        const jump_index = try self.appendJumpSlot(
+            op_id,
+            4,
+            std.math.add(u32, self.output_len, 1) catch
+                return error.BytecodeOverflow,
+            label_index,
+        );
+
+        if (self.addr[label_index] == labels.unbound) {
+            if (!slot.flags.bound or slot.bound_offset == labels.unbound)
+                return error.InvalidBytecode;
+            const estimated = @as(i64, slot.bound_offset) -
+                @as(i64, input_position) - 1;
+            if (estimated < 128 and
+                (op_id == op.if_false or op_id == op.if_true or op_id == op.goto))
+            {
+                const short_op = try shortJumpOp(op_id);
+                self.jump_slots[jump_index].op = short_op;
+                self.jump_slots[jump_index].size = 1;
+                try self.appendByte(short_op);
+                const operand_pos = self.output_len;
+                self.jump_slots[jump_index].pos = operand_pos;
+                try self.appendByte(0);
+                try self.addReloc(label_index, operand_pos, 1);
+                return position_next;
+            }
+            if (estimated < 32768 and op_id == op.goto) {
+                self.jump_slots[jump_index].op = op.goto16;
+                self.jump_slots[jump_index].size = 2;
+                try self.appendByte(op.goto16);
+                const operand_pos = self.output_len;
+                self.jump_slots[jump_index].pos = operand_pos;
+                try self.appendU16(0);
+                try self.addReloc(label_index, operand_pos, 2);
+                return position_next;
+            }
+        } else {
+            const diff = @as(i64, self.addr[label_index]) -
+                @as(i64, self.output_len) - 1;
+            if (diff >= std.math.minInt(i8) and diff <= std.math.maxInt(i8) and
+                (op_id == op.if_false or op_id == op.if_true or op_id == op.goto))
+            {
+                const short_op = try shortJumpOp(op_id);
+                self.jump_slots[jump_index].op = short_op;
+                self.jump_slots[jump_index].size = 1;
+                try self.appendByte(short_op);
+                const operand_pos = self.output_len;
+                self.jump_slots[jump_index].pos = operand_pos;
+                try self.appendByte(@bitCast(@as(i8, @intCast(diff))));
+                return position_next;
+            }
+            if (diff >= std.math.minInt(i16) and diff <= std.math.maxInt(i16) and
+                op_id == op.goto)
+            {
+                self.jump_slots[jump_index].op = op.goto16;
+                self.jump_slots[jump_index].size = 2;
+                try self.appendByte(op.goto16);
+                const operand_pos = self.output_len;
+                self.jump_slots[jump_index].pos = operand_pos;
+                try self.appendI16(@intCast(diff));
+                return position_next;
+            }
+        }
+
+        try self.appendByte(op_id);
+        const operand_pos = self.output_len;
+        self.jump_slots[jump_index].pos = operand_pos;
+        if (self.addr[label_index] == labels.unbound) {
+            try self.appendU32(0);
+            try self.addReloc(label_index, operand_pos, 4);
+        } else {
+            const diff = @as(i64, self.addr[label_index]) - @as(i64, operand_pos);
+            if (diff < std.math.minInt(i32) or diff > std.math.maxInt(i32))
+                return error.BytecodeOverflow;
+            try self.appendI32(@intCast(diff));
+        }
+        return position_next;
+    }
+
+    const SlotFamily = struct {
+        get: u8,
+        put: u8,
+        set: u8,
+    };
+
+    fn putFamily(op_id: u8) ?SlotFamily {
+        return switch (op_id) {
+            op.put_loc => .{ .get = op.get_loc, .put = op.put_loc, .set = op.set_loc },
+            op.put_loc_check => .{
+                .get = op.get_loc_check,
+                .put = op.put_loc_check,
+                .set = op.set_loc_check,
+            },
+            op.put_arg => .{ .get = op.get_arg, .put = op.put_arg, .set = op.set_arg },
+            op.put_var_ref => .{
+                .get = op.get_var_ref,
+                .put = op.put_var_ref,
+                .set = op.set_var_ref,
+            },
+            else => null,
+        };
+    }
+
+    fn isShortSlotFamily(op_id: u8) bool {
+        return op_id == op.get_loc or op_id == op.put_loc or op_id == op.set_loc or
+            op_id == op.get_arg or op_id == op.put_arg or op_id == op.set_arg or
+            op_id == op.get_var_ref or op_id == op.put_var_ref or
+            op_id == op.set_var_ref;
+    }
+
+    fn copyDefault(
+        self: *Resolver,
+        position: u32,
+        instruction: Instruction,
+    ) Error!void {
+        try self.attachSource();
+        const position_next = position + instruction.size;
+        if (instruction.op_id == op.call) {
+            try self.putShortCode(op.call, try readU16(self.code, position));
+        } else if (isShortSlotFamily(instruction.op_id)) {
+            try self.putShortCode(
+                instruction.op_id,
+                try readU16(self.code, position),
+            );
+        } else {
+            try self.appendRaw(self.code[position..position_next]);
+        }
+        try self.consumeAtomsRange(
+            position,
+            position_next,
+            if (hasAtomFormat(instruction.format)) position else null,
+        );
+    }
+
+    fn emitRawInstruction(
+        self: *Resolver,
+        position: u32,
+        instruction: Instruction,
+    ) Error!void {
+        try self.attachSource();
+        const position_next = position + instruction.size;
+        try self.appendRaw(self.code[position..position_next]);
+        try self.consumeAtomsRange(
+            position,
+            position_next,
+            if (hasAtomFormat(instruction.format)) position else null,
+        );
+    }
+
+    fn handleGoto(
+        self: *Resolver,
+        input_position: u32,
+        initial_next: u32,
+        initial_label: u32,
+    ) Error!u32 {
+        var target_op: u8 = op.invalid;
+        const label_index = try self.findJumpTarget(initial_label, &target_op);
+        if (try self.codeHasLabel(initial_next, label_index)) {
+            _ = try updateLabel(self.product, label_index, -1);
+            return initial_next;
+        }
+        if (target_op == op.@"return" or target_op == op.return_undef or
+            target_op == op.throw)
+        {
+            _ = try updateLabel(self.product, label_index, -1);
+            try self.attachSource();
+            try self.appendByte(target_op);
+            return self.skipDeadCode(initial_next);
+        }
+        return self.emitHasLabel(
+            input_position,
+            initial_next,
+            op.goto,
+            label_index,
+        );
+    }
+
+    fn handleConstantTest(
+        self: *Resolver,
+        input_position: u32,
+        value: bool,
+        match: SeqMatch,
+    ) Error!u32 {
+        self.absorbSources(match.end);
+        const branch_op = match.ops[0];
+        const label_index = try readU32At(
+            self.code,
+            match.positions[0],
+            1,
+        );
+        if (value == (branch_op == op.if_true)) {
+            return self.handleGoto(input_position, match.end, label_index);
+        }
+        _ = try updateLabel(self.product, label_index, -1);
+        return match.end;
+    }
+
+    /// qjs:35099 atom_label_u8 family.
+    fn emitWithProbe(
+        self: *Resolver,
+        position: u32,
+        position_next: u32,
+        op_id: u8,
+    ) Error!void {
+        const atom_id = try readU32At(self.code, position, 1);
+        var target_op: u8 = op.invalid;
+        const label_index = try self.findJumpTarget(
+            try readU32At(self.code, position, 5),
+            &target_op,
+        );
+        if (label_index >= self.product.label_len)
+            return error.InvalidBytecode;
+        try self.attachSource();
+        const jump_index = try self.appendJumpSlot(
+            op_id,
+            4,
+            std.math.add(u32, self.output_len, 5) catch
+                return error.BytecodeOverflow,
+            label_index,
+        );
+        try self.appendByte(op_id);
+        try self.appendU32(atom_id);
+        const operand_pos = self.output_len;
+        self.jump_slots[jump_index].pos = operand_pos;
+        if (self.addr[label_index] == labels.unbound) {
+            const slot = self.product.label_slots[label_index];
+            if (!slot.flags.bound or slot.bound_offset == labels.unbound)
+                return error.InvalidBytecode;
+            try self.appendU32(0);
+            try self.addReloc(label_index, operand_pos, 4);
+        } else {
+            const diff = @as(i64, self.addr[label_index]) - @as(i64, operand_pos);
+            if (diff < std.math.minInt(i32) or diff > std.math.maxInt(i32))
+                return error.BytecodeOverflow;
+            try self.appendI32(@intCast(diff));
+        }
+        try self.appendByte(self.code[position + 9]);
+        try self.consumeAtomsRange(position, position_next, position);
+    }
+
+    fn walk(self: *Resolver) Error!void {
+        try self.emitFunctionPrologue();
+
+        var position: u32 = 0;
+        while (position < self.product.code_len) {
+            try self.processBindsAt(position);
+            self.absorbSources(position + 1);
+            const instruction = try decodeInstruction(self.code, position);
+            var position_next = position + instruction.size;
+
+            switch (instruction.op_id) {
+                // qjs:34941-34959 deliberately diverges: zjs emits tail_call
+                // directly and legacy resolve_labels never folds call+return.
+                // Ordinary call still takes the default call0..3 selector.
+                op.call, op.call_method => try self.copyDefault(position, instruction),
+
+                // qjs:34960-34967.
+                op.@"return",
+                op.return_undef,
+                op.return_async,
+                op.throw,
+                op.throw_error,
+                => {
+                    try self.emitRawInstruction(position, instruction);
+                    position_next = try self.skipDeadCode(position_next);
+                },
+
+                // qjs:34968-34998.
+                op.goto => {
+                    position_next = try self.handleGoto(
+                        position,
+                        position_next,
+                        try readU32At(self.code, position, 1),
+                    );
+                },
+
+                // qjs:34999-35010. The disabled empty-finalizer fold stays
+                // disabled; S3 already removes that shape.
+                op.gosub, op.@"catch" => {
+                    position_next = try self.emitHasLabel(
+                        position,
+                        position_next,
+                        instruction.op_id,
+                        try readU32At(self.code, position, 1),
+                    );
+                },
+
+                // qjs:35015-35098.
+                op.if_true, op.if_false => {
+                    var target_op: u8 = op.invalid;
+                    var label_index = try self.findJumpTarget(
+                        try readU32At(self.code, position, 1),
+                        &target_op,
+                    );
+                    if (try self.codeHasLabel(position_next, label_index)) {
+                        _ = try updateLabel(self.product, label_index, -1);
+                        try self.attachSource();
+                        try self.appendByte(op.drop);
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.goto} },
+                    })) |match| {
+                        if (try self.codeHasLabel(match.end, label_index)) {
+                            self.absorbSources(match.end);
+                            _ = try updateLabel(self.product, label_index, -1);
+                            label_index = try readU32At(
+                                self.code,
+                                match.positions[0],
+                                1,
+                            );
+                            const inverted = if (instruction.op_id == op.if_false)
+                                op.if_true
+                            else
+                                op.if_false;
+                            position_next = try self.emitHasLabel(
+                                position,
+                                match.end,
+                                inverted,
+                                label_index,
+                            );
+                        } else {
+                            position_next = try self.emitHasLabel(
+                                position,
+                                position_next,
+                                instruction.op_id,
+                                label_index,
+                            );
+                        }
+                    } else {
+                        position_next = try self.emitHasLabel(
+                            position,
+                            position_next,
+                            instruction.op_id,
+                            label_index,
+                        );
+                    }
+                },
+
+                // qjs:35099-35135.
+                op.with_get_var,
+                op.with_put_var,
+                op.with_delete_var,
+                op.with_make_ref,
+                op.with_get_ref,
+                => try self.emitWithProbe(
+                    position,
+                    position_next,
+                    instruction.op_id,
+                ),
+
+                // qjs:35136-35145.
+                op.drop => {
+                    if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.return_undef} },
+                    })) |match| {
+                        // The return is intentionally revisited by the main
+                        // loop; only its carried source is absorbed here.
+                        self.absorbSources(match.end);
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                // qjs:35146-35169, followed by the false constant-test case.
+                op.null => {
+                    if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.strict_eq} },
+                    })) |match| {
+                        self.absorbSources(match.end);
+                        try self.attachSource();
+                        try self.appendByte(op.is_null);
+                        position_next = match.end;
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.strict_neq} },
+                        .{ .options = &.{ op.if_false, op.if_true } },
+                    })) |match| {
+                        self.absorbSources(match.end);
+                        try self.attachSource();
+                        try self.appendByte(op.is_null);
+                        const inverted = if (match.ops[1] == op.if_false)
+                            op.if_true
+                        else
+                            op.if_false;
+                        position_next = try self.emitHasLabel(
+                            position,
+                            match.end,
+                            inverted,
+                            try readU32At(self.code, match.positions[1], 1),
+                        );
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{ op.if_false, op.if_true } },
+                    })) |match| {
+                        position_next = try self.handleConstantTest(
+                            position,
+                            false,
+                            match,
+                        );
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                // qjs:35170-35196.
+                op.push_false, op.push_true => {
+                    if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{ op.if_false, op.if_true } },
+                    })) |match| {
+                        position_next = try self.handleConstantTest(
+                            position,
+                            instruction.op_id == op.push_true,
+                            match,
+                        );
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                // qjs:35197-35229, with the deliberate legacy zjs ordering:
+                // constant-test recognition precedes neg and push/drop folds.
+                op.push_i32 => {
+                    const value = try readI32(self.code, position);
+                    if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{ op.if_false, op.if_true } },
+                    })) |match| {
+                        position_next = try self.handleConstantTest(
+                            position,
+                            value != 0,
+                            match,
+                        );
+                    } else if (value != std.math.minInt(i32) and value != 0) {
+                        if (try self.matchSeq(position_next, &.{
+                            .{ .options = &.{op.neg} },
+                        })) |neg_match| {
+                            if (try self.matchSeq(neg_match.end, &.{
+                                .{ .options = &.{op.drop} },
+                            })) |drop_match| {
+                                self.absorbSources(drop_match.end);
+                                position_next = drop_match.end;
+                            } else {
+                                self.absorbSources(neg_match.end);
+                                try self.attachSource();
+                                try self.pushShortInt(-value);
+                                position_next = neg_match.end;
+                            }
+                        } else if (try self.matchSeq(position_next, &.{
+                            .{ .options = &.{op.drop} },
+                        })) |drop_match| {
+                            self.absorbSources(drop_match.end);
+                            position_next = drop_match.end;
+                        } else {
+                            try self.attachSource();
+                            try self.pushShortInt(value);
+                        }
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.drop} },
+                    })) |drop_match| {
+                        self.absorbSources(drop_match.end);
+                        position_next = drop_match.end;
+                    } else {
+                        try self.attachSource();
+                        try self.pushShortInt(value);
+                    }
+                },
+
+                // qjs:35230-35250. zjs guards the entire fold, including the
+                // discarded variant, against INT32_MIN.
+                op.push_bigint_i32 => {
+                    const value = try readI32(self.code, position);
+                    if (value != std.math.minInt(i32)) {
+                        if (try self.matchSeq(position_next, &.{
+                            .{ .options = &.{op.neg} },
+                        })) |neg_match| {
+                            if (try self.matchSeq(neg_match.end, &.{
+                                .{ .options = &.{op.drop} },
+                            })) |drop_match| {
+                                self.absorbSources(drop_match.end);
+                                position_next = drop_match.end;
+                            } else {
+                                self.absorbSources(neg_match.end);
+                                try self.attachSource();
+                                try self.appendByte(op.push_bigint_i32);
+                                try self.appendI32(-value);
+                                position_next = neg_match.end;
+                            }
+                        } else {
+                            try self.copyDefault(position, instruction);
+                        }
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                // qjs:35251-35263.
+                op.push_const, op.fclosure => {
+                    const index = try readU32At(self.code, position, 1);
+                    if (index < 256) {
+                        try self.attachSource();
+                        try self.appendByte(if (instruction.op_id == op.push_const)
+                            op.push_const8
+                        else
+                            op.fclosure8);
+                        try self.appendByte(@intCast(index));
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                // qjs:35264-35275.
+                op.get_field => {
+                    if (try readU32At(self.code, position, 1) == core.atom.ids.length) {
+                        try self.attachSource();
+                        try self.appendByte(op.get_length);
+                        try self.consumeAtomsRange(position, position_next, null);
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                // qjs:35276-35296.
+                op.push_atom_value => {
+                    if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.drop} },
+                    })) |match| {
+                        self.absorbSources(match.end);
+                        try self.consumeAtomsRange(position, match.end, null);
+                        position_next = match.end;
+                    } else if (try readU32At(self.code, position, 1) ==
+                        core.atom.ids.empty_string)
+                    {
+                        try self.attachSource();
+                        try self.appendByte(op.push_empty_string);
+                        try self.consumeAtomsRange(position, position_next, null);
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                // qjs:35297-35307 deliberately not ported: legacy zjs has no
+                // to_propkey/store fold.
+                op.to_propkey => try self.copyDefault(position, instruction),
+
+                // qjs:35308-35351.
+                op.undefined => {
+                    if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.drop} },
+                    })) |match| {
+                        self.absorbSources(match.end);
+                        position_next = match.end;
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.@"return"} },
+                    })) |match| {
+                        self.absorbSources(match.end);
+                        try self.attachSource();
+                        try self.appendByte(op.return_undef);
+                        position_next = match.end;
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{ op.if_false, op.if_true } },
+                    })) |match| {
+                        position_next = try self.handleConstantTest(
+                            position,
+                            false,
+                            match,
+                        );
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.strict_eq} },
+                    })) |match| {
+                        self.absorbSources(match.end);
+                        try self.attachSource();
+                        try self.appendByte(op.is_undefined);
+                        position_next = match.end;
+                    } else if (try self.matchSeq(position_next, &.{
+                        .{ .options = &.{op.strict_neq} },
+                        .{ .options = &.{ op.if_false, op.if_true } },
+                    })) |match| {
+                        self.absorbSources(match.end);
+                        try self.attachSource();
+                        try self.appendByte(op.is_undefined);
+                        const inverted = if (match.ops[1] == op.if_false)
+                            op.if_true
+                        else
+                            op.if_false;
+                        position_next = try self.emitHasLabel(
+                            position,
+                            match.end,
+                            inverted,
+                            try readU32At(self.code, match.positions[1], 1),
+                        );
+                    } else {
+                        try self.copyDefault(position, instruction);
+                    }
+                },
+
+                else => try self.walkLateArm(position, instruction, &position_next),
+            }
+
+            position = position_next;
+        }
+
+        try self.processBindsAt(self.product.code_len);
+        self.absorbSourcesAtEnd();
+        if (self.bind_cursor != self.binds.len or
+            self.atom_cursor != self.input_atoms.len or
+            self.source_cursor != self.input_sources.len)
+        {
+            return error.InvalidBytecode;
+        }
+        for (self.product.label_slots[0..self.product.label_len]) |slot| {
+            if (slot.first_reloc != labels.no_reloc)
+                return error.InvalidBytecode;
+        }
+    }
+
+    fn walkLateArm(
+        self: *Resolver,
+        position: u32,
+        instruction: Instruction,
+        position_next: *u32,
+    ) Error!void {
+        switch (instruction.op_id) {
+            // qjs:35352-35367.
+            op.insert2 => {
+                if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{op.put_field} },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    const put_position = match.positions[0];
+                    try self.appendByte(op.put_field);
+                    try self.appendU32(try readU32At(self.code, put_position, 1));
+                    try self.consumeAtomsRange(position, match.end, put_position);
+                    position_next.* = match.end;
+                } else {
+                    try self.copyDefault(position, instruction);
+                }
+            },
+
+            // qjs:35368-35394. Explicit families replace qjs's arithmetic
+            // get/put/set assumptions, including the checked-local family.
+            op.dup => {
+                if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{
+                        op.put_loc,
+                        op.put_loc_check,
+                        op.put_arg,
+                        op.put_var_ref,
+                    } },
+                })) |put_match| {
+                    const family = putFamily(put_match.ops[0]) orelse
+                        return error.InvalidBytecode;
+                    const idx = try self.readIndex(put_match.positions[0]);
+                    self.absorbSources(put_match.end);
+                    var result_op = family.set;
+                    var final_end = put_match.end;
+                    if (try self.matchSeq(final_end, &.{
+                        .{ .options = &.{op.drop} },
+                    })) |drop_match| {
+                        self.absorbSources(drop_match.end);
+                        result_op = family.put;
+                        final_end = drop_match.end;
+                        if (try self.matchSeq(final_end, &.{
+                            .{ .options = &.{family.get}, .idx = idx },
+                        })) |get_match| {
+                            // S3 source slots are absorbed on matcher
+                            // acceptance, so this applies qjs's delayed line2
+                            // before attach instead of after it.
+                            self.absorbSources(get_match.end);
+                            result_op = family.set;
+                            final_end = get_match.end;
+                        }
+                    }
+                    try self.attachSource();
+                    try self.putShortCode(result_op, idx);
+                    position_next.* = final_end;
+                } else {
+                    try self.copyDefault(position, instruction);
+                }
+            },
+
+            // qjs:35395-35468.
+            op.get_loc => {
+                const idx = try readU16(self.code, position);
+                if (idx >= 256) {
+                    try self.copyDefault(position, instruction);
+                    return;
+                }
+
+                if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{ op.post_dec, op.post_inc } },
+                    .{ .options = &.{op.put_loc}, .idx = idx },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    try self.appendByte(if (match.ops[0] == op.post_inc)
+                        op.inc_loc
+                    else
+                        op.dec_loc);
+                    try self.appendByte(@intCast(idx));
+                    position_next.* = match.end;
+                } else if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{ op.dec, op.inc } },
+                    .{ .options = &.{op.dup} },
+                    .{ .options = &.{op.put_loc}, .idx = idx },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    try self.appendByte(if (match.ops[0] == op.inc)
+                        op.inc_loc
+                    else
+                        op.dec_loc);
+                    try self.appendByte(@intCast(idx));
+                    position_next.* = match.end;
+                } else if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{op.push_atom_value} },
+                    .{ .options = &.{op.add} },
+                    .{ .options = &.{op.dup} },
+                    .{ .options = &.{op.put_loc}, .idx = idx },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    const atom_position = match.positions[0];
+                    const atom_id = try readU32At(self.code, atom_position, 1);
+                    if (atom_id == core.atom.ids.empty_string) {
+                        try self.appendByte(op.push_empty_string);
+                        try self.consumeAtomsRange(position, match.end, null);
+                    } else {
+                        try self.appendByte(op.push_atom_value);
+                        try self.appendU32(atom_id);
+                        try self.consumeAtomsRange(
+                            position,
+                            match.end,
+                            atom_position,
+                        );
+                    }
+                    try self.appendByte(op.add_loc);
+                    try self.appendByte(@intCast(idx));
+                    position_next.* = match.end;
+                } else if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{op.push_i32} },
+                    .{ .options = &.{op.add} },
+                    .{ .options = &.{op.dup} },
+                    .{ .options = &.{op.put_loc}, .idx = idx },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    try self.pushShortInt(try readI32(self.code, match.positions[0]));
+                    try self.appendByte(op.add_loc);
+                    try self.appendByte(@intCast(idx));
+                    position_next.* = match.end;
+                } else if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{ op.get_loc, op.get_arg, op.get_var_ref } },
+                    .{ .options = &.{op.add} },
+                    .{ .options = &.{op.dup} },
+                    .{ .options = &.{op.put_loc}, .idx = idx },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    try self.putShortCode(
+                        match.ops[0],
+                        try self.readIndex(match.positions[0]),
+                    );
+                    try self.appendByte(op.add_loc);
+                    try self.appendByte(@intCast(idx));
+                    position_next.* = match.end;
+                } else {
+                    try self.attachSource();
+                    try self.putShortCode(op.get_loc, idx);
+                }
+            },
+
+            // qjs:35469-35479.
+            op.get_arg, op.get_var_ref => {
+                try self.attachSource();
+                try self.putShortCode(
+                    instruction.op_id,
+                    try readU16(self.code, position),
+                );
+            },
+
+            // qjs:35480-35500.
+            op.put_loc, op.put_loc_check, op.put_arg, op.put_var_ref => {
+                const family = putFamily(instruction.op_id) orelse
+                    return error.InvalidBytecode;
+                const idx = try readU16(self.code, position);
+                if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{family.get}, .idx = idx },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    try self.putShortCode(family.set, idx);
+                    position_next.* = match.end;
+                } else {
+                    try self.attachSource();
+                    // put_loc_check is intentionally wide: putShortCode has
+                    // no short-family row for it.
+                    try self.putShortCode(family.put, idx);
+                }
+            },
+
+            // qjs:35501-35545.
+            op.post_inc, op.post_dec => {
+                const update_op = if (instruction.op_id == op.post_inc)
+                    op.inc
+                else
+                    op.dec;
+                if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{ op.put_loc, op.put_arg, op.put_var_ref } },
+                    .{ .options = &.{op.drop} },
+                })) |store_match| {
+                    const family = putFamily(store_match.ops[0]) orelse
+                        return error.InvalidBytecode;
+                    const idx = try self.readIndex(store_match.positions[0]);
+                    self.absorbSources(store_match.end);
+                    var store_op = family.put;
+                    var final_end = store_match.end;
+                    if (try self.matchSeq(final_end, &.{
+                        .{ .options = &.{family.get}, .idx = idx },
+                    })) |get_match| {
+                        self.absorbSources(get_match.end);
+                        store_op = family.set;
+                        final_end = get_match.end;
+                    }
+                    try self.attachSource();
+                    try self.appendByte(update_op);
+                    try self.putShortCode(store_op, idx);
+                    position_next.* = final_end;
+                } else if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{op.perm3} },
+                    .{ .options = &.{op.put_field} },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    const put_position = match.positions[1];
+                    try self.appendByte(update_op);
+                    try self.appendByte(op.put_field);
+                    try self.appendU32(try readU32At(self.code, put_position, 1));
+                    try self.consumeAtomsRange(position, match.end, put_position);
+                    position_next.* = match.end;
+                } else if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{op.perm4} },
+                    .{ .options = &.{op.put_array_el} },
+                    .{ .options = &.{op.drop} },
+                })) |match| {
+                    self.absorbSources(match.end);
+                    try self.attachSource();
+                    try self.appendByte(update_op);
+                    try self.appendByte(op.put_array_el);
+                    position_next.* = match.end;
+                } else {
+                    try self.copyDefault(position, instruction);
+                }
+            },
+
+            // qjs:35546-35586.
+            op.typeof => {
+                if (try self.matchSeq(position_next.*, &.{
+                    .{ .options = &.{op.push_atom_value} },
+                    .{ .options = &.{ op.strict_eq, op.strict_neq, op.eq, op.neq } },
+                })) |compare_match| {
+                    const atom_id = try readU32At(
+                        self.code,
+                        compare_match.positions[0],
+                        1,
+                    );
+                    const test_op: ?u8 = if (atom_id == core.atom.ids.undefined_)
+                        op.typeof_is_undefined
+                    else if (atom_id == core.atom.ids.type_function)
+                        op.typeof_is_function
+                    else
+                        null;
+                    if (test_op) |selected_test| {
+                        const compare_op = compare_match.ops[1];
+                        if (compare_op == op.strict_eq or compare_op == op.eq) {
+                            self.absorbSources(compare_match.end);
+                            try self.attachSource();
+                            try self.appendByte(selected_test);
+                            try self.consumeAtomsRange(
+                                position,
+                                compare_match.end,
+                                null,
+                            );
+                            position_next.* = compare_match.end;
+                            return;
+                        }
+                        if (try self.matchSeq(compare_match.end, &.{
+                            .{ .options = &.{op.if_false} },
+                        })) |branch_match| {
+                            self.absorbSources(branch_match.end);
+                            try self.attachSource();
+                            try self.appendByte(selected_test);
+                            try self.consumeAtomsRange(
+                                position,
+                                branch_match.end,
+                                null,
+                            );
+                            position_next.* = try self.emitHasLabel(
+                                position,
+                                branch_match.end,
+                                op.if_true,
+                                try readU32At(
+                                    self.code,
+                                    branch_match.positions[0],
+                                    1,
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                }
+                try self.copyDefault(position, instruction);
+            },
+
+            // qjs:35587-35592.
+            else => try self.copyDefault(position, instruction),
+        }
+    }
+
+    /// qjs:35599-35673 bounded jump relaxation. This intentionally retains
+    /// QuickJS's quadratic tail move; replacing it belongs to a measured
+    /// follow-up, not the semantic port.
+    fn relaxJumps(self: *Resolver) Error!void {
+        var patch_offsets: u32 = 0;
+        var index: u32 = 0;
+        while (index < self.jump_count) : (index += 1) {
+            const jump = &self.jump_slots[index];
+            if (jump.label >= self.product.label_len or
+                self.addr[jump.label] == labels.unbound)
+            {
+                return error.InvalidBytecode;
+            }
+
+            var delta: u32 = 3;
+            switch (jump.op) {
+                op.goto16 => delta = 1,
+                op.if_false, op.if_true, op.goto => {},
+                else => continue,
+            }
+            if (jump.pos > self.output_len) return error.InvalidBytecode;
+            const diff = @as(i64, self.addr[jump.label]) - @as(i64, jump.pos);
+
+            var new_size: ?u8 = null;
+            var new_op = jump.op;
+            if (diff >= -128 and diff <= 127 + @as(i64, delta)) {
+                new_size = 1;
+                new_op = if (jump.op == op.goto16)
+                    op.goto8
+                else
+                    try shortJumpOp(jump.op);
+            } else if (jump.op == op.goto and
+                diff >= std.math.minInt(i16) and diff <= std.math.maxInt(i16))
+            {
+                new_size = 2;
+                delta = 2;
+                new_op = op.goto16;
+            }
+
+            const compact_size = new_size orelse continue;
+            if (jump.pos == 0) return error.InvalidBytecode;
+            const source_start = std.math.add(
+                u32,
+                jump.pos,
+                @as(u32, compact_size) + delta,
+            ) catch return error.InvalidBytecode;
+            const destination_start = jump.pos + compact_size;
+            if (source_start > self.output_len or destination_start > source_start)
+                return error.InvalidBytecode;
+            self.output[jump.pos - 1] = new_op;
+            const tail_len: usize = @intCast(self.output_len - source_start);
+            std.mem.copyForwards(
+                u8,
+                self.output[destination_start..][0..tail_len],
+                self.output[source_start..][0..tail_len],
+            );
+            self.output_len -= delta;
+            jump.op = new_op;
+            jump.size = compact_size;
+            patch_offsets += 1;
+
+            for (self.addr) |*label_addr| {
+                if (label_addr.* != labels.unbound and label_addr.* > jump.pos)
+                    label_addr.* -= delta;
+            }
+            var later = index + 1;
+            while (later < self.jump_count) : (later += 1) {
+                if (self.jump_slots[later].pos > jump.pos)
+                    self.jump_slots[later].pos -= delta;
+            }
+            for (self.output_sources[0..self.output_source_len]) |*source| {
+                if (source.pc > jump.pos) source.pc -= delta;
+            }
+        }
+
+        if (patch_offsets != 0) {
+            for (self.jump_slots[0..self.jump_count]) |jump| {
+                if (jump.label >= self.product.label_len or
+                    self.addr[jump.label] == labels.unbound)
+                {
+                    return error.InvalidBytecode;
+                }
+                const diff = @as(i64, self.addr[jump.label]) - @as(i64, jump.pos);
+                try self.writeRelative(jump.pos, jump.size, diff);
+            }
+        }
+    }
+
+    fn exactCopy(
+        self: *Resolver,
+        comptime T: type,
+        source: []const T,
+    ) Error![]T {
+        if (source.len == 0) return &.{};
+        const owned = self.memory.alloc(T, source.len) catch
+            return error.OutOfMemory;
+        @memcpy(owned, source);
+        return owned;
+    }
+
+    fn validateFinalOutput(self: *const Resolver) Error!void {
+        const code = self.output[0..self.output_len];
+        var position: u32 = 0;
+        var atom_index: u32 = 0;
+        while (position < self.output_len) {
+            const instruction = try decodeInstruction(code, position);
+            if (instruction.op_id == op.invalid) return error.InvalidBytecode;
+            if (hasAtomFormat(instruction.format)) {
+                if (atom_index >= self.output_atom_len)
+                    return error.InvalidBytecode;
+                if (try readU32At(code, position, 1) != self.output_atoms[atom_index])
+                    return error.InvalidBytecode;
+                atom_index += 1;
+            }
+            position += instruction.size;
+        }
+        if (position != self.output_len or atom_index != self.output_atom_len)
+            return error.InvalidBytecode;
+
+        var previous_pc: u32 = 0;
+        for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
+            if (source.pc >= self.output_len or
+                (index != 0 and source.pc < previous_pc))
+            {
+                return error.InvalidBytecode;
+            }
+            previous_pc = source.pc;
+        }
+    }
+
+    fn installSourceLocsNoFail(
+        self: *Resolver,
+        function: *bytecode.Bytecode,
+        owned: []SourceLocSlot,
+    ) void {
+        const old = function.source_loc_slots;
+        const old_capacity = function.source_loc_capacity;
+        function.source_loc_slots = owned;
+        function.source_loc_capacity = owned.len;
+        if (old_capacity != 0)
+            self.memory.free(SourceLocSlot, old.ptr[0..old_capacity]);
+    }
+
+    fn commit(self: *Resolver) Error!void {
+        const exact_code = try self.exactCopy(
+            u8,
+            self.output[0..self.output_len],
+        );
+        errdefer if (exact_code.len != 0) self.memory.free(u8, exact_code);
+
+        const exact_atoms = try self.exactCopy(
+            core.atom.Atom,
+            self.output_atoms[0..self.output_atom_len],
+        );
+        // The retains remain owned by self until all exact buffers exist.
+        errdefer if (exact_atoms.len != 0)
+            self.memory.free(core.atom.Atom, exact_atoms);
+
+        const exact_sources = try self.exactCopy(
+            SourceLocSlot,
+            self.output_sources[0..self.output_source_len],
+        );
+        errdefer if (exact_sources.len != 0)
+            self.memory.free(SourceLocSlot, exact_sources);
+
+        // Transfer the atom retains from the growable ledger to exact_atoms.
+        if (self.output_atom_capacity != 0)
+            self.memory.free(core.atom.Atom, self.output_atoms);
+        self.output_atoms = &.{};
+        self.output_atom_capacity = 0;
+        self.output_atom_len = 0;
+
+        // Every operation below is allocation-free: this is the sole commit
+        // point, so no observable half-install can escape.
+        self.function.installCode(exact_code);
+        for (self.function.atom_operands) |old_atom|
+            self.atoms.free(old_atom);
+        self.function.installAtomOperands(exact_atoms);
+        self.installSourceLocsNoFail(self.function, exact_sources);
+    }
+};
+
+/// Final emission over the S3 product. product label-slot ref_counts and
+/// first_reloc heads are mutated in place qjs-style. All fallible output work
+/// finishes before the Bytecode's single allocation-free commit point.
+pub fn run(
+    function: *bytecode.Bytecode,
+    fd: ?*const bytecode.function_def.FunctionDef,
+    product: *resolve_variables.ResolvedProduct,
+) Error!void {
+    if (function.memory != product.memory or function.atoms != product.atoms)
+        return error.InvalidBytecode;
+    if (fd) |function_def| {
+        if (function_def.memory != product.memory or function_def.atoms != product.atoms)
+            return error.InvalidBytecode;
+    }
+    try validateProduct(product);
+
+    var resolver: Resolver = .{
+        .function = function,
+        .fd = fd,
+        .product = product,
+        .memory = product.memory,
+        .atoms = product.atoms,
+        .code = product.code[0..product.code_len],
+        .input_atoms = product.atom_operands[0..product.atom_len],
+        .input_sources = product.source_slots[0..product.source_len],
+    };
+    defer resolver.deinit();
+    try resolver.initScratch();
+    try resolver.walk();
+    try resolver.relaxJumps();
+    try resolver.validateFinalOutput();
+    try resolver.commit();
+}
+
+const ResolveLabelsTestHarness = struct {
+    rt: *core.JSRuntime,
+    name_atom: core.atom.Atom,
+    function: bytecode.Bytecode,
+    fd: bytecode.function_def.FunctionDef,
+
+    fn init(harness: *ResolveLabelsTestHarness, allocator: std.mem.Allocator) !void {
+        harness.rt = try core.JSRuntime.create(allocator);
+        errdefer harness.rt.destroy();
+        harness.name_atom = try harness.rt.atoms.internString("qcp1-s4-pass-a");
+        errdefer harness.rt.atoms.free(harness.name_atom);
+        harness.function = bytecode.Bytecode.init(
+            &harness.rt.memory,
+            &harness.rt.atoms,
+            harness.name_atom,
+        );
+        errdefer harness.function.deinit(harness.rt);
+        harness.fd = bytecode.function_def.FunctionDef.init(
+            &harness.rt.memory,
+            &harness.rt.atoms,
+            harness.name_atom,
+        );
+        errdefer harness.fd.deinit(harness.rt);
+        const input_builder = try harness.rt.memory.create(builder.Builder);
+        input_builder.* = builder.Builder.init(&harness.rt.memory, &harness.rt.atoms);
+        harness.fd.v2_builder = input_builder;
+    }
+
+    fn deinit(harness: *ResolveLabelsTestHarness) void {
+        harness.fd.deinit(harness.rt);
+        harness.function.deinit(harness.rt);
+        harness.rt.atoms.free(harness.name_atom);
+        harness.rt.destroy();
+    }
+
+    fn input(harness: *ResolveLabelsTestHarness) *builder.Builder {
+        return harness.fd.v2_builder.?;
+    }
+
+    fn resolve(harness: *ResolveLabelsTestHarness) !resolve_variables.ResolvedProduct {
+        return resolve_variables.run(&harness.function, &harness.fd);
+    }
+};
+
+fn requireCompilerV2() !void {
+    var skip = std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+}
+
+test "compiler_v2.resolve_labels: straight-line slot shortening and source dedupe" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.addSourceMarker(10, 2);
+    try input.emitOpU16(op.get_loc, 0);
+    try input.addSourceMarker(10, 2);
+    try input.emitOpU16(op.get_loc, 3);
+    try input.addSourceMarker(20, 4);
+    try input.emitOpU16(op.get_loc, 4);
+    try input.emitOpU16(op.get_loc, 255);
+    try input.emitOpU16(op.get_loc, 256);
+    try input.emitOpU16(op.set_loc, 0);
+    try input.emitOpU16(op.set_loc, 3);
+    try input.emitOpU16(op.set_loc, 4);
+    try input.emitOpU16(op.set_loc, 255);
+    try input.emitOpU16(op.set_loc, 256);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    const expected = [_]u8{
+        op.get_loc0,
+        op.get_loc3,
+        op.get_loc8,
+        4,
+        op.get_loc8,
+        255,
+        op.get_loc,
+        0,
+        1,
+        op.set_loc0,
+        op.set_loc3,
+        op.set_loc8,
+        4,
+        op.set_loc8,
+        255,
+        op.set_loc,
+        0,
+        1,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
+    try std.testing.expectEqual(@as(usize, 2), harness.function.source_loc_slots.len);
+    try std.testing.expectEqualDeep(
+        SourceLocSlot{ .pc = 0, .line_num = 10, .col_num = 2 },
+        harness.function.source_loc_slots[0],
+    );
+    try std.testing.expectEqualDeep(
+        SourceLocSlot{ .pc = 2, .line_num = 20, .col_num = 4 },
+        harness.function.source_loc_slots[1],
+    );
+}
+
+test "compiler_v2.resolve_labels: backward goto selects exact i8 and i16 encodings" {
+    try requireCompilerV2();
+
+    {
+        var harness: ResolveLabelsTestHarness = undefined;
+        try harness.init(std.testing.allocator);
+        defer harness.deinit();
+        const input = harness.input();
+        const loop = try input.newLabel();
+        try input.bindLabel(loop);
+        try input.emitOp(op.undefined);
+        try input.emitJump(op.goto, loop);
+
+        var product = try harness.resolve();
+        defer product.deinitUncommitted();
+        try run(&harness.function, null, &product);
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{ op.undefined, op.goto8, 0xfe },
+            harness.function.code,
+        );
+    }
+
+    {
+        var harness: ResolveLabelsTestHarness = undefined;
+        try harness.init(std.testing.allocator);
+        defer harness.deinit();
+        const input = harness.input();
+        const loop = try input.newLabel();
+        try input.bindLabel(loop);
+        var filler: usize = 0;
+        while (filler < 130) : (filler += 1)
+            try input.emitOp(op.undefined);
+        try input.emitJump(op.goto, loop);
+
+        var product = try harness.resolve();
+        defer product.deinitUncommitted();
+        try run(&harness.function, null, &product);
+        var expected = [_]u8{op.undefined} ** 133;
+        expected[130] = op.goto16;
+        expected[131] = 0x7d;
+        expected[132] = 0xff;
+        try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
+    }
+}
+
+test "compiler_v2.resolve_labels: forward goto uses a one-byte relocation" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const body = try input.newLabel();
+    const target = try input.newLabel();
+    try input.emitJump(op.goto, target);
+    try input.bindLabel(body);
+    try input.emitOp(op.object);
+    try input.bindLabel(target);
+    try input.emitJump(op.if_false, body);
+    try input.emitOp(op.object);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.goto8, 2, op.object, op.if_false8, 0xfe, op.object },
+        harness.function.code,
+    );
+}
+
+test "compiler_v2.resolve_labels: goto16 relaxes after body shortening and moves sources" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const body = try input.newLabel();
+    const target = try input.newLabel();
+    try input.addSourceMarker(10, 1);
+    try input.emitJump(op.goto, target);
+    try input.bindLabel(body);
+    var index: usize = 0;
+    while (index < 30) : (index += 1)
+        try input.emitOpU32(op.push_i32, 1);
+    try input.bindLabel(target);
+    try input.addSourceMarker(30, 3);
+    try input.emitJump(op.if_false, body);
+    try input.emitOp(op.object);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+
+    var expected: [35]u8 = undefined;
+    expected[0] = op.goto8;
+    expected[1] = 31;
+    @memset(expected[2..32], op.push_1);
+    expected[32] = op.if_false8;
+    expected[33] = 0xe1;
+    expected[34] = op.object;
+    try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
+    try std.testing.expectEqual(@as(usize, 2), harness.function.source_loc_slots.len);
+    try std.testing.expectEqual(@as(u32, 0), harness.function.source_loc_slots[0].pc);
+    try std.testing.expectEqual(@as(u32, 32), harness.function.source_loc_slots[1].pc);
+    try std.testing.expectEqual(@as(i32, 30), harness.function.source_loc_slots[1].line_num);
+}
+
+test "compiler_v2.resolve_labels: next conditional drops and adjacent goto inverts" {
+    try requireCompilerV2();
+
+    {
+        var harness: ResolveLabelsTestHarness = undefined;
+        try harness.init(std.testing.allocator);
+        defer harness.deinit();
+        const input = harness.input();
+        const next = try input.newLabel();
+        try input.emitJump(op.if_false, next);
+        try input.bindLabel(next);
+        try input.emitOp(op.object);
+
+        var product = try harness.resolve();
+        defer product.deinitUncommitted();
+        try run(&harness.function, null, &product);
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{ op.drop, op.object },
+            harness.function.code,
+        );
+        try std.testing.expectEqual(@as(u32, 0), product.label_slots[next.index()].ref_count);
+    }
+
+    {
+        var harness: ResolveLabelsTestHarness = undefined;
+        try harness.init(std.testing.allocator);
+        defer harness.deinit();
+        const input = harness.input();
+        const false_path = try input.newLabel();
+        const done = try input.newLabel();
+        try input.emitJump(op.if_false, false_path);
+        try input.emitJump(op.goto, done);
+        try input.bindLabel(false_path);
+        try input.emitOp(op.undefined);
+        try input.bindLabel(done);
+        try input.emitOp(op.object);
+
+        var product = try harness.resolve();
+        defer product.deinitUncommitted();
+        try run(&harness.function, null, &product);
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{ op.if_true8, 2, op.undefined, op.object },
+            harness.function.code,
+        );
+        try std.testing.expectEqual(
+            @as(u32, 0),
+            product.label_slots[false_path.index()].ref_count,
+        );
+    }
+}
+
+test "compiler_v2.resolve_labels: goto terminal fold skips live S3 fallthrough edges" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const tail = try input.newLabel();
+    const returns = try input.newLabel();
+    try input.emitOp(op.push_true);
+    try input.emitJump(op.if_true, returns);
+    try input.emitJump(op.goto, tail);
+    try input.bindLabel(tail);
+    try input.emitOp(op.object);
+    try input.bindLabel(returns);
+    try input.emitOp(op.return_undef);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(@as(u32, 1), product.label_slots[tail.index()].ref_count);
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{op.return_undef},
+        harness.function.code,
+    );
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[tail.index()].ref_count);
+}
+
+test "compiler_v2.resolve_labels: two-hop goto threading targets the final label" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const first = try input.newLabel();
+    const final = try input.newLabel();
+    try input.emitOp(op.push_true);
+    try input.emitJump(op.if_true, first);
+    try input.emitOp(op.undefined);
+    try input.bindLabel(first);
+    try input.emitJump(op.goto, final);
+    try input.bindLabel(final);
+    try input.emitOp(op.object);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.goto8, 1, op.object },
+        harness.function.code,
+    );
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[first.index()].ref_count);
+    try std.testing.expectEqual(@as(u32, 1), product.label_slots[final.index()].ref_count);
+}
+
+test "compiler_v2.resolve_labels: boolean constant tests become goto or nothing" {
+    try requireCompilerV2();
+
+    {
+        var harness: ResolveLabelsTestHarness = undefined;
+        try harness.init(std.testing.allocator);
+        defer harness.deinit();
+        const input = harness.input();
+        const target = try input.newLabel();
+        try input.emitOp(op.push_true);
+        try input.emitJump(op.if_true, target);
+        try input.emitOp(op.undefined);
+        try input.bindLabel(target);
+        try input.emitOp(op.object);
+
+        var product = try harness.resolve();
+        defer product.deinitUncommitted();
+        try run(&harness.function, null, &product);
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{ op.goto8, 1, op.object },
+            harness.function.code,
+        );
+        try std.testing.expectEqual(@as(u32, 1), product.label_slots[target.index()].ref_count);
+    }
+
+    {
+        var harness: ResolveLabelsTestHarness = undefined;
+        try harness.init(std.testing.allocator);
+        defer harness.deinit();
+        const input = harness.input();
+        const target = try input.newLabel();
+        try input.emitOp(op.push_false);
+        try input.emitJump(op.if_true, target);
+        try input.bindLabel(target);
+        try input.emitOp(op.object);
+
+        var product = try harness.resolve();
+        defer product.deinitUncommitted();
+        try run(&harness.function, null, &product);
+        try std.testing.expectEqualSlices(u8, &.{op.object}, harness.function.code);
+        try std.testing.expectEqual(@as(u32, 0), product.label_slots[target.index()].ref_count);
+    }
+}
+
+test "compiler_v2.resolve_labels: dup put and local update peepholes use short forms" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.emitOp(op.dup);
+    try input.emitOpU16(op.put_loc, 0);
+    try input.emitOp(op.drop);
+    try input.emitOpU16(op.put_loc, 1);
+    try input.emitOpU16(op.get_loc, 1);
+    try input.emitOpU16(op.get_loc, 2);
+    try input.emitOp(op.post_inc);
+    try input.emitOpU16(op.put_loc, 2);
+    try input.emitOp(op.drop);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.put_loc0, op.set_loc1, op.inc_loc, 2 },
+        harness.function.code,
+    );
+}
+
+test "compiler_v2.resolve_labels: integer negation and short constants are byte exact" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.emitOpU32(op.push_i32, @bitCast(@as(i32, -5)));
+    try input.emitOp(op.neg);
+    try input.emitOpU32(op.push_i32, 3);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.push_5, op.push_3 },
+        harness.function.code,
+    );
+}
+
+test "compiler_v2.resolve_labels: dropped atom and length field balance ownership" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const named = try harness.rt.atoms.internString("qcp1-s4-dropped");
+    defer harness.rt.atoms.free(named);
+    const base_refs = harness.rt.atoms.refCount(named).?;
+    try input.emitAtomOpOwned(
+        op.push_atom_value,
+        harness.rt.atoms.dup(named),
+    );
+    try input.emitOp(op.drop);
+    try input.emitAtomOpOwned(
+        op.get_field,
+        harness.rt.atoms.dup(core.atom.ids.length),
+    );
+
+    var product = try harness.resolve();
+    try run(&harness.function, null, &product);
+    try std.testing.expectEqualSlices(u8, &.{op.get_length}, harness.function.code);
+    try std.testing.expectEqual(@as(usize, 0), harness.function.atom_operands.len);
+    product.deinitUncommitted();
+    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(named).?);
+}
+
+test "compiler_v2.resolve_labels: shared with probes resolve operand-relative done label" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const name = try harness.rt.atoms.internString("qcp1-s4-with-probe");
+    defer harness.rt.atoms.free(name);
+    _ = try harness.fd.appendScope(-1);
+    harness.fd.var_object_idx = try harness.fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    harness.fd.arg_var_object_idx = try harness.fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try harness.fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = name,
+    });
+    try harness.input().emitAtomOpU16Owned(
+        op.scope_get_var,
+        harness.rt.atoms.dup(name),
+        0,
+    );
+    try harness.input().emitOp(op.return_undef);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(@as(u32, 2), product.jump_size);
+    try std.testing.expectEqual(op.with_get_var, product.code[3]);
+    try std.testing.expectEqual(op.with_get_var, product.code[16]);
+    try run(&harness.function, null, &product);
+
+    var expected = [_]u8{0} ** 26;
+    expected[0] = op.get_loc0;
+    expected[1] = op.with_get_var;
+    std.mem.writeInt(u32, expected[2..6], name, .little);
+    std.mem.writeInt(i32, expected[6..10], 19, .little);
+    expected[10] = 0;
+    expected[11] = op.get_loc1;
+    expected[12] = op.with_get_var;
+    std.mem.writeInt(u32, expected[13..17], name, .little);
+    std.mem.writeInt(i32, expected[17..21], 8, .little);
+    expected[21] = 0;
+    expected[22] = op.get_var;
+    std.mem.writeInt(u16, expected[23..25], 0, .little);
+    expected[25] = op.return_undef;
+    try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
+    try std.testing.expectEqualSlices(
+        core.atom.Atom,
+        &.{ name, name },
+        harness.function.atom_operands,
+    );
+}
+
+test "compiler_v2.resolve_labels: strict this and arguments prologue is exact" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    _ = try harness.fd.appendScope(-1);
+    harness.fd.this_var_idx = try harness.fd.addScopeVar(
+        core.atom.ids.this_,
+        .normal,
+        0,
+        false,
+        false,
+    );
+    harness.fd.arguments_var_idx = try harness.fd.addScopeVar(
+        core.atom.ids.arguments,
+        .normal,
+        0,
+        false,
+        false,
+    );
+    harness.fd.is_strict_mode = true;
+    try harness.input().emitOp(op.object);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(&harness.function, &harness.fd, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{
+            op.push_this,
+            op.put_loc0,
+            op.special_object,
+            opcode.special_object_subtype.arguments,
+            op.put_loc1,
+            op.object,
+        },
+        harness.function.code,
+    );
+    try std.testing.expectEqual(@as(usize, 0), harness.function.source_loc_slots.len);
+}
+
+fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void {
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const name = try harness.rt.atoms.internString("qcp1-s4-oom");
+    defer harness.rt.atoms.free(name);
+    const base_refs = harness.rt.atoms.refCount(name).?;
+    const body = try input.newLabel();
+    const target = try input.newLabel();
+    try input.addSourceMarker(10, 1);
+    try input.emitJump(op.goto, target);
+    try input.bindLabel(body);
+    var index: usize = 0;
+    while (index < 30) : (index += 1)
+        try input.emitOpU32(op.push_i32, 1);
+    try input.addSourceMarker(20, 2);
+    try input.emitAtomOpOwned(op.get_field, harness.rt.atoms.dup(name));
+    try input.bindLabel(target);
+    try input.addSourceMarker(30, 3);
+    try input.emitJump(op.if_false, body);
+    try input.emitOp(op.object);
+    try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(name).?);
+
+    var product = harness.resolve() catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), harness.function.code.len);
+        try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(name).?);
+        return err;
+    };
+    var product_live = true;
+    defer if (product_live) product.deinitUncommitted();
+
+    run(&harness.function, null, &product) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), harness.function.code.len);
+        try std.testing.expectEqual(@as(usize, 0), harness.function.atom_operands.len);
+        product.deinitUncommitted();
+        product_live = false;
+        try std.testing.expectEqual(base_refs + 1, harness.rt.atoms.refCount(name).?);
+        return err;
+    };
+
+    try std.testing.expect(harness.function.code.len != 0);
+    try std.testing.expectEqualSlices(
+        core.atom.Atom,
+        &.{name},
+        harness.function.atom_operands,
+    );
+    product.deinitUncommitted();
+    product_live = false;
+    try std.testing.expectEqual(base_refs + 2, harness.rt.atoms.refCount(name).?);
+}
+
+test "compiler_v2.resolve_labels: allocation failure sweep is transactional" {
+    try requireCompilerV2();
+    try resolveLabelsOomScript(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        resolveLabelsOomScript,
+        .{},
+    );
+}
+
+test {
+    _ = builtin;
+}

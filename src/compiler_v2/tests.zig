@@ -2,6 +2,10 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const parser_mod = @import("../parser.zig");
 const bytecode_mod = @import("../bytecode.zig");
+const zjs_vm = @import("../exec/zjs_vm.zig");
+const object_ops = @import("../exec/object_ops.zig");
+const stack_mod = @import("../exec/stack.zig");
+const standard_globals = @import("../exec/standard_globals.zig");
 const builder_mod = @import("builder.zig");
 const labels = @import("labels.zig");
 const resolve_variables = @import("resolve_variables.zig");
@@ -89,6 +93,44 @@ const LegacyParse = struct {
     fn deinit(h: *LegacyParse) void {
         h.state.deinit(h.rt);
         h.function.deinit(h.rt);
+        h.rt.atoms.free(h.name_atom);
+        h.rt.destroy();
+    }
+};
+
+const V2Exec = struct {
+    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
+    name_atom: core.atom.Atom,
+    function: bytecode_mod.Bytecode,
+    lex: parser_mod.Lexer,
+    state: P.ParseState,
+    installed_short_opcode: bool,
+
+    /// `h` must be a stack local (`var h: V2Exec = undefined;`).
+    fn init(h: *V2Exec, src: []const u8) !void {
+        h.rt = try core.JSRuntime.create(std.testing.allocator);
+        errdefer h.rt.destroy();
+        standard_globals.configureRuntime(h.rt);
+        h.ctx = try core.JSContext.create(h.rt);
+        errdefer h.ctx.destroy();
+        h.name_atom = try h.rt.atoms.internString("compiler_v2-s4-exec");
+        errdefer h.rt.atoms.free(h.name_atom);
+        h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
+        errdefer h.function.deinit(h.rt);
+        h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
+        errdefer h.lex.deinit();
+        h.state = try P.ParseState.initCanonicalRootWithRuntime(h.rt, &h.lex, &h.function);
+        h.state.function_def.is_global_var = true;
+        h.state.top_level_functions_as_children = true;
+        h.installed_short_opcode = false;
+    }
+
+    fn deinit(h: *V2Exec) void {
+        h.state.deinit(h.rt);
+        h.lex.deinit();
+        h.function.deinit(h.rt);
+        h.ctx.destroy();
         h.rt.atoms.free(h.name_atom);
         h.rt.destroy();
     }
@@ -510,6 +552,416 @@ fn attachTranslatedBuilder(
     }
     try translatePhase1ToV2(b, code, atoms);
     fd.v2_builder = b;
+}
+
+fn isFullPhase1JumpOp(op_id: u8) bool {
+    return op_id == qop.goto or op_id == qop.if_true or
+        op_id == qop.if_false or op_id == qop.@"catch" or
+        op_id == qop.gosub;
+}
+
+/// Complete the legacy parser-label transaction before translation. Most
+/// forward jumps are patched in place by the parser; shared exception/finally
+/// labels retain parser identities until legacy resolve_variables binds them.
+/// The v2 test bridge performs that same allocation-before-mutation bind so
+/// translatePhase1ToV2Full still rejects any unpatched identity it receives.
+fn completeLegacyParserLabels(code: []u8, atoms: []const core.atom.Atom) !void {
+    if (code.len >= qop.parser_label_tag) return error.BytecodeOverflow;
+
+    var reference_sites: std.ArrayList(usize) = .empty;
+    defer reference_sites.deinit(std.testing.allocator);
+    var max_label_id: u32 = 0;
+    var pc: usize = 0;
+    var atom_index: usize = 0;
+    while (pc < code.len) {
+        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
+        const op_id = code[pc];
+        if (instruction.is_temp and op_id == qop.label) {
+            const id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (id > max_label_id) max_label_id = id;
+        }
+        if (phase1LabelOperandOffset(op_id, instruction)) |offset| {
+            if (offset + 4 > instruction.size) return error.InvalidBytecode;
+            const encoded = std.mem.readInt(u32, code[pc + offset ..][0..4], .little);
+            if ((encoded & qop.parser_label_tag) != 0) {
+                const id = encoded & ~qop.parser_label_tag;
+                if (id == 0) return error.InvalidBytecode;
+                if (id > max_label_id) max_label_id = id;
+                try reference_sites.append(std.testing.allocator, pc + offset);
+            }
+        }
+        if (instruction.has_atom) atom_index += 1;
+        pc += instruction.size;
+    }
+    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
+    if (reference_sites.items.len == 0) return;
+
+    const unbound = std.math.maxInt(u32);
+    const targets = try std.testing.allocator.alloc(u32, @as(usize, max_label_id) + 1);
+    defer std.testing.allocator.free(targets);
+    @memset(targets, unbound);
+
+    pc = 0;
+    atom_index = 0;
+    while (pc < code.len) {
+        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
+        const op_id = code[pc];
+        if (instruction.is_temp and op_id == qop.label) {
+            const id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (id != 0) {
+                if (id >= targets.len or targets[id] != unbound)
+                    return error.InvalidBytecode;
+                targets[id] = @intCast(pc);
+            }
+        }
+        if (instruction.has_atom) atom_index += 1;
+        pc += instruction.size;
+    }
+
+    // Validate every site before publishing any absolute target.
+    for (reference_sites.items) |site| {
+        const encoded = std.mem.readInt(u32, code[site..][0..4], .little);
+        const id = encoded & ~qop.parser_label_tag;
+        if ((encoded & qop.parser_label_tag) == 0 or id >= targets.len or
+            targets[id] == unbound)
+        {
+            return error.InvalidBytecode;
+        }
+    }
+    for (reference_sites.items) |site| {
+        const encoded = std.mem.readInt(u32, code[site..][0..4], .little);
+        const id = encoded & ~qop.parser_label_tag;
+        std.mem.writeInt(u32, code[site..][0..4], targets[id], .little);
+    }
+}
+
+/// Translate a completed parser phase-1 stream. Parser label markers disappear;
+/// their patched absolute byte offsets become builder-native LabelIds.
+fn translatePhase1ToV2Full(
+    b: *builder_mod.Builder,
+    code: []const u8,
+    atoms: []const core.atom.Atom,
+) !void {
+    if (b.code_len != 0 or b.atom_len != 0 or b.label_len != 0 or b.reloc_len != 0)
+        return error.InvalidBytecode;
+
+    var target_pcs: std.ArrayList(u32) = .empty;
+    defer target_pcs.deinit(std.testing.allocator);
+
+    // Pass 1 assigns one LabelId to each referenced absolute phase-1 target.
+    // The raw ids carried by op.label are parser-only patching identities.
+    var pc: usize = 0;
+    var atom_index: usize = 0;
+    while (pc < code.len) {
+        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
+        const op_id = code[pc];
+        var target_pc: ?u32 = null;
+        if (instruction.is_temp and op_id == qop.scope_make_ref) {
+            if (instruction.size != 11) return error.InvalidBytecode;
+            target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
+        } else if (!instruction.is_temp and opcode.formatOf(op_id) == .label) {
+            if (!isFullPhase1JumpOp(op_id) or instruction.size != 5)
+                return error.InvalidBytecode;
+            target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+        }
+        if (target_pc) |target| {
+            if ((target & qop.parser_label_tag) != 0 or target > code.len)
+                return error.InvalidBytecode;
+            try target_pcs.append(std.testing.allocator, target);
+        }
+        if (instruction.has_atom) atom_index += 1;
+        pc += instruction.size;
+    }
+    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
+
+    std.mem.sort(u32, target_pcs.items, {}, u32LessThan);
+    var target_count: usize = 0;
+    for (target_pcs.items) |target_pc| {
+        if (target_count == 0 or target_pcs.items[target_count - 1] != target_pc) {
+            target_pcs.items[target_count] = target_pc;
+            target_count += 1;
+        }
+    }
+    const targets = target_pcs.items[0..target_count];
+    const target_labels = try std.testing.allocator.alloc(labels.LabelId, target_count);
+    defer std.testing.allocator.free(target_labels);
+    for (target_labels) |*label| label.* = try b.newLabel();
+
+    // Pass 2 binds targets at the corresponding instruction boundary and
+    // emits the compact v2 instruction stream.
+    pc = 0;
+    atom_index = 0;
+    var bind_cursor: usize = 0;
+    while (pc < code.len) {
+        while (bind_cursor < targets.len and targets[bind_cursor] == pc) : (bind_cursor += 1) {
+            try b.bindLabel(target_labels[bind_cursor]);
+        }
+        if (bind_cursor < targets.len and targets[bind_cursor] < pc)
+            return error.InvalidBytecode;
+
+        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
+        const op_id = code[pc];
+        if (instruction.is_temp) {
+            switch (op_id) {
+                // v2 source markers are exercised by resolve_labels inline
+                // tests; VM execution semantics do not consume pc2line.
+                qop.label, qop.line_num => {},
+                qop.enter_scope, qop.leave_scope => {
+                    if (instruction.size != 3) return error.InvalidBytecode;
+                    try b.emitOpU16(
+                        op_id,
+                        std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+                    );
+                },
+                qop.scope_get_var_undef,
+                qop.scope_get_var,
+                qop.scope_put_var,
+                qop.scope_delete_var,
+                qop.scope_get_ref,
+                qop.scope_put_var_init,
+                qop.scope_get_var_checkthis,
+                qop.scope_get_private_field,
+                qop.scope_get_private_field2,
+                qop.scope_put_private_field,
+                qop.scope_in_private_field,
+                => {
+                    if (instruction.size != 7 or atom_index >= atoms.len)
+                        return error.InvalidBytecode;
+                    const atom_id = atoms[atom_index];
+                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                        return error.InvalidBytecode;
+                    try b.emitAtomOpU16Owned(
+                        op_id,
+                        b.atoms.dup(atom_id),
+                        std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
+                    );
+                    atom_index += 1;
+                },
+                qop.scope_make_ref => {
+                    if (instruction.size != 11 or atom_index >= atoms.len)
+                        return error.InvalidBytecode;
+                    const atom_id = atoms[atom_index];
+                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                        return error.InvalidBytecode;
+                    const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
+                    if ((target_pc & qop.parser_label_tag) != 0)
+                        return error.InvalidBytecode;
+                    try b.emitScopeRefOpOwned(
+                        op_id,
+                        b.atoms.dup(atom_id),
+                        try translatedTargetLabel(targets, target_labels, target_pc),
+                        std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
+                    );
+                    atom_index += 1;
+                },
+                else => return error.NonStraightLinePhase1,
+            }
+            pc += instruction.size;
+            continue;
+        }
+
+        const format = opcode.formatOf(op_id);
+        switch (format) {
+            .none, .none_int, .none_loc, .none_arg, .none_var_ref, .npopx => {
+                if (instruction.size != 1) return error.InvalidBytecode;
+                try b.emitOp(op_id);
+            },
+            .u8, .i8, .loc8, .const8 => {
+                if (instruction.size != 2) return error.InvalidBytecode;
+                try b.emitOpU8(op_id, code[pc + 1]);
+            },
+            .u16, .i16, .npop, .loc, .arg, .var_ref => {
+                if (instruction.size != 3) return error.InvalidBytecode;
+                try b.emitOpU16(
+                    op_id,
+                    std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+                );
+            },
+            .npop_u16, .u32, .i32, .@"const" => {
+                if (instruction.size != 5) return error.InvalidBytecode;
+                try b.emitOpU32(
+                    op_id,
+                    std.mem.readInt(u32, code[pc + 1 ..][0..4], .little),
+                );
+            },
+            .atom, .atom_u8, .atom_u16 => {
+                if (atom_index >= atoms.len) return error.InvalidBytecode;
+                const atom_id = atoms[atom_index];
+                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                    return error.InvalidBytecode;
+                switch (format) {
+                    .atom => {
+                        if (instruction.size != 5) return error.InvalidBytecode;
+                        try b.emitAtomOpOwned(op_id, b.atoms.dup(atom_id));
+                    },
+                    .atom_u8 => {
+                        if (instruction.size != 6) return error.InvalidBytecode;
+                        try b.emitAtomOpU8Owned(op_id, b.atoms.dup(atom_id), code[pc + 5]);
+                    },
+                    .atom_u16 => {
+                        if (instruction.size != 7) return error.InvalidBytecode;
+                        try b.emitAtomOpU16Owned(
+                            op_id,
+                            b.atoms.dup(atom_id),
+                            std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
+                        );
+                    },
+                    else => unreachable,
+                }
+                atom_index += 1;
+            },
+            .label => {
+                if (!isFullPhase1JumpOp(op_id) or instruction.size != 5)
+                    return error.InvalidBytecode;
+                const target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                if ((target_pc & qop.parser_label_tag) != 0)
+                    return error.InvalidBytecode;
+                try b.emitJump(
+                    op_id,
+                    try translatedTargetLabel(targets, target_labels, target_pc),
+                );
+            },
+            .atom_label_u8, .atom_label_u16 => {
+                if (atom_index >= atoms.len) return error.InvalidBytecode;
+                const atom_id = atoms[atom_index];
+                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                    return error.InvalidBytecode;
+                const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
+                if ((target_pc & qop.parser_label_tag) != 0)
+                    return error.InvalidBytecode;
+                const target_label = try translatedTargetLabel(targets, target_labels, target_pc);
+                switch (format) {
+                    .atom_label_u8 => {
+                        if (instruction.size != 10) return error.InvalidBytecode;
+                        try b.emitAtomLabelOpU8Owned(
+                            op_id,
+                            b.atoms.dup(atom_id),
+                            target_label,
+                            code[pc + 9],
+                        );
+                    },
+                    .atom_label_u16 => {
+                        if (instruction.size != 11) return error.InvalidBytecode;
+                        try b.emitScopeRefOpOwned(
+                            op_id,
+                            b.atoms.dup(atom_id),
+                            target_label,
+                            std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
+                        );
+                    },
+                    else => unreachable,
+                }
+                atom_index += 1;
+            },
+            .label8, .label16, .label_u16 => return error.NonStraightLinePhase1,
+        }
+        pc += instruction.size;
+    }
+    while (bind_cursor < targets.len and targets[bind_cursor] == code.len) : (bind_cursor += 1) {
+        try b.bindLabel(target_labels[bind_cursor]);
+    }
+    if (bind_cursor != targets.len or atom_index != atoms.len)
+        return error.InvalidBytecode;
+}
+
+fn attachTranslatedBuilderFull(
+    fd: *bytecode_mod.function_def.FunctionDef,
+    code: []u8,
+    atoms: []const core.atom.Atom,
+) !void {
+    try std.testing.expect(fd.v2_builder == null);
+    try completeLegacyParserLabels(code, atoms);
+    const b = try fd.memory.create(builder_mod.Builder);
+    b.* = builder_mod.Builder.init(fd.memory, fd.atoms);
+    errdefer {
+        b.deinit();
+        fd.memory.destroy(builder_mod.Builder, b);
+    }
+    try translatePhase1ToV2Full(b, code, atoms);
+    fd.v2_builder = b;
+}
+
+fn attachTranslatedBuilderTree(fd: *bytecode_mod.function_def.FunctionDef) !void {
+    try attachTranslatedBuilderFull(fd, fd.byte_code, fd.atom_operands);
+    for (fd.child_list) |child| try attachTranslatedBuilderTree(child);
+}
+
+fn installedFunctionHasShortOpcode(fb: *const bytecode_mod.FunctionBytecode) !bool {
+    const code = fb.byteCode();
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size: usize = opcode.sizeOf(op_id);
+        if (size == 0 or size > code.len - pc) return error.InvalidBytecode;
+        switch (op_id) {
+            qop.goto8,
+            qop.if_true8,
+            qop.if_false8,
+            qop.put_loc0...qop.put_loc3,
+            => return true,
+            else => {},
+        }
+        pc += size;
+    }
+    return false;
+}
+
+/// Parse as a completion-returning script, translate the whole FunctionDef
+/// tree to v2, finalize through the production packed-FB pipeline, and execute
+/// it on the VM. The returned completion value is owned by the caller.
+fn v2CompileAndRun(h: *V2Exec) !core.JSValue {
+    try h.state.enableReturnCompletion();
+    try P.parseProgramStatements(
+        &h.state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try h.state.finalizeEvalReturn();
+
+    try attachTranslatedBuilderTree(&h.state.function_def);
+
+    const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+        &h.state.function_def,
+        .{ .realm = h.ctx },
+    );
+    const fb = &fb_slice[0];
+    var fb_value = core.JSValue.functionBytecode(&fb.header);
+    var fb_value_owned = true;
+    errdefer if (fb_value_owned) fb_value.free(h.rt);
+    h.installed_short_opcode = try installedFunctionHasShortOpcode(fb);
+
+    const global = try zjs_vm.contextGlobal(h.ctx);
+    // createRootBytecodeFunctionObject consumes the FB value on every path.
+    fb_value_owned = false;
+    const root_fn = try object_ops.createRootBytecodeFunctionObject(
+        h.ctx,
+        global,
+        fb_value,
+        .root_global,
+    );
+    defer root_fn.free(h.rt);
+    const root_object = object_ops.objectFromValue(root_fn) orelse
+        return error.InvalidBytecode;
+
+    var stack = stack_mod.Stack.init(&h.rt.memory, h.ctx.stackLimit());
+    defer stack.deinit(h.rt);
+    try stack.reserveAdditional(fb.stack_size);
+    return zjs_vm.runWithCallEnv(.{
+        .ctx = h.ctx,
+        .stack = &stack,
+        .function = fb,
+        .initial_this_value = if (fb.runtimeStrictMode())
+            core.JSValue.undefinedValue()
+        else
+            root_object.bytecodeFunctionRealmGlobalPtr().?.value(),
+        .var_refs = root_object.functionCaptures(),
+        .global = root_object.bytecodeFunctionRealmGlobalPtr() orelse
+            return error.InvalidBytecode,
+        .strict_unresolved_get_var = fb.isStrictMode(),
+        .current_function_value = root_fn,
+        .direct_eval_vars_reach_global = true,
+        .global_declarations_prevalidated = true,
+    });
 }
 
 fn expectFdTopologyEqual(
@@ -3706,4 +4158,136 @@ test "compiler_v2.s3r: normalized dead binding events equal legacy exact CFG" {
         "function f(p) { return p; var v; v = p; }",
         .{ .args = 1, .vars = 1 },
     );
+}
+
+fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
+    var h: V2Exec = undefined;
+    try h.init(src);
+    defer h.deinit();
+    const result = try v2CompileAndRun(&h);
+    defer result.free(h.rt);
+    try std.testing.expectEqual(expected, result.asInt32().?);
+}
+
+test "compiler_v2.s4: arithmetic executes installed FunctionBytecode" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion("6 * 7;", 42);
+}
+
+test "compiler_v2.s4: if else true arm executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let r; if (true) { r = 1; } else { r = 2; } r;",
+        1,
+    );
+}
+
+test "compiler_v2.s4: if else false arm executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let r; if (false) { r = 1; } else { r = 2; } r;",
+        2,
+    );
+}
+
+test "compiler_v2.s4: while break executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let i = 0; while (true) { i = i + 1; if (i == 3) break; } i;",
+        3,
+    );
+}
+
+test "compiler_v2.s4: for accumulate executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;",
+        10,
+    );
+}
+
+test "compiler_v2.s4: switch fallthrough executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let x = 0; switch (2) { case 1: x = x + 1; case 2: x = x + 10; case 3: x = x + 100; break; default: x = x + 1000; } x;",
+        110,
+    );
+}
+
+test "compiler_v2.s4: try finally value executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let t = 0; try { t = 1; } finally { t = t + 10; } t;",
+        11,
+    );
+}
+
+test "compiler_v2.s4: try catch throw executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let c = 0; try { throw 5; } catch (e) { c = e + 2; } c;",
+        7,
+    );
+}
+
+test "compiler_v2.s4: nested closure capture executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    // S3 deliberately leaves function-body hoist instantiation to a later
+    // finalization owner (resolve_variables.zig enter_scope arm). Use an
+    // explicit function-expression assignment until that documented stub is
+    // filled; this still exercises child + grandchild FBs, fclosure, and
+    // var_ref capture.
+    try expectV2ExecutionCompletion(
+        "(function () { let c = 5; let inner = function () { return c + 2; }; return inner(); })();",
+        7,
+    );
+}
+
+test "compiler_v2.s4: labeled break executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "let n = 0; L: { n = 1; break L; n = 2; } n;",
+        1,
+    );
+}
+
+test "compiler_v2.s4: global var machinery executes" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion("var g = 4; g + 1;", 5);
+}
+
+test "compiler_v2.s4: installed for loop contains a short opcode" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Exec = undefined;
+    try h.init("let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;");
+    defer h.deinit();
+    const result = try v2CompileAndRun(&h);
+    defer result.free(h.rt);
+    try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
+    try std.testing.expect(h.installed_short_opcode);
 }
