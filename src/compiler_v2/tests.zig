@@ -4,7 +4,9 @@ const parser_mod = @import("../parser.zig");
 const bytecode_mod = @import("../bytecode.zig");
 const builder_mod = @import("builder.zig");
 const labels = @import("labels.zig");
+const resolve_variables = @import("resolve_variables.zig");
 const P = parser_mod.Parser;
+const opcode = bytecode_mod.opcode;
 const qop = bytecode_mod.opcode.op;
 
 const V2Parse = struct {
@@ -51,6 +53,47 @@ const V2Parse = struct {
     }
 };
 
+const LegacyParse = struct {
+    rt: *core.JSRuntime,
+    name_atom: core.atom.Atom,
+    function: bytecode_mod.Bytecode,
+    lex: parser_mod.Lexer,
+    state: P.ParseState,
+
+    /// Parse through the ordinary phase-1 emitter. Unlike V2Parse, this keeps
+    /// source markers and scope temporary opcodes and emits the root stream to
+    /// function.code; nested functions own their FunctionDef.byte_code stream.
+    fn init(h: *LegacyParse, src: []const u8) !void {
+        h.rt = try core.JSRuntime.create(std.testing.allocator);
+        errdefer h.rt.destroy();
+        h.name_atom = try h.rt.atoms.internString("compiler_v2-s3-equivalence");
+        errdefer h.rt.atoms.free(h.name_atom);
+        h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
+        errdefer h.function.deinit(h.rt);
+        h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
+        h.state = try P.ParseState.init(&h.lex, &h.function);
+        // The seed models a script-global var environment while deliberately
+        // leaving is_eval false so top-level let/const remain local TDZ slots.
+        h.state.function_def.is_global_var = true;
+    }
+
+    fn parseProgram(h: *LegacyParse, capture_top_level_functions: bool) !void {
+        h.state.top_level_functions_as_children = capture_top_level_functions;
+        try P.parseProgramStatements(
+            &h.state,
+            P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+        );
+        try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    }
+
+    fn deinit(h: *LegacyParse) void {
+        h.state.deinit(h.rt);
+        h.function.deinit(h.rt);
+        h.rt.atoms.free(h.name_atom);
+        h.rt.destroy();
+    }
+};
+
 const ExpectedInsn = struct {
     op: u8,
     size: u8,
@@ -72,12 +115,442 @@ fn expectV2Stream(b: *const builder_mod.Builder, expected: []const ExpectedInsn)
     try std.testing.expectEqual(@as(usize, @intCast(b.code_len)), pc);
 }
 
+fn expectResolvedStream(
+    product: *const resolve_variables.ResolvedProduct,
+    expected: []const ExpectedInsn,
+) !void {
+    var pc: usize = 0;
+    for (expected) |insn| {
+        try std.testing.expect(pc < product.code_len);
+        try std.testing.expectEqual(insn.op, product.code[pc]);
+        if (insn.label) |label_index|
+            try std.testing.expectEqual(
+                label_index,
+                std.mem.readInt(u32, product.code[pc + 1 ..][0..4], .little),
+            );
+        if (insn.atom) |atom_id|
+            try std.testing.expectEqual(
+                atom_id,
+                std.mem.readInt(u32, product.code[pc + 1 ..][0..4], .little),
+            );
+        pc += insn.size;
+    }
+    try std.testing.expectEqual(@as(usize, @intCast(product.code_len)), pc);
+}
+
 fn expectLabel(b: *const builder_mod.Builder, index: u32, ref_count: u32, bound_offset: u32) !void {
     try std.testing.expect(index < b.label_len);
     const slot = b.label_slots[index];
     try std.testing.expect(slot.flags.bound);
     try std.testing.expectEqual(ref_count, slot.ref_count);
     try std.testing.expectEqual(bound_offset, slot.bound_offset);
+}
+
+fn expectResolvedLabel(
+    product: *const resolve_variables.ResolvedProduct,
+    index: u32,
+    ref_count: u32,
+    bound_offset: u32,
+) !void {
+    try std.testing.expect(index < product.label_len);
+    const slot = product.label_slots[index];
+    try std.testing.expectEqual(ref_count, slot.ref_count);
+    try std.testing.expectEqual(bound_offset, slot.bound_offset);
+    try std.testing.expectEqual(bound_offset != labels.unbound, slot.flags.bound);
+    try std.testing.expectEqual(labels.no_reloc, slot.first_reloc);
+}
+
+const Phase1Instruction = struct {
+    size: u8,
+    is_temp: bool = false,
+    has_atom: bool = false,
+};
+
+fn phase1TempAtomInstructionSize(op_id: u8) ?u8 {
+    return switch (op_id) {
+        qop.scope_get_var_undef,
+        qop.scope_get_var,
+        qop.scope_put_var,
+        qop.scope_delete_var,
+        qop.scope_get_ref,
+        qop.scope_put_var_init,
+        qop.scope_get_var_checkthis,
+        qop.scope_get_private_field,
+        qop.scope_get_private_field2,
+        qop.scope_put_private_field,
+        qop.scope_in_private_field,
+        => 7,
+        qop.scope_make_ref => 11,
+        qop.get_field_opt_chain => 5,
+        else => null,
+    };
+}
+
+fn phase1InstructionHasAtom(op_id: u8, is_temp: bool) bool {
+    if (is_temp) return switch (op_id) {
+        qop.scope_get_var_undef,
+        qop.scope_get_var,
+        qop.scope_put_var,
+        qop.scope_delete_var,
+        qop.scope_make_ref,
+        qop.scope_get_ref,
+        qop.scope_put_var_init,
+        qop.scope_get_var_checkthis,
+        qop.scope_get_private_field,
+        qop.scope_get_private_field2,
+        qop.scope_put_private_field,
+        qop.scope_in_private_field,
+        qop.get_field_opt_chain,
+        => true,
+        else => false,
+    };
+
+    return switch (opcode.formatOf(op_id)) {
+        .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
+        else => false,
+    };
+}
+
+/// Test-local twin of parserPhaseInstruction. The atom ledger disambiguates
+/// phase-1 temporary ids from the overlapping final short-opcode ids.
+fn decodePhase1Instruction(
+    code: []const u8,
+    atoms: []const core.atom.Atom,
+    pc: usize,
+    atom_index: usize,
+) !Phase1Instruction {
+    if (pc >= code.len) return error.InvalidBytecode;
+    const op_id = code[pc];
+
+    if (phase1TempAtomInstructionSize(op_id)) |temp_size| {
+        if (pc + temp_size <= code.len and atom_index < atoms.len and
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == atoms[atom_index])
+        {
+            return .{ .size = temp_size, .is_temp = true, .has_atom = true };
+        }
+    }
+
+    var instruction: Phase1Instruction = switch (op_id) {
+        qop.enter_scope,
+        qop.leave_scope,
+        qop.label,
+        qop.get_array_el_opt_chain,
+        qop.set_class_name,
+        qop.line_num,
+        => .{ .size = opcode.sizeOfPhase1(op_id), .is_temp = true },
+        else => .{ .size = opcode.sizeOf(op_id) },
+    };
+    if (instruction.size == 0 or pc + instruction.size > code.len)
+        return error.InvalidBytecode;
+    instruction.has_atom = phase1InstructionHasAtom(op_id, instruction.is_temp);
+    return instruction;
+}
+
+/// Translate the straight-line subset of a real legacy parser phase-1 stream
+/// into a fresh v2 Builder. Label-bearing input is deliberately rejected: a
+/// seed becoming control-flow-shaped must fail rather than silently weaken the
+/// normalized-equivalence comparison.
+fn translatePhase1ToV2(
+    b: *builder_mod.Builder,
+    code: []const u8,
+    atoms: []const core.atom.Atom,
+) !void {
+    var pc: usize = 0;
+    var atom_index: usize = 0;
+    while (pc < code.len) {
+        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
+        const op_id = code[pc];
+
+        if (instruction.is_temp) {
+            switch (op_id) {
+                qop.line_num => {},
+                qop.enter_scope, qop.leave_scope => {
+                    if (instruction.size != 3) return error.InvalidBytecode;
+                    try b.emitOpU16(
+                        op_id,
+                        std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+                    );
+                },
+                qop.scope_get_var_undef,
+                qop.scope_get_var,
+                qop.scope_put_var,
+                qop.scope_delete_var,
+                qop.scope_get_ref,
+                qop.scope_put_var_init,
+                qop.scope_get_var_checkthis,
+                qop.scope_get_private_field,
+                qop.scope_get_private_field2,
+                qop.scope_put_private_field,
+                qop.scope_in_private_field,
+                => {
+                    if (instruction.size != 7 or atom_index >= atoms.len)
+                        return error.InvalidBytecode;
+                    const atom_id = atoms[atom_index];
+                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                        return error.InvalidBytecode;
+                    try b.emitAtomOpU16Owned(
+                        op_id,
+                        b.atoms.dup(atom_id),
+                        std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
+                    );
+                    atom_index += 1;
+                },
+                else => return error.NonStraightLinePhase1,
+            }
+            pc += instruction.size;
+            continue;
+        }
+
+        const format = opcode.formatOf(op_id);
+        switch (format) {
+            .none, .none_int, .none_loc, .none_arg, .none_var_ref, .npopx => {
+                if (instruction.size != 1) return error.InvalidBytecode;
+                try b.emitOp(op_id);
+            },
+            .u8, .i8, .loc8, .const8 => {
+                if (instruction.size != 2) return error.InvalidBytecode;
+                try b.emitOpU8(op_id, code[pc + 1]);
+            },
+            .u16, .i16, .npop, .loc, .arg, .var_ref => {
+                if (instruction.size != 3) return error.InvalidBytecode;
+                try b.emitOpU16(
+                    op_id,
+                    std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+                );
+            },
+            .npop_u16, .u32, .i32, .@"const" => {
+                if (instruction.size != 5) return error.InvalidBytecode;
+                try b.emitOpU32(
+                    op_id,
+                    std.mem.readInt(u32, code[pc + 1 ..][0..4], .little),
+                );
+            },
+            .atom, .atom_u8, .atom_u16 => {
+                if (atom_index >= atoms.len) return error.InvalidBytecode;
+                const atom_id = atoms[atom_index];
+                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
+                    return error.InvalidBytecode;
+                switch (format) {
+                    .atom => {
+                        if (instruction.size != 5) return error.InvalidBytecode;
+                        try b.emitAtomOpOwned(op_id, b.atoms.dup(atom_id));
+                    },
+                    .atom_u8 => {
+                        if (instruction.size != 6) return error.InvalidBytecode;
+                        try b.emitAtomOpU8Owned(op_id, b.atoms.dup(atom_id), code[pc + 5]);
+                    },
+                    .atom_u16 => {
+                        if (instruction.size != 7) return error.InvalidBytecode;
+                        try b.emitAtomOpU16Owned(
+                            op_id,
+                            b.atoms.dup(atom_id),
+                            std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
+                        );
+                    },
+                    else => unreachable,
+                }
+                atom_index += 1;
+            },
+            .label8,
+            .label16,
+            .label,
+            .atom_label_u8,
+            .atom_label_u16,
+            .label_u16,
+            => return error.NonStraightLinePhase1,
+        }
+        pc += instruction.size;
+    }
+    if (atom_index != atoms.len) return error.InvalidBytecode;
+}
+
+fn attachTranslatedBuilder(
+    fd: *bytecode_mod.function_def.FunctionDef,
+    code: []const u8,
+    atoms: []const core.atom.Atom,
+) !void {
+    try std.testing.expect(fd.v2_builder == null);
+    const b = try fd.memory.create(builder_mod.Builder);
+    b.* = builder_mod.Builder.init(fd.memory, fd.atoms);
+    errdefer {
+        b.deinit();
+        fd.memory.destroy(builder_mod.Builder, b);
+    }
+    try translatePhase1ToV2(b, code, atoms);
+    fd.v2_builder = b;
+}
+
+fn expectFdTopologyEqual(
+    legacy_fd: *const bytecode_mod.function_def.FunctionDef,
+    v2_fd: *const bytecode_mod.function_def.FunctionDef,
+) !void {
+    try std.testing.expectEqual(legacy_fd.vars.len, v2_fd.vars.len);
+    for (legacy_fd.vars, v2_fd.vars) |legacy_var, v2_var| {
+        try std.testing.expectEqual(legacy_var.var_name, v2_var.var_name);
+        try std.testing.expectEqual(legacy_var.scope_level, v2_var.scope_level);
+        try std.testing.expectEqual(legacy_var.var_kind, v2_var.var_kind);
+        try std.testing.expectEqual(legacy_var.is_lexical, v2_var.is_lexical);
+        try std.testing.expectEqual(legacy_var.is_const, v2_var.is_const);
+        try std.testing.expectEqual(legacy_var.is_captured, v2_var.is_captured);
+    }
+
+    try std.testing.expectEqual(legacy_fd.args.len, v2_fd.args.len);
+    for (legacy_fd.args, v2_fd.args) |legacy_arg, v2_arg| {
+        try std.testing.expectEqual(legacy_arg.var_name, v2_arg.var_name);
+        try std.testing.expectEqual(legacy_arg.scope_level, v2_arg.scope_level);
+        try std.testing.expectEqual(legacy_arg.var_kind, v2_arg.var_kind);
+        try std.testing.expectEqual(legacy_arg.is_lexical, v2_arg.is_lexical);
+        try std.testing.expectEqual(legacy_arg.is_const, v2_arg.is_const);
+        try std.testing.expectEqual(legacy_arg.is_captured, v2_arg.is_captured);
+    }
+
+    try std.testing.expectEqual(legacy_fd.closure_var.len, v2_fd.closure_var.len);
+    for (legacy_fd.closure_var, v2_fd.closure_var) |legacy_ref, v2_ref| {
+        try std.testing.expectEqual(legacy_ref.var_name, v2_ref.var_name);
+        try std.testing.expectEqual(legacy_ref.closureType(), v2_ref.closureType());
+        try std.testing.expectEqual(legacy_ref.isLexical(), v2_ref.isLexical());
+        try std.testing.expectEqual(legacy_ref.isConst(), v2_ref.isConst());
+        // var_idx is the closure-ref topology order, not just row metadata.
+        try std.testing.expectEqual(legacy_ref.var_idx, v2_ref.var_idx);
+    }
+}
+
+fn normalizedLegacyCode(code: []const u8) ![]u8 {
+    var normalized: std.ArrayList(u8) = .empty;
+    errdefer normalized.deinit(std.testing.allocator);
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size: usize = if (op_id == qop.label) 5 else opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+        if (op_id != qop.label and op_id != qop.nop)
+            try normalized.appendSlice(std.testing.allocator, code[pc .. pc + size]);
+        pc += size;
+    }
+    return normalized.toOwnedSlice(std.testing.allocator);
+}
+
+fn expectLoweredStreamEqual(
+    legacy_function: *const bytecode_mod.Bytecode,
+    v2_product: *const resolve_variables.ResolvedProduct,
+) !void {
+    const normalized = try normalizedLegacyCode(legacy_function.code);
+    defer std.testing.allocator.free(normalized);
+    try std.testing.expectEqualSlices(
+        u8,
+        normalized,
+        v2_product.code[0..v2_product.code_len],
+    );
+    try std.testing.expectEqualSlices(
+        core.atom.Atom,
+        legacy_function.atom_operands,
+        v2_product.atom_operands[0..v2_product.atom_len],
+    );
+}
+
+fn runLegacyResolve(
+    function: *bytecode_mod.Bytecode,
+    fd: *bytecode_mod.function_def.FunctionDef,
+) !void {
+    var ctx = bytecode_mod.pipeline_resolve_variables.JSContext.initWithFunctionDef(function, fd);
+    try bytecode_mod.pipeline_resolve_variables.run(&ctx);
+}
+
+fn installPhase1Stream(
+    function: *bytecode_mod.Bytecode,
+    code: []const u8,
+    atoms: []const core.atom.Atom,
+) !void {
+    try function.setCode(code);
+    for (atoms) |atom_id| try function.retainAtomOperand(atom_id);
+}
+
+const RootSeedKind = enum {
+    global,
+    top_level_lexical,
+    block_lexical,
+};
+
+fn expectRootNormalizedEquivalence(src: []const u8, kind: RootSeedKind) !void {
+    var legacy: LegacyParse = undefined;
+    try legacy.init(src);
+    defer legacy.deinit();
+    try legacy.parseProgram(false);
+
+    var v2: LegacyParse = undefined;
+    try v2.init(src);
+    defer v2.deinit();
+    try v2.parseProgram(false);
+    try attachTranslatedBuilder(
+        &v2.state.function_def,
+        v2.function.code,
+        v2.function.atom_operands,
+    );
+
+    try runLegacyResolve(&legacy.function, &legacy.state.function_def);
+    var product = try resolve_variables.run(&v2.function, &v2.state.function_def);
+    defer product.deinitUncommitted();
+
+    try expectFdTopologyEqual(&legacy.state.function_def, &v2.state.function_def);
+    try expectLoweredStreamEqual(&legacy.function, &product);
+    switch (kind) {
+        .global => {
+            try std.testing.expectEqual(@as(usize, 1), legacy.state.function_def.closure_var.len);
+            try std.testing.expectEqual(
+                bytecode_mod.function_def.ClosureType.global,
+                legacy.state.function_def.closure_var[0].closureType(),
+            );
+        },
+        .top_level_lexical, .block_lexical => {
+            try std.testing.expect(legacy.state.function_def.vars.len != 0);
+        },
+    }
+}
+
+fn expectChildNormalizedEquivalence(src: []const u8) !void {
+    var legacy: LegacyParse = undefined;
+    try legacy.init(src);
+    defer legacy.deinit();
+    try legacy.parseProgram(true);
+    try std.testing.expectEqual(@as(usize, 1), legacy.state.function_def.child_list.len);
+    const legacy_child = legacy.state.function_def.child_list[0];
+
+    var v2: LegacyParse = undefined;
+    try v2.init(src);
+    defer v2.deinit();
+    try v2.parseProgram(true);
+    try std.testing.expectEqual(@as(usize, 1), v2.state.function_def.child_list.len);
+    const v2_child = v2.state.function_def.child_list[0];
+    try attachTranslatedBuilder(v2_child, v2_child.byte_code, v2_child.atom_operands);
+
+    var legacy_function = bytecode_mod.Bytecode.init(
+        &legacy.rt.memory,
+        &legacy.rt.atoms,
+        legacy_child.func_name,
+    );
+    defer legacy_function.deinit(legacy.rt);
+    try installPhase1Stream(
+        &legacy_function,
+        legacy_child.byte_code,
+        legacy_child.atom_operands,
+    );
+    try runLegacyResolve(&legacy_function, legacy_child);
+
+    var v2_function = bytecode_mod.Bytecode.init(
+        &v2.rt.memory,
+        &v2.rt.atoms,
+        v2_child.func_name,
+    );
+    defer v2_function.deinit(v2.rt);
+    var product = try resolve_variables.run(&v2_function, v2_child);
+    defer product.deinitUncommitted();
+
+    try expectFdTopologyEqual(legacy_child, v2_child);
+    try expectLoweredStreamEqual(&legacy_function, &product);
+    // Byte equality proves the selected loc/arg operands; var_idx equality in
+    // expectFdTopologyEqual proves closure-ref index order.
+    try std.testing.expectEqual(@as(usize, 1), legacy_child.args.len);
+    try std.testing.expectEqual(@as(usize, 1), legacy_child.vars.len);
 }
 
 /// Validate every intrusive relocation chain, including unique coverage of the
@@ -2796,4 +3269,215 @@ test "compiler_v2.s2g4: getter child keeps return terminal" {
     try std.testing.expectEqual(@as(i64, 1), getter.last_opcode_pos);
     try expectRelocIntegrity(getter);
     try expectSourceOrder(getter);
+}
+
+test "compiler_v2.s3: parsed dead code after break is dropped" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    // Numeric literal emission is outside the migrated v2 parser surface;
+    // null keeps the same dead expression-statement shape through v2.
+    try h.init("for (;;) { break; null; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(
+        &h.state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const input = h.builder();
+    try expectV2Stream(input, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try expectLabel(input, 0, 1, 0);
+    try expectLabel(input, 1, 1, 18);
+    try expectLabel(input, 2, 0, 13);
+    try expectLabel(input, 3, 1, 18);
+
+    var product = try resolve_variables.run(&h.function, &h.state.function_def);
+    defer product.deinitUncommitted();
+    try expectResolvedStream(&product, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+    });
+    try expectResolvedLabel(&product, 0, 0, 0);
+    try expectResolvedLabel(&product, 1, 1, 11);
+    try expectResolvedLabel(&product, 2, 0, labels.unbound);
+    try expectResolvedLabel(&product, 3, 1, 11);
+    try std.testing.expectEqual(@as(u32, 2), product.jump_size);
+}
+
+test "compiler_v2.s3: parsed dead-only loop labels stay dead" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("for (;;) { break; continue; }");
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(
+        &h.state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const input = h.builder();
+    try expectV2Stream(input, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.goto, .size = 5, .label = 0 },
+    });
+    try expectLabel(input, 0, 1, 0);
+    try expectLabel(input, 1, 1, 21);
+    try expectLabel(input, 2, 1, 16);
+    try expectLabel(input, 3, 1, 21);
+
+    var product = try resolve_variables.run(&h.function, &h.state.function_def);
+    defer product.deinitUncommitted();
+    try expectResolvedStream(&product, &.{
+        .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 3 },
+    });
+    // The loop head was passed before dead-code skipping, so it remains bound
+    // at output zero even though its only back-edge reference was removed.
+    try expectResolvedLabel(&product, 0, 0, 0);
+    try expectResolvedLabel(&product, 1, 1, 11);
+    try expectResolvedLabel(&product, 2, 0, labels.unbound);
+    try expectResolvedLabel(&product, 3, 1, 11);
+    try std.testing.expectEqual(@as(u32, 2), product.jump_size);
+}
+
+test "compiler_v2.s3: parsed return through finally keeps live gosub" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("try { return; } finally { null; }");
+    h.state.return_depth = 1;
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(
+        &h.state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const input = h.builder();
+    const expected = [_]ExpectedInsn{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.nip_catch, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.@"return", .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.ret, .size = 1 },
+    };
+    try expectV2Stream(input, &expected);
+    try expectLabel(input, 0, 1, 13);
+    try expectLabel(input, 1, 2, 19);
+    try expectLabel(input, 2, 0, 22);
+
+    var product = try resolve_variables.run(&h.function, &h.state.function_def);
+    defer product.deinitUncommitted();
+    try expectResolvedStream(&product, &expected);
+    try expectResolvedLabel(&product, 0, 1, 13);
+    try expectResolvedLabel(&product, 1, 2, 19);
+    try expectResolvedLabel(&product, 2, 0, labels.unbound);
+    try std.testing.expectEqual(@as(u32, 3), product.jump_size);
+}
+
+test "compiler_v2.s3: parsed empty finally removes gosub" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    var h: V2Parse = undefined;
+    try h.init("try { return; } finally { }");
+    h.state.return_depth = 1;
+    defer h.deinit();
+
+    try P.parseStatementOrDecl(
+        &h.state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+
+    const input = h.builder();
+    try expectV2Stream(input, &.{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.nip_catch, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.@"return", .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.ret, .size = 1 },
+    });
+    try expectLabel(input, 0, 1, 13);
+    try expectLabel(input, 1, 2, 19);
+    try expectLabel(input, 2, 0, 20);
+
+    var product = try resolve_variables.run(&h.function, &h.state.function_def);
+    defer product.deinitUncommitted();
+    try expectResolvedStream(&product, &.{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.nip_catch, .size = 1 },
+        .{ .op = qop.@"return", .size = 1 },
+        .{ .op = qop.throw, .size = 1 },
+    });
+    try expectResolvedLabel(&product, 0, 1, 8);
+    try expectResolvedLabel(&product, 1, 0, labels.unbound);
+    try expectResolvedLabel(&product, 2, 0, labels.unbound);
+    try std.testing.expectEqual(@as(u32, 3), product.jump_size);
+}
+
+test "compiler_v2.s3: normalized global binding equals legacy" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectRootNormalizedEquivalence("var g = 1; g;", .global);
+}
+
+test "compiler_v2.s3: normalized top-level lexical equals legacy" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectRootNormalizedEquivalence(
+        "let a = 1; a = a + 2; a;",
+        .top_level_lexical,
+    );
+}
+
+test "compiler_v2.s3: normalized block lexical equals legacy" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectRootNormalizedEquivalence("{ let b = 2; b; }", .block_lexical);
+}
+
+test "compiler_v2.s3: normalized child loc arg indices equal legacy" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectChildNormalizedEquivalence(
+        "function f(p) { var v; v = p; return v; }",
+    );
 }

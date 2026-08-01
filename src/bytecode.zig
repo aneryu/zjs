@@ -9257,6 +9257,68 @@ pub const pipeline_resolve_variables = struct {
         defer product.deinit();
         commitProduct(ctx, &product);
     }
+
+    /// QCP-1 S3: curated reuse surface for compiler_v2/resolve_variables.zig.
+    /// v2 replaces the PASS STRUCTURE (linear qjs walk, growable output, LabelId
+    /// operands) but calls these for every binding decision so the two pipelines
+    /// cannot drift semantically. Keep this list minimal.
+    pub const v2 = struct {
+        pub const ScopeOperandAlias = ScopeOperand;
+        pub const ScopeVarActionAlias = ScopeVarAction;
+        pub const EvalVarObjectProbeAlias = EvalVarObjectProbe;
+        pub const PrivateFieldResolutionAlias = PrivateFieldResolution;
+
+        pub const decodeScopeOperand = pipeline_resolve_variables.decodeScopeOperand;
+        pub const markEvalCapturedVariables = pipeline_resolve_variables.markEvalCapturedVariables;
+        pub const encodeEvalScopeHead = pipeline_resolve_variables.encodeEvalScopeHead;
+        pub const resolveBindingTopology = pipeline_resolve_variables.resolveBindingTopology;
+        pub const planScopeVarLowering = pipeline_resolve_variables.planScopeVarLowering;
+        pub const scopeVarActionSize = ScopeVarAction.size;
+        pub const scopeVarActionAtomCount = ScopeVarAction.atomCount;
+        pub const writeScopeVarAction = pipeline_resolve_variables.writeScopeVarAction;
+        pub const functionHasDynamicEnvObjects = pipeline_resolve_variables.functionHasDynamicEnvObjects;
+
+        pub const scopeVarProbeKind = pipeline_resolve_variables.scopeVarProbeKind;
+        pub const scopeVarProbeOpcode = EvalVarObjectProbeKind.probeOpcode;
+        pub const evalVarObjectProbePlan = pipeline_resolve_variables.evalVarObjectProbePlan;
+        pub const evalVarObjectProbeAccessorSize = pipeline_resolve_variables.evalVarObjectProbeAccessorSize;
+        pub const writeEvalVarObjectProbeAccessor = pipeline_resolve_variables.writeEvalVarObjectProbeAccessor;
+        pub const localWithProbeIteratorInit = LocalWithProbeIterator.init;
+        pub const localWithProbeIteratorNext = LocalWithProbeIterator.next;
+        pub const closureDynamicEnvProbeIteratorInit = ClosureDynamicEnvProbeIterator.init;
+        pub const closureDynamicEnvProbeIteratorNext = ClosureDynamicEnvProbeIterator.next;
+        pub const staticBindingStopsDynamicEnvProbes = pipeline_resolve_variables.staticBindingStopsDynamicEnvProbes;
+        pub const scopeUsesArgumentEnvironmentOnly = pipeline_resolve_variables.scopeUsesArgumentEnvironmentOnly;
+        pub const evalVarObjectClosureProbe = pipeline_resolve_variables.evalVarObjectClosureProbe;
+        pub const evalVarObjectPutProbeMode = pipeline_resolve_variables.evalVarObjectPutProbeMode;
+        pub const evalVarObjectProbeIsWith = pipeline_resolve_variables.evalVarObjectProbeIsWith;
+
+        pub const loweredScopeDeleteVarSize = pipeline_resolve_variables.loweredScopeDeleteVarSize;
+        pub const writeLoweredScopeDeleteVar = pipeline_resolve_variables.writeLoweredScopeDeleteVar;
+        pub const loweredScopeGetRefSize = pipeline_resolve_variables.loweredScopeGetRefSize;
+        pub const writeLoweredScopeGetRef = pipeline_resolve_variables.writeLoweredScopeGetRef;
+        pub const loweredScopeMakeRefSize = pipeline_resolve_variables.loweredScopeMakeRefSize;
+        pub const loweredScopeMakeRefAtomCount = pipeline_resolve_variables.loweredScopeMakeRefAtomCount;
+        pub const writeLoweredScopeMakeRef = pipeline_resolve_variables.writeLoweredScopeMakeRef;
+        pub const markReferenceTakenBinding = pipeline_resolve_variables.markReferenceTakenBinding;
+        pub const makeRefBindingIsGlobal = pipeline_resolve_variables.makeRefBindingIsGlobal;
+        pub const canOptimizeGlobalRefPutTail = pipeline_resolve_variables.canOptimizeGlobalRefPutTail;
+
+        pub const resolvePrivateBindingTopology = pipeline_resolve_variables.resolvePrivateBindingTopology;
+        pub const resolvePrivateField = pipeline_resolve_variables.resolvePrivateField;
+        pub const loweredPrivateFieldSize = pipeline_resolve_variables.loweredPrivateFieldSize;
+        pub const loweredPrivateFieldAtomCount = pipeline_resolve_variables.loweredPrivateFieldAtomCount;
+        pub const writeLoweredPrivateField = pipeline_resolve_variables.writeLoweredPrivateField;
+
+        pub const enterScopeRefreshSize = pipeline_resolve_variables.enterScopeRefreshSize;
+        pub const writeEnterScopeRefresh = pipeline_resolve_variables.writeEnterScopeRefresh;
+        pub const leaveScopeCloseSize = pipeline_resolve_variables.leaveScopeCloseSize;
+        pub const writeLeaveScopeClose = pipeline_resolve_variables.writeLeaveScopeClose;
+
+        pub const hasDirectEvalLexicalRedeclaration = pipeline_resolve_variables.hasDirectEvalLexicalRedeclaration;
+        pub const throw_error_instr_size = pipeline_resolve_variables.throw_error_instr_size;
+        pub const writeThrowVarRedeclaration = pipeline_resolve_variables.writeThrowVarRedeclaration;
+    };
 };
 
 pub const pipeline_resolve_labels = struct {

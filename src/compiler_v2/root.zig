@@ -20,16 +20,39 @@
 //! atom + source position), execution tier (test262 / force-GC / OOM /
 //! altrepr remain final authority).
 
+const bytecode = @import("../bytecode.zig");
+
 pub const labels = @import("labels.zig");
 pub const builder = @import("builder.zig");
+pub const resolve_variables = @import("resolve_variables.zig");
 
 pub const LabelId = labels.LabelId;
 pub const LabelSlot = labels.LabelSlot;
 pub const RelocEntry = labels.RelocEntry;
 pub const Builder = builder.Builder;
+pub const ResolvedProduct = resolve_variables.ResolvedProduct;
+
+/// QCP-1 v2 pipeline entry: resolve_variables_v2 now; resolve_labels_v2 lands
+/// next stage, so its Stage 4 stub returns the resolved product unchanged.
+pub fn compileFunctionV2(
+    function: *bytecode.Bytecode,
+    fd: *bytecode.function_def.FunctionDef,
+) resolve_variables.Error!ResolvedProduct {
+    var product = try resolve_variables.run(function, fd);
+    resolveLabelsV2Stub(&product);
+    return product;
+}
+
+/// QCP-1 Stage 4 placeholder. Label relocation and short-op emission will be
+/// installed here without changing the Stage 3 product ownership boundary.
+fn resolveLabelsV2Stub(product: *ResolvedProduct) void {
+    _ = product;
+}
 
 test {
     _ = labels;
     _ = builder;
+    _ = resolve_variables;
+    _ = compileFunctionV2;
     _ = @import("tests.zig");
 }
