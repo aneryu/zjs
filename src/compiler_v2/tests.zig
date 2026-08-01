@@ -4291,3 +4291,370 @@ test "compiler_v2.s4: installed for loop contains a short opcode" {
     try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
     try std.testing.expect(h.installed_short_opcode);
 }
+
+// QCP-1 S3R+ Pass C: ruling-mandated danger shapes. These tests deliberately
+// combine exact-CFG liveness with resolve_variables' Debug ownership,
+// event-order, and optimization-boundary oracles.
+
+const S3RpResolveHarness = struct {
+    rt: *core.JSRuntime,
+    name_atom: core.atom.Atom,
+    function: bytecode_mod.Bytecode,
+    fd: bytecode_mod.function_def.FunctionDef,
+    compiler_state_live: bool,
+
+    fn init(harness: *S3RpResolveHarness, allocator: std.mem.Allocator) !void {
+        harness.compiler_state_live = false;
+        harness.rt = try core.JSRuntime.create(allocator);
+        errdefer harness.rt.destroy();
+
+        harness.name_atom = try harness.rt.atoms.internString("compiler_v2-s3rp");
+        errdefer harness.rt.atoms.free(harness.name_atom);
+
+        harness.function = bytecode_mod.Bytecode.init(
+            &harness.rt.memory,
+            &harness.rt.atoms,
+            harness.name_atom,
+        );
+        errdefer harness.function.deinit(harness.rt);
+
+        harness.fd = bytecode_mod.function_def.FunctionDef.init(
+            &harness.rt.memory,
+            &harness.rt.atoms,
+            harness.name_atom,
+        );
+        errdefer harness.fd.deinit(harness.rt);
+
+        const input_builder = try harness.rt.memory.create(builder_mod.Builder);
+        input_builder.* = builder_mod.Builder.init(&harness.rt.memory, &harness.rt.atoms);
+        harness.fd.v2_builder = input_builder;
+        harness.compiler_state_live = true;
+    }
+
+    fn deinitCompilerState(harness: *S3RpResolveHarness) void {
+        if (!harness.compiler_state_live) return;
+        harness.fd.deinit(harness.rt);
+        harness.function.deinit(harness.rt);
+        harness.compiler_state_live = false;
+    }
+
+    fn deinit(harness: *S3RpResolveHarness) void {
+        harness.deinitCompilerState();
+        harness.rt.atoms.free(harness.name_atom);
+        harness.rt.destroy();
+    }
+
+    fn input(harness: *S3RpResolveHarness) *builder_mod.Builder {
+        return harness.fd.v2_builder.?;
+    }
+
+    fn resolve(harness: *S3RpResolveHarness) !resolve_variables.ResolvedProduct {
+        return resolve_variables.run(&harness.function, &harness.fd);
+    }
+};
+
+fn requireCompilerV2ForS3Rp() !void {
+    var skip = std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+}
+
+const S3RpChildPhase1Shape = struct {
+    make_ref_name: ?[]const u8 = null,
+    binding_name: ?[]const u8 = null,
+    eval_before_return: bool = false,
+    if_false_after_return: bool = false,
+    leave_scope_after_return: bool = false,
+    nested_children: ?usize = null,
+};
+
+/// Check the untranslated child stream, using its atom ledger to disambiguate
+/// temporary scope opcodes from overlapping final short-opcode ids.
+fn expectS3RpChildPhase1Shape(src: []const u8, expected: S3RpChildPhase1Shape) !void {
+    var parsed: LegacyParse = undefined;
+    try parsed.init(src);
+    defer parsed.deinit();
+    try parsed.parseProgram(true);
+    try std.testing.expectEqual(@as(usize, 1), parsed.state.function_def.child_list.len);
+    const child = parsed.state.function_def.child_list[0];
+
+    if (expected.nested_children) |count|
+        try std.testing.expectEqual(count, child.child_list.len);
+
+    const make_ref_atom = if (expected.make_ref_name) |name|
+        try parsed.rt.atoms.internString(name)
+    else
+        null;
+    defer if (make_ref_atom) |atom_id| parsed.rt.atoms.free(atom_id);
+    const binding_atom = if (expected.binding_name) |name|
+        try parsed.rt.atoms.internString(name)
+    else
+        null;
+    defer if (binding_atom) |atom_id| parsed.rt.atoms.free(atom_id);
+
+    var make_ref_pc: ?usize = null;
+    var binding_pc: ?usize = null;
+    var eval_pc: ?usize = null;
+    var return_pc: ?usize = null;
+    var dead_if_false_pc: ?usize = null;
+    var dead_leave_scope_pc: ?usize = null;
+    var pc: usize = 0;
+    var atom_index: usize = 0;
+    while (pc < child.byte_code.len) {
+        const instruction = try decodePhase1Instruction(
+            child.byte_code,
+            child.atom_operands,
+            pc,
+            atom_index,
+        );
+        const op_id = child.byte_code[pc];
+        const input_atom = if (instruction.has_atom)
+            child.atom_operands[atom_index]
+        else
+            null;
+
+        if (instruction.is_temp and op_id == qop.scope_make_ref and
+            make_ref_atom != null and input_atom.? == make_ref_atom.?)
+        {
+            if (make_ref_pc == null) make_ref_pc = pc;
+        }
+        if (instruction.is_temp and op_id == qop.scope_put_var_init and
+            binding_atom != null and input_atom.? == binding_atom.?)
+        {
+            if (binding_pc == null) binding_pc = pc;
+        }
+        if (op_id == qop.eval and eval_pc == null) eval_pc = pc;
+
+        const head_pc = make_ref_pc orelse binding_pc;
+        if ((op_id == qop.@"return" or op_id == qop.return_undef) and
+            return_pc == null and head_pc != null and pc > head_pc.?)
+        {
+            return_pc = pc;
+        }
+        if (op_id == qop.if_false and return_pc != null and pc > return_pc.? and
+            dead_if_false_pc == null)
+        {
+            dead_if_false_pc = pc;
+        }
+        if (instruction.is_temp and op_id == qop.leave_scope and
+            return_pc != null and pc > return_pc.? and dead_leave_scope_pc == null)
+        {
+            dead_leave_scope_pc = pc;
+        }
+
+        if (instruction.has_atom) atom_index += 1;
+        pc += instruction.size;
+    }
+    try std.testing.expectEqual(child.byte_code.len, pc);
+    try std.testing.expectEqual(child.atom_operands.len, atom_index);
+
+    if (make_ref_atom != null) try std.testing.expect(make_ref_pc != null);
+    if (binding_atom != null) try std.testing.expect(binding_pc != null);
+    const terminal = return_pc orelse return error.TestExpectedEqual;
+    if (expected.eval_before_return) {
+        const eval_at = eval_pc orelse return error.TestExpectedEqual;
+        try std.testing.expect(binding_pc.? < eval_at and eval_at < terminal);
+    }
+    if (expected.if_false_after_return)
+        try std.testing.expect(dead_if_false_pc != null);
+    if (expected.leave_scope_after_return)
+        try std.testing.expect(dead_leave_scope_pc != null);
+}
+
+const S3RpResolvedStats = struct {
+    instruction_count: usize = 0,
+    with_make_ref_count: usize = 0,
+};
+
+fn s3RpResolvedStats(product: *const resolve_variables.ResolvedProduct) !S3RpResolvedStats {
+    var stats: S3RpResolvedStats = .{};
+    var pc: usize = 0;
+    while (pc < product.code_len) {
+        const op_id = product.code[pc];
+        const size: usize = opcode.sizeOf(op_id);
+        if (size == 0 or size > product.code_len - pc) return error.InvalidBytecode;
+        stats.instruction_count += 1;
+        if (op_id == qop.with_make_ref) stats.with_make_ref_count += 1;
+        pc += size;
+    }
+    try std.testing.expectEqual(@as(usize, @intCast(product.code_len)), pc);
+    return stats;
+}
+
+test "compiler_v2.s3rp: live make_ref keeps aux edge and drops terminal dead branch" {
+    try requireCompilerV2ForS3Rp();
+
+    var harness: S3RpResolveHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const name = try harness.rt.atoms.internString("compiler_v2-s3rp-with-name");
+    defer harness.rt.atoms.free(name);
+    const refs_after_intern = harness.rt.atoms.refCount(name).?;
+
+    _ = try harness.fd.appendScope(-1);
+    harness.fd.var_object_idx = try harness.fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    harness.fd.arg_var_object_idx = try harness.fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try harness.fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = name,
+    });
+
+    const input = harness.input();
+    const aux = try input.newLabel();
+    const dead = try input.newLabel();
+    try input.emitScopeRefOpOwned(qop.scope_make_ref, harness.rt.atoms.dup(name), aux, 0);
+    try input.emitOp(qop.return_undef);
+    try input.emitJump(qop.if_false, dead);
+    try input.emitOp(qop.return_undef);
+    try input.bindLabel(dead);
+    try input.emitOp(qop.return_undef);
+    try input.bindLabel(aux);
+    try input.emitOp(qop.return_undef);
+
+    var product = try harness.resolve();
+    var product_live = true;
+    defer if (product_live) product.deinitUncommitted();
+
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[dead.index()].ref_count);
+    const stats = try s3RpResolvedStats(&product);
+    try std.testing.expectEqual(@as(usize, 7), stats.instruction_count);
+    try std.testing.expectEqual(@as(usize, 2), stats.with_make_ref_count);
+    try std.testing.expectEqual(@as(u32, 3), product.atom_len);
+    try std.testing.expect(product.code_len != 0);
+    try std.testing.expectEqual(qop.return_undef, product.code[product.code_len - 1]);
+
+    try deinitProductAndExpectAtomBalance(&harness.rt.atoms, &product);
+    product_live = false;
+    harness.deinitCompilerState();
+    try std.testing.expectEqual(refs_after_intern, harness.rt.atoms.refCount(name).?);
+}
+
+test "compiler_v2.s3rp: source make_ref precedes return and dead branch" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    const src = "function f(o) { with (o) { let v = 0; v = 1; } return o; if (o) { o = 2; } }";
+    try expectS3RpChildPhase1Shape(src, .{
+        .make_ref_name = "v",
+        .if_false_after_return = true,
+    });
+    try expectChildNormalizedEquivalence(src, .{ .args = 1 });
+}
+
+test "compiler_v2.s3rp: live lexical init drops terminal dead cleanup" {
+    try requireCompilerV2ForS3Rp();
+
+    var harness: S3RpResolveHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const name = try harness.rt.atoms.internString("compiler_v2-s3rp-binding");
+    defer harness.rt.atoms.free(name);
+    const refs_after_intern = harness.rt.atoms.refCount(name).?;
+
+    _ = try harness.fd.appendScope(-1);
+    _ = try harness.fd.addScopeVar(name, .normal, 0, true, false);
+
+    const input = harness.input();
+    try input.emitOp(qop.undefined);
+    try input.emitAtomOpU16Owned(
+        qop.scope_put_var_init,
+        harness.rt.atoms.dup(name),
+        0,
+    );
+    try input.emitOp(qop.return_undef);
+    try input.emitOpU16(qop.leave_scope, 0);
+
+    var product = try harness.resolve();
+    var product_live = true;
+    defer if (product_live) product.deinitUncommitted();
+
+    try expectResolvedStream(&product, &.{
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.put_loc, .size = 3 },
+        .{ .op = qop.return_undef, .size = 1 },
+    });
+    try std.testing.expectEqual(@as(u32, 0), product.atom_len);
+
+    try deinitProductAndExpectAtomBalance(&harness.rt.atoms, &product);
+    product_live = false;
+    harness.deinitCompilerState();
+    try std.testing.expectEqual(refs_after_intern, harness.rt.atoms.refCount(name).?);
+}
+
+test "compiler_v2.s3rp: plain block binding return drops dead cleanup" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    const src = "function f(p) { { let b = 1; return b; } }";
+    try expectS3RpChildPhase1Shape(src, .{
+        .binding_name = "b",
+        .leave_scope_after_return = true,
+    });
+    try expectChildNormalizedEquivalence(src, .{ .args = 1 });
+}
+
+test "compiler_v2.s3rp: eval-visible binding return drops dead cleanup" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    const src = "function f(p) { { let b = 1; eval(\"b\"); return b; } }";
+    try expectS3RpChildPhase1Shape(src, .{
+        .binding_name = "b",
+        .eval_before_return = true,
+        .leave_scope_after_return = true,
+    });
+    try expectChildNormalizedEquivalence(src, .{ .args = 1 });
+}
+
+test "compiler_v2.s3rp: closure-captured binding return drops dead cleanup" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+
+    const src = "function f(p) { { let b = 1; let g = function () { return b; }; return g; } }";
+    try expectS3RpChildPhase1Shape(src, .{
+        .binding_name = "b",
+        .leave_scope_after_return = true,
+        .nested_children = 1,
+    });
+    try expectChildNormalizedEquivalence(src, .{ .args = 1 });
+}
+
+test "compiler_v2.s3rp: lexical return completes without dead cleanup" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "(function () { { let b = 7; return b; } })();",
+        7,
+    );
+}
+
+test "compiler_v2.s3rp: with assignment completes without dead cleanup" {
+    var skip = !P.v2_available;
+    _ = &skip;
+    if (skip) return error.SkipZigTest;
+    try expectV2ExecutionCompletion(
+        "(function (o) { with (o) { v = 3; } return o.v; })({ v: 0 });",
+        3,
+    );
+}
