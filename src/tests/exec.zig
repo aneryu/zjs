@@ -3173,6 +3173,33 @@ fn finalOpcodeCount(code: []const u8, wanted: u8) !usize {
     return count;
 }
 
+const SetVarRefStats = struct {
+    count: usize = 0,
+    first_idx: ?u16 = null,
+};
+
+fn finalSetVarRefStats(code: []const u8) !SetVarRefStats {
+    var stats: SetVarRefStats = .{};
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size = bytecode.opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return error.InvalidFunctionBytecode;
+        const idx: ?u16 = if (op_id == op.set_var_ref)
+            std.mem.readInt(u16, code[pc + 1 ..][0..2], .little)
+        else if (op_id >= op.set_var_ref0 and op_id <= op.set_var_ref3)
+            op_id - op.set_var_ref0
+        else
+            null;
+        if (idx) |ref_idx| {
+            stats.count += 1;
+            if (stats.first_idx == null) stats.first_idx = ref_idx;
+        }
+        pc += size;
+    }
+    return stats;
+}
+
 fn hasTailEvalReturn(function: *const bytecode.FunctionBytecode) bool {
     const code = function.byteCode();
     var pc: usize = 0;
@@ -5433,11 +5460,14 @@ test "resident set_var_ref preserves assignment results and refcounted self-assi
     try std.testing.expect(result.isUndefined());
 
     const short = try globalFunctionBytecode(&js, "__residentSetVarRefShort");
-    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(short.byteCode(), op.set_var_ref0));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(short.byteCode(), op.set_var_ref));
+    const short_set = try finalSetVarRefStats(short.byteCode());
+    try std.testing.expectEqual(@as(usize, 1), short_set.count);
+    try std.testing.expectEqual(@as(?u16, 0), short_set.first_idx);
 
     const self_assign = try globalFunctionBytecode(&js, "__residentSetVarRefSelf");
-    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(self_assign.byteCode(), op.set_var_ref0));
+    const self_set = try finalSetVarRefStats(self_assign.byteCode());
+    try std.testing.expectEqual(@as(usize, 1), self_set.count);
+    try std.testing.expectEqual(@as(?u16, 0), self_set.first_idx);
 
     const generic = try globalFunctionBytecode(&js, "__residentSetVarRefGeneric");
     var generic_set_idx: ?u16 = null;

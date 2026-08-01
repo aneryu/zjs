@@ -3795,6 +3795,7 @@ pub const parser_core = struct {
     const UsingBlockFrame = struct {
         stack_loc: ?u16 = null,
         catch_off: ?usize = null,
+        v2_catch_label: ?compiler_v2.LabelId = null,
         catch_marker_depth: u32 = 0,
         seen_async_hint: bool = false,
     };
@@ -8161,7 +8162,11 @@ pub const parser_core = struct {
             // as invalidateLastOpcode + deferred absolute publish.
             s.function.atoms.free(lvalue.name);
             lvalue.owns_name = false;
-            try v2FBindLabel(s, lvalue.v2_ref_label.?);
+            // qjs put_lvalue's emit_label is a physical matcher boundary even
+            // after scope_make_ref consumes its auxiliary refcount. Preserve
+            // that identity as a Stage-4 match barrier; the legacy phase-1
+            // stream expresses the same boundary with OP_label.
+            try v2FBindParserLabel(s, lvalue.v2_ref_label.?);
         }
 
         // qjs put_lvalue (quickjs.c:26081-26161): apply the selected stack
@@ -9585,7 +9590,34 @@ pub const parser_core = struct {
             switch (v2b.code[pos]) {
                 opcode.op.get_field_opt_chain,
                 opcode.op.get_array_el_opt_chain,
-                => return Error.UnexpectedToken,
+                => {
+                    const field_form = v2b.code[pos] == opcode.op.get_field_opt_chain;
+                    const getter_size: u32 = if (field_form) 5 else 1;
+                    if (pos + getter_size != v2b.code_len) return Error.UnexpectedToken;
+                    const optional_label = try v2OptionalChainExitAtEnd(s);
+                    if (field_form) {
+                        if (v2b.atom_len == 0) return Error.UnexpectedToken;
+                        const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                        if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.UnexpectedToken;
+                    }
+
+                    // qjs js_parse_postfix_expr (quickjs.c:26771-26790): a
+                    // call on a closed optional-chain reference preserves the
+                    // receiver, bypasses the undefined pad on the live path,
+                    // and moves the shared chain exit to that pad. v2 carries
+                    // both targets as LabelIds instead of raw OP_label bytes.
+                    const snapshot = v2b.snapshot();
+                    errdefer v2b.rollback(snapshot);
+                    const next_label = try v2FNewLabel(s);
+                    try v2FEmitJumpNoSource(s, opcode.op.goto, next_label);
+                    const cleanup_offset = v2b.code_len;
+                    try v2FEmitOpNoSource(s, opcode.op.undefined);
+                    try v2FBindParserLabel(s, next_label);
+
+                    v2b.code[pos] = if (field_form) opcode.op.get_field2 else opcode.op.get_array_el2;
+                    v2b.label_slots[optional_label.index()].bound_offset = cleanup_offset;
+                    return .{ .kind = .method, .optional_drop_count = 2 };
+                },
                 opcode.op.get_field => {
                     if (pos + 5 != v2b.code_len)
                         return .{ .kind = .plain, .optional_drop_count = 1 };
@@ -13112,45 +13144,100 @@ pub const parser_core = struct {
 
     fn emitCreateUsingDisposableStack(s: *State) Error!u16 {
         const stack_loc = try appendAnonymousTempLocal(s);
-        try s.emitOp(opcode.op.using_create_stack);
-        try s.emitOpU16(opcode.op.put_loc, stack_loc);
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering: mirror the
+            // legacy stack creation and local-store sequence exactly.
+            try v2FEmitOp(s, opcode.op.using_create_stack);
+            try v2FEmitOpU16(s, opcode.op.put_loc, stack_loc);
+        } else {
+            try s.emitOp(opcode.op.using_create_stack);
+            try s.emitOpU16(opcode.op.put_loc, stack_loc);
+        }
         return stack_loc;
     }
 
     fn emitUsingAwait(s: *State) Error!void {
         if (s.lex.is_module and s.cur_func_stack.len == 0) s.function.ensureModule().has_top_level_await = true;
         if (!s.in_async and !(s.lex.is_module and s.cur_func_stack.len == 0)) return Error.AwaitOutsideAsyncFunction;
-        try s.emitOp(opcode.op.await);
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering reuses the
+            // ordinary await opcode through the identity-native emitter.
+            try v2FEmitOp(s, opcode.op.await);
+        } else {
+            try s.emitOp(opcode.op.await);
+        }
     }
 
     fn emitUsingAddResource(s: *State, kind: DisposalHint, stack_loc: u16, resource_loc: u16) Error!void {
-        try s.emitOpU16(opcode.op.get_loc, stack_loc);
-        try s.emitOpU16(opcode.op.get_loc, resource_loc);
-        try s.emitOpU8(opcode.op.using_add_resource, @intFromEnum(kind));
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering: preserve the
+            // legacy stack/resource operand order and disposal hint.
+            try v2FEmitOpU16(s, opcode.op.get_loc, stack_loc);
+            try v2FEmitOpU16(s, opcode.op.get_loc, resource_loc);
+            try v2FEmitOpU8(s, opcode.op.using_add_resource, @intFromEnum(kind));
+        } else {
+            try s.emitOpU16(opcode.op.get_loc, stack_loc);
+            try s.emitOpU16(opcode.op.get_loc, resource_loc);
+            try s.emitOpU8(opcode.op.using_add_resource, @intFromEnum(kind));
+        }
     }
 
     fn emitUsingAwaitIfNeeded(s: *State, may_be_async: bool) Error!void {
         if (!may_be_async) return;
-        try s.emitOp(opcode.op.dup);
-        try s.emitOp(opcode.op.is_undefined);
-        const skip_await = try emitForwardJump(s, opcode.op.if_true);
-        try emitUsingAwait(s);
-        try patchForwardJump(s, skip_await);
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering: the optional
+            // await continuation is born and bound as a real LabelId.
+            try v2FEmitOp(s, opcode.op.dup);
+            try v2FEmitOp(s, opcode.op.is_undefined);
+            const skip_await = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.if_true, skip_await);
+            try emitUsingAwait(s);
+            try v2FBindLabel(s, skip_await);
+        } else {
+            try s.emitOp(opcode.op.dup);
+            try s.emitOp(opcode.op.is_undefined);
+            const skip_await = try emitForwardJump(s, opcode.op.if_true);
+            try emitUsingAwait(s);
+            try patchForwardJump(s, skip_await);
+        }
     }
 
     fn emitUsingDisposeStack(s: *State, stack_loc: u16, may_be_async: bool) Error!void {
-        try s.emitOpU16(opcode.op.get_loc, stack_loc);
-        try s.emitOp(opcode.op.using_dispose_stack);
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering: mirror the
+            // normal-completion disposal prefix exactly.
+            try v2FEmitOpU16(s, opcode.op.get_loc, stack_loc);
+            try v2FEmitOp(s, opcode.op.using_dispose_stack);
+        } else {
+            try s.emitOpU16(opcode.op.get_loc, stack_loc);
+            try s.emitOp(opcode.op.using_dispose_stack);
+        }
         try emitUsingAwaitIfNeeded(s, may_be_async);
-        try s.emitOp(opcode.op.drop);
+        if (v2_available and s.emit_v2) {
+            try v2FEmitOp(s, opcode.op.drop);
+        } else {
+            try s.emitOp(opcode.op.drop);
+        }
     }
 
     fn emitUsingDisposeStackForThrow(s: *State, stack_loc: u16, may_be_async: bool) Error!void {
-        try s.emitOpU16(opcode.op.get_loc, stack_loc);
-        try s.emitOp(opcode.op.swap);
-        try s.emitOp(opcode.op.using_dispose_stack_for_throw);
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering: preserve the
+            // thrown value beneath the disposable stack before suppression.
+            try v2FEmitOpU16(s, opcode.op.get_loc, stack_loc);
+            try v2FEmitOp(s, opcode.op.swap);
+            try v2FEmitOp(s, opcode.op.using_dispose_stack_for_throw);
+        } else {
+            try s.emitOpU16(opcode.op.get_loc, stack_loc);
+            try s.emitOp(opcode.op.swap);
+            try s.emitOp(opcode.op.using_dispose_stack_for_throw);
+        }
         try emitUsingAwaitIfNeeded(s, may_be_async);
-        try s.emitOp(opcode.op.drop);
+        if (v2_available and s.emit_v2) {
+            try v2FEmitOp(s, opcode.op.drop);
+        } else {
+            try s.emitOp(opcode.op.drop);
+        }
     }
 
     fn armCurrentUsingBlockFrame(s: *State) Error!u16 {
@@ -13159,11 +13246,21 @@ pub const parser_core = struct {
         if (s.using_block_frames.items[frame_index].stack_loc) |stack_loc| return stack_loc;
 
         const stack_loc = try emitCreateUsingDisposableStack(s);
-        const catch_off = try emitForwardJump(s, opcode.op.@"catch");
+        var catch_off: ?usize = null;
+        var v2_catch_label: ?compiler_v2.LabelId = null;
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering: keep the
+            // synthetic catch edge identity-native until final layout.
+            v2_catch_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.@"catch", v2_catch_label.?);
+        } else {
+            catch_off = try emitForwardJump(s, opcode.op.@"catch");
+        }
         s.active_catch_marker_depth += 1;
         s.using_block_frames.items[frame_index] = .{
             .stack_loc = stack_loc,
             .catch_off = catch_off,
+            .v2_catch_label = v2_catch_label,
             .catch_marker_depth = s.active_catch_marker_depth,
         };
         return stack_loc;
@@ -13183,19 +13280,33 @@ pub const parser_core = struct {
             _ = s.using_block_frames.pop();
             return;
         };
-        const catch_off = frame.catch_off orelse return Error.UnexpectedToken;
         if (frame.catch_marker_depth != s.active_catch_marker_depth or s.active_catch_marker_depth == 0) {
             return Error.UnexpectedToken;
         }
 
         s.active_catch_marker_depth -= 1;
-        try s.emitOp(opcode.op.drop);
-        try emitUsingDisposeStack(s, stack_loc, frame.seen_async_hint);
-        try s.emitCloseLoc(stack_loc);
-        const end_off = try emitForwardJump(s, opcode.op.goto);
-        try patchForwardJump(s, catch_off);
-        try emitUsingDisposeStackForThrow(s, stack_loc, frame.seen_async_hint);
-        try patchForwardJump(s, end_off);
+        if (v2_available and s.emit_v2) {
+            // zjs-only explicit-resource-management lowering: normal and
+            // throw completions converge through real catch/end LabelIds.
+            const catch_label = frame.v2_catch_label orelse return Error.UnexpectedToken;
+            try v2FEmitOp(s, opcode.op.drop);
+            try emitUsingDisposeStack(s, stack_loc, frame.seen_async_hint);
+            try s.emitCloseLoc(stack_loc);
+            const end_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.goto, end_label);
+            try v2FBindLabel(s, catch_label);
+            try emitUsingDisposeStackForThrow(s, stack_loc, frame.seen_async_hint);
+            try v2FBindLabel(s, end_label);
+        } else {
+            const catch_off = frame.catch_off orelse return Error.UnexpectedToken;
+            try s.emitOp(opcode.op.drop);
+            try emitUsingDisposeStack(s, stack_loc, frame.seen_async_hint);
+            try s.emitCloseLoc(stack_loc);
+            const end_off = try emitForwardJump(s, opcode.op.goto);
+            try patchForwardJump(s, catch_off);
+            try emitUsingDisposeStackForThrow(s, stack_loc, frame.seen_async_hint);
+            try patchForwardJump(s, end_off);
+        }
         _ = s.using_block_frames.pop();
     }
 
@@ -13222,9 +13333,21 @@ pub const parser_core = struct {
             s.is_outer_constructor_block = false;
             if (s.current_parameter_properties) |props| {
                 for (props.items) |prop_atom| {
-                    try s.emitOp(opcode.op.push_this);
+                    if (v2_available and s.emit_v2) {
+                        // zjs-only TypeScript parameter-property lowering:
+                        // mirror the legacy constructor prelude exactly.
+                        try v2FEmitOp(s, opcode.op.push_this);
+                    } else {
+                        try s.emitOp(opcode.op.push_this);
+                    }
                     try s.emitScopeGetVar(prop_atom);
-                    try s.emitOpAtom(opcode.op.put_field, prop_atom);
+                    if (v2_available and s.emit_v2) {
+                        // zjs-only TypeScript parameter-property lowering:
+                        // retain the field atom for the v2 instruction owner.
+                        try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(prop_atom));
+                    } else {
+                        try s.emitOpAtom(opcode.op.put_field, prop_atom);
+                    }
                 }
             }
         }
@@ -14869,10 +14992,22 @@ pub const parser_core = struct {
                     s.last_anonymous_function_expr = false;
                 }
             }
-            try s.emitOp(opcode.op.dup);
+            if (v2_available and s.emit_v2) {
+                // zjs-only explicit-resource-management lowering: retain one
+                // initializer value for the lexical binding and one resource.
+                try v2FEmitOp(s, opcode.op.dup);
+            } else {
+                try s.emitOp(opcode.op.dup);
+            }
             try s.emitScopePutVarInit(atom_id);
             const resource_loc = try appendAnonymousTempLocal(s);
-            try s.emitOpU16(opcode.op.put_loc, resource_loc);
+            if (v2_available and s.emit_v2) {
+                // zjs-only explicit-resource-management lowering: keep the
+                // retained resource in the same anonymous local as legacy.
+                try v2FEmitOpU16(s, opcode.op.put_loc, resource_loc);
+            } else {
+                try s.emitOpU16(opcode.op.put_loc, resource_loc);
+            }
             try emitUsingAddResource(s, kind, stack_loc, resource_loc);
             try noteUsingResourceHint(s, kind);
             try s.emitCloseLoc(resource_loc);
@@ -15064,14 +15199,26 @@ pub const parser_core = struct {
             const idx = try s.appendFunctionVarAtOrigin(State.eval_ret_atom, 0);
             saved_eval_ret_idx = idx;
             try s.emitEvalRetGet();
-            try s.emitOpU16(opcode.op.put_loc, idx);
+            if (v2_available and s.emit_v2) {
+                // zjs-only shared-finalizer lowering: spill the incoming eval
+                // completion to the same anonymous local as legacy.
+                try v2FEmitOpU16(s, opcode.op.put_loc, idx);
+            } else {
+                try s.emitOpU16(opcode.op.put_loc, idx);
+            }
             try s.setEvalReturnUndefined();
         }
 
         try parseBlock(s);
 
         if (saved_eval_ret_idx) |idx| {
-            try s.emitOpU16(opcode.op.get_loc, idx);
+            if (v2_available and s.emit_v2) {
+                // zjs-only shared-finalizer lowering: restore the saved eval
+                // completion after ignoring the finalizer's normal value.
+                try v2FEmitOpU16(s, opcode.op.get_loc, idx);
+            } else {
+                try s.emitOpU16(opcode.op.get_loc, idx);
+            }
             try s.emitEvalRetPut();
         }
     }
@@ -16134,11 +16281,24 @@ pub const parser_core = struct {
 
             const atom_id = target_atom orelse return Error.UnexpectedToken;
             const value_loc = iteration_using_value_loc orelse return Error.UnexpectedToken;
-            try s.emitOpU16(opcode.op.get_loc, value_loc);
-            try s.emitOp(opcode.op.dup);
+            if (v2_available and s.emit_v2) {
+                // zjs-only `for (using ... of ...)` lowering: mirror the
+                // legacy iteration-value load and duplicate exactly.
+                try v2FEmitOpU16(s, opcode.op.get_loc, value_loc);
+                try v2FEmitOp(s, opcode.op.dup);
+            } else {
+                try s.emitOpU16(opcode.op.get_loc, value_loc);
+                try s.emitOp(opcode.op.dup);
+            }
             try s.emitScopePutVarInit(atom_id);
             const resource_loc = try appendAnonymousTempLocal(s);
-            try s.emitOpU16(opcode.op.put_loc, resource_loc);
+            if (v2_available and s.emit_v2) {
+                // zjs-only `for (using ... of ...)` lowering: retain the
+                // resource in the same anonymous local as legacy.
+                try v2FEmitOpU16(s, opcode.op.put_loc, resource_loc);
+            } else {
+                try s.emitOpU16(opcode.op.put_loc, resource_loc);
+            }
             try emitUsingAddResource(s, target_using_kind, stack_loc, resource_loc);
             try noteUsingResourceHint(s, target_using_kind);
             try s.emitCloseLoc(resource_loc);
@@ -18427,26 +18587,43 @@ pub const parser_core = struct {
                     try s.emitOp(opcode.op.nip_catch);
                 }
                 if (async_generator) {
-                    // QCP-1 S2-G3: async-generator return()-close is the generator group; fail loud under v2.
-                    std.debug.assert(!(v2_available and s.emit_v2));
                     // QuickJS emit_return (quickjs.c:28422-28440): discard the
                     // cached next method, call iterator.return(), require an
                     // Object result, await it, then restore the injected return
                     // value for the next enclosing cleanup / OP_return_async.
-                    try s.emitOp(opcode.op.nip);
-                    try s.emitOp(opcode.op.swap);
-                    try s.emitOpAtom(opcode.op.get_field2, return_atom);
-                    try s.emitOp(opcode.op.dup);
-                    try s.emitOp(opcode.op.is_undefined_or_null);
-                    const no_return = try emitForwardJump(s, opcode.op.if_true);
-                    try s.emitOpU16(opcode.op.call_method, 0);
-                    try s.emitOp(opcode.op.iterator_check_object);
-                    try s.emitOp(opcode.op.await);
-                    const closed = try emitForwardJump(s, opcode.op.goto);
-                    try patchForwardJump(s, no_return);
-                    try s.emitOp(opcode.op.drop);
-                    try patchForwardJump(s, closed);
-                    try s.emitOp(opcode.op.drop);
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitOp(s, opcode.op.nip);
+                        try v2FEmitOp(s, opcode.op.swap);
+                        try v2FEmitAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(return_atom));
+                        try v2FEmitOp(s, opcode.op.dup);
+                        try v2FEmitOp(s, opcode.op.is_undefined_or_null);
+                        const no_return = try v2FNewLabel(s);
+                        try v2FEmitJump(s, opcode.op.if_true, no_return);
+                        try v2FEmitOpU16(s, opcode.op.call_method, 0);
+                        try v2FEmitOp(s, opcode.op.iterator_check_object);
+                        try v2FEmitOp(s, opcode.op.await);
+                        const closed = try v2FNewLabel(s);
+                        try v2FEmitJump(s, opcode.op.goto, closed);
+                        try v2FBindLabel(s, no_return);
+                        try v2FEmitOp(s, opcode.op.drop);
+                        try v2FBindLabel(s, closed);
+                        try v2FEmitOp(s, opcode.op.drop);
+                    } else {
+                        try s.emitOp(opcode.op.nip);
+                        try s.emitOp(opcode.op.swap);
+                        try s.emitOpAtom(opcode.op.get_field2, return_atom);
+                        try s.emitOp(opcode.op.dup);
+                        try s.emitOp(opcode.op.is_undefined_or_null);
+                        const no_return = try emitForwardJump(s, opcode.op.if_true);
+                        try s.emitOpU16(opcode.op.call_method, 0);
+                        try s.emitOp(opcode.op.iterator_check_object);
+                        try s.emitOp(opcode.op.await);
+                        const closed = try emitForwardJump(s, opcode.op.goto);
+                        try patchForwardJump(s, no_return);
+                        try s.emitOp(opcode.op.drop);
+                        try patchForwardJump(s, closed);
+                        try s.emitOp(opcode.op.drop);
+                    }
                 } else {
                     if (v2_available and s.emit_v2) {
                         // qjs emit_return iterator cleanup (quickjs.c:28441-28444): rotate value, add dummy catch offset, close.

@@ -781,6 +781,60 @@ const Resolver = struct {
         return false;
     }
 
+    /// The identity-native switch default bridge can leave `goto TARGET`
+    /// followed only by a now-unreferenced dispatch trampoline before TARGET.
+    /// QuickJS's parser patches that dispatch directly to the earlier default
+    /// body, so this shape does not exist in its qjs:34968-34982 next-label
+    /// check. Prove the intervening bind set is dead before asking the normal
+    /// dead-code consumer to expose the same logical fallthrough.
+    fn deadSwitchTrampolineCanReachLabel(
+        self: *const Resolver,
+        start: u32,
+        label_index: u32,
+    ) Error!bool {
+        if (label_index >= self.product.label_len) return error.InvalidBytecode;
+        const slot = self.product.label_slots[label_index];
+        if (!slot.flags.bound or slot.bound_offset == labels.unbound or
+            slot.bound_offset <= start or slot.bound_offset > self.product.code_len)
+        {
+            return false;
+        }
+
+        var index = self.bind_cursor;
+        if (index < self.binds.len and self.binds[index].bound_offset < start)
+            return error.InvalidBytecode;
+        while (index < self.binds.len and
+            self.binds[index].bound_offset < slot.bound_offset) : (index += 1)
+        {
+            const entry = self.binds[index];
+            if (entry.dead_skipped) continue;
+            if (entry.match_barrier) return false;
+            if (entry.label_index >= self.product.label_len)
+                return error.InvalidBytecode;
+            if (self.product.label_slots[entry.label_index].ref_count != 0)
+                return false;
+        }
+
+        // The switch-only bridge is exactly one backward goto between the
+        // dead no-match bind and the live skip bind. Do not generalize this to
+        // an arbitrary dead range: legacy deliberately retains some of those
+        // goto edges (notably constant-false eval completion joins).
+        // The synthetic switch dispatch is source-less; loop backedges carry
+        // their parser source and must retain the legacy CFG edge.
+        if (self.hasInputSourceAt(start)) return false;
+        const dispatch = try decodeInstruction(self.code, start);
+        if (dispatch.op_id != op.goto or start + dispatch.size != slot.bound_offset)
+            return false;
+        const dispatch_label = try readU32At(self.code, start, 1);
+        if (dispatch_label >= self.product.label_len)
+            return error.InvalidBytecode;
+        const dispatch_slot = self.product.label_slots[dispatch_label];
+        return dispatch_slot.flags.bound and
+            dispatch_slot.bound_offset != labels.unbound and
+            dispatch_slot.bound_offset < start and
+            try self.codeHasLabel(slot.bound_offset, label_index);
+    }
+
     /// qjs:34661 find_jump_target. The line-output parameter is intentionally
     /// absent: qjs's sole goto caller leaves its captured line unapplied.
     fn findJumpTarget(
@@ -1257,6 +1311,13 @@ const Resolver = struct {
             try self.attachSource();
             try self.appendByte(target_op);
             return self.skipDeadCode(initial_next);
+        }
+        if (try self.deadSwitchTrampolineCanReachLabel(initial_next, label_index)) {
+            const live_next = try self.skipDeadCode(initial_next);
+            if (!try self.codeHasLabel(live_next, label_index))
+                return error.InvalidBytecode;
+            _ = try updateLabel(self.product, label_index, -1);
+            return live_next;
         }
         return self.emitHasLabel(
             layout,
@@ -3180,6 +3241,94 @@ test "compiler_v2.resolve_labels: two-hop goto threading targets the final label
     );
     try std.testing.expectEqual(@as(u32, 0), product.label_slots[first.index()].ref_count);
     try std.testing.expectEqual(@as(u32, 1), product.label_slots[final.index()].ref_count);
+}
+
+test "compiler_v2.resolve_labels: goto over dead switch trampoline becomes fallthrough" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const no_match = try input.newLabel();
+    const default_body = try input.newLabel();
+    const skip_dispatch = try input.newLabel();
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitJump(op.if_false, no_match);
+    try input.emitOp(op.object);
+    try input.bindLabel(default_body);
+    try input.emitOp(op.null);
+    try input.emitJump(op.goto, skip_dispatch);
+    try input.bindLabel(no_match);
+    try input.emitJump(op.goto, default_body);
+    try input.bindLabel(skip_dispatch);
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(.short, &harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.get_arg0, op.if_false8, 2, op.object, op.null, op.get_arg0, op.@"return" },
+        harness.function.code,
+    );
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[no_match.index()].ref_count);
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[skip_dispatch.index()].ref_count);
+}
+
+test "compiler_v2.resolve_labels: sourceful constant-false loop keeps legacy goto edge" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const loop_top = try input.newLabel();
+    const exit = try input.newLabel();
+    try input.bindLabel(loop_top);
+    try input.emitOp(op.push_false);
+    try input.emitJump(op.if_false, exit);
+    try input.addSourceMarker(10, 2);
+    try input.emitJump(op.goto, loop_top);
+    try input.bindLabel(exit);
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(.short, &harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.goto8, 1, op.get_arg0, op.@"return" },
+        harness.function.code,
+    );
+}
+
+test "compiler_v2.resolve_labels: variable pass removes forward-only dead tail" {
+    try requireCompilerV2();
+    var harness: ResolveLabelsTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const target = try input.newLabel();
+    try input.emitJump(op.goto, target);
+    try input.emitOp(op.object);
+    try input.emitJump(op.goto, target);
+    try input.bindLabel(target);
+    try input.emitOpU16(op.get_arg, 0);
+    try input.emitOp(op.@"return");
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try run(.short, &harness.function, null, &product);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.get_arg0, op.@"return" },
+        harness.function.code,
+    );
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[target.index()].ref_count);
 }
 
 test "compiler_v2.resolve_labels: boolean constant tests become goto or nothing" {

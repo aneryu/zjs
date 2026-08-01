@@ -877,6 +877,19 @@ const Resolver = struct {
         }
     }
 
+    fn hasLiveMatchBarrierAt(self: *const Resolver, input_pos: u32) bool {
+        var index = self.firstBindAtOrAfter(input_pos);
+        while (index < self.binds.len and self.binds[index].input_offset == input_pos) : (index += 1) {
+            const entry = self.binds[index];
+            if (!entry.dead_skipped and
+                self.product.label_slots[entry.label_index].flags.match_barrier)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn blockAt(self: *Resolver, input_pos: u32) Error!usize {
         if (input_pos > self.input.code_len or self.graph.block_starts.len == 0)
             return error.InvalidBytecode;
@@ -1528,8 +1541,13 @@ const Resolver = struct {
                     }
                 },
 
-                // qjs:34499-34501.
-                op.nop => {},
+                // qjs:34499-34501 normally erases OP_nop. A nop at a physical
+                // OP_label boundary survives zjs's legacy phase-2 product,
+                // however: put_lvalue uses precisely that shape for an
+                // un-folded scope_make_ref tail. v2 has no label byte, so its
+                // match-barrier identity is the exact retention signal.
+                op.nop => if (self.hasLiveMatchBarrierAt(position))
+                    try self.copyInputInstruction(position, instruction, input_atom),
 
                 // qjs:34502-34504.
                 op.set_class_name => {},
@@ -1805,6 +1823,73 @@ fn buildBindIndex(
     return binds;
 }
 
+/// Deliver reachable direct-eval capture events before the output walk can
+/// lower an earlier `leave_scope`. QuickJS marks the scope at OP_eval /
+/// OP_apply_eval (qjs:34247-34262); zjs's exact-CFG preflight makes that
+/// binding fact available to every real consumer regardless of byte order.
+fn markReachableEvalCaptures(
+    input: *const builder.Builder,
+    graph: *const cfg.Graph,
+    fd: *bytecode.function_def.FunctionDef,
+) Error!void {
+    const code = input.code[0..input.code_len];
+    const atom_ledger = input.atom_operands[0..input.atom_len];
+    var position: u32 = 0;
+    var atom_index: u32 = 0;
+    var block_index: usize = 0;
+
+    while (position < input.code_len) {
+        while (block_index + 1 < graph.block_starts.len and
+            graph.block_starts[block_index + 1] <= position)
+        {
+            block_index += 1;
+        }
+        if (block_index >= graph.blocks.len or
+            graph.block_starts[block_index] > position)
+        {
+            return error.InvalidBytecode;
+        }
+
+        const instruction = try tempInstruction(
+            code,
+            atom_ledger,
+            position,
+            atom_index,
+        );
+        const pc: usize = @intCast(position);
+        if (instruction.has_atom) {
+            if (atom_index >= atom_ledger.len or instruction.size < 5)
+                return error.InvalidBytecode;
+            const encoded_atom = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (encoded_atom != atom_ledger[atom_index])
+                return error.InvalidBytecode;
+            atom_index += 1;
+        }
+
+        const block = graph.blocks[block_index];
+        const reachable = graph.isReachable(block_index) and
+            (!block.has_terminal or position <= block.cutoff_offset);
+        if (reachable) switch (code[pc]) {
+            op.eval => {
+                if (instruction.size != 5) return error.InvalidBytecode;
+                const scope = std.mem.readInt(u16, code[pc + 3 ..][0..2], .little);
+                try legacy.markEvalCapturedVariables(fd, scope);
+            },
+            op.apply_eval => {
+                if (instruction.size != 3) return error.InvalidBytecode;
+                const scope = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+                try legacy.markEvalCapturedVariables(fd, scope);
+            },
+            else => {},
+        };
+
+        position = std.math.add(u32, position, instruction.size) catch
+            return error.InvalidBytecode;
+    }
+    if (position != input.code_len or atom_index != input.atom_len)
+        return error.InvalidBytecode;
+}
+
 /// Exact block-CFG resolve pass over fd.v2_builder. The input Builder is
 /// strictly read-only: every output atom is freshly retained, and every
 /// fallible output allocation is owned by the uncommitted product or scratch
@@ -1827,6 +1912,7 @@ pub fn run(
     if (comptime (builtin.mode == .Debug or builtin.mode == .ReleaseSafe)) {
         try cfg.auditInstructionOwnership(fd.memory, input, &graph);
     }
+    try markReachableEvalCaptures(input, &graph, fd);
 
     var product: ResolvedProduct = .{ .memory = fd.memory, .atoms = fd.atoms };
     errdefer product.deinitUncommitted();
@@ -2440,6 +2526,26 @@ test "compiler_v2.resolve_variables: erased temp ops and optional-chain rewrites
     try std.testing.expectEqual(base_refs, harness.rt.atoms.refCount(field).?);
 }
 
+test "compiler_v2.resolve_variables: match-barrier nop preserves legacy tail shape" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    const boundary = try input.newLabel();
+    try input.bindLabelMatchBarrier(boundary);
+    try input.emitOp(op.nop);
+    try input.emitOp(op.return_undef);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try expectProductCode(&product, &.{ op.nop, op.return_undef });
+    try std.testing.expectEqual(@as(u32, 0), product.label_slots[boundary.index()].bound_offset);
+    try std.testing.expect(product.label_slots[boundary.index()].flags.match_barrier);
+}
+
 test "compiler_v2.resolve_variables: insert3 fold recognizes both put variants" {
     try requireCompilerV2();
 
@@ -2940,6 +3046,57 @@ test "compiler_v2.resolve_variables: apply_eval scope head equals legacy" {
     try std.testing.expectEqual(@as(u32, 4), product.code_len);
     try std.testing.expectEqual(
         @as(u16, 256),
+        std.mem.readInt(u16, product.code[1..3], .little),
+    );
+    try expectProductCode(&product, legacy_function.code);
+    try expectBindingRowsEqual(&harness.fd, &legacy_fd);
+    try snapshot.expectUnchanged(harness.input());
+    try expectOwnedAtomRelease(&harness, &product, captured);
+}
+
+test "compiler_v2.resolve_variables: later apply_eval capture closes an earlier scope exit" {
+    try requireCompilerV2();
+
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+
+    const captured = try harness.rt.atoms.internString("qcp1-s3-eval-close-before-call");
+    defer harness.rt.atoms.free(captured);
+    _ = try harness.fd.appendScope(-1);
+    const local_index = try harness.fd.addScopeVar(captured, .normal, 0, true, false);
+    try harness.input().emitOpU16(op.leave_scope, 0);
+    try harness.input().emitOpU16(op.apply_eval, 0);
+    try harness.input().emitOp(op.return_undef);
+    var snapshot = try TestInputSnapshot.init(harness.input());
+    defer snapshot.deinit();
+
+    var legacy_function = bytecode.Bytecode.init(
+        &harness.rt.memory,
+        &harness.rt.atoms,
+        harness.name_atom,
+    );
+    defer legacy_function.deinit(harness.rt);
+    var legacy_fd = bytecode.function_def.FunctionDef.init(
+        &harness.rt.memory,
+        &harness.rt.atoms,
+        harness.name_atom,
+    );
+    defer legacy_fd.deinit(harness.rt);
+    _ = try legacy_fd.appendScope(-1);
+    _ = try legacy_fd.addScopeVar(captured, .normal, 0, true, false);
+    const legacy_input = [_]u8{
+        op.leave_scope,  0, 0,
+        op.apply_eval,   0, 0,
+        op.return_undef,
+    };
+    try runLegacyForComparison(&legacy_function, &legacy_fd, &legacy_input, &.{});
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+    try std.testing.expectEqual(op.close_loc, product.code[0]);
+    try std.testing.expectEqual(
+        @as(u16, @intCast(local_index)),
         std.mem.readInt(u16, product.code[1..3], .little),
     );
     try expectProductCode(&product, legacy_function.code);
