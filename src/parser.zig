@@ -8182,10 +8182,15 @@ pub const parser_core = struct {
                 @as(Atom, 25)
             else
                 return Error.UnexpectedToken;
+            // Retain before `advance()` releases the token, exactly as the
+            // live member-access paths do (`parseMemberChain`,
+            // `parseNewCalleeMemberAccess`).
+            const retained_name = s.function.atoms.dup(name);
+            defer s.function.atoms.free(retained_name);
             try s.advance();
             if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
                 try s.emitOp(opcode.op.get_super);
-                try s.emitOpAtom(opcode.op.push_atom_value, name);
+                try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
                 try s.emitOp(opcode.op.get_super_value);
                 const shape = try parseCallArgs(s, flags);
                 switch (shape) {
@@ -17793,7 +17798,8 @@ pub const parser_core = struct {
         if (next_tok == tok.TOK_DEFAULT) {
             try s.advance();
             if (s.peekKind() == tok.TOK_CLASS) {
-                if (exportDefaultClassName(s)) |name_atom| {
+                if (exportDefaultClassNameOwned(s)) |name_atom| {
+                    defer s.function.atoms.free(name_atom);
                     try parseClass(s, true);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
@@ -17812,7 +17818,8 @@ pub const parser_core = struct {
                 }
                 return;
             } else if (s.peekKind() == tok.TOK_FUNCTION) {
-                if (exportDefaultFunctionName(s)) |name_atom| {
+                if (exportDefaultFunctionNameOwned(s)) |name_atom| {
+                    defer s.function.atoms.free(name_atom);
                     const source_start = s.currentTokenStartOffset();
                     try parseFunctionDecl(s, .normal, source_start);
                     try addModuleExportName(s, atom_default, name_atom);
@@ -17825,7 +17832,8 @@ pub const parser_core = struct {
             } else if (s.peekKind() == tok.TOK_IDENT and s.isIdent("async") and s.peekNextKind() == tok.TOK_FUNCTION) {
                 const source_start = s.currentTokenStartOffset();
                 try s.advance();
-                if (exportDefaultFunctionName(s)) |name_atom| {
+                if (exportDefaultFunctionNameOwned(s)) |name_atom| {
+                    defer s.function.atoms.free(name_atom);
                     try parseFunctionDecl(s, .async, source_start);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
@@ -17958,7 +17966,8 @@ pub const parser_core = struct {
                 try s.advance();
             }
             const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
-            const name_atom = exportDefaultFunctionName(s);
+            const name_atom = exportDefaultFunctionNameOwned(s);
+            defer if (name_atom) |name| s.function.atoms.free(name);
             try parseFunctionDecl(s, func_kind, source_start);
             if (name_atom) |name| try addModuleExportName(s, name, name);
             return;
@@ -17978,7 +17987,8 @@ pub const parser_core = struct {
                 const source_start = s.currentTokenStartOffset();
                 try s.advance(); // consume async
                 const func_kind: ParseFunctionKind = .async;
-                const name_atom = exportDefaultFunctionName(s);
+                const name_atom = exportDefaultFunctionNameOwned(s);
+                defer if (name_atom) |name| s.function.atoms.free(name);
                 try parseFunctionDecl(s, func_kind, source_start);
                 if (name_atom) |name| try addModuleExportName(s, name, name);
                 return;
@@ -17988,7 +17998,14 @@ pub const parser_core = struct {
         return Error.UnexpectedToken;
     }
 
-    fn exportDefaultFunctionName(s: *State) ?Atom {
+    /// Return one owned retain for the declaration name that follows the
+    /// `function` keyword, or null when the declaration is anonymous. The scan
+    /// token that interned the name is released by this function's own `defer`,
+    /// so the retain must be taken here: a borrowed id survives only while the
+    /// re-parse happens to reclaim the freed atom-table slot (`internDynamic`
+    /// pops the LIFO free list), which is luck, not ownership. Same contract as
+    /// `moduleImportNameAtomOwned`; the caller frees.
+    fn exportDefaultFunctionNameOwned(s: *State) ?Atom {
         const saved_pos = s.lex.pos;
         const saved_line = s.lex.line;
         const saved_col = s.lex.col;
@@ -18008,14 +18025,16 @@ pub const parser_core = struct {
         if (first.val == @as(tok.TokenKind, @intCast('*'))) {
             var second = s.lex.next() catch return null;
             defer s.lex.freeToken(&second);
-            if (second.val == tok.TOK_IDENT) return second.payload.ident.atom;
+            if (second.val == tok.TOK_IDENT) return s.function.atoms.dup(second.payload.ident.atom);
             return null;
         }
-        if (first.val == tok.TOK_IDENT) return first.payload.ident.atom;
+        if (first.val == tok.TOK_IDENT) return s.function.atoms.dup(first.payload.ident.atom);
         return null;
     }
 
-    fn exportDefaultClassName(s: *State) ?Atom {
+    /// Owned counterpart of `exportDefaultFunctionNameOwned` for `class`.
+    /// The caller frees.
+    fn exportDefaultClassNameOwned(s: *State) ?Atom {
         const saved_pos = s.lex.pos;
         const saved_line = s.lex.line;
         const saved_col = s.lex.col;
@@ -18032,7 +18051,7 @@ pub const parser_core = struct {
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
-        return if (name.val == tok.TOK_IDENT) name.payload.ident.atom else null;
+        return if (name.val == tok.TOK_IDENT) s.function.atoms.dup(name.payload.ident.atom) else null;
     }
 
     /// Parse from clause: from 'module'
