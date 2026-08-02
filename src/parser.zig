@@ -7478,29 +7478,18 @@ pub const parser_core = struct {
         kind: LogicalAssignKind,
         direct_lhs_atom: ?Atom,
     ) Error!void {
-        var v2_skip_assign: compiler_v2.LabelId = undefined;
-        var skip_assign: usize = undefined;
-        if (v2_available and s.emit_v2) {
-            // qjs js_parse_assign_expr2 logical assignment (quickjs.c:
-            // 28167-28204): all topology bookkeeping is source-less.
-            try v2FEmitOpNoSource(s, opcode.op.dup);
-            if (kind == .nullish) try v2FEmitOpNoSource(s, opcode.op.is_undefined_or_null);
-            v2_skip_assign = try v2FNewLabel(s);
-            try v2FEmitJumpNoSource(
-                s,
-                if (kind == .lor) opcode.op.if_true else opcode.op.if_false,
-                v2_skip_assign,
-            );
-            try v2FEmitOpNoSource(s, opcode.op.drop);
-        } else {
-            try s.emitOpNoSource(opcode.op.dup);
-            if (kind == .nullish) try s.emitOpNoSource(opcode.op.is_undefined_or_null);
-            skip_assign = try emitForwardJumpNoSource(
-                s,
-                if (kind == .lor) opcode.op.if_true else opcode.op.if_false,
-            );
-            try s.emitOpNoSource(opcode.op.drop);
-        }
+        var skip_assign: Label = .{};
+        // qjs js_parse_assign_expr2 logical assignment (quickjs.c:
+        // 28167-28204): all topology bookkeeping is source-less.
+        try Emitter.opNoSource(s, opcode.op.dup);
+        if (kind == .nullish) try Emitter.opNoSource(s, opcode.op.is_undefined_or_null);
+        try Emitter.newLabel(s, &skip_assign);
+        try Emitter.jumpNoSource(
+            s,
+            if (kind == .lor) opcode.op.if_true else opcode.op.if_false,
+            &skip_assign,
+        );
+        try Emitter.opNoSource(s, opcode.op.drop);
 
         const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
         try parseAssignExpr2(s, rhs_flags);
@@ -7513,38 +7502,21 @@ pub const parser_core = struct {
             s.last_anonymous_function_expr = false;
         }
 
-        if (v2_available and s.emit_v2) {
-            try v2FEmitOpNoSource(s, switch (lvalue.depth) {
-                0 => opcode.op.dup,
-                1 => opcode.op.insert2,
-                2 => opcode.op.insert3,
-                3 => opcode.op.insert4,
-                else => unreachable,
-            });
-        } else {
-            try s.emitOpNoSource(switch (lvalue.depth) {
-                0 => opcode.op.dup,
-                1 => opcode.op.insert2,
-                2 => opcode.op.insert3,
-                3 => opcode.op.insert4,
-                else => unreachable,
-            });
-        }
+        try Emitter.opNoSource(s, switch (lvalue.depth) {
+            0 => opcode.op.dup,
+            1 => opcode.op.insert2,
+            2 => opcode.op.insert3,
+            3 => opcode.op.insert4,
+            else => unreachable,
+        });
         try putLValue(s, lvalue, .no_keep_depth);
-        if (v2_available and s.emit_v2) {
-            const v2_end = try v2FNewLabel(s);
-            try v2FEmitJumpNoSource(s, opcode.op.goto, v2_end);
-            try v2FBindLabel(s, v2_skip_assign);
-            var depth = lvalue.depth;
-            while (depth != 0) : (depth -= 1) try v2FEmitOpNoSource(s, opcode.op.nip);
-            try v2FBindLabel(s, v2_end);
-        } else {
-            const end = try emitForwardJumpNoSource(s, opcode.op.goto);
-            try patchForwardJump(s, skip_assign);
-            var depth = lvalue.depth;
-            while (depth != 0) : (depth -= 1) try s.emitOpNoSource(opcode.op.nip);
-            try patchForwardJump(s, end);
-        }
+        var end: Label = .{};
+        try Emitter.newLabel(s, &end);
+        try Emitter.jumpNoSource(s, opcode.op.goto, &end);
+        try Emitter.bind(s, &skip_assign);
+        var depth = lvalue.depth;
+        while (depth != 0) : (depth -= 1) try Emitter.opNoSource(s, opcode.op.nip);
+        try Emitter.bind(s, &end);
     }
 
     const LValueOpcode = enum {
@@ -8289,33 +8261,18 @@ pub const parser_core = struct {
             var then_flags = forceResultNeeded(flags);
             then_flags.in_accepted = true;
             const else_flags = forceResultNeeded(flags);
-            var v2_else_label: compiler_v2.LabelId = undefined;
-            var else_jump_offset: usize = undefined;
-            if (v2_available and s.emit_v2) {
-                // qjs js_parse_cond_expr: label1 = emit_goto(if_false), label2 = emit_goto(goto), emit_label at each merge.
-                v2_else_label = try v2FNewLabel(s);
-                try v2FEmitJump(s, opcode.op.if_false, v2_else_label);
-            } else {
-                else_jump_offset = try emitForwardJump(s, opcode.op.if_false);
-            }
+            // qjs js_parse_cond_expr: label1 = emit_goto(if_false), label2 = emit_goto(goto), emit_label at each merge.
+            var else_label: Label = .{};
+            try Emitter.newLabel(s, &else_label);
+            try Emitter.jump(s, opcode.op.if_false, &else_label);
             try parseAssignExprWithoutPendingFunctionName(s, then_flags);
-            var v2_end_label: compiler_v2.LabelId = undefined;
-            var end_jump_offset: usize = undefined;
-            if (v2_available and s.emit_v2) {
-                v2_end_label = try v2FNewLabel(s);
-                try v2FEmitJump(s, opcode.op.goto, v2_end_label);
-                try v2FBindLabel(s, v2_else_label);
-            } else {
-                end_jump_offset = try emitForwardJump(s, opcode.op.goto);
-                try patchForwardJump(s, else_jump_offset);
-            }
+            var end_label: Label = .{};
+            try Emitter.newLabel(s, &end_label);
+            try Emitter.jump(s, opcode.op.goto, &end_label);
+            try Emitter.bind(s, &else_label);
             try expectPunct(s, ':');
             try parseAssignExprWithoutPendingFunctionName(s, else_flags);
-            if (v2_available and s.emit_v2) {
-                try v2FBindLabel(s, v2_end_label);
-            } else {
-                try patchForwardJump(s, end_jump_offset);
-            }
+            try Emitter.bind(s, &end_label);
             s.last_anonymous_function_expr = false;
         }
     }
@@ -8370,74 +8327,44 @@ pub const parser_core = struct {
         if (op_kind == tok.TOK_LOR) {
             try parseLogicalAndOr(s, tok.TOK_LAND, flags);
             if (s.peekKind() == tok.TOK_LOR) {
-                if (v2_available and s.emit_v2) {
-                    // qjs js_parse_logical_and_or: label1 = new_label() before the loop;
-                    // dup ; if_true label1 ; drop per operand; emit_label(label1) at end.
-                    const end_label = try v2FNewLabel(s);
-                    while (s.peekKind() == tok.TOK_LOR) {
-                        try s.advance();
-                        try v2FEmitOpNoSource(s, opcode.op.dup);
-                        try v2FEmitJumpNoSource(s, opcode.op.if_true, end_label);
-                        try v2FEmitOpNoSource(s, opcode.op.drop);
-                        try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
-                        s.last_anonymous_function_expr = false;
-                        if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                            return Error.UnexpectedToken;
-                        }
+                // qjs js_parse_logical_and_or: label1 = new_label() before the loop;
+                // dup ; if_true label1 ; drop per operand; emit_label(label1) at end.
+                var end_label: PhysLabel = .{};
+                try Emitter.newPhysLabel(s, &end_label);
+                while (s.peekKind() == tok.TOK_LOR) {
+                    try s.advance();
+                    // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
+                    try Emitter.opNoSource(s, opcode.op.dup);
+                    try Emitter.jumpPhysNoSource(s, opcode.op.if_true, &end_label);
+                    try Emitter.opNoSource(s, opcode.op.drop);
+                    try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
+                    s.last_anonymous_function_expr = false;
+                    if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                        return Error.UnexpectedToken;
                     }
-                    try v2FBindParserLabel(s, end_label);
-                } else {
-                    const end_label = newParserLabel(s);
-                    while (s.peekKind() == tok.TOK_LOR) {
-                        try s.advance();
-                        // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
-                        try s.emitOpNoSource(opcode.op.dup);
-                        try emitParserLabelJumpNoSource(s, opcode.op.if_true, end_label);
-                        try s.emitOpNoSource(opcode.op.drop);
-                        try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
-                        s.last_anonymous_function_expr = false;
-                        if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                            return Error.UnexpectedToken;
-                        }
-                    }
-                    try emitParserLabelNoSource(s, end_label);
                 }
+                try Emitter.bindPhys(s, &end_label);
             }
         } else {
             try parseExprBinary(s, 8, flags);
             if (s.peekKind() == tok.TOK_LAND) {
-                if (v2_available and s.emit_v2) {
-                    // qjs js_parse_logical_and_or: label1 = new_label() before the loop;
-                    // dup ; if_false label1 ; drop per operand; emit_label(label1) at end.
-                    const end_label = try v2FNewLabel(s);
-                    while (s.peekKind() == tok.TOK_LAND) {
-                        try s.advance();
-                        try v2FEmitOpNoSource(s, opcode.op.dup);
-                        try v2FEmitJumpNoSource(s, opcode.op.if_false, end_label);
-                        try v2FEmitOpNoSource(s, opcode.op.drop);
-                        try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
-                        s.last_anonymous_function_expr = false;
-                        if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                            return Error.UnexpectedToken;
-                        }
+                // qjs js_parse_logical_and_or: label1 = new_label() before the loop;
+                // dup ; if_false label1 ; drop per operand; emit_label(label1) at end.
+                var end_label: PhysLabel = .{};
+                try Emitter.newPhysLabel(s, &end_label);
+                while (s.peekKind() == tok.TOK_LAND) {
+                    try s.advance();
+                    // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
+                    try Emitter.opNoSource(s, opcode.op.dup);
+                    try Emitter.jumpPhysNoSource(s, opcode.op.if_false, &end_label);
+                    try Emitter.opNoSource(s, opcode.op.drop);
+                    try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
+                    s.last_anonymous_function_expr = false;
+                    if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                        return Error.UnexpectedToken;
                     }
-                    try v2FBindParserLabel(s, end_label);
-                } else {
-                    const end_label = newParserLabel(s);
-                    while (s.peekKind() == tok.TOK_LAND) {
-                        try s.advance();
-                        // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
-                        try s.emitOpNoSource(opcode.op.dup);
-                        try emitParserLabelJumpNoSource(s, opcode.op.if_false, end_label);
-                        try s.emitOpNoSource(opcode.op.drop);
-                        try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
-                        s.last_anonymous_function_expr = false;
-                        if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                            return Error.UnexpectedToken;
-                        }
-                    }
-                    try emitParserLabelNoSource(s, end_label);
                 }
+                try Emitter.bindPhys(s, &end_label);
             }
         }
     }
@@ -8705,18 +8632,12 @@ pub const parser_core = struct {
                     // yield with expression
                     try parseAssignExpr2(s, ParseFlags{ .in_accepted = flags.in_accepted });
                 }
-                if (v2_available and s.emit_v2) {
-                    try v2FEmitOp(s, opcode.op.yield);
-                    const normal_resume = try v2FNewLabel(s);
-                    try v2FEmitJump(s, opcode.op.if_false, normal_resume);
-                    try emitReturnValue(s, s.in_async and s.in_generator);
-                    try v2FBindLabel(s, normal_resume);
-                } else {
-                    try s.emitOp(opcode.op.yield);
-                    const normal_resume = try emitForwardJump(s, opcode.op.if_false);
-                    try emitReturnValue(s, s.in_async and s.in_generator);
-                    try patchForwardJump(s, normal_resume);
-                }
+                try Emitter.op(s, opcode.op.yield);
+                var normal_resume: Label = .{};
+                try Emitter.newLabel(s, &normal_resume);
+                try Emitter.jump(s, opcode.op.if_false, &normal_resume);
+                try emitReturnValue(s, s.in_async and s.in_generator);
+                try Emitter.bind(s, &normal_resume);
             }
             return;
         }
@@ -9861,26 +9782,17 @@ pub const parser_core = struct {
     /// `super()` receives the ordinary threaded captures.
     fn emitClassFieldInitCall(s: *State) Error!void {
         try s.emitScopeGetVar(atom_class_fields_init);
-        if (v2_available and s.emit_v2) {
-            // qjs emit_class_field_init (quickjs.c:25184-25207): the skip
-            // target is born as a LabelId bound at the shared drop.
-            try v2FEmitOp(s, opcode.op.dup);
-            const skip_call = try v2FNewLabel(s);
-            try v2FEmitJump(s, opcode.op.if_false, skip_call);
-            try s.emitScopeGetVar(atom_this);
-            try v2FEmitOp(s, opcode.op.swap);
-            try v2FEmitOpU16(s, opcode.op.call_method, 0);
-            try v2FBindLabel(s, skip_call);
-            try v2FEmitOp(s, opcode.op.drop);
-        } else {
-            try s.emitOp(opcode.op.dup);
-            const skip_call = try emitForwardJump(s, opcode.op.if_false);
-            try s.emitScopeGetVar(atom_this);
-            try s.emitOp(opcode.op.swap);
-            try s.emitOpU16(opcode.op.call_method, 0);
-            try patchForwardJump(s, skip_call);
-            try s.emitOp(opcode.op.drop);
-        }
+        // qjs emit_class_field_init (quickjs.c:25184-25207): the skip
+        // target is born as a label bound at the shared drop.
+        try Emitter.op(s, opcode.op.dup);
+        var skip_call: Label = .{};
+        try Emitter.newLabel(s, &skip_call);
+        try Emitter.jump(s, opcode.op.if_false, &skip_call);
+        try s.emitScopeGetVar(atom_this);
+        try Emitter.op(s, opcode.op.swap);
+        try Emitter.opU16(s, opcode.op.call_method, 0);
+        try Emitter.bind(s, &skip_call);
+        try Emitter.op(s, opcode.op.drop);
     }
 
     fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
@@ -11499,6 +11411,33 @@ pub const parser_core = struct {
         inline fn pushConstOwned(s: *State, value: JSValue) Error!void {
             return v2FEmitPushConstOwned(s, value);
         }
+        inline fn newLabel(s: *State, label: *Label) Error!void {
+            label.v2 = try v2FNewLabel(s);
+        }
+        inline fn jump(s: *State, op_id: u8, label: *Label) Error!void {
+            return v2FEmitJump(s, op_id, label.v2);
+        }
+        inline fn jumpNoSource(s: *State, op_id: u8, label: *Label) Error!void {
+            return v2FEmitJumpNoSource(s, op_id, label.v2);
+        }
+        inline fn bind(s: *State, label: *Label) Error!void {
+            return v2FBindLabel(s, label.v2);
+        }
+        inline fn bindTarget(s: *State, label: *Label) Error!void {
+            return v2FBindLabel(s, label.v2);
+        }
+        inline fn newPhysLabel(s: *State, label: *PhysLabel) Error!void {
+            label.v2 = try v2FNewLabel(s);
+        }
+        inline fn jumpPhys(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            return v2FEmitJump(s, op_id, label.v2);
+        }
+        inline fn jumpPhysNoSource(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            return v2FEmitJumpNoSource(s, op_id, label.v2);
+        }
+        inline fn bindPhys(s: *State, label: *PhysLabel) Error!void {
+            return v2FBindParserLabel(s, label.v2);
+        }
     };
 
     /// The legacy leg: the absolute-PC byte-stream primitives, unchanged.
@@ -11554,21 +11493,194 @@ pub const parser_core = struct {
         inline fn pushConstOwned(s: *State, value: JSValue) Error!void {
             return s.emitPushConstOwned(value);
         }
+        /// The legacy label is born with the jump that references it, so
+        /// creation has nothing to record.
+        inline fn newLabel(s: *State, label: *Label) Error!void {
+            _ = s;
+            _ = label;
+        }
+        inline fn jump(s: *State, op_id: u8, label: *Label) Error!void {
+            if (label.legacy_target != Label.none) return emitBackwardJump(s, op_id, label.legacy_target);
+            std.debug.assert(label.legacy_pending == Label.none);
+            label.legacy_pending = @intCast(try emitForwardJump(s, op_id));
+        }
+        inline fn jumpNoSource(s: *State, op_id: u8, label: *Label) Error!void {
+            if (label.legacy_target != Label.none) return emitBackwardJumpNoSource(s, op_id, label.legacy_target);
+            std.debug.assert(label.legacy_pending == Label.none);
+            label.legacy_pending = @intCast(try emitForwardJumpNoSource(s, op_id));
+        }
+        /// A pending forward jump is patched exactly as `patchForwardJump` did
+        /// (which is also what invalidates the merge's last opcode); a label
+        /// bound with no pending jump is the loop-top `currentCodeLen()` read,
+        /// which never invalidated anything.
+        /// Exactly the `patchForwardJump` the construct arm ran, and nothing
+        /// else: a merge label is not a backward-jump target, so it records no
+        /// position (that is `bindTarget`).
+        inline fn bind(s: *State, label: *Label) Error!void {
+            std.debug.assert(label.legacy_pending != Label.none and
+                label.legacy_pending != Label.closed);
+            const operand_offset = label.legacy_pending;
+            if (std.debug.runtime_safety) label.legacy_pending = Label.closed;
+            try patchForwardJump(s, operand_offset);
+        }
+
+        /// The loop-top `top_pc = @intCast(s.currentCodeLen())` read: legacy
+        /// binds a backward-jump target by remembering the position, and unlike
+        /// a merge it invalidates nothing.
+        inline fn bindTarget(s: *State, label: *Label) Error!void {
+            std.debug.assert(label.legacy_pending == Label.none);
+            label.legacy_target = @intCast(s.currentCodeLen());
+        }
+        inline fn newPhysLabel(s: *State, label: *PhysLabel) Error!void {
+            label.legacy = newParserLabel(s);
+        }
+        inline fn jumpPhys(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            return emitParserLabelJump(s, op_id, label.legacy);
+        }
+        inline fn jumpPhysNoSource(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            return emitParserLabelJumpNoSource(s, op_id, label.legacy);
+        }
+        inline fn bindPhys(s: *State, label: *PhysLabel) Error!void {
+            return emitParserLabelNoSource(s, label.legacy);
+        }
+    };
+
+    /// QCP-1 P3: one patch-label identity for both backends.
+    ///
+    /// v2 owns a real `LabelId` from the identity model. `LegacyEmitter`
+    /// emulates the same vocabulary over the absolute-PC forward-jump protocol
+    /// it already owns: an unbound label remembers its pending jump operand
+    /// offset, `bind` runs exactly the `patchForwardJump` the construct arm
+    /// used to run, and the bound position makes later jumps exactly the
+    /// `emitBackwardJump` the arm used to run. No table, no allocation, no
+    /// extra work on the legacy path — the local that used to hold the
+    /// operand offset now lives in the label.
+    ///
+    /// One pending forward jump at a time is all the converted constructs
+    /// need; `jump` is fail-closed on that in Debug/ReleaseSafe.
+    const Label = struct {
+        /// "no pending forward jump" / "not a backward-jump target". Real code
+        /// offsets are capped far below this by the bytecode-overflow checks.
+        const none: u32 = std.math.maxInt(u32);
+        /// Safety-build fail-closed marker: the label was bound as a merge, so
+        /// no further jump may reference it.
+        const closed: u32 = std.math.maxInt(u32) - 1;
+
+        v2: compiler_v2.LabelId = undefined,
+        /// Legacy: operand offset of the pending forward jump.
+        legacy_pending: u32 = none,
+        /// Legacy: position this label was bound at, for backward jumps.
+        legacy_target: u32 = none,
+    };
+
+    /// QCP-1 P3: one PHYSICAL-label identity for both backends — the family
+    /// that survives into the stream as an `OP_label` marker (qjs
+    /// emit_label/emit_goto). Legacy already spoke this vocabulary through
+    /// `ParserLabelRef`, so the adapter is a pure renaming; unlike `Label`,
+    /// any number of jumps may target one `PhysLabel`.
+    const PhysLabel = struct {
+        v2: compiler_v2.LabelId = undefined,
+        legacy: ParserLabelRef = .{ .id = 0 },
     };
 
     /// The emission interface the parser speaks: `Emitter.<verb>(state, ...)`.
     ///
     /// A namespace of functions over `*State`, deliberately NOT a value type:
-    /// every verb inlines to the same `branch + call` the open-coded gate
-    /// emitted, so legacy compiles execute the identical instruction stream and
-    /// no parser frame grows by a byte. (A `struct { s: *State }` receiver cost
-    /// one materialised temporary per call site in Debug, which is enough to
-    /// overflow a 64 KiB native stack in the dual parser.)
+    /// a `struct { s: *State }` receiver costs one materialised temporary per
+    /// call site in Debug, which is enough to overflow a 64 KiB native stack in
+    /// the dual parser.
+    ///
+    /// The plain-emission verbs are `inline` so each one folds to the same
+    /// `branch + call` the open-coded gate emitted and legacy compiles execute
+    /// an identical instruction stream. The control-flow verbs are NOT: their
+    /// legs carry locals, and inlining ~45 of those bodies into the recursive
+    /// descent is what the same 64 KiB budget cannot afford.
     const Emitter = struct {
         /// The one backend predicate. `v2_available` is comptime, so a legacy
         /// build folds every v2 leg away exactly as the open-coded gates did.
         inline fn isV2(s: *State) bool {
             return v2_available and s.emit_v2;
+        }
+
+        // CONTROL FLOW. Two gates pull in opposite directions here and the
+        // comptime split below is what satisfies both. A legacy build must keep
+        // the single call the construct site open-coded, so its leg is inlined
+        // all the way through (the compile instruction null is exact). A
+        // v2/dual build must keep these bodies OUT of the recursive descent's
+        // Debug frames — inlining ~45 label bodies into it overflows the
+        // parser's 64 KiB native-stack budget — so it lands on one out-of-line
+        // `*Backend` call instead.
+        inline fn newLabel(s: *State, label: *Label) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.newLabel(s, label);
+            return newLabelBackend(s, label);
+        }
+        fn newLabelBackend(s: *State, label: *Label) Error!void {
+            if (isV2(s)) return V2Emitter.newLabel(s, label);
+            return LegacyEmitter.newLabel(s, label);
+        }
+        inline fn jump(s: *State, op_id: u8, label: *Label) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.jump(s, op_id, label);
+            return jumpBackend(s, op_id, label);
+        }
+        fn jumpBackend(s: *State, op_id: u8, label: *Label) Error!void {
+            if (isV2(s)) return V2Emitter.jump(s, op_id, label);
+            return LegacyEmitter.jump(s, op_id, label);
+        }
+        inline fn jumpNoSource(s: *State, op_id: u8, label: *Label) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.jumpNoSource(s, op_id, label);
+            return jumpNoSourceBackend(s, op_id, label);
+        }
+        fn jumpNoSourceBackend(s: *State, op_id: u8, label: *Label) Error!void {
+            if (isV2(s)) return V2Emitter.jumpNoSource(s, op_id, label);
+            return LegacyEmitter.jumpNoSource(s, op_id, label);
+        }
+        inline fn bind(s: *State, label: *Label) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.bind(s, label);
+            return bindBackend(s, label);
+        }
+        fn bindBackend(s: *State, label: *Label) Error!void {
+            if (isV2(s)) return V2Emitter.bind(s, label);
+            return LegacyEmitter.bind(s, label);
+        }
+        inline fn bindTarget(s: *State, label: *Label) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.bindTarget(s, label);
+            return bindTargetBackend(s, label);
+        }
+        fn bindTargetBackend(s: *State, label: *Label) Error!void {
+            if (isV2(s)) return V2Emitter.bindTarget(s, label);
+            return LegacyEmitter.bindTarget(s, label);
+        }
+        inline fn newPhysLabel(s: *State, label: *PhysLabel) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.newPhysLabel(s, label);
+            return newPhysLabelBackend(s, label);
+        }
+        fn newPhysLabelBackend(s: *State, label: *PhysLabel) Error!void {
+            if (isV2(s)) return V2Emitter.newPhysLabel(s, label);
+            return LegacyEmitter.newPhysLabel(s, label);
+        }
+        inline fn jumpPhys(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.jumpPhys(s, op_id, label);
+            return jumpPhysBackend(s, op_id, label);
+        }
+        fn jumpPhysBackend(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            if (isV2(s)) return V2Emitter.jumpPhys(s, op_id, label);
+            return LegacyEmitter.jumpPhys(s, op_id, label);
+        }
+        inline fn jumpPhysNoSource(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.jumpPhysNoSource(s, op_id, label);
+            return jumpPhysNoSourceBackend(s, op_id, label);
+        }
+        fn jumpPhysNoSourceBackend(s: *State, op_id: u8, label: *PhysLabel) Error!void {
+            if (isV2(s)) return V2Emitter.jumpPhysNoSource(s, op_id, label);
+            return LegacyEmitter.jumpPhysNoSource(s, op_id, label);
+        }
+        inline fn bindPhys(s: *State, label: *PhysLabel) Error!void {
+            if (comptime !v2_available) return LegacyEmitter.bindPhys(s, label);
+            return bindPhysBackend(s, label);
+        }
+        fn bindPhysBackend(s: *State, label: *PhysLabel) Error!void {
+            if (isV2(s)) return V2Emitter.bindPhys(s, label);
+            return LegacyEmitter.bindPhys(s, label);
         }
 
         inline fn op(s: *State, op_id: u8) Error!void {
@@ -12891,22 +13003,15 @@ pub const parser_core = struct {
 
     fn emitUsingAwaitIfNeeded(s: *State, may_be_async: bool) Error!void {
         if (!may_be_async) return;
-        if (v2_available and s.emit_v2) {
-            // zjs-only explicit-resource-management lowering: the optional
-            // await continuation is born and bound as a real LabelId.
-            try v2FEmitOp(s, opcode.op.dup);
-            try v2FEmitOp(s, opcode.op.is_undefined);
-            const skip_await = try v2FNewLabel(s);
-            try v2FEmitJump(s, opcode.op.if_true, skip_await);
-            try emitUsingAwait(s);
-            try v2FBindLabel(s, skip_await);
-        } else {
-            try s.emitOp(opcode.op.dup);
-            try s.emitOp(opcode.op.is_undefined);
-            const skip_await = try emitForwardJump(s, opcode.op.if_true);
-            try emitUsingAwait(s);
-            try patchForwardJump(s, skip_await);
-        }
+        // zjs-only explicit-resource-management lowering: the optional
+        // await continuation is born and bound as a label.
+        try Emitter.op(s, opcode.op.dup);
+        try Emitter.op(s, opcode.op.is_undefined);
+        var skip_await: Label = .{};
+        try Emitter.newLabel(s, &skip_await);
+        try Emitter.jump(s, opcode.op.if_true, &skip_await);
+        try emitUsingAwait(s);
+        try Emitter.bind(s, &skip_await);
     }
 
     fn emitUsingDisposeStack(s: *State, stack_loc: u16, may_be_async: bool) Error!void {
@@ -13212,20 +13317,13 @@ pub const parser_core = struct {
 
         // Emit Enum = Enum || {}
         try s.emitScopeGetVarUndef(enum_atom);
-        if (v2_available and s.emit_v2) {
-            try v2FEmitOp(s, opcode.op.dup);
-            const skip_label = try v2FNewLabel(s);
-            try v2FEmitJump(s, opcode.op.if_true, skip_label);
-            try v2FEmitOp(s, opcode.op.drop);
-            try v2FEmitOp(s, opcode.op.object);
-            try v2FBindLabel(s, skip_label);
-        } else {
-            try s.emitOp(opcode.op.dup);
-            const skip_jump = try emitForwardJump(s, opcode.op.if_true);
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.object);
-            try patchForwardJump(s, skip_jump);
-        }
+        try Emitter.op(s, opcode.op.dup);
+        var skip_label: Label = .{};
+        try Emitter.newLabel(s, &skip_label);
+        try Emitter.jump(s, opcode.op.if_true, &skip_label);
+        try Emitter.op(s, opcode.op.drop);
+        try Emitter.op(s, opcode.op.object);
+        try Emitter.bind(s, &skip_label);
         try s.emitScopePutVar(enum_atom);
 
         try s.expectToken('{');
@@ -13334,20 +13432,13 @@ pub const parser_core = struct {
 
         // Emit Namespace = Namespace || {}
         try s.emitScopeGetVarUndef(ns_atom);
-        if (v2_available and s.emit_v2) {
-            try v2FEmitOp(s, opcode.op.dup);
-            const skip_label = try v2FNewLabel(s);
-            try v2FEmitJump(s, opcode.op.if_true, skip_label);
-            try v2FEmitOp(s, opcode.op.drop);
-            try v2FEmitOp(s, opcode.op.object);
-            try v2FBindLabel(s, skip_label);
-        } else {
-            try s.emitOp(opcode.op.dup);
-            const skip_jump = try emitForwardJump(s, opcode.op.if_true);
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.object);
-            try patchForwardJump(s, skip_jump);
-        }
+        try Emitter.op(s, opcode.op.dup);
+        var skip_label: Label = .{};
+        try Emitter.newLabel(s, &skip_label);
+        try Emitter.jump(s, opcode.op.if_true, &skip_label);
+        try Emitter.op(s, opcode.op.drop);
+        try Emitter.op(s, opcode.op.object);
+        try Emitter.bind(s, &skip_label);
         try s.emitScopePutVar(ns_atom);
 
         if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
@@ -13675,15 +13766,10 @@ pub const parser_core = struct {
                 try s.expectToken('(');
                 try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = true });
                 try s.expectToken(')');
-                var v2_if_false_label: compiler_v2.LabelId = undefined;
-                var if_false_off: usize = undefined;
-                if (v2_available and s.emit_v2) {
-                    // qjs TOK_IF (quickjs.c:29018): emit_goto(OP_if_false) / emit_goto(OP_goto) / emit_label at each merge.
-                    v2_if_false_label = try v2FNewLabel(s);
-                    try v2FEmitJump(s, opcode.op.if_false, v2_if_false_label);
-                } else {
-                    if_false_off = try emitForwardJump(s, opcode.op.if_false);
-                }
+                // qjs TOK_IF (quickjs.c:29018): emit_goto(OP_if_false) / emit_goto(OP_goto) / emit_label at each merge.
+                var if_false_label: Label = .{};
+                try Emitter.newLabel(s, &if_false_label);
+                try Emitter.jump(s, opcode.op.if_false, &if_false_label);
                 const allow_annex_b_if_function = !s.is_strict and !s.cur_func().is_strict_mode;
                 const then_is_annex_b_function =
                     allow_annex_b_if_function and
@@ -13697,17 +13783,11 @@ pub const parser_core = struct {
                 s.annex_b_if_function_decl_clause = saved_annex_b_if_function_decl_clause;
                 if (s.peekKind() == tok.TOK_ELSE) {
                     try s.advance();
-                    var v2_else_goto_label: compiler_v2.LabelId = undefined;
-                    var else_goto_off: usize = undefined;
-                    if (v2_available and s.emit_v2) {
-                        v2_else_goto_label = try v2FNewLabel(s);
-                        try v2FEmitJump(s, opcode.op.goto, v2_else_goto_label);
-                        try v2FBindLabel(s, v2_if_false_label);
-                    } else {
-                        else_goto_off = try emitForwardJump(s, opcode.op.goto);
-                        // Patch if_false to land at the start of the else block.
-                        try patchForwardJump(s, if_false_off);
-                    }
+                    var else_goto_label: Label = .{};
+                    try Emitter.newLabel(s, &else_goto_label);
+                    try Emitter.jump(s, opcode.op.goto, &else_goto_label);
+                    // Patch if_false to land at the start of the else block.
+                    try Emitter.bind(s, &if_false_label);
                     const else_is_annex_b_function =
                         allow_annex_b_if_function and
                         s.peekKind() == tok.TOK_FUNCTION and
@@ -13716,19 +13796,11 @@ pub const parser_core = struct {
                     s.annex_b_if_function_decl_clause = else_is_annex_b_function;
                     try parseStatementOrDecl(s, else_decl_mask);
                     s.annex_b_if_function_decl_clause = saved_annex_b_if_function_decl_clause;
-                    if (v2_available and s.emit_v2) {
-                        try v2FBindLabel(s, v2_else_goto_label);
-                    } else {
-                        // Patch the goto-over-else to land after the else block.
-                        try patchForwardJump(s, else_goto_off);
-                    }
+                    // Patch the goto-over-else to land after the else block.
+                    try Emitter.bind(s, &else_goto_label);
                 } else {
-                    if (v2_available and s.emit_v2) {
-                        try v2FBindLabel(s, v2_if_false_label);
-                    } else {
-                        // No else: patch if_false to land just past the then block.
-                        try patchForwardJump(s, if_false_off);
-                    }
+                    // No else: patch if_false to land just past the then block.
+                    try Emitter.bind(s, &if_false_label);
                 }
                 try s.popScope();
             },
@@ -13738,26 +13810,16 @@ pub const parser_core = struct {
                 s.pending_label_atom = null;
                 try s.setEvalReturnUndefined();
                 try s.expectToken('(');
-                var v2_top_label: compiler_v2.LabelId = undefined;
-                var top_pc: u32 = undefined;
-                if (v2_available and s.emit_v2) {
-                    // qjs TOK_WHILE: label_cont bound at the test; the back edge is
-                    // emit_goto against the bound label.
-                    v2_top_label = try v2FNewLabel(s);
-                    try v2FBindLabel(s, v2_top_label);
-                } else {
-                    // Loop top: condition is evaluated each iteration.
-                    top_pc = @intCast(s.currentCodeLen());
-                }
+                // qjs TOK_WHILE: label_cont bound at the test; the back edge is
+                // emit_goto against the bound label. Loop top: condition is
+                // evaluated each iteration.
+                var top_label: Label = .{};
+                try Emitter.newLabel(s, &top_label);
+                try Emitter.bindTarget(s, &top_label);
                 try parseExpr(s);
-                var v2_exit_label: compiler_v2.LabelId = undefined;
-                var exit_off: usize = undefined;
-                if (v2_available and s.emit_v2) {
-                    v2_exit_label = try v2FNewLabel(s);
-                    try v2FEmitJump(s, opcode.op.if_false, v2_exit_label);
-                } else {
-                    exit_off = try emitForwardJump(s, opcode.op.if_false);
-                }
+                var exit_label: Label = .{};
+                try Emitter.newLabel(s, &exit_label);
+                try Emitter.jump(s, opcode.op.if_false, &exit_label);
                 try s.expectToken(')');
                 try pushBreakFrame(s);
                 const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
@@ -13768,15 +13830,10 @@ pub const parser_core = struct {
                 try parseStatementOrDecl(s, DeclMask{});
                 try patchContinueFrame(s);
                 if (label_frame) |idx| try s.patchLabelContinues(idx);
-                if (v2_available and s.emit_v2) {
-                    try v2FEmitJump(s, opcode.op.goto, v2_top_label);
-                    try v2FBindLabel(s, v2_exit_label);
-                } else {
-                    // Back-edge to the top to re-test the condition.
-                    try emitBackwardJump(s, opcode.op.goto, top_pc);
-                    // Patch the if_false exit to land here.
-                    try patchForwardJump(s, exit_off);
-                }
+                // Back-edge to the top to re-test the condition, then patch the
+                // if_false exit to land here.
+                try Emitter.jump(s, opcode.op.goto, &top_label);
+                try Emitter.bind(s, &exit_label);
                 popControlBlock(s, &loop_block);
                 loop_block_active = false;
                 try popBreakFrameAndPatch(s);
@@ -13791,16 +13848,10 @@ pub const parser_core = struct {
                 const loop_label = s.pending_label_atom;
                 s.pending_label_atom = null;
                 try s.setEvalReturnUndefined();
-                var v2_body_label: compiler_v2.LabelId = undefined;
-                var body_pc: u32 = undefined;
-                if (v2_available and s.emit_v2) {
-                    // qjs TOK_DO: label1 bound at the body; if_true back edge re-enters it.
-                    v2_body_label = try v2FNewLabel(s);
-                    try v2FBindLabel(s, v2_body_label);
-                } else {
-                    // Body starts at this pc; if_true at the bottom branches back here.
-                    body_pc = @intCast(s.currentCodeLen());
-                }
+                // qjs TOK_DO: label1 bound at the body; if_true back edge re-enters it.
+                var body_label: Label = .{};
+                try Emitter.newLabel(s, &body_label);
+                try Emitter.bindTarget(s, &body_label);
                 try pushBreakFrame(s);
                 const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
                 var loop_block: BlockEnv = undefined;
@@ -13814,12 +13865,8 @@ pub const parser_core = struct {
                 try s.expectToken('(');
                 try parseExpr(s);
                 try s.expectToken(')');
-                if (v2_available and s.emit_v2) {
-                    try v2FEmitJump(s, opcode.op.if_true, v2_body_label);
-                } else {
-                    // Back-edge: re-enter body when the test is truthy.
-                    try emitBackwardJump(s, opcode.op.if_true, body_pc);
-                }
+                // Back-edge: re-enter body when the test is truthy.
+                try Emitter.jump(s, opcode.op.if_true, &body_label);
                 if (s.isPunct(';')) try s.advance();
                 popControlBlock(s, &loop_block);
                 loop_block_active = false;
@@ -14989,21 +15036,14 @@ pub const parser_core = struct {
 
         if (s.in_constructor and s.class_has_extends) {
             if (value_on_stack) {
-                if (v2_available and s.emit_v2) {
-                    // qjs emit_return derived constructor (quickjs.c:28453-28472): if_false skips this substitution.
-                    try v2FEmitOp(s, opcode.op.check_ctor_return);
-                    const v2_return_value = try v2FNewLabel(s);
-                    try v2FEmitJump(s, opcode.op.if_false, v2_return_value);
-                    try v2FEmitOp(s, opcode.op.drop);
-                    try s.emitScopeGetVarCheckThis(atom_this);
-                    try v2FBindLabel(s, v2_return_value);
-                } else {
-                    try s.emitOp(opcode.op.check_ctor_return);
-                    const return_value = try emitForwardJump(s, opcode.op.if_false);
-                    try s.emitOp(opcode.op.drop);
-                    try s.emitScopeGetVarCheckThis(atom_this);
-                    try patchForwardJump(s, return_value);
-                }
+                // qjs emit_return derived constructor (quickjs.c:28453-28472): if_false skips this substitution.
+                try Emitter.op(s, opcode.op.check_ctor_return);
+                var return_value: Label = .{};
+                try Emitter.newLabel(s, &return_value);
+                try Emitter.jump(s, opcode.op.if_false, &return_value);
+                try Emitter.op(s, opcode.op.drop);
+                try s.emitScopeGetVarCheckThis(atom_this);
+                try Emitter.bind(s, &return_value);
             } else {
                 try s.emitScopeGetVarCheckThis(atom_this);
             }
@@ -16286,30 +16326,19 @@ pub const parser_core = struct {
                         if (first_default_param == null) first_default_param = arg_index;
                         try s.advance();
                         if (capture_child) {
-                            if (v2_available and s.emit_v2) {
-                                // qjs js_parse_function_decl2: keep an already-supplied
-                                // argument, otherwise evaluate and store its initializer.
-                                try v2FEmitOpU16(s, opcode.op.get_arg, @intCast(arg_index));
-                                try v2FEmitOp(s, opcode.op.is_undefined);
-                                const keep_value = try v2FNewLabel(s);
-                                try v2FEmitJump(s, opcode.op.if_false, keep_value);
-                                const saved_in_parameter_initializer = s.in_parameter_initializer;
-                                s.in_parameter_initializer = true;
-                                defer s.in_parameter_initializer = saved_in_parameter_initializer;
-                                try parseNamedBindingDefaultInitializer(s, param_atom);
-                                try v2FEmitOpU16(s, opcode.op.put_arg, @intCast(arg_index));
-                                try v2FBindLabel(s, keep_value);
-                            } else {
-                                try s.emitOpU16(opcode.op.get_arg, @intCast(arg_index));
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                const saved_in_parameter_initializer = s.in_parameter_initializer;
-                                s.in_parameter_initializer = true;
-                                defer s.in_parameter_initializer = saved_in_parameter_initializer;
-                                try parseNamedBindingDefaultInitializer(s, param_atom);
-                                try s.emitOpU16(opcode.op.put_arg, @intCast(arg_index));
-                                try patchForwardJump(s, keep_value);
-                            }
+                            // qjs js_parse_function_decl2: keep an already-supplied
+                            // argument, otherwise evaluate and store its initializer.
+                            try Emitter.opU16(s, opcode.op.get_arg, @intCast(arg_index));
+                            try Emitter.op(s, opcode.op.is_undefined);
+                            var keep_value: Label = .{};
+                            try Emitter.newLabel(s, &keep_value);
+                            try Emitter.jump(s, opcode.op.if_false, &keep_value);
+                            const saved_in_parameter_initializer = s.in_parameter_initializer;
+                            s.in_parameter_initializer = true;
+                            defer s.in_parameter_initializer = saved_in_parameter_initializer;
+                            try parseNamedBindingDefaultInitializer(s, param_atom);
+                            try Emitter.opU16(s, opcode.op.put_arg, @intCast(arg_index));
+                            try Emitter.bind(s, &keep_value);
                         } else {
                             const saved_in_parameter_initializer = s.in_parameter_initializer;
                             s.in_parameter_initializer = true;
@@ -17211,30 +17240,19 @@ pub const parser_core = struct {
                         if (first_default_param == null) first_default_param = arg_index;
                         try s.advance();
                         if (capture_child) {
-                            if (v2_available and s.emit_v2) {
-                                // qjs js_parse_function_decl2: arrow parameters use
-                                // the same supplied-value/default-value merge.
-                                try v2FEmitOpU16(s, opcode.op.get_arg, @intCast(arg_index));
-                                try v2FEmitOp(s, opcode.op.is_undefined);
-                                const keep_value = try v2FNewLabel(s);
-                                try v2FEmitJump(s, opcode.op.if_false, keep_value);
-                                const saved_in_parameter_initializer = s.in_parameter_initializer;
-                                s.in_parameter_initializer = true;
-                                defer s.in_parameter_initializer = saved_in_parameter_initializer;
-                                try parseNamedBindingDefaultInitializer(s, param_atom);
-                                try v2FEmitOpU16(s, opcode.op.put_arg, @intCast(arg_index));
-                                try v2FBindLabel(s, keep_value);
-                            } else {
-                                try s.emitOpU16(opcode.op.get_arg, @intCast(arg_index));
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                const saved_in_parameter_initializer = s.in_parameter_initializer;
-                                s.in_parameter_initializer = true;
-                                defer s.in_parameter_initializer = saved_in_parameter_initializer;
-                                try parseNamedBindingDefaultInitializer(s, param_atom);
-                                try s.emitOpU16(opcode.op.put_arg, @intCast(arg_index));
-                                try patchForwardJump(s, keep_value);
-                            }
+                            // qjs js_parse_function_decl2: arrow parameters use
+                            // the same supplied-value/default-value merge.
+                            try Emitter.opU16(s, opcode.op.get_arg, @intCast(arg_index));
+                            try Emitter.op(s, opcode.op.is_undefined);
+                            var keep_value: Label = .{};
+                            try Emitter.newLabel(s, &keep_value);
+                            try Emitter.jump(s, opcode.op.if_false, &keep_value);
+                            const saved_in_parameter_initializer = s.in_parameter_initializer;
+                            s.in_parameter_initializer = true;
+                            defer s.in_parameter_initializer = saved_in_parameter_initializer;
+                            try parseNamedBindingDefaultInitializer(s, param_atom);
+                            try Emitter.opU16(s, opcode.op.put_arg, @intCast(arg_index));
+                            try Emitter.bind(s, &keep_value);
                         } else {
                             const saved_in_parameter_initializer = s.in_parameter_initializer;
                             s.in_parameter_initializer = true;
@@ -17706,22 +17724,13 @@ pub const parser_core = struct {
 
     fn parsePatternDefault(s: *State, target: *const PatternTarget) Error!void {
         if (s.peekKind() != @as(tok.TokenKind, @intCast('='))) return;
-        var v2_has_value: compiler_v2.LabelId = undefined;
-        var has_value: usize = undefined;
-        if (v2_available and s.emit_v2) {
-            try v2FEmitOp(s, opcode.op.dup);
-            try v2FEmitOp(s, opcode.op.undefined);
-            try v2FEmitOp(s, opcode.op.strict_eq);
-            v2_has_value = try v2FNewLabel(s);
-            try v2FEmitJump(s, opcode.op.if_false, v2_has_value);
-            try v2FEmitOp(s, opcode.op.drop);
-        } else {
-            try s.emitOp(opcode.op.dup);
-            try s.emitOp(opcode.op.undefined);
-            try s.emitOp(opcode.op.strict_eq);
-            has_value = try emitForwardJump(s, opcode.op.if_false);
-            try s.emitOp(opcode.op.drop);
-        }
+        try Emitter.op(s, opcode.op.dup);
+        try Emitter.op(s, opcode.op.undefined);
+        try Emitter.op(s, opcode.op.strict_eq);
+        var has_value: Label = .{};
+        try Emitter.newLabel(s, &has_value);
+        try Emitter.jump(s, opcode.op.if_false, &has_value);
+        try Emitter.op(s, opcode.op.drop);
         try s.advance();
 
         const saved_pending_name = s.pending_function_name;
@@ -17735,11 +17744,7 @@ pub const parser_core = struct {
         }
         try parseAssignExpr(s);
         if (target.defaultName()) |name| try emitAnonymousDefaultName(s, name);
-        if (v2_available and s.emit_v2) {
-            try v2FBindLabel(s, v2_has_value);
-        } else {
-            try patchForwardJump(s, has_value);
-        }
+        try Emitter.bind(s, &has_value);
     }
 
     fn rotateNamedSourcePastTarget(s: *State, depth: u8) Error!void {
@@ -17899,39 +17904,24 @@ pub const parser_core = struct {
                     // cached next method, call iterator.return(), require an
                     // Object result, await it, then restore the injected return
                     // value for the next enclosing cleanup / OP_return_async.
-                    if (v2_available and s.emit_v2) {
-                        try v2FEmitOp(s, opcode.op.nip);
-                        try v2FEmitOp(s, opcode.op.swap);
-                        try v2FEmitAtomOpOwned(s, opcode.op.get_field2, s.function.atoms.dup(return_atom));
-                        try v2FEmitOp(s, opcode.op.dup);
-                        try v2FEmitOp(s, opcode.op.is_undefined_or_null);
-                        const no_return = try v2FNewLabel(s);
-                        try v2FEmitJump(s, opcode.op.if_true, no_return);
-                        try v2FEmitOpU16(s, opcode.op.call_method, 0);
-                        try v2FEmitOp(s, opcode.op.iterator_check_object);
-                        try v2FEmitOp(s, opcode.op.await);
-                        const closed = try v2FNewLabel(s);
-                        try v2FEmitJump(s, opcode.op.goto, closed);
-                        try v2FBindLabel(s, no_return);
-                        try v2FEmitOp(s, opcode.op.drop);
-                        try v2FBindLabel(s, closed);
-                        try v2FEmitOp(s, opcode.op.drop);
-                    } else {
-                        try s.emitOp(opcode.op.nip);
-                        try s.emitOp(opcode.op.swap);
-                        try s.emitOpAtom(opcode.op.get_field2, return_atom);
-                        try s.emitOp(opcode.op.dup);
-                        try s.emitOp(opcode.op.is_undefined_or_null);
-                        const no_return = try emitForwardJump(s, opcode.op.if_true);
-                        try s.emitOpU16(opcode.op.call_method, 0);
-                        try s.emitOp(opcode.op.iterator_check_object);
-                        try s.emitOp(opcode.op.await);
-                        const closed = try emitForwardJump(s, opcode.op.goto);
-                        try patchForwardJump(s, no_return);
-                        try s.emitOp(opcode.op.drop);
-                        try patchForwardJump(s, closed);
-                        try s.emitOp(opcode.op.drop);
-                    }
+                    try Emitter.op(s, opcode.op.nip);
+                    try Emitter.op(s, opcode.op.swap);
+                    try Emitter.opAtom(s, opcode.op.get_field2, return_atom);
+                    try Emitter.op(s, opcode.op.dup);
+                    try Emitter.op(s, opcode.op.is_undefined_or_null);
+                    var no_return: Label = .{};
+                    try Emitter.newLabel(s, &no_return);
+                    try Emitter.jump(s, opcode.op.if_true, &no_return);
+                    try Emitter.opU16(s, opcode.op.call_method, 0);
+                    try Emitter.op(s, opcode.op.iterator_check_object);
+                    try Emitter.op(s, opcode.op.await);
+                    var closed: Label = .{};
+                    try Emitter.newLabel(s, &closed);
+                    try Emitter.jump(s, opcode.op.goto, &closed);
+                    try Emitter.bind(s, &no_return);
+                    try Emitter.op(s, opcode.op.drop);
+                    try Emitter.bind(s, &closed);
+                    try Emitter.op(s, opcode.op.drop);
                 } else {
                     // qjs emit_return iterator cleanup (quickjs.c:28441-28444): rotate value, add dummy catch offset, close.
                     try Emitter.op(s, opcode.op.rot3r);
