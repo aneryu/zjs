@@ -115,6 +115,13 @@ pub const OptimizationBoundary = struct {
     fold_start: u32,
     consumed_end: u32,
     replacement_start: u32,
+    /// PRODUCT offset the replacement was written at, captured by the resolver
+    /// at the instant of the replacing emission. `labels.unbound` while a fold
+    /// is planned but not yet emitted (make_ref_tail between registration and
+    /// `emitPendingTailRewrite`). Audit-only: the anchor-split classifier
+    /// compares it against the product offset of the label bound at
+    /// `replacement_start` to decide class A vs class D.
+    replacement_product: u32 = labels.unbound,
 };
 
 pub const identity_kinds = [_][]const u8{
@@ -274,6 +281,373 @@ pub fn resetFanoutCensus() void {
     @atomicStore(u64, &boundary_fanout_census.chain_depth_total, 0, .monotonic);
     @atomicStore(u64, &boundary_fanout_census.max_chain_depth, 0, .monotonic);
     @atomicStore(u64, &boundary_fanout_census.final_address_hops, 0, .monotonic);
+}
+
+/// F3 anchor-split classification (docs/anchor_split_classification.md).
+///
+/// The uniqueness oracle counted the anchoring exposure; it did not say what
+/// kind of exposure each contested position is. The ruling's partition:
+///   A  one semantic boundary owned by several identities  -> MUST MERGE
+///   B  one PC carrying several DISTINCT semantic events   -> allowed
+///   C  a source/debug anchor as an independent identity   -> allowed
+///   D  the optimization replacement anchor, independent   -> needs a rule
+///
+/// The class is decided by WHAT COMPETES for the position (a debug marker, a
+/// fold replacement, or another control-flow event) plus one falsifiable test
+/// applied to every case: do the competing owners of one INPUT position
+/// resolve to the same PRODUCT position? A pair that resolves apart is a real
+/// split (class A) whatever kind the competitor is; only agreement leaves the
+/// case in the allowed classes.
+pub const AnchorClass = enum(u8) {
+    a,
+    b,
+    c,
+    d,
+
+    pub fn name(self: AnchorClass) []const u8 {
+        return switch (self) {
+            .a => "A",
+            .b => "B",
+            .c => "C",
+            .d => "D",
+        };
+    }
+};
+
+pub const AnchorCase = enum(u8) {
+    /// A: a source event and a label bind at one input offset that resolve to
+    /// DIFFERENT product offsets.
+    a_source_product_split,
+    /// A: a fold replacement and a label bind at one input offset that resolve
+    /// to DIFFERENT product offsets.
+    a_fold_product_split,
+    /// B: one boundary whose label group is referenced under more than one
+    /// role (jump target / exception landing / cleanup subroutine / aux).
+    b_multi_role_boundary,
+    /// B: a boundary that is also the end of a consumed fold region.
+    b_boundary_is_fold_region_end,
+    /// B: a retained match barrier sharing its PC with a referenced identity.
+    b_barrier_with_reference,
+    /// B: the ruling's literal example - one PC carrying a line marker, a
+    /// label target and a fold replacement at once.
+    b_triple_owner_pc,
+    /// C: source event and label bind co-resident, same product offset.
+    c_source_coresident,
+    /// C: the source event survives at a boundary whose whole label group was
+    /// retired - the debug anchor OUTLIVES every identity there.
+    c_source_outlives_identity,
+    /// C: the label survives but the source event was dropped (a trailing
+    /// event with no emitted instruction left to carry it).
+    c_identity_outlives_source,
+    /// C: neither owner survives - the dead boundary retired its labels and
+    /// its source events together.
+    c_boundary_fully_retired,
+    /// D: fold replacement start with no label identity at that offset.
+    d_fold_uncontested,
+    /// D: fold replacement start contested by a label identity that resolves
+    /// to the same product offset.
+    d_fold_contested_agree,
+
+    pub fn class(self: AnchorCase) AnchorClass {
+        return switch (self) {
+            .a_source_product_split, .a_fold_product_split => .a,
+            .b_multi_role_boundary,
+            .b_boundary_is_fold_region_end,
+            .b_barrier_with_reference,
+            .b_triple_owner_pc,
+            => .b,
+            .c_source_coresident,
+            .c_source_outlives_identity,
+            .c_identity_outlives_source,
+            .c_boundary_fully_retired,
+            => .c,
+            .d_fold_uncontested, .d_fold_contested_agree => .d,
+        };
+    }
+
+    pub fn name(self: AnchorCase) []const u8 {
+        return @tagName(self);
+    }
+};
+
+pub const anchor_case_count = @typeInfo(AnchorCase).@"enum".fields.len;
+
+/// Corpus accumulator for the classification. Comptime-erased in ReleaseFast
+/// exactly like `OracleReport`.
+pub const AnchorSplitCensus = if (audit_oracles) struct {
+    cases: [anchor_case_count]u64 = .{0} ** anchor_case_count,
+    /// fold replacement anchors by OptimizationBoundaryKind
+    fold_by_kind: [5]u64 = .{0} ** 5,
+    /// ... of which contested by a label identity
+    fold_contested_by_kind: [5]u64 = .{0} ** 5,
+    /// fold replacements whose product offset was still unrecorded when the
+    /// classifier ran (should be zero: every plan is consumed before return)
+    fold_product_unknown: u64 = 0,
+    /// input source events whose product slot disagreed on line/col - the
+    /// falsifiable proof that product source slot i is input source slot i
+    source_index_alignment_violations: u64 = 0,
+    /// relaxJumps stability, .short layout only
+    relax_compactions: u64 = 0,
+    relax_window_sources: u64 = 0,
+    relax_window_labels: u64 = 0,
+    relax_coincidence_before: u64 = 0,
+    relax_coincidence_after: u64 = 0,
+    relax_coincidence_lost: u64 = 0,
+    relax_coincidence_gained: u64 = 0,
+} else struct {};
+
+pub var anchor_split_census: AnchorSplitCensus = .{};
+
+comptime {
+    if (!audit_oracles) std.debug.assert(@sizeOf(AnchorSplitCensus) == 0);
+}
+
+/// One classified position, kept for the corpus report. Exemplars are the
+/// ruling's requirement that the classification cite REAL CONSTRUCTS, not just
+/// counts: `line`/`col` locate the construct in the compiled source and
+/// `label_product` / `other_product` name the competing owners' resolutions.
+pub const AnchorExemplar = struct {
+    case: AnchorCase,
+    /// `@intFromEnum(OptimizationBoundaryKind)` or 0xff when not a fold case
+    fold_kind: u8 = 0xff,
+    /// opcode at `input_offset` (0xff at the end-of-code boundary)
+    op_id: u8 = 0xff,
+    /// label identities bound at `input_offset`
+    fanout: u32 = 0,
+    /// union of BoundaryRole bits observed at references to this boundary
+    role_mask: u8 = 0,
+    input_offset: u32 = 0,
+    label_index: u32 = labels.unbound,
+    label_product: u32 = labels.unbound,
+    other_product: u32 = labels.unbound,
+    line: i32 = 0,
+    col: i32 = 0,
+};
+
+pub const anchor_exemplar_capacity: usize = 128;
+/// Distinct (line, col) sites retained per case.
+pub const anchor_exemplars_per_case: u32 = 6;
+
+pub var anchor_exemplars: [anchor_exemplar_capacity]AnchorExemplar = undefined;
+pub var anchor_exemplar_len: u32 = 0;
+
+fn anchorAdd(counter: *u64, amount: u64) void {
+    if (comptime !audit_oracles) return;
+    censusAdd(counter, amount);
+}
+
+fn recordAnchorCase(case: AnchorCase) void {
+    if (comptime !audit_oracles) return;
+    censusAdd(&anchor_split_census.cases[@intFromEnum(case)], 1);
+}
+
+/// Retain up to `anchor_exemplars_per_case` DISTINCT source sites per
+/// (case, fold kind) - keyed on the fold kind too so one prolific kind cannot
+/// crowd the others out of the report. Audit-only and single-threaded by
+/// construction (one compile at a time on the compiling thread); no ordering
+/// guarantee is needed or offered.
+fn recordAnchorExemplar(exemplar: AnchorExemplar) void {
+    if (comptime !audit_oracles) return;
+    var seen: u32 = 0;
+    for (anchor_exemplars[0..anchor_exemplar_len]) |existing| {
+        if (existing.case != exemplar.case or existing.fold_kind != exemplar.fold_kind) continue;
+        if (existing.line == exemplar.line and existing.col == exemplar.col) return;
+        seen += 1;
+    }
+    if (seen >= anchor_exemplars_per_case) return;
+    if (anchor_exemplar_len >= anchor_exemplar_capacity) return;
+    anchor_exemplars[anchor_exemplar_len] = exemplar;
+    anchor_exemplar_len += 1;
+}
+
+pub fn resetAnchorSplitCensus() void {
+    if (comptime !audit_oracles) return;
+    for (&anchor_split_census.cases) |*counter| @atomicStore(u64, counter, 0, .monotonic);
+    for (&anchor_split_census.fold_by_kind) |*counter| @atomicStore(u64, counter, 0, .monotonic);
+    for (&anchor_split_census.fold_contested_by_kind) |*counter|
+        @atomicStore(u64, counter, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.fold_product_unknown, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.source_index_alignment_violations, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.relax_compactions, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.relax_window_sources, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.relax_window_labels, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.relax_coincidence_before, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.relax_coincidence_after, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.relax_coincidence_lost, 0, .monotonic);
+    @atomicStore(u64, &anchor_split_census.relax_coincidence_gained, 0, .monotonic);
+    anchor_exemplar_len = 0;
+}
+
+pub fn anchorSplitSnapshot() AnchorSplitCensus {
+    if (comptime !audit_oracles) return .{};
+    var census: AnchorSplitCensus = .{
+        .fold_product_unknown = @atomicLoad(
+            u64,
+            &anchor_split_census.fold_product_unknown,
+            .monotonic,
+        ),
+        .source_index_alignment_violations = @atomicLoad(
+            u64,
+            &anchor_split_census.source_index_alignment_violations,
+            .monotonic,
+        ),
+        .relax_compactions = @atomicLoad(u64, &anchor_split_census.relax_compactions, .monotonic),
+        .relax_window_sources = @atomicLoad(
+            u64,
+            &anchor_split_census.relax_window_sources,
+            .monotonic,
+        ),
+        .relax_window_labels = @atomicLoad(
+            u64,
+            &anchor_split_census.relax_window_labels,
+            .monotonic,
+        ),
+        .relax_coincidence_before = @atomicLoad(
+            u64,
+            &anchor_split_census.relax_coincidence_before,
+            .monotonic,
+        ),
+        .relax_coincidence_after = @atomicLoad(
+            u64,
+            &anchor_split_census.relax_coincidence_after,
+            .monotonic,
+        ),
+        .relax_coincidence_lost = @atomicLoad(
+            u64,
+            &anchor_split_census.relax_coincidence_lost,
+            .monotonic,
+        ),
+        .relax_coincidence_gained = @atomicLoad(
+            u64,
+            &anchor_split_census.relax_coincidence_gained,
+            .monotonic,
+        ),
+    };
+    for (&census.cases, 0..) |*counter, index| {
+        counter.* = @atomicLoad(u64, &anchor_split_census.cases[index], .monotonic);
+    }
+    for (&census.fold_by_kind, 0..) |*counter, index| {
+        counter.* = @atomicLoad(u64, &anchor_split_census.fold_by_kind[index], .monotonic);
+    }
+    for (&census.fold_contested_by_kind, 0..) |*counter, index| {
+        counter.* = @atomicLoad(u64, &anchor_split_census.fold_contested_by_kind[index], .monotonic);
+    }
+    return census;
+}
+
+pub fn anchorClassTotal(census: AnchorSplitCensus, class: AnchorClass) u64 {
+    if (comptime !audit_oracles) return 0;
+    var total: u64 = 0;
+    inline for (@typeInfo(AnchorCase).@"enum".fields) |field| {
+        const case: AnchorCase = @enumFromInt(field.value);
+        if (case.class() == class) total += census.cases[field.value];
+    }
+    return total;
+}
+
+/// `ZJS-V2-ANCHOR-SPLIT A=<n> B=<n> C=<n> D=<n> cases{...} folds{...}
+/// relax{...} integrity{...}` - one line, class A first because it is the only
+/// class that changes the model.
+pub fn formatAnchorSplit(buffer: []u8, census: AnchorSplitCensus) []const u8 {
+    if (comptime !audit_oracles) {
+        return "ZJS-V2-ANCHOR-SPLIT unavailable: counters are comptime-erased in this build";
+    }
+    var writer = std.Io.Writer.fixed(buffer);
+    writer.print("ZJS-V2-ANCHOR-SPLIT A={d} B={d} C={d} D={d} cases{{", .{
+        anchorClassTotal(census, .a),
+        anchorClassTotal(census, .b),
+        anchorClassTotal(census, .c),
+        anchorClassTotal(census, .d),
+    }) catch unreachable;
+    inline for (@typeInfo(AnchorCase).@"enum".fields, 0..) |field, index| {
+        const case: AnchorCase = @enumFromInt(field.value);
+        writer.print("{s}{s}={d}", .{
+            if (index == 0) "" else " ",
+            case.name(),
+            census.cases[field.value],
+        }) catch unreachable;
+    }
+    writer.print("}} folds{{", .{}) catch unreachable;
+    inline for (@typeInfo(OptimizationBoundaryKind).@"enum".fields, 0..) |field, index| {
+        writer.print("{s}{s}={d}/{d}", .{
+            if (index == 0) "" else " ",
+            field.name,
+            census.fold_contested_by_kind[field.value],
+            census.fold_by_kind[field.value],
+        }) catch unreachable;
+    }
+    writer.print(
+        "}} relax{{compactions={d} window-sources={d} window-labels={d} coincident={d}->{d} lost={d} gained={d}}} integrity{{fold-product-unknown={d} source-index-violations={d}}}",
+        .{
+            census.relax_compactions,
+            census.relax_window_sources,
+            census.relax_window_labels,
+            census.relax_coincidence_before,
+            census.relax_coincidence_after,
+            census.relax_coincidence_lost,
+            census.relax_coincidence_gained,
+            census.fold_product_unknown,
+            census.source_index_alignment_violations,
+        },
+    ) catch unreachable;
+    return writer.buffered();
+}
+
+/// One exemplar row: `<class> <case> line=<n> col=<n> op=<name> off=<n>
+/// fanout=<n> roles=0x<n> owners{label#<n>@<product>, <other>@<product>}`.
+pub fn formatAnchorExemplar(buffer: []u8, exemplar: AnchorExemplar) []const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    const op_name = if (exemplar.op_id == 0xff)
+        "<end-of-code>"
+    else
+        opcode.nameOfPhase1(exemplar.op_id);
+    const other_kind: []const u8 = switch (exemplar.case) {
+        .a_fold_product_split, .d_fold_uncontested, .d_fold_contested_agree => "fold_replacement",
+        .b_boundary_is_fold_region_end => "fold_region_end",
+        .b_multi_role_boundary, .b_barrier_with_reference => "label_group",
+        else => "source_event",
+    };
+    writer.print(
+        "ZJS-V2-ANCHOR-EXEMPLAR class={s} case={s} line={d} col={d} op={s} off={d} fanout={d} roles=0x{x:0>2} fold={s} owners{{label#{d}@{d}, {s}@{d}}}",
+        .{
+            exemplar.case.class().name(),
+            exemplar.case.name(),
+            exemplar.line,
+            exemplar.col,
+            op_name,
+            exemplar.input_offset,
+            exemplar.fanout,
+            exemplar.role_mask,
+            if (exemplar.fold_kind == 0xff)
+                "none"
+            else
+                @tagName(@as(OptimizationBoundaryKind, @enumFromInt(exemplar.fold_kind))),
+            exemplar.label_index,
+            exemplar.label_product,
+            other_kind,
+            exemplar.other_product,
+        },
+    ) catch unreachable;
+    return writer.buffered();
+}
+
+/// relaxJumps instrumentation sink (`.short` layout only). `window_sources` /
+/// `window_labels` count events that sat STRICTLY INSIDE a compacted jump's
+/// removed bytes: the only way the two independently shifted arrays can end up
+/// disagreeing, since both use the same `> jump.pos` predicate and delta.
+pub fn recordRelaxCompaction(window_sources: u64, window_labels: u64) void {
+    if (comptime !audit_oracles) return;
+    censusAdd(&anchor_split_census.relax_compactions, 1);
+    censusAdd(&anchor_split_census.relax_window_sources, window_sources);
+    censusAdd(&anchor_split_census.relax_window_labels, window_labels);
+}
+
+pub fn recordRelaxCoincidence(before: u64, after: u64, lost: u64, gained: u64) void {
+    if (comptime !audit_oracles) return;
+    censusAdd(&anchor_split_census.relax_coincidence_before, before);
+    censusAdd(&anchor_split_census.relax_coincidence_after, after);
+    censusAdd(&anchor_split_census.relax_coincidence_lost, lost);
+    censusAdd(&anchor_split_census.relax_coincidence_gained, gained);
 }
 
 pub fn bindLessThan(_: void, lhs: BindEntry, rhs: BindEntry) bool {
@@ -1661,6 +2035,278 @@ pub fn formatOracleReport(buffer: []u8, report: OracleReport) []const u8 {
     return writer.buffered();
 }
 
+/// Product offset a boundary resolves to: the offset of the first SURVIVING
+/// identity of the alias group at `input_offset`. `aliasGroupSplit` has
+/// already proven every survivor in the group agrees, so the first is the
+/// group's answer. Null when the whole group was retired.
+fn boundaryProductOffset(
+    binds: []const BindEntry,
+    product_labels: []const labels.LabelSlot,
+    input_offset: u32,
+) ?u32 {
+    var index = lowerBoundBindOffset(binds, input_offset);
+    while (index < binds.len and binds[index].input_offset == input_offset) : (index += 1) {
+        const label_index = binds[index].label_index;
+        if (label_index >= product_labels.len) continue;
+        const slot = product_labels[label_index];
+        if (slot.flags.bound) return slot.bound_offset;
+    }
+    return null;
+}
+
+fn boundaryFirstLabel(binds: []const BindEntry, input_offset: u32) u32 {
+    const index = lowerBoundBindOffset(binds, input_offset);
+    if (index < binds.len and binds[index].input_offset == input_offset)
+        return binds[index].label_index;
+    return labels.unbound;
+}
+
+const SourceSite = struct {
+    line: i32 = 0,
+    col: i32 = 0,
+};
+
+/// Last parser source marker at or before `offset`. Exemplars for boundaries
+/// that carry no marker of their own still need a source citation; input
+/// source slots are sorted by temp_offset, so this is a bisection.
+fn nearestSourceSite(sources: []const builder.SourceSlot, offset: u32) SourceSite {
+    var lo: usize = 0;
+    var hi = sources.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (sources[mid].temp_offset <= offset) lo = mid + 1 else hi = mid;
+    }
+    if (lo == 0) return .{};
+    const slot = sources[lo - 1];
+    return .{ .line = slot.line, .col = slot.col };
+}
+
+fn opAt(input: *const builder.Builder, offset: u32) u8 {
+    return if (offset < input.code_len) input.code[offset] else 0xff;
+}
+
+/// F3: classify every contested / unanchored position into the ruling's four
+/// classes instead of only counting it. Runs after the reference walk so the
+/// per-label role mask is complete.
+///
+/// The falsifiable arm is the PRODUCT OFFSET COMPARISON. Every competing owner
+/// of an input position resolves to a product position: the label group
+/// through `product_labels[..].bound_offset`, the source event through the
+/// product source slot the resolver attached it to, the fold replacement
+/// through the product offset captured at the replacing emission. Owners that
+/// resolve apart are a genuine split (class A). Owners that always resolve
+/// together are the same position named twice, and the class is then decided
+/// by WHAT the competitor is: a debug marker (C), a fold replacement (D), or
+/// another control-flow event (B).
+fn classifyAnchorSplits(
+    input: *const builder.Builder,
+    binds: []const BindEntry,
+    product_labels: []const labels.LabelSlot,
+    product_sources: []const builder.SourceSlot,
+    opt_bounds: []const OptimizationBoundary,
+    role_masks: []const u8,
+) void {
+    if (comptime !audit_oracles) return;
+    const input_sources = input.source_slots[0..input.source_len];
+
+    // ---- population S: parser source events sitting on a bound offset.
+    for (input_sources, 0..) |source, source_index| {
+        if (canonicalIdentityAtOffset(binds, source.temp_offset) == null) continue;
+        censusAdd(&boundary_fanout_census.unanchored_source_events, 1);
+
+        const attached: ?u32 = if (source_index < product_sources.len) blk: {
+            const product = product_sources[source_index];
+            // Falsifiable: the resolver appends absorbed events in order, so
+            // product slot i must be input slot i. If that ever stops holding
+            // the comparison below is meaningless, and this counter says so.
+            if (product.line != source.line or product.col != source.col) {
+                censusAdd(&anchor_split_census.source_index_alignment_violations, 1);
+                break :blk null;
+            }
+            break :blk product.temp_offset;
+        } else null;
+        const dropped = source_index >= product_sources.len;
+        const label_product = boundaryProductOffset(binds, product_labels, source.temp_offset);
+        const label_index = boundaryFirstLabel(binds, source.temp_offset);
+
+        const source_survives = !dropped and attached != null;
+        const case: AnchorCase = if (!source_survives and label_product == null)
+            .c_boundary_fully_retired
+        else if (!source_survives)
+            .c_identity_outlives_source
+        else if (label_product == null)
+            .c_source_outlives_identity
+        else if (attached.? == label_product.?)
+            .c_source_coresident
+        else
+            .a_source_product_split;
+
+        recordAnchorCase(case);
+        recordAnchorExemplar(.{
+            .case = case,
+            .op_id = opAt(input, source.temp_offset),
+            .fanout = boundaryFanoutAt(binds, source.temp_offset),
+            .role_mask = boundaryRoleMask(binds, role_masks, source.temp_offset),
+            .input_offset = source.temp_offset,
+            .label_index = label_index,
+            .label_product = label_product orelse labels.unbound,
+            .other_product = attached orelse labels.unbound,
+            .line = source.line,
+            .col = source.col,
+        });
+    }
+
+    // ---- population F: fold replacement anchors.
+    for (opt_bounds) |boundary| {
+        censusAdd(&boundary_fanout_census.unanchored_fold_replacements, 1);
+        censusAdd(&anchor_split_census.fold_by_kind[@intFromEnum(boundary.kind)], 1);
+        const contested = canonicalIdentityAtOffset(binds, boundary.replacement_start) != null;
+        if (contested) {
+            censusAdd(&boundary_fanout_census.contested_fold_replacements, 1);
+            censusAdd(
+                &anchor_split_census.fold_contested_by_kind[@intFromEnum(boundary.kind)],
+                1,
+            );
+        }
+        if (boundary.replacement_product == labels.unbound) {
+            censusAdd(&anchor_split_census.fold_product_unknown, 1);
+        }
+        const label_product =
+            boundaryProductOffset(binds, product_labels, boundary.replacement_start);
+        const case: AnchorCase = if (!contested)
+            .d_fold_uncontested
+        else if (label_product == null or
+            boundary.replacement_product == labels.unbound or
+            label_product.? == boundary.replacement_product)
+            .d_fold_contested_agree
+        else
+            .a_fold_product_split;
+
+        recordAnchorCase(case);
+        const site = nearestSourceSite(input_sources, boundary.replacement_start);
+        recordAnchorExemplar(.{
+            .case = case,
+            .fold_kind = @intFromEnum(boundary.kind),
+            .op_id = opAt(input, boundary.fold_start),
+            .fanout = boundaryFanoutAt(binds, boundary.replacement_start),
+            .role_mask = boundaryRoleMask(binds, role_masks, boundary.replacement_start),
+            .input_offset = boundary.replacement_start,
+            .label_index = boundaryFirstLabel(binds, boundary.replacement_start),
+            .label_product = label_product orelse labels.unbound,
+            .other_product = boundary.replacement_product,
+            .line = site.line,
+            .col = site.col,
+        });
+    }
+
+    // ---- population B: one PC, several DISTINCT non-debug semantic events.
+    var group_start: usize = 0;
+    while (group_start < binds.len) {
+        var group_end = group_start + 1;
+        while (group_end < binds.len and
+            binds[group_end].input_offset == binds[group_start].input_offset) : (group_end += 1)
+        {}
+        const group = binds[group_start..group_end];
+        const input_offset = group[0].input_offset;
+        group_start = group_end;
+
+        var role_mask: u8 = 0;
+        var barrier = false;
+        var referenced = false;
+        for (group) |entry| {
+            if (entry.label_index >= product_labels.len) continue;
+            role_mask |= role_masks[entry.label_index];
+            const slot = product_labels[entry.label_index];
+            if (slot.flags.match_barrier) barrier = true;
+            if (slot.ref_count != 0) referenced = true;
+        }
+        const distinct_roles = @popCount(role_mask);
+        const label_product = boundaryProductOffset(binds, product_labels, input_offset);
+        const site = nearestSourceSite(input_sources, input_offset);
+        const exemplar: AnchorExemplar = .{
+            .case = .b_multi_role_boundary,
+            .op_id = opAt(input, input_offset),
+            .fanout = @intCast(group.len),
+            .role_mask = role_mask,
+            .input_offset = input_offset,
+            .label_index = group[0].label_index,
+            .label_product = label_product orelse labels.unbound,
+            .other_product = label_product orelse labels.unbound,
+            .line = site.line,
+            .col = site.col,
+        };
+
+        if (distinct_roles >= 2) {
+            recordAnchorCase(.b_multi_role_boundary);
+            recordAnchorExemplar(exemplar);
+        }
+        if (barrier and referenced) {
+            recordAnchorCase(.b_barrier_with_reference);
+            var barrier_exemplar = exemplar;
+            barrier_exemplar.case = .b_barrier_with_reference;
+            recordAnchorExemplar(barrier_exemplar);
+        }
+        for (opt_bounds) |boundary| {
+            if (boundary.consumed_end != input_offset) continue;
+            recordAnchorCase(.b_boundary_is_fold_region_end);
+            var region_exemplar = exemplar;
+            region_exemplar.case = .b_boundary_is_fold_region_end;
+            region_exemplar.fold_kind = @intFromEnum(boundary.kind);
+            region_exemplar.other_product = boundary.replacement_product;
+            recordAnchorExemplar(region_exemplar);
+            break;
+        }
+
+        // The ruling's literal class-B example: a line marker, a fold
+        // replacement and a label target on one PC.
+        if (!hasSourceEventAt(input_sources, input_offset)) continue;
+        for (opt_bounds) |boundary| {
+            if (boundary.replacement_start != input_offset) continue;
+            recordAnchorCase(.b_triple_owner_pc);
+            var triple_exemplar = exemplar;
+            triple_exemplar.case = .b_triple_owner_pc;
+            triple_exemplar.fold_kind = @intFromEnum(boundary.kind);
+            triple_exemplar.other_product = boundary.replacement_product;
+            triple_exemplar.line = site.line;
+            triple_exemplar.col = site.col;
+            recordAnchorExemplar(triple_exemplar);
+            break;
+        }
+    }
+}
+
+fn hasSourceEventAt(sources: []const builder.SourceSlot, offset: u32) bool {
+    var lo: usize = 0;
+    var hi = sources.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (sources[mid].temp_offset < offset) lo = mid + 1 else hi = mid;
+    }
+    return lo < sources.len and sources[lo].temp_offset == offset;
+}
+
+fn boundaryFanoutAt(binds: []const BindEntry, input_offset: u32) u32 {
+    var index = lowerBoundBindOffset(binds, input_offset);
+    var count: u32 = 0;
+    while (index < binds.len and binds[index].input_offset == input_offset) : (index += 1) {
+        count += 1;
+    }
+    return count;
+}
+
+fn boundaryRoleMask(
+    binds: []const BindEntry,
+    role_masks: []const u8,
+    input_offset: u32,
+) u8 {
+    var index = lowerBoundBindOffset(binds, input_offset);
+    var mask: u8 = 0;
+    while (index < binds.len and binds[index].input_offset == input_offset) : (index += 1) {
+        if (binds[index].label_index < role_masks.len) mask |= role_masks[binds[index].label_index];
+    }
+    return mask;
+}
+
 /// Debug/ReleaseSafe input-coordinate proof obligation: one semantic boundary
 /// may carry same-offset aliases, but the resolver and every live reference
 /// must retain one stable canonical identity for that boundary.
@@ -1670,6 +2316,7 @@ pub fn auditBoundaryUniqueness(
     graph: *const Graph,
     binds: []const BindEntry,
     product_labels: []const labels.LabelSlot,
+    product_sources: []const builder.SourceSlot,
     opt_bounds: []const OptimizationBoundary,
 ) Error!void {
     try validateBoundaryAuditInput(input, graph, binds, product_labels);
@@ -1996,21 +2643,16 @@ pub fn auditBoundaryUniqueness(
         }
     }
 
-    for (input.source_slots[0..input.source_len]) |source| {
-        if (canonicalIdentityAtOffset(binds, source.temp_offset) != null) {
-            // builder.SourceSlot carries no anchor_label; adding that LabelId
-            // at parser emission is the minimal change that closes this gap.
-            censusAdd(&boundary_fanout_census.unanchored_source_events, 1);
-        }
-    }
-    for (opt_bounds) |boundary| {
-        // OptimizationBoundary carries offsets but no replacement_label;
-        // recording that LabelId is the minimal change that closes this gap.
-        censusAdd(&boundary_fanout_census.unanchored_fold_replacements, 1);
-        if (canonicalIdentityAtOffset(binds, boundary.replacement_start) != null) {
-            censusAdd(&boundary_fanout_census.contested_fold_replacements, 1);
-        }
-    }
+    // builder.SourceSlot carries no anchor_label and OptimizationBoundary
+    // carries no replacement_label; the unanchored / contested counters live
+    // in classifyAnchorSplits below, which also decides what KIND of exposure
+    // each of them is (F3, docs/anchor_split_classification.md).
+    const role_masks: []u8 = if (comptime audit_oracles)
+        memory.alloc(u8, product_labels.len) catch return error.OutOfMemory
+    else
+        &.{};
+    defer if (comptime audit_oracles) memory.free(u8, role_masks);
+    if (comptime audit_oracles) @memset(role_masks, 0);
 
     const instruction_claimed_words: []usize = if (comptime audit_oracles)
         memory.alloc(usize, word_count) catch return error.OutOfMemory
@@ -2110,6 +2752,11 @@ pub fn auditBoundaryUniqueness(
             label_reference_count += 1;
             const label_index = try readLabelIndex(input, pc, instruction, operand_offset);
             const role = roleForLabelOperand(op_id, instruction);
+            if (comptime audit_oracles) {
+                if (label_index < role_masks.len) {
+                    role_masks[label_index] |= @as(u8, 1) << @intCast(@intFromEnum(role));
+                }
+            }
             const input_slot = input.label_slots[label_index];
             // validateBindIndex proves label_slots[i].bound_offset is exactly
             // the offset of i's bind row, so every identity lookup below is a
@@ -2278,6 +2925,15 @@ pub fn auditBoundaryUniqueness(
         reportAdd("control_edges", @intCast(graph.edge_len));
         reportAdd("control_continuations", accounting.continuations);
     }
+
+    classifyAnchorSplits(
+        input,
+        binds,
+        product_labels,
+        product_sources,
+        opt_bounds,
+        role_masks,
+    );
 }
 
 test "compiler_v2.cfg: unreachable self-loop does not retain its block" {
@@ -2357,6 +3013,7 @@ test "compiler_v2.cfg: alias group coalescing is downstream-indistinguishable" {
         &binds,
         &product_labels,
         &.{},
+        &.{},
     );
 
     const census = fanoutCensusSnapshot();
@@ -2373,6 +3030,167 @@ test "compiler_v2.cfg: alias group coalescing is downstream-indistinguishable" {
     try std.testing.expectEqualStrings(
         "identity kinds=5 instances=2 fan-out{mean=2.00 p95=2 max=2} chain{mean=3.00 p95=3 max=3 +final-hop=0} final-source{events=0 on-identity=0 between-identities=0} unanchored{source=0 fold=0 contested=0}",
         formatIdentityHealth(&health_buffer, census),
+    );
+}
+
+/// Shared fixture for the anchor-split classification tests: one boundary at
+/// input offset 6 carrying a bound label and a source marker.
+const AnchorSplitFixture = struct {
+    rt: *core.JSRuntime,
+    input: builder.Builder,
+    graph: Graph,
+    binds: [1]BindEntry,
+
+    fn init(self: *AnchorSplitFixture) !void {
+        self.rt = try core.JSRuntime.create(std.testing.allocator);
+        errdefer self.rt.destroy();
+        self.input = builder.Builder.init(&self.rt.memory, &self.rt.atoms);
+        errdefer self.input.deinit();
+        const target = try self.input.newLabel();
+        try self.input.emitJump(op.if_false, target);
+        try self.input.emitOp(op.return_undef);
+        try self.input.bindLabel(target);
+        try self.input.addSourceMarker(10, 2);
+        try self.input.emitOp(op.return_undef);
+        self.binds = .{.{
+            .input_offset = self.input.label_slots[target.index()].bound_offset,
+            .label_index = target.index(),
+        }};
+        self.graph = try build(&self.rt.memory, &self.input, &self.binds);
+    }
+
+    fn deinit(self: *AnchorSplitFixture) void {
+        self.graph.deinit();
+        self.input.deinit();
+        self.rt.destroy();
+    }
+
+    fn boundary(self: *const AnchorSplitFixture) u32 {
+        return self.binds[0].input_offset;
+    }
+};
+
+test "compiler_v2.cfg: class A arm fires when a source event resolves off its boundary" {
+    resetFanoutCensus();
+    resetAnchorSplitCensus();
+    defer resetFanoutCensus();
+    defer resetAnchorSplitCensus();
+    if (comptime !audit_oracles) return;
+
+    var fixture: AnchorSplitFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+
+    var product_labels = [_]labels.LabelSlot{.{ .bound_offset = 4, .flags = .{ .bound = true } }};
+    // Same input offset, DIFFERENT product offsets: the split class A exists
+    // to name. A=0 on the corpus is only evidence because this fires.
+    const split_sources = [_]builder.SourceSlot{
+        .{ .temp_offset = 9, .line = 10, .col = 2 },
+    };
+    try auditBoundaryUniqueness(
+        &fixture.rt.memory,
+        &fixture.input,
+        &fixture.graph,
+        &fixture.binds,
+        &product_labels,
+        &split_sources,
+        &.{},
+    );
+    var census = anchorSplitSnapshot();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        census.cases[@intFromEnum(AnchorCase.a_source_product_split)],
+    );
+    try std.testing.expectEqual(@as(u64, 1), anchorClassTotal(census, .a));
+
+    // Negative control: the same fixture with the event on the boundary is C.
+    resetAnchorSplitCensus();
+    const agreeing_sources = [_]builder.SourceSlot{
+        .{ .temp_offset = 4, .line = 10, .col = 2 },
+    };
+    try auditBoundaryUniqueness(
+        &fixture.rt.memory,
+        &fixture.input,
+        &fixture.graph,
+        &fixture.binds,
+        &product_labels,
+        &agreeing_sources,
+        &.{},
+    );
+    census = anchorSplitSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), anchorClassTotal(census, .a));
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        census.cases[@intFromEnum(AnchorCase.c_source_coresident)],
+    );
+}
+
+test "compiler_v2.cfg: class A arm fires when a fold replacement resolves off its boundary" {
+    resetFanoutCensus();
+    resetAnchorSplitCensus();
+    defer resetFanoutCensus();
+    defer resetAnchorSplitCensus();
+    if (comptime !audit_oracles) return;
+
+    var fixture: AnchorSplitFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+
+    var product_labels = [_]labels.LabelSlot{.{ .bound_offset = 4, .flags = .{ .bound = true } }};
+    const sources = [_]builder.SourceSlot{.{ .temp_offset = 4, .line = 10, .col = 2 }};
+    const split_bounds = [_]OptimizationBoundary{.{
+        .kind = .dup_branch_fold,
+        .fold_start = fixture.boundary(),
+        .consumed_end = fixture.input.code_len,
+        .replacement_start = fixture.boundary(),
+        .replacement_product = 7,
+    }};
+    try auditBoundaryUniqueness(
+        &fixture.rt.memory,
+        &fixture.input,
+        &fixture.graph,
+        &fixture.binds,
+        &product_labels,
+        &sources,
+        &split_bounds,
+    );
+    var census = anchorSplitSnapshot();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        census.cases[@intFromEnum(AnchorCase.a_fold_product_split)],
+    );
+    try std.testing.expectEqual(@as(u64, 1), anchorClassTotal(census, .a));
+    try std.testing.expectEqual(@as(u64, 0), census.fold_product_unknown);
+
+    // The same fold agreeing with the boundary is class D, not class A.
+    resetAnchorSplitCensus();
+    const agreeing_bounds = [_]OptimizationBoundary{.{
+        .kind = .dup_branch_fold,
+        .fold_start = fixture.boundary(),
+        .consumed_end = fixture.input.code_len,
+        .replacement_start = fixture.boundary(),
+        .replacement_product = 4,
+    }};
+    try auditBoundaryUniqueness(
+        &fixture.rt.memory,
+        &fixture.input,
+        &fixture.graph,
+        &fixture.binds,
+        &product_labels,
+        &sources,
+        &agreeing_bounds,
+    );
+    census = anchorSplitSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), anchorClassTotal(census, .a));
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        census.cases[@intFromEnum(AnchorCase.d_fold_contested_agree)],
+    );
+    // One PC owning a line marker, a label target and a fold replacement is
+    // the ruling's class B example.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        census.cases[@intFromEnum(AnchorCase.b_triple_owner_pc)],
     );
 }
 
@@ -2409,6 +3227,7 @@ test "compiler_v2.cfg: oracle report counts boundary categories" {
         &graph,
         &binds,
         &product_labels,
+        &.{},
         &.{},
     );
 

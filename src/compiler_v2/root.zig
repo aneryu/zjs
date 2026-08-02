@@ -86,7 +86,10 @@ pub fn compileFunctionV2(
         try addLedger(&out.closure_sources_threaded, fd.closure_var.len);
     }
 
-    if (comptime cfg.audit_oracles) emitIdentityHealth();
+    if (comptime cfg.audit_oracles) {
+        emitIdentityHealth();
+        emitAnchorSplit();
+    }
 }
 
 /// RELEASE AT THE CONSUMPTION POINT. `resolve_variables.run` is the last
@@ -111,6 +114,27 @@ fn emitIdentityHealth() void {
     var buffer: [512]u8 = undefined;
     const health = cfg.formatIdentityHealth(&buffer, cfg.fanoutCensusSnapshot());
     std.debug.print("{s}\n", .{health});
+}
+
+/// F3 anchor-split classification report. `ZJS_V2_ANCHOR_SPLIT` prints the
+/// cumulative class totals after every function (take the last line);
+/// `ZJS_V2_ANCHOR_EXEMPLARS` additionally prints each retained exemplar ONCE,
+/// at the compile that first captured it, so the whole run emits at most
+/// `cfg.anchor_exemplar_capacity` exemplar lines.
+var reported_anchor_exemplars: u32 = 0;
+
+fn emitAnchorSplit() void {
+    if (std.c.getenv("ZJS_V2_ANCHOR_EXEMPLARS") != null) {
+        while (reported_anchor_exemplars < cfg.anchor_exemplar_len) {
+            var line_buffer: [512]u8 = undefined;
+            const exemplar = cfg.anchor_exemplars[reported_anchor_exemplars];
+            reported_anchor_exemplars += 1;
+            std.debug.print("{s}\n", .{cfg.formatAnchorExemplar(&line_buffer, exemplar)});
+        }
+    }
+    if (std.c.getenv("ZJS_V2_ANCHOR_SPLIT") == null) return;
+    var buffer: [1024]u8 = undefined;
+    std.debug.print("{s}\n", .{cfg.formatAnchorSplit(&buffer, cfg.anchorSplitSnapshot())});
 }
 
 fn countEncodedSourceEvents(function: *const bytecode.Bytecode) usize {

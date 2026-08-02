@@ -2391,6 +2391,29 @@ const Resolver = struct {
             jump.size = compact_size;
             patch_offsets += 1;
 
+            // F3 anchor-split instrumentation: label addresses and source pcs
+            // are shifted below as two independent arrays. Both use the SAME
+            // predicate and delta, so the only way they can end up disagreeing
+            // is an event sitting STRICTLY INSIDE the removed bytes
+            // `(jump.pos, source_start)` - that event would be pulled behind
+            // its own instruction by one array while the other kept it. These
+            // counters make that population falsifiable instead of argued.
+            if (comptime cfg.audit_oracles) {
+                var window_labels: u64 = 0;
+                var window_sources: u64 = 0;
+                for (self.addr) |label_addr| {
+                    if (label_addr != labels.unbound and
+                        label_addr > jump.pos and label_addr < source_start)
+                    {
+                        window_labels += 1;
+                    }
+                }
+                for (self.output_sources[0..self.output_source_len]) |source| {
+                    if (source.pc > jump.pos and source.pc < source_start) window_sources += 1;
+                }
+                cfg.recordRelaxCompaction(window_sources, window_labels);
+            }
+
             for (self.addr) |*label_addr| {
                 if (label_addr.* != labels.unbound and label_addr.* > jump.pos)
                     label_addr.* -= delta;
@@ -2416,6 +2439,73 @@ const Resolver = struct {
                 try self.writeRelative(jump.pos, jump.size, diff);
             }
         }
+    }
+
+    /// F3 audit scratch: one bit per emitted source event, set when that event
+    /// sat exactly on a bound identity's final address before relaxJumps.
+    const AnchorCoincidence = struct {
+        bits: []u8 = &.{},
+        count: u64 = 0,
+
+        fn deinit(self: *AnchorCoincidence, memory: *core.memory.MemoryAccount) void {
+            if (self.bits.len != 0) memory.free(u8, self.bits);
+            self.bits = &.{};
+        }
+    };
+
+    /// True when `pc` equals the final address of some bound alias group.
+    /// `group_cursor` walks `self.binds` monotonically, so a caller iterating
+    /// source events in ascending pc order pays one merge, not a search each.
+    fn anchorAtAddress(self: *const Resolver, pc: u32, group_cursor: *usize) bool {
+        while (group_cursor.* < self.binds.len) {
+            var group_end = group_cursor.* + 1;
+            while (group_end < self.binds.len and
+                self.binds[group_end].bound_offset ==
+                    self.binds[group_cursor.*].bound_offset) : (group_end += 1)
+            {}
+            const group_identity = self.binds[group_cursor.*].label_index;
+            if (group_identity >= self.addr.len) return false;
+            const group_address = self.addr[group_identity];
+            if (group_address == labels.unbound or group_address < pc) {
+                group_cursor.* = group_end;
+                continue;
+            }
+            return group_address == pc;
+        }
+        return false;
+    }
+
+    fn captureAnchorCoincidence(self: *const Resolver) Error!AnchorCoincidence {
+        if (comptime !cfg.audit_oracles) return .{};
+        if (self.output_source_len == 0) return .{};
+        const byte_count = (@as(usize, self.output_source_len) + 7) / 8;
+        const bits = self.memory.alloc(u8, byte_count) catch return error.OutOfMemory;
+        @memset(bits, 0);
+        var result: AnchorCoincidence = .{ .bits = bits };
+        var group_cursor: usize = 0;
+        for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
+            if (!self.anchorAtAddress(source.pc, &group_cursor)) continue;
+            bits[index / 8] |= @as(u8, 1) << @intCast(index % 8);
+            result.count += 1;
+        }
+        return result;
+    }
+
+    fn reportAnchorCoincidence(self: *const Resolver, before: *const AnchorCoincidence) void {
+        if (comptime !cfg.audit_oracles) return;
+        var after_count: u64 = 0;
+        var lost: u64 = 0;
+        var gained: u64 = 0;
+        var group_cursor: usize = 0;
+        for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
+            const after = self.anchorAtAddress(source.pc, &group_cursor);
+            if (after) after_count += 1;
+            const was = before.bits.len > index / 8 and
+                (before.bits[index / 8] & (@as(u8, 1) << @intCast(index % 8))) != 0;
+            if (was and !after) lost += 1;
+            if (after and !was) gained += 1;
+        }
+        cfg.recordRelaxCoincidence(before.count, after_count, lost, gained);
     }
 
     /// Debug/ReleaseSafe product-to-final proof obligation. Canonical
@@ -2720,7 +2810,16 @@ pub fn run(
     try resolver.initScratch();
     try resolver.walk(layout);
     resolver.releaseConsumedProduct();
-    if (layout == .short) try resolver.relaxJumps();
+    if (layout == .short) {
+        // F3: relaxJumps is the one pass that moves source events and label
+        // addresses after they are both fixed. Snapshot which events sit on an
+        // identity BEFORE it runs and re-derive after, so "positional
+        // attribution survives compaction" is measured, not assumed.
+        var stability = try resolver.captureAnchorCoincidence();
+        defer stability.deinit(resolver.memory);
+        try resolver.relaxJumps();
+        resolver.reportAnchorCoincidence(&stability);
+    }
     if (comptime cfg.audit_oracles) try resolver.auditFinalBoundaryIdentity();
     try resolver.validateFinalOutput();
     resolver.commit();

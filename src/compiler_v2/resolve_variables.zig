@@ -222,12 +222,19 @@ const Resolver = struct {
         }
     }
 
+    /// `replacement_product` is the PRODUCT offset the replacement is written
+    /// at, captured by the caller at the instant of the replacing emission
+    /// (`labels.unbound` for a fold whose replacement is emitted later; the
+    /// deferred make_ref tail patches it in `emitPendingTailRewrite`). The F3
+    /// classifier compares it against the product offset of the label bound at
+    /// `replacement_start`.
     fn recordOptimizationBoundary(
         self: *Resolver,
         kind: cfg.OptimizationBoundaryKind,
         fold_start: u32,
         consumed_end: u32,
         replacement_start: u32,
+        replacement_product: u32,
     ) Error!void {
         if (comptime !audit_oracles) return;
         if (self.opt_boundary_len == std.math.maxInt(u32))
@@ -246,8 +253,29 @@ const Resolver = struct {
             .fold_start = fold_start,
             .consumed_end = consumed_end,
             .replacement_start = replacement_start,
+            .replacement_product = replacement_product,
         };
         self.opt_boundary_len += 1;
+    }
+
+    /// Fill in the product offset of a fold whose replacement is emitted after
+    /// the boundary was recorded (make_ref tail). Called from the emission
+    /// point with `product.code_len` taken before the replacing write.
+    fn resolveDeferredFoldProduct(
+        self: *Resolver,
+        kind: cfg.OptimizationBoundaryKind,
+        fold_start: u32,
+        replacement_product: u32,
+    ) void {
+        if (comptime !audit_oracles) return;
+        for (self.opt_boundaries[0..self.opt_boundary_len]) |*boundary| {
+            if (boundary.kind == kind and boundary.fold_start == fold_start and
+                boundary.replacement_product == labels.unbound)
+            {
+                boundary.replacement_product = replacement_product;
+                return;
+            }
+        }
     }
 
     fn prepareLegacyWrite(
@@ -764,6 +792,11 @@ const Resolver = struct {
         {
             return error.InvalidBytecode;
         }
+        self.resolveDeferredFoldProduct(
+            .make_ref_tail,
+            rewrite.input_offset,
+            self.product.code_len,
+        );
         if (rewrite.emit_dup) try self.emitInstruction(&.{op.dup}, null);
         try self.writeScopeVarAction(core.atom.null_atom, rewrite.put_action);
         self.absorbSourcesThrough(rewrite.input_offset + 1);
@@ -1415,10 +1448,16 @@ const Resolver = struct {
                 fold.emit_dup,
                 fold.put_action,
             );
+            // Product offset the consumed head resolves to. Nothing has been
+            // emitted since the caller's passBindsAt(position), so this is
+            // exactly where a label bound at `position` was bound.
+            const head_product = self.product.code_len;
+            var value_product = head_product;
             var next = position_next;
             if (fold.reads_value) {
                 try self.passBindsAt(position_next);
                 self.absorbSourcesThrough(position_next);
+                value_product = self.product.code_len;
                 try self.writeScopeVarAction(atom_id, fold.get_action);
                 next = std.math.add(u32, next, 1) catch return error.InvalidBytecode;
             }
@@ -1432,6 +1471,7 @@ const Resolver = struct {
                     position,
                     position_next,
                     position,
+                    head_product,
                 );
                 if (fold.reads_value) {
                     try self.recordOptimizationBoundary(
@@ -1439,13 +1479,17 @@ const Resolver = struct {
                         position_next,
                         next,
                         position_next,
+                        value_product,
                     );
                 }
+                // The tail replacement is emitted later, at the loop visit of
+                // fold.tail_offset; emitPendingTailRewrite fills the product.
                 try self.recordOptimizationBoundary(
                     .make_ref_tail,
                     fold.tail_offset,
                     tail_end,
                     fold.tail_offset,
+                    labels.unbound,
                 );
             }
             return next;
@@ -1551,11 +1595,15 @@ const Resolver = struct {
                     {
                         _ = try updateLabel(self.product, label_index, -1);
                         if (comptime audit_oracles) {
+                            // The replacement is empty: the anchor is the
+                            // product offset the deleted gosub would have
+                            // occupied, i.e. the current output cursor.
                             try self.recordOptimizationBoundary(
                                 .gosub_empty,
                                 position,
                                 position_next,
                                 position,
+                                self.product.code_len,
                             );
                         }
                     } else {
@@ -1617,6 +1665,7 @@ const Resolver = struct {
                             var rewritten: [5]u8 = undefined;
                             rewritten[0] = first.branch_op;
                             std.mem.writeInt(u32, rewritten[1..5], target.label_index, .little);
+                            const fold_product = self.product.code_len;
                             try self.emitInstruction(&rewritten, null);
                             if (comptime audit_oracles) {
                                 try self.recordOptimizationBoundary(
@@ -1624,6 +1673,7 @@ const Resolver = struct {
                                     position,
                                     first.after,
                                     position,
+                                    fold_product,
                                 );
                             }
                             self.absorbSourcesThrough(first.drop_pos);
@@ -1639,6 +1689,7 @@ const Resolver = struct {
                 // qjs:34343-34358.
                 op.insert3 => {
                     if (try self.matchInsertTail(position_next)) |match| {
+                        const fold_product = self.product.code_len;
                         try self.emitInstruction(&.{match.middle_op}, null);
                         if (comptime audit_oracles) {
                             try self.recordOptimizationBoundary(
@@ -1646,6 +1697,7 @@ const Resolver = struct {
                                 position,
                                 match.after,
                                 position,
+                                fold_product,
                             );
                         }
                         self.absorbSourcesThrough(match.drop_pos);
@@ -2055,6 +2107,7 @@ pub fn run(
             &graph,
             binds,
             product.label_slots[0..product.label_len],
+            product.source_slots[0..product.source_len],
             resolver.opt_boundaries[0..resolver.opt_boundary_len],
         );
     }
@@ -3232,6 +3285,14 @@ test "compiler_v2.resolve_variables: later apply_eval capture closes an earlier 
 test "compiler_v2.resolve_variables: local scope_make_ref fold equals legacy" {
     try requireCompilerV2();
 
+    // The corpus never reaches the make_ref fold (a `with` lvalue always needs
+    // the var-object probe), so this is the only place the deferred
+    // make_ref_tail replacement anchor is exercised: the F3 classifier's
+    // `fold_product_unknown` must stay zero here or the class D counts for
+    // that kind would be unmeasured rather than measured-as-agreeing.
+    cfg.resetAnchorSplitCensus();
+    defer cfg.resetAnchorSplitCensus();
+
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3294,6 +3355,20 @@ test "compiler_v2.resolve_variables: local scope_make_ref fold equals legacy" {
     try expectBindingRowsEqual(&harness.fd, &legacy_fd);
     try snapshot.expectUnchanged(harness.input());
     try expectOwnedAtomRelease(&harness, &product, local);
+
+    if (comptime audit_oracles) {
+        const census = cfg.anchorSplitSnapshot();
+        try std.testing.expectEqual(
+            @as(u64, 2),
+            census.fold_by_kind[@intFromEnum(cfg.OptimizationBoundaryKind.make_ref_head)],
+        );
+        try std.testing.expectEqual(
+            @as(u64, 1),
+            census.fold_by_kind[@intFromEnum(cfg.OptimizationBoundaryKind.make_ref_tail)],
+        );
+        try std.testing.expectEqual(@as(u64, 0), census.fold_product_unknown);
+        try std.testing.expectEqual(@as(u64, 0), cfg.anchorClassTotal(census, .a));
+    }
 }
 
 test "compiler_v2.resolve_variables: local scope_make_ref non-fold equals legacy" {
