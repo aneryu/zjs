@@ -8,7 +8,6 @@
 //! to the legacy resolver's curated reuse surface.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
@@ -19,6 +18,8 @@ const opcode = bytecode.opcode;
 const op = opcode.op;
 const legacy_pipeline = bytecode.pipeline_resolve_variables;
 const legacy = legacy_pipeline.v2;
+
+const audit_oracles = cfg.audit_oracles;
 
 pub const Error = error{
     OutOfMemory,
@@ -170,6 +171,9 @@ const Resolver = struct {
     pending_tail_rewrites: []PendingTailRewrite = &.{},
     pending_tail_capacity: usize = 0,
     pending_tail_len: u32 = 0,
+    opt_boundaries: []cfg.OptimizationBoundary = &.{},
+    opt_boundary_capacity: usize = 0,
+    opt_boundary_len: u32 = 0,
 
     bind_cursor: usize = 0,
     block_cursor: usize = 0,
@@ -184,6 +188,42 @@ const Resolver = struct {
         self.pending_tail_rewrites = &.{};
         self.pending_tail_capacity = 0;
         self.pending_tail_len = 0;
+        if (comptime audit_oracles) {
+            if (self.opt_boundary_capacity != 0) {
+                self.product.memory.free(cfg.OptimizationBoundary, self.opt_boundaries);
+            }
+            self.opt_boundaries = &.{};
+            self.opt_boundary_capacity = 0;
+            self.opt_boundary_len = 0;
+        }
+    }
+
+    fn recordOptimizationBoundary(
+        self: *Resolver,
+        kind: cfg.OptimizationBoundaryKind,
+        fold_start: u32,
+        consumed_end: u32,
+        replacement_start: u32,
+    ) Error!void {
+        if (comptime !audit_oracles) return;
+        if (self.opt_boundary_len == std.math.maxInt(u32))
+            return error.BytecodeOverflow;
+        try reserve(
+            cfg.OptimizationBoundary,
+            self.product.memory,
+            &self.opt_boundaries,
+            &self.opt_boundary_capacity,
+            self.opt_boundary_len,
+            1,
+            4,
+        );
+        self.opt_boundaries[self.opt_boundary_len] = .{
+            .kind = kind,
+            .fold_start = fold_start,
+            .consumed_end = consumed_end,
+            .replacement_start = replacement_start,
+        };
+        self.opt_boundary_len += 1;
     }
 
     fn prepareLegacyWrite(
@@ -1358,6 +1398,32 @@ const Resolver = struct {
                 try self.writeScopeVarAction(atom_id, fold.get_action);
                 next = std.math.add(u32, next, 1) catch return error.InvalidBytecode;
             }
+            if (comptime audit_oracles) {
+                const tail_end = std.math.add(u32, fold.tail_offset, 2) catch
+                    return error.InvalidBytecode;
+                // The head is one span per consumed instruction: a bind may
+                // legitimately sit at position_next and is passed above.
+                try self.recordOptimizationBoundary(
+                    .make_ref_head,
+                    position,
+                    position_next,
+                    position,
+                );
+                if (fold.reads_value) {
+                    try self.recordOptimizationBoundary(
+                        .make_ref_head,
+                        position_next,
+                        next,
+                        position_next,
+                    );
+                }
+                try self.recordOptimizationBoundary(
+                    .make_ref_tail,
+                    fold.tail_offset,
+                    tail_end,
+                    fold.tail_offset,
+                );
+            }
             return next;
         }
 
@@ -1460,6 +1526,14 @@ const Resolver = struct {
                         self.code[slot.bound_offset] == op.ret)
                     {
                         _ = try updateLabel(self.product, label_index, -1);
+                        if (comptime audit_oracles) {
+                            try self.recordOptimizationBoundary(
+                                .gosub_empty,
+                                position,
+                                position_next,
+                                position,
+                            );
+                        }
                     } else {
                         try self.copyInputInstruction(position, instruction, input_atom);
                     }
@@ -1520,6 +1594,14 @@ const Resolver = struct {
                             rewritten[0] = first.branch_op;
                             std.mem.writeInt(u32, rewritten[1..5], target.label_index, .little);
                             try self.emitInstruction(&rewritten, null);
+                            if (comptime audit_oracles) {
+                                try self.recordOptimizationBoundary(
+                                    .dup_branch_fold,
+                                    position,
+                                    first.after,
+                                    position,
+                                );
+                            }
                             self.absorbSourcesThrough(first.drop_pos);
                             position_next = first.after;
                         } else {
@@ -1534,6 +1616,14 @@ const Resolver = struct {
                 op.insert3 => {
                     if (try self.matchInsertTail(position_next)) |match| {
                         try self.emitInstruction(&.{match.middle_op}, null);
+                        if (comptime audit_oracles) {
+                            try self.recordOptimizationBoundary(
+                                .insert_tail_fold,
+                                position,
+                                match.after,
+                                position,
+                            );
+                        }
                         self.absorbSourcesThrough(match.drop_pos);
                         position_next = match.after;
                     } else {
@@ -1909,7 +1999,7 @@ pub fn run(
 
     var graph = try cfg.build(fd.memory, input, binds);
     defer graph.deinit();
-    if (comptime (builtin.mode == .Debug or builtin.mode == .ReleaseSafe)) {
+    if (comptime audit_oracles) {
         try cfg.auditInstructionOwnership(fd.memory, input, &graph);
     }
     try markReachableEvalCaptures(input, &graph, fd);
@@ -1934,6 +2024,16 @@ pub fn run(
     };
     defer resolver.deinitScratch();
     try resolver.run();
+    if (comptime cfg.audit_oracles) {
+        try cfg.auditBoundaryUniqueness(
+            fd.memory,
+            input,
+            &graph,
+            binds,
+            product.label_slots[0..product.label_len],
+            resolver.opt_boundaries[0..resolver.opt_boundary_len],
+        );
+    }
     return product;
 }
 

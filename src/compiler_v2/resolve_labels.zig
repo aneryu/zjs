@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
+const cfg = @import("cfg.zig");
 const labels = @import("labels.zig");
 const resolve_variables = @import("resolve_variables.zig");
 
@@ -53,11 +54,17 @@ const FinalReloc = struct {
     size: u8,
 };
 
+const AuditCanonicalIdentity = if (cfg.audit_oracles) u32 else void;
+const no_audit_canonical_identity: AuditCanonicalIdentity = if (cfg.audit_oracles)
+    labels.unbound
+else {};
+
 const JumpSlot = struct {
     op: u8,
     size: u8,
     pos: u32,
     label: u32,
+    canonical_identity: AuditCanonicalIdentity = no_audit_canonical_identity,
 };
 
 const BindEntry = struct {
@@ -72,6 +79,152 @@ fn bindLessThan(_: void, lhs: BindEntry, rhs: BindEntry) bool {
     if (lhs.bound_offset != rhs.bound_offset)
         return lhs.bound_offset < rhs.bound_offset;
     return lhs.label_index < rhs.label_index;
+}
+
+fn lowerBoundBindOffset(binds: []const BindEntry, bound_offset: u32) usize {
+    var low: usize = 0;
+    var high = binds.len;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        if (binds[middle].bound_offset < bound_offset)
+            low = middle + 1
+        else
+            high = middle;
+    }
+    return low;
+}
+
+/// Product-coordinate form of cfg.canonicalIdentityAtOffset. Callers already
+/// hold the target LabelSlot and pass slot.bound_offset, keeping every jump
+/// lookup O(log binds) rather than scanning this offset-primary index by id.
+fn canonicalIdentityAtProductOffset(
+    binds: []const BindEntry,
+    bound_offset: u32,
+) ?u32 {
+    const first = lowerBoundBindOffset(binds, bound_offset);
+    if (first >= binds.len or binds[first].bound_offset != bound_offset) return null;
+    return binds[first].label_index;
+}
+
+const FinalAliasSplit = struct {
+    first_label: u32,
+    first_address: u32,
+    second_label: u32,
+    second_address: u32,
+};
+
+fn finalAliasSplit(group: []const BindEntry, addr: []const u32) ?FinalAliasSplit {
+    var first_live_label: ?u32 = null;
+    for (group) |entry| {
+        if (entry.label_index >= addr.len) return null;
+        const final_address = addr[entry.label_index];
+        if (final_address == labels.unbound) continue;
+        if (first_live_label) |first_label| {
+            const first_address = addr[first_label];
+            if (first_address != final_address) {
+                return .{
+                    .first_label = first_label,
+                    .first_address = first_address,
+                    .second_label = entry.label_index,
+                    .second_address = final_address,
+                };
+            }
+        } else {
+            first_live_label = entry.label_index;
+        }
+    }
+    return null;
+}
+
+const AliasLivenessSplit = struct {
+    live_label: u32,
+    retired_label: u32,
+};
+
+fn aliasLivenessSplit(group: []const BindEntry, addr: []const u32) ?AliasLivenessSplit {
+    var live_label: ?u32 = null;
+    var retired_label: ?u32 = null;
+    for (group) |entry| {
+        if (entry.label_index >= addr.len) return null;
+        if (addr[entry.label_index] == labels.unbound)
+            retired_label = retired_label orelse entry.label_index
+        else
+            live_label = live_label orelse entry.label_index;
+        if (live_label != null and retired_label != null) {
+            return .{ .live_label = live_label.?, .retired_label = retired_label.? };
+        }
+    }
+    return null;
+}
+
+/// A boundary whose whole alias run was retired must have been retired
+/// deliberately and must own nothing: it was dead-skipped, holds no relocation
+/// and carries no surviving reference.
+///
+/// `match_barrier` is deliberately NOT a disqualifier. The barrier flag means
+/// "Stage 4 must not FOLD across this bind even at ref_count zero"
+/// (labels.zig LabelFlags), and `hasBindInRange` — the routine that enforces
+/// it — reads `initially_referenced`/`match_barrier` without consulting
+/// `dead_skipped`, so retiring the bind keeps the barrier intact. Only
+/// `skipDeadCode` can retire a barrier bind (`processBindsAt`'s pass-over loop
+/// fails closed on one), and it scans unreachable code only; that is exactly
+/// the S4 analogue of resolve_variables' `deadBoundaryAt` unreachable arm,
+/// which likewise retires barrier binds. cfg.auditBoundaryUniqueness encodes
+/// the same asymmetry in input coordinates.
+fn retiredIdentityStillReferenced(entry: BindEntry, slot: labels.LabelSlot) bool {
+    return !entry.dead_skipped or
+        slot.first_reloc != labels.no_reloc or
+        slot.ref_count != 0;
+}
+
+fn panicFinalBoundaryUniquenessViolation(
+    category: []const u8,
+    role: []const u8,
+    canonical_identities: [2]u32,
+    raw_labels: [2]u32,
+    product_offsets: [2]u32,
+    final_addresses: [2]u32,
+) noreturn {
+    std.debug.panic(
+        "compiler_v2 boundary-uniqueness violation: category={s} role={s} construct=resolve_labels_v2 key=canonical_identities={d},{d}:raw_labels={d},{d} identities=[canonical_label#{d}@{d}, canonical_label#{d}@{d}] block=none label=none source=none addresses=[{d},{d}]",
+        .{
+            category,
+            role,
+            canonical_identities[0],
+            canonical_identities[1],
+            raw_labels[0],
+            raw_labels[1],
+            canonical_identities[0],
+            product_offsets[0],
+            canonical_identities[1],
+            product_offsets[1],
+            final_addresses[0],
+            final_addresses[1],
+        },
+    );
+}
+
+fn resolvedJumpAddress(
+    output: []const u8,
+    output_len: u32,
+    jump: JumpSlot,
+) Error!u32 {
+    const opcode_delta: u32 = if (isWithOp(jump.op)) 5 else 1;
+    if (jump.pos < opcode_delta or jump.pos > output_len or
+        @as(usize, jump.pos) + jump.size > output_len or
+        output[jump.pos - opcode_delta] != jump.op)
+    {
+        return error.InvalidBytecode;
+    }
+    const operand: i64 = switch (jump.size) {
+        1 => @as(i8, @bitCast(output[jump.pos])),
+        2 => std.mem.readInt(i16, output[jump.pos..][0..2], .little),
+        4 => std.mem.readInt(i32, output[jump.pos..][0..4], .little),
+        else => return error.InvalidBytecode,
+    };
+    const target = @as(i64, jump.pos) + operand;
+    if (target < 0 or target > output_len) return error.InvalidBytecode;
+    return @intCast(target);
 }
 
 const SourcePoint = struct {
@@ -762,6 +915,16 @@ const Resolver = struct {
             .pos = operand_pos,
             .label = label_index,
         };
+        if (comptime cfg.audit_oracles) {
+            if (label_index >= self.product.label_len)
+                return error.InvalidBytecode;
+            const slot = self.product.label_slots[label_index];
+            if (!slot.flags.bound or slot.bound_offset == labels.unbound)
+                return error.InvalidBytecode;
+            self.jump_slots[index].canonical_identity =
+                canonicalIdentityAtProductOffset(self.binds, slot.bound_offset) orelse
+                return error.InvalidBytecode;
+        }
         self.jump_count += 1;
         return index;
     }
@@ -931,14 +1094,23 @@ const Resolver = struct {
                 const slot = &self.product.label_slots[label_index];
                 if (slot.ref_count > 0) {
                     has_live_bind = true;
-                } else {
-                    if (slot.first_reloc != labels.no_reloc)
-                        return error.InvalidBytecode;
-                    self.binds[bind_end].dead_skipped = true;
+                } else if (slot.first_reloc != labels.no_reloc) {
+                    return error.InvalidBytecode;
                 }
                 bind_end += 1;
             }
+            // Retire a boundary's alias run wholesale or not at all. Marking
+            // unreferenced aliases while still scanning retired them even when
+            // the run turned out to be live, and `processBindsAt` then skipped
+            // exactly those identities: one semantic boundary would carry a
+            // surviving identity resolved to the output position plus an alias
+            // resolved to nothing. That is the split the boundary-uniqueness
+            // oracle rejects as `alias_liveness_split`. S3 retires transparent
+            // zero-ref aliases (deadBoundaryAt, qjs label transparency) before
+            // this stage ever sees them, so every alias reaching S4 is one S3
+            // chose to keep.
             if (has_live_bind) return position;
+            for (self.binds[bind_start..bind_end]) |*entry| entry.dead_skipped = true;
             self.bind_cursor = bind_end;
             if (position == self.product.code_len) return position;
 
@@ -2236,6 +2408,196 @@ const Resolver = struct {
         }
     }
 
+    /// Debug/ReleaseSafe product-to-final proof obligation. Canonical
+    /// identities are compared before final addresses; address equality only
+    /// corroborates the already-matched identity chain.
+    fn auditFinalBoundaryIdentity(self: *const Resolver) Error!void {
+        if (self.product.label_len > self.product.label_slots.len or
+            self.addr.len < self.product.label_len or
+            self.jump_count > self.jump_slots.len or
+            self.output_len > self.output.len or
+            self.output_source_len > self.output_sources.len)
+        {
+            return error.InvalidBytecode;
+        }
+
+        var bound_count: usize = 0;
+        for (self.product.label_slots[0..self.product.label_len]) |slot| {
+            if (slot.flags.bound) bound_count += 1;
+        }
+        if (bound_count != self.binds.len) return error.InvalidBytecode;
+
+        var previous_bind: ?BindEntry = null;
+        for (self.binds) |entry| {
+            if (entry.label_index >= self.product.label_len)
+                return error.InvalidBytecode;
+            const slot = self.product.label_slots[entry.label_index];
+            if (!slot.flags.bound or slot.bound_offset != entry.bound_offset)
+                return error.InvalidBytecode;
+            if (previous_bind) |previous| {
+                if (entry.bound_offset < previous.bound_offset or
+                    (entry.bound_offset == previous.bound_offset and
+                        entry.label_index <= previous.label_index))
+                {
+                    return error.InvalidBytecode;
+                }
+            }
+            previous_bind = entry;
+        }
+
+        var previous_live_address: ?u32 = null;
+        var live_group_count: u64 = 0;
+        var group_start: usize = 0;
+        while (group_start < self.binds.len) {
+            var group_end = group_start + 1;
+            while (group_end < self.binds.len and
+                self.binds[group_end].bound_offset == self.binds[group_start].bound_offset) : (group_end += 1)
+            {}
+            const group = self.binds[group_start..group_end];
+            const product_offset = group[0].bound_offset;
+            const canonical_identity = group[0].label_index;
+            if (canonicalIdentityAtProductOffset(self.binds, product_offset) != canonical_identity)
+                return error.InvalidBytecode;
+
+            if (finalAliasSplit(group, self.addr)) |split| {
+                panicFinalBoundaryUniquenessViolation(
+                    "alias_final_address_split",
+                    "position",
+                    .{ canonical_identity, canonical_identity },
+                    .{ split.first_label, split.second_label },
+                    .{ product_offset, product_offset },
+                    .{ split.first_address, split.second_address },
+                );
+            }
+            if (aliasLivenessSplit(group, self.addr)) |split| {
+                panicFinalBoundaryUniquenessViolation(
+                    "alias_liveness_split",
+                    "position",
+                    .{ canonical_identity, canonical_identity },
+                    .{ split.live_label, split.retired_label },
+                    .{ product_offset, product_offset },
+                    .{ self.addr[split.live_label], self.addr[split.retired_label] },
+                );
+            }
+
+            const group_address = self.addr[canonical_identity];
+            if (group_address == labels.unbound) {
+                for (group) |entry| {
+                    const slot = self.product.label_slots[entry.label_index];
+                    if (retiredIdentityStillReferenced(entry, slot)) {
+                        panicFinalBoundaryUniquenessViolation(
+                            "retired_identity_still_referenced",
+                            "position",
+                            .{ canonical_identity, canonical_identity },
+                            .{ entry.label_index, canonical_identity },
+                            .{ product_offset, product_offset },
+                            .{ self.addr[entry.label_index], group_address },
+                        );
+                    }
+                }
+            } else {
+                if (group_address > self.output_len) return error.InvalidBytecode;
+                if (previous_live_address) |previous| {
+                    if (group_address < previous) return error.InvalidBytecode;
+                }
+                previous_live_address = group_address;
+                live_group_count += 1;
+            }
+            group_start = group_end;
+        }
+
+        for (self.jump_slots[0..self.jump_count]) |jump| {
+            if (jump.label >= self.product.label_len)
+                return error.InvalidBytecode;
+            const target_slot = self.product.label_slots[jump.label];
+            if (!target_slot.flags.bound or target_slot.bound_offset == labels.unbound)
+                return error.InvalidBytecode;
+
+            // JumpSlot retains the jump subsystem's canonical identity when
+            // emitted. Recompute the position subsystem's identity from the
+            // held LabelSlot offset, then compare identities before reading an
+            // address or decoding the relative operand.
+            const jump_identity = jump.canonical_identity;
+            const boundary_identity = canonicalIdentityAtProductOffset(
+                self.binds,
+                target_slot.bound_offset,
+            ) orelse return error.InvalidBytecode;
+            if (jump_identity >= self.product.label_len)
+                return error.InvalidBytecode;
+            const jump_identity_slot = self.product.label_slots[jump_identity];
+            if (!jump_identity_slot.flags.bound or
+                jump_identity_slot.bound_offset == labels.unbound)
+            {
+                return error.InvalidBytecode;
+            }
+            if (jump_identity != boundary_identity) {
+                panicFinalBoundaryUniquenessViolation(
+                    "cross_subsystem_identity_split",
+                    "jump_target",
+                    .{ jump_identity, boundary_identity },
+                    .{ jump.label, boundary_identity },
+                    .{ jump_identity_slot.bound_offset, target_slot.bound_offset },
+                    .{ self.addr[jump.label], self.addr[boundary_identity] },
+                );
+            }
+
+            const encoded_address = try resolvedJumpAddress(
+                self.output[0..self.output_len],
+                self.output_len,
+                jump,
+            );
+            const target_address = self.addr[jump.label];
+            if (target_address == labels.unbound or encoded_address != target_address) {
+                panicFinalBoundaryUniquenessViolation(
+                    "cross_subsystem_identity_split",
+                    "jump_target",
+                    .{ jump_identity, boundary_identity },
+                    .{ jump.label, boundary_identity },
+                    .{ jump_identity_slot.bound_offset, target_slot.bound_offset },
+                    .{ target_address, encoded_address },
+                );
+            }
+        }
+
+        var source_group_start: usize = 0;
+        var previous_source_pc: ?u32 = null;
+        var source_events_on_identity: u64 = 0;
+        var source_events_between_identities: u64 = 0;
+        for (self.output_sources[0..self.output_source_len]) |source| {
+            if (source.pc >= self.output_len) return error.InvalidBytecode;
+            if (previous_source_pc) |previous| {
+                if (source.pc < previous) return error.InvalidBytecode;
+            }
+            previous_source_pc = source.pc;
+
+            var on_identity = false;
+            while (source_group_start < self.binds.len) {
+                var source_group_end = source_group_start + 1;
+                while (source_group_end < self.binds.len and
+                    self.binds[source_group_end].bound_offset == self.binds[source_group_start].bound_offset) : (source_group_end += 1)
+                {}
+                const group_identity = self.binds[source_group_start].label_index;
+                const group_address = self.addr[group_identity];
+                if (group_address == labels.unbound or group_address < source.pc) {
+                    source_group_start = source_group_end;
+                    continue;
+                }
+                on_identity = group_address == source.pc;
+                break;
+            }
+            if (on_identity)
+                source_events_on_identity += 1
+            else
+                source_events_between_identities += 1;
+        }
+        cfg.recordFinalSourceCensus(
+            self.output_source_len,
+            source_events_on_identity,
+            source_events_between_identities,
+        );
+        cfg.recordFinalBoundaryHops(live_group_count);
+    }
+
     fn exactCopy(
         self: *Resolver,
         comptime T: type,
@@ -2361,6 +2723,7 @@ pub fn run(
     try resolver.initScratch();
     try resolver.walk(layout);
     if (layout == .short) try resolver.relaxJumps();
+    if (comptime cfg.audit_oracles) try resolver.auditFinalBoundaryIdentity();
     try resolver.validateFinalOutput();
     try resolver.commit();
 }
@@ -3691,6 +4054,93 @@ test "compiler_v2.resolve_labels: allocation failure sweep is transactional" {
         resolveLabelsOomScript,
         .{},
     );
+}
+
+test "compiler_v2.resolve_labels: alias group resolves to one final address" {
+    const group = [_]BindEntry{
+        .{
+            .bound_offset = 4,
+            .label_index = 0,
+            .initially_referenced = true,
+            .match_barrier = false,
+        },
+        .{
+            .bound_offset = 4,
+            .label_index = 1,
+            .initially_referenced = true,
+            .match_barrier = false,
+        },
+    };
+    const addr = [_]u32{ 9, 9 };
+    try std.testing.expect(finalAliasSplit(&group, &addr) == null);
+    try std.testing.expect(aliasLivenessSplit(&group, &addr) == null);
+}
+
+test "compiler_v2.resolve_labels: split final addresses are rejected" {
+    const group = [_]BindEntry{
+        .{
+            .bound_offset = 4,
+            .label_index = 0,
+            .initially_referenced = true,
+            .match_barrier = false,
+        },
+        .{
+            .bound_offset = 4,
+            .label_index = 1,
+            .initially_referenced = true,
+            .match_barrier = false,
+        },
+    };
+    const addr = [_]u32{ 9, 10 };
+    const split = finalAliasSplit(&group, &addr) orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 0), split.first_label);
+    try std.testing.expectEqual(@as(u32, 1), split.second_label);
+}
+
+test "compiler_v2.resolve_labels: a half-retired alias group is rejected" {
+    const group = [_]BindEntry{
+        .{
+            .bound_offset = 4,
+            .label_index = 0,
+            .initially_referenced = true,
+            .match_barrier = false,
+        },
+        .{
+            .bound_offset = 4,
+            .label_index = 1,
+            .initially_referenced = false,
+            .match_barrier = false,
+            .dead_skipped = true,
+        },
+    };
+    const addr = [_]u32{ 9, labels.unbound };
+    const split = aliasLivenessSplit(&group, &addr) orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 0), split.live_label);
+    try std.testing.expectEqual(@as(u32, 1), split.retired_label);
+}
+
+test "compiler_v2.resolve_labels: identical final address is not a defence" {
+    const binds = [_]BindEntry{
+        .{
+            .bound_offset = 4,
+            .label_index = 0,
+            .initially_referenced = true,
+            .match_barrier = false,
+        },
+        .{
+            .bound_offset = 8,
+            .label_index = 1,
+            .initially_referenced = true,
+            .match_barrier = false,
+        },
+    };
+    const addr = [_]u32{ 12, 12 };
+    const first_identity = canonicalIdentityAtProductOffset(&binds, 4).?;
+    const second_identity = canonicalIdentityAtProductOffset(&binds, 8).?;
+    try std.testing.expect(first_identity != second_identity);
+    try std.testing.expectEqual(addr[first_identity], addr[second_identity]);
 }
 
 test {

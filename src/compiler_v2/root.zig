@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
+const cfg = @import("cfg.zig");
 
 pub const labels = @import("labels.zig");
 pub const builder = @import("builder.zig");
@@ -69,6 +70,15 @@ pub fn compileFunctionV2(
         try addLedger(&out.source_events_emitted, countEncodedSourceEvents(function));
         try addLedger(&out.closure_sources_threaded, fd.closure_var.len);
     }
+
+    if (comptime cfg.audit_oracles) emitIdentityHealth();
+}
+
+fn emitIdentityHealth() void {
+    if (std.c.getenv("ZJS_V2_IDENTITY_HEALTH") == null) return;
+    var buffer: [512]u8 = undefined;
+    const health = cfg.formatIdentityHealth(&buffer, cfg.fanoutCensusSnapshot());
+    std.debug.print("{s}\n", .{health});
 }
 
 fn countEncodedSourceEvents(function: *const bytecode.Bytecode) usize {
