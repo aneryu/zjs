@@ -12434,9 +12434,11 @@ pub const parser_core = struct {
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
         const current_line = s.token.line_num;
-        const peek_token = s.lex.next() catch return false;
+        // The lexer restore must be armed before the fallible scan: `next()`
+        // moves `pos` past the peeked token before it can fail (the identifier
+        // atom is interned last), so a failure that escaped this frame with the
+        // restore still unarmed would leave the parser mid-token.
         defer {
-            s.lex.freeToken(@constCast(&peek_token));
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
@@ -12445,6 +12447,8 @@ pub const parser_core = struct {
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
+        const peek_token = s.lex.next() catch return false;
+        defer s.lex.freeToken(@constCast(&peek_token));
         const val = peek_token.val;
         if (val == @as(tok.TokenKind, @intCast('['))) {
             // `let [` is a syntax restriction: it never introduces an
