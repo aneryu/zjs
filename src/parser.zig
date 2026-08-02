@@ -22431,8 +22431,9 @@ pub const compile_entry = struct {
         errdefer if (legacy_root_owned) JSValue.functionBytecode(&legacy_root.header).free(rt);
         const atom_b = atomStrongRefTotal(rt);
         if (atom_b < atom_a) {
+            compiler_v2.cfg.recordDiffBucket(.ownership_mismatch);
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier=L0 mode={s} fn=root field=legacy_atom_delta legacy={d} v2=underflow\n",
+                "ZJS-DUAL-MISMATCH bucket=OWNERSHIP_MISMATCH tier=L0 mode={s} fn=root field=legacy_atom_delta legacy={d} v2=underflow\n",
                 .{ modeName(options.mode), atom_a - atom_b },
             );
             return error.DualCompileMismatch;
@@ -22448,8 +22449,9 @@ pub const compile_entry = struct {
         const v2_root = compileQjsProgram(.v2, rt, filename_atom, source, options, v2_context, &v2_function, &v2_features) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
+                compiler_v2.cfg.recordDiffBucket(.ownership_mismatch);
                 std.debug.print(
-                    "ZJS-DUAL-MISMATCH tier=L0 mode={s} fn=root field=v2_compile_error legacy=success v2={s}\n",
+                    "ZJS-DUAL-MISMATCH bucket=OWNERSHIP_MISMATCH tier=L0 mode={s} fn=root field=v2_compile_error legacy=success v2={s}\n",
                     .{ modeName(options.mode), @errorName(err) },
                 );
                 return error.DualCompileMismatch;
@@ -22459,8 +22461,9 @@ pub const compile_entry = struct {
         errdefer if (v2_root_owned) JSValue.functionBytecode(&v2_root.header).free(rt);
         const atom_c = atomStrongRefTotal(rt);
         if (atom_c < atom_b) {
+            compiler_v2.cfg.recordDiffBucket(.ownership_mismatch);
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier=L0 mode={s} fn=root field=v2_atom_delta legacy={d} v2=underflow\n",
+                "ZJS-DUAL-MISMATCH bucket=OWNERSHIP_MISMATCH tier=L0 mode={s} fn=root field=v2_atom_delta legacy={d} v2=underflow\n",
                 .{ modeName(options.mode), atom_b - atom_c },
             );
             return error.DualCompileMismatch;
@@ -22483,15 +22486,17 @@ pub const compile_entry = struct {
 
         const atom_after_legacy_free = atomStrongRefTotal(rt);
         const expected_after_free = std.math.add(usize, atom_a, atom_c - atom_b) catch {
+            compiler_v2.cfg.recordDiffBucket(.ownership_mismatch);
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier=L0 mode={s} fn=root field=legacy_free_atom_balance legacy=overflow v2={d}\n",
+                "ZJS-DUAL-MISMATCH bucket=OWNERSHIP_MISMATCH tier=L0 mode={s} fn=root field=legacy_free_atom_balance legacy=overflow v2={d}\n",
                 .{ modeName(options.mode), atom_after_legacy_free },
             );
             return error.DualCompileMismatch;
         };
         if (atom_after_legacy_free != expected_after_free) {
+            compiler_v2.cfg.recordDiffBucket(.ownership_mismatch);
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier=L0 mode={s} fn=root field=legacy_free_atom_balance legacy={d} v2={d}\n",
+                "ZJS-DUAL-MISMATCH bucket=OWNERSHIP_MISMATCH tier=L0 mode={s} fn=root field=legacy_free_atom_balance legacy={d} v2={d}\n",
                 .{ modeName(options.mode), expected_after_free, atom_after_legacy_free },
             );
             return error.DualCompileMismatch;

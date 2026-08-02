@@ -43,6 +43,70 @@ pub const OptimizationBoundaryKind = enum {
     gosub_empty,
 };
 
+/// The ruling's six diff buckets. Every oracle violation — cfg.zig identity
+/// oracles and compare.zig dual-comparator tiers alike — is classified into
+/// exactly one of these, and every failure message names its bucket before
+/// any coordinate. Offsets are the pre-v2 identity and must never be the
+/// primary classification key.
+pub const DiffBucket = enum {
+    boundary_mismatch,
+    ownership_mismatch,
+    binding_mismatch,
+    cfg_mismatch,
+    continuation_mismatch,
+    source_event_mismatch,
+
+    pub fn name(self: DiffBucket) []const u8 {
+        return switch (self) {
+            .boundary_mismatch => "BOUNDARY_MISMATCH",
+            .ownership_mismatch => "OWNERSHIP_MISMATCH",
+            .binding_mismatch => "BINDING_MISMATCH",
+            .cfg_mismatch => "CFG_MISMATCH",
+            .continuation_mismatch => "CONTINUATION_MISMATCH",
+            .source_event_mismatch => "SOURCE_EVENT_MISMATCH",
+        };
+    }
+};
+
+/// Corpus-level oracle report accumulator. Scratch-only: the payload type is
+/// comptime-erased to an empty struct in ReleaseFast, so neither the storage
+/// nor any of the counting code exists in a release build.
+pub const OracleReport = if (audit_oracles) struct {
+    // boundary set: every legacy-notion boundary claim resolved against the
+    // v2 identity that owns it.
+    legacy_boundaries: u64 = 0,
+    v2_boundaries: u64 = 0,
+    missing_boundaries: u64 = 0,
+    extra_boundaries: u64 = 0,
+    duplicated_boundaries: u64 = 0,
+    // per-category legacy claim totals (the ruling's four boundary
+    // categories), reported as provenance for `legacy_boundaries`.
+    instruction_claims: u64 = 0,
+    control_flow_claims: u64 = 0,
+    optimization_claims: u64 = 0,
+    debug_claims: u64 = 0,
+    // atom-owner ownership events.
+    ownership_create: u64 = 0,
+    ownership_transfer: u64 = 0,
+    ownership_release: u64 = 0,
+    ownership_unbalanced: u64 = 0,
+    // control totals.
+    control_blocks: u64 = 0,
+    control_edges: u64 = 0,
+    control_continuations: u64 = 0,
+    // diff buckets, indexed by @intFromEnum(DiffBucket).
+    buckets: [6]u64 = .{0} ** 6,
+} else struct {};
+
+pub var oracle_report: OracleReport = .{};
+
+comptime {
+    // The ruling requires the counters to not exist in ReleaseFast. This is
+    // the standing compile-time proof: the accumulator carries no storage
+    // there, so no counting code can be emitted against it either.
+    if (!audit_oracles) std.debug.assert(@sizeOf(OracleReport) == 0);
+}
+
 /// One resolver-recorded peephole span in INPUT (temporary-stream) coordinates.
 /// `replacement_start` is the single offset that owns the emitted replacement;
 /// `fold_start .. consumed_end` is the consumed range.
@@ -378,6 +442,27 @@ pub fn isUnconditionalTerminal(op_id: u8) bool {
         op.throw,
         op.throw_error,
         op.ret,
+        => true,
+        else => false,
+    };
+}
+
+/// Continuation-kind opcodes. Keep synchronized with
+/// compare.zig's `continuationKind`, which is the dual comparator's
+/// definition of the same population.
+fn isContinuationOp(op_id: u8) bool {
+    return switch (op_id) {
+        op.@"catch",
+        op.gosub,
+        op.ret,
+        op.nip_catch,
+        op.for_await_of_start,
+        op.for_await_of_next,
+        op.initial_yield,
+        op.yield,
+        op.yield_star,
+        op.async_yield_star,
+        op.await,
         => true,
         else => false,
     };
@@ -814,9 +899,10 @@ pub fn auditInstructionOwnership(
         const cfg_live = graph.isReachable(block_index) and
             (!block.has_terminal or pc <= block.cutoff_offset);
         if (instruction_live != cfg_live) {
+            recordDiffBucket(.ownership_mismatch);
             std.debug.panic(
-                "compiler_v2 CFG ownership divergence at offset {d}, opcode 0x{x:0>2}, block {d}: instruction_live={}, cfg_live={}",
-                .{ pc, input.code[pc], block_index, instruction_live, cfg_live },
+                "compiler_v2 oracle violation: bucket=OWNERSHIP_MISMATCH category=cfg_ownership_divergence role=position construct=opcode_0x{x:0>2} key=block={d} identities=[instruction_live={}, cfg_live={}] offset={d}",
+                .{ input.code[pc], block_index, instruction_live, cfg_live, pc },
             );
         }
         pc = std.math.add(u32, pc, nodes[pc].size) catch
@@ -975,6 +1061,7 @@ fn writeReportIdentity(writer: *std.Io.Writer, identity: ReportIdentity) void {
 }
 
 fn panicBoundaryUniquenessViolation(
+    bucket: DiffBucket,
     category: []const u8,
     role: BoundaryRole,
     op_id: u8,
@@ -988,17 +1075,19 @@ fn panicBoundaryUniquenessViolation(
     var message_buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&message_buffer);
     writer.print(
-        "compiler_v2 boundary-uniqueness violation: category={s} role={s} construct=opcode_0x{x:0>2} key={s} identities=[",
-        .{ category, @tagName(role), op_id, semantic_key },
+        "compiler_v2 oracle violation: bucket={s} category={s} role={s} construct=opcode_0x{x:0>2} key={s} identities=[",
+        .{ bucket.name(), category, @tagName(role), op_id, semantic_key },
     ) catch unreachable;
     writeReportIdentity(&writer, identities[0]);
     writer.print(", ", .{}) catch unreachable;
     writeReportIdentity(&writer, identities[1]);
     writer.print("] {s}", .{origin_text}) catch unreachable;
+    recordDiffBucket(bucket);
     std.debug.panic("{s}", .{writer.buffered()});
 }
 
 fn boundaryViolation(
+    bucket: DiffBucket,
     input: *const builder.Builder,
     graph: *const Graph,
     binds: []const BindEntry,
@@ -1015,6 +1104,7 @@ fn boundaryViolation(
     else
         0xff;
     panicBoundaryUniquenessViolation(
+        bucket,
         category,
         role,
         op_id,
@@ -1244,6 +1334,149 @@ fn censusAdd(counter: *u64, amount: u64) void {
     _ = @atomicRmw(u64, counter, .Add, amount, .monotonic);
 }
 
+fn reportAdd(comptime field: []const u8, amount: u64) void {
+    if (comptime !audit_oracles) return;
+    censusAdd(&@field(oracle_report, field), amount);
+}
+
+pub fn recordDiffBucket(bucket: DiffBucket) void {
+    if (comptime !audit_oracles) return;
+    censusAdd(&oracle_report.buckets[@intFromEnum(bucket)], 1);
+}
+
+pub fn oracleReportSnapshot() OracleReport {
+    if (comptime !audit_oracles) return .{};
+    var report: OracleReport = .{
+        .legacy_boundaries = @atomicLoad(
+            u64,
+            &oracle_report.legacy_boundaries,
+            .monotonic,
+        ),
+        .v2_boundaries = @atomicLoad(u64, &oracle_report.v2_boundaries, .monotonic),
+        .missing_boundaries = @atomicLoad(
+            u64,
+            &oracle_report.missing_boundaries,
+            .monotonic,
+        ),
+        .extra_boundaries = @atomicLoad(u64, &oracle_report.extra_boundaries, .monotonic),
+        .duplicated_boundaries = @atomicLoad(
+            u64,
+            &oracle_report.duplicated_boundaries,
+            .monotonic,
+        ),
+        .instruction_claims = @atomicLoad(u64, &oracle_report.instruction_claims, .monotonic),
+        .control_flow_claims = @atomicLoad(u64, &oracle_report.control_flow_claims, .monotonic),
+        .optimization_claims = @atomicLoad(u64, &oracle_report.optimization_claims, .monotonic),
+        .debug_claims = @atomicLoad(u64, &oracle_report.debug_claims, .monotonic),
+        .ownership_create = @atomicLoad(u64, &oracle_report.ownership_create, .monotonic),
+        .ownership_transfer = @atomicLoad(u64, &oracle_report.ownership_transfer, .monotonic),
+        .ownership_release = @atomicLoad(u64, &oracle_report.ownership_release, .monotonic),
+        .ownership_unbalanced = @atomicLoad(
+            u64,
+            &oracle_report.ownership_unbalanced,
+            .monotonic,
+        ),
+        .control_blocks = @atomicLoad(u64, &oracle_report.control_blocks, .monotonic),
+        .control_edges = @atomicLoad(u64, &oracle_report.control_edges, .monotonic),
+        .control_continuations = @atomicLoad(
+            u64,
+            &oracle_report.control_continuations,
+            .monotonic,
+        ),
+    };
+    for (&report.buckets, 0..) |*bucket, index| {
+        bucket.* = @atomicLoad(u64, &oracle_report.buckets[index], .monotonic);
+    }
+    return report;
+}
+
+pub fn resetOracleReport() void {
+    if (comptime !audit_oracles) return;
+    @atomicStore(u64, &oracle_report.legacy_boundaries, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.v2_boundaries, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.missing_boundaries, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.extra_boundaries, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.duplicated_boundaries, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.instruction_claims, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.control_flow_claims, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.optimization_claims, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.debug_claims, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.ownership_create, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.ownership_transfer, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.ownership_release, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.ownership_unbalanced, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.control_blocks, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.control_edges, 0, .monotonic);
+    @atomicStore(u64, &oracle_report.control_continuations, 0, .monotonic);
+    for (&oracle_report.buckets) |*bucket| {
+        @atomicStore(u64, bucket, 0, .monotonic);
+    }
+}
+
+const BoundaryClaimCategory = enum(u8) {
+    instruction,
+    control_flow,
+    optimization,
+    debug,
+};
+
+/// Oracle-report boundary definitions, in INPUT temporary-stream coordinates:
+/// `instruction` claims every instruction start plus the `code_len` sentinel;
+/// `control_flow` claims every label operand at its target and every
+/// unconditional terminal at its own start; `optimization` claims fold_start,
+/// replacement_start, and consumed_end for every fold; `debug` claims every
+/// SourceSlot.temp_offset. A claim resolves to the canonical bound-label
+/// identity at its offset when one exists, otherwise to its instruction-start
+/// anchor. `legacy` is the sum of all claims, `v2` is the number of distinct
+/// resolved offsets, and `missing` counts claims without either anchor.
+/// `extra` counts bind groups absent from the control_flow/optimization/debug
+/// union (the all-covering instruction category is deliberately excluded).
+/// `duplicated` is summed per category as claims minus distinct offsets, so
+/// repeated references to one target intentionally register fan-in.
+const BoundaryReportAccounting = if (audit_oracles) struct {
+    category_words: [4][]usize,
+    any_words: []usize,
+    semantic_words: []usize,
+    claims: [4]u64 = .{0} ** 4,
+    distinct: [4]u64 = .{0} ** 4,
+    v2_distinct: u64 = 0,
+    missing: u64 = 0,
+    ownership_transfer: u64 = 0,
+    ownership_release: u64 = 0,
+    continuations: u64 = 0,
+    block_index: usize = 0,
+
+    fn claim(
+        self: *@This(),
+        category: BoundaryClaimCategory,
+        offset: u32,
+        binds: []const BindEntry,
+        starts_words: []const usize,
+        code_len: u32,
+    ) void {
+        std.debug.assert(offset <= code_len);
+        const category_index = @intFromEnum(category);
+        const offset_index: usize = @intCast(offset);
+        self.claims[category_index] += 1;
+        if (!bitIsSet(self.category_words[category_index], offset_index)) {
+            setBit(self.category_words[category_index], offset_index);
+            self.distinct[category_index] += 1;
+        }
+        if (category != .instruction) setBit(self.semantic_words, offset_index);
+
+        const resolved = isInstructionStart(starts_words, code_len, offset) or
+            canonicalIdentityAtOffset(binds, offset) != null;
+        if (!resolved) {
+            self.missing += 1;
+            return;
+        }
+        if (!bitIsSet(self.any_words, offset_index)) {
+            setBit(self.any_words, offset_index);
+            self.v2_distinct += 1;
+        }
+    }
+} else struct {};
+
 fn censusMax(counter: *u64, value: u64) void {
     _ = @atomicRmw(u64, counter, .Max, value, .monotonic);
 }
@@ -1369,6 +1602,65 @@ pub fn formatIdentityHealth(buffer: []u8, census: FanoutCensus) []const u8 {
     return writer.buffered();
 }
 
+/// The ruling's report block: Summary first, then Diff buckets. Never prints
+/// a bare "PASS", and never keys anything by instruction offset.
+pub fn formatOracleReport(buffer: []u8, report: OracleReport) []const u8 {
+    if (comptime !audit_oracles) {
+        return "ZJS-V2-ORACLE-REPORT unavailable: counters are comptime-erased in this build";
+    }
+
+    const atom_balanced = report.ownership_unbalanced == 0 and
+        report.ownership_create == report.ownership_transfer + report.ownership_release;
+    var writer = std.Io.Writer.fixed(buffer);
+    writer.print(
+        \\ZJS-V2-ORACLE-REPORT
+        \\Summary:
+        \\  boundaries: legacy={d} v2={d} missing={d} extra={d} duplicated={d}
+        \\  boundary categories: instruction={d} control-flow={d} optimization={d} debug={d}
+        \\  ownership events: create={d} transfer={d} release={d}
+        \\  atom balanced: {s}
+        \\  control totals: blocks={d} edges={d} continuations={d}
+        \\Diff buckets:
+        \\  {s}={d}
+        \\  {s}={d}
+        \\  {s}={d}
+        \\  {s}={d}
+        \\  {s}={d}
+        \\  {s}={d}
+        \\
+    , .{
+        report.legacy_boundaries,
+        report.v2_boundaries,
+        report.missing_boundaries,
+        report.extra_boundaries,
+        report.duplicated_boundaries,
+        report.instruction_claims,
+        report.control_flow_claims,
+        report.optimization_claims,
+        report.debug_claims,
+        report.ownership_create,
+        report.ownership_transfer,
+        report.ownership_release,
+        if (atom_balanced) "yes" else "no",
+        report.control_blocks,
+        report.control_edges,
+        report.control_continuations,
+        DiffBucket.boundary_mismatch.name(),
+        report.buckets[@intFromEnum(DiffBucket.boundary_mismatch)],
+        DiffBucket.ownership_mismatch.name(),
+        report.buckets[@intFromEnum(DiffBucket.ownership_mismatch)],
+        DiffBucket.binding_mismatch.name(),
+        report.buckets[@intFromEnum(DiffBucket.binding_mismatch)],
+        DiffBucket.cfg_mismatch.name(),
+        report.buckets[@intFromEnum(DiffBucket.cfg_mismatch)],
+        DiffBucket.continuation_mismatch.name(),
+        report.buckets[@intFromEnum(DiffBucket.continuation_mismatch)],
+        DiffBucket.source_event_mismatch.name(),
+        report.buckets[@intFromEnum(DiffBucket.source_event_mismatch)],
+    }) catch unreachable;
+    return writer.buffered();
+}
+
 /// Debug/ReleaseSafe input-coordinate proof obligation: one semantic boundary
 /// may carry same-offset aliases, but the resolver and every live reference
 /// must retain one stable canonical identity for that boundary.
@@ -1426,6 +1718,7 @@ pub fn auditBoundaryUniqueness(
                 .{ input_offset, split.first_offset, split.second_offset },
             ) catch unreachable;
             return boundaryViolation(
+                .boundary_mismatch,
                 input,
                 graph,
                 binds,
@@ -1456,6 +1749,7 @@ pub fn auditBoundaryUniqueness(
                     .{ input_offset, slot.ref_count, slot.first_reloc },
                 ) catch unreachable;
                 return boundaryViolation(
+                    .binding_mismatch,
                     input,
                     graph,
                     binds,
@@ -1477,6 +1771,7 @@ pub fn auditBoundaryUniqueness(
                     .{input_offset},
                 ) catch unreachable;
                 return boundaryViolation(
+                    .binding_mismatch,
                     input,
                     graph,
                     binds,
@@ -1503,6 +1798,7 @@ pub fn auditBoundaryUniqueness(
                 .{entry.input_offset},
             ) catch unreachable;
             return boundaryViolation(
+                .boundary_mismatch,
                 input,
                 graph,
                 binds,
@@ -1526,6 +1822,7 @@ pub fn auditBoundaryUniqueness(
                 .{source_index},
             ) catch unreachable;
             return boundaryViolation(
+                .source_event_mismatch,
                 input,
                 graph,
                 binds,
@@ -1558,6 +1855,7 @@ pub fn auditBoundaryUniqueness(
                 },
             ) catch unreachable;
             return boundaryViolation(
+                .boundary_mismatch,
                 input,
                 graph,
                 binds,
@@ -1593,6 +1891,7 @@ pub fn auditBoundaryUniqueness(
                     .{ @tagName(boundary.kind), position.name },
                 ) catch unreachable;
                 return boundaryViolation(
+                    .boundary_mismatch,
                     input,
                     graph,
                     binds,
@@ -1635,6 +1934,7 @@ pub fn auditBoundaryUniqueness(
                 },
             ) catch unreachable;
             return boundaryViolation(
+                .boundary_mismatch,
                 input,
                 graph,
                 binds,
@@ -1672,6 +1972,7 @@ pub fn auditBoundaryUniqueness(
                 },
             ) catch unreachable;
             return boundaryViolation(
+                .boundary_mismatch,
                 input,
                 graph,
                 binds,
@@ -1711,6 +2012,56 @@ pub fn auditBoundaryUniqueness(
         }
     }
 
+    const instruction_claimed_words: []usize = if (comptime audit_oracles)
+        memory.alloc(usize, word_count) catch return error.OutOfMemory
+    else
+        &.{};
+    defer if (comptime audit_oracles) memory.free(usize, instruction_claimed_words);
+    const control_flow_claimed_words: []usize = if (comptime audit_oracles)
+        memory.alloc(usize, word_count) catch return error.OutOfMemory
+    else
+        &.{};
+    defer if (comptime audit_oracles) memory.free(usize, control_flow_claimed_words);
+    const optimization_claimed_words: []usize = if (comptime audit_oracles)
+        memory.alloc(usize, word_count) catch return error.OutOfMemory
+    else
+        &.{};
+    defer if (comptime audit_oracles) memory.free(usize, optimization_claimed_words);
+    const debug_claimed_words: []usize = if (comptime audit_oracles)
+        memory.alloc(usize, word_count) catch return error.OutOfMemory
+    else
+        &.{};
+    defer if (comptime audit_oracles) memory.free(usize, debug_claimed_words);
+    const any_claimed_words: []usize = if (comptime audit_oracles)
+        memory.alloc(usize, word_count) catch return error.OutOfMemory
+    else
+        &.{};
+    defer if (comptime audit_oracles) memory.free(usize, any_claimed_words);
+    const semantic_claimed_words: []usize = if (comptime audit_oracles)
+        memory.alloc(usize, word_count) catch return error.OutOfMemory
+    else
+        &.{};
+    defer if (comptime audit_oracles) memory.free(usize, semantic_claimed_words);
+
+    var accounting: BoundaryReportAccounting = if (comptime audit_oracles) blk: {
+        @memset(instruction_claimed_words, 0);
+        @memset(control_flow_claimed_words, 0);
+        @memset(optimization_claimed_words, 0);
+        @memset(debug_claimed_words, 0);
+        @memset(any_claimed_words, 0);
+        @memset(semantic_claimed_words, 0);
+        break :blk .{
+            .category_words = .{
+                instruction_claimed_words,
+                control_flow_claimed_words,
+                optimization_claimed_words,
+                debug_claimed_words,
+            },
+            .any_words = any_claimed_words,
+            .semantic_words = semantic_claimed_words,
+        };
+    } else .{};
+
     pc = 0;
     atom_index = 0;
     var label_reference_count: u32 = 0;
@@ -1726,6 +2077,33 @@ pub fn auditBoundaryUniqueness(
         try validateAndAdvanceAtom(input, pc, instruction, &atom_index);
 
         const op_id = input.code[pc];
+        if (comptime audit_oracles) {
+            accounting.claim(.instruction, pc, binds, starts_words, input.code_len);
+            if (isUnconditionalTerminal(op_id)) {
+                accounting.claim(.control_flow, pc, binds, starts_words, input.code_len);
+            }
+            if (isContinuationOp(op_id)) accounting.continuations += 1;
+
+            while (accounting.block_index + 1 < graph.block_starts.len and
+                graph.block_starts[accounting.block_index + 1] <= pc)
+            {
+                accounting.block_index += 1;
+            }
+            if (accounting.block_index >= graph.blocks.len or
+                graph.block_starts[accounting.block_index] > pc)
+            {
+                return error.InvalidBytecode;
+            }
+            if (instruction.has_atom) {
+                const block = graph.blocks[accounting.block_index];
+                const live = graph.isReachable(accounting.block_index) and
+                    (!block.has_terminal or pc <= block.cutoff_offset);
+                if (live)
+                    accounting.ownership_transfer += 1
+                else
+                    accounting.ownership_release += 1;
+            }
+        }
         if (labelOperandOffset(op_id, instruction)) |operand_offset| {
             if (label_reference_count == std.math.maxInt(u32))
                 return error.InvalidBytecode;
@@ -1757,6 +2135,7 @@ pub fn auditBoundaryUniqueness(
                     .{ pc, label_index },
                 ) catch unreachable;
                 return boundaryViolation(
+                    .binding_mismatch,
                     input,
                     graph,
                     binds,
@@ -1770,6 +2149,15 @@ pub fn auditBoundaryUniqueness(
                     },
                 );
             };
+            if (comptime audit_oracles) {
+                accounting.claim(
+                    .control_flow,
+                    input_slot.bound_offset,
+                    binds,
+                    starts_words,
+                    input.code_len,
+                );
+            }
 
             // Do not compare `owner` with canonicalIdentityAtOffset(binds,
             // input_slot.bound_offset): validateBindIndex proves that both
@@ -1797,6 +2185,7 @@ pub fn auditBoundaryUniqueness(
                         },
                     ) catch unreachable;
                     return boundaryViolation(
+                        .binding_mismatch,
                         input,
                         graph,
                         binds,
@@ -1826,6 +2215,68 @@ pub fn auditBoundaryUniqueness(
         label_reference_count != input.reloc_len)
     {
         return error.InvalidBytecode;
+    }
+
+    if (comptime audit_oracles) {
+        accounting.claim(.instruction, input.code_len, binds, starts_words, input.code_len);
+        for (opt_bounds) |boundary| {
+            accounting.claim(.optimization, boundary.fold_start, binds, starts_words, input.code_len);
+            accounting.claim(
+                .optimization,
+                boundary.replacement_start,
+                binds,
+                starts_words,
+                input.code_len,
+            );
+            accounting.claim(.optimization, boundary.consumed_end, binds, starts_words, input.code_len);
+        }
+        for (input.source_slots[0..input.source_len]) |source| {
+            accounting.claim(.debug, source.temp_offset, binds, starts_words, input.code_len);
+        }
+
+        var extra_boundaries: u64 = 0;
+        var report_group_start: usize = 0;
+        while (report_group_start < binds.len) {
+            const input_offset = binds[report_group_start].input_offset;
+            if (!bitIsSet(accounting.semantic_words, @intCast(input_offset))) {
+                extra_boundaries += 1;
+            }
+            report_group_start += 1;
+            while (report_group_start < binds.len and
+                binds[report_group_start].input_offset == input_offset)
+            {
+                report_group_start += 1;
+            }
+        }
+
+        var legacy_boundaries: u64 = 0;
+        var duplicated_boundaries: u64 = 0;
+        for (accounting.claims, accounting.distinct) |claims, distinct| {
+            legacy_boundaries += claims;
+            duplicated_boundaries += claims - distinct;
+        }
+
+        reportAdd("legacy_boundaries", legacy_boundaries);
+        reportAdd("v2_boundaries", accounting.v2_distinct);
+        reportAdd("missing_boundaries", accounting.missing);
+        reportAdd("extra_boundaries", extra_boundaries);
+        reportAdd("duplicated_boundaries", duplicated_boundaries);
+        reportAdd("instruction_claims", accounting.claims[@intFromEnum(BoundaryClaimCategory.instruction)]);
+        reportAdd("control_flow_claims", accounting.claims[@intFromEnum(BoundaryClaimCategory.control_flow)]);
+        reportAdd("optimization_claims", accounting.claims[@intFromEnum(BoundaryClaimCategory.optimization)]);
+        reportAdd("debug_claims", accounting.claims[@intFromEnum(BoundaryClaimCategory.debug)]);
+
+        const ownership_create: u64 = input.atom_len;
+        reportAdd("ownership_create", ownership_create);
+        reportAdd("ownership_transfer", accounting.ownership_transfer);
+        reportAdd("ownership_release", accounting.ownership_release);
+        if (accounting.ownership_transfer + accounting.ownership_release != ownership_create) {
+            reportAdd("ownership_unbalanced", 1);
+        }
+
+        reportAdd("control_blocks", @intCast(graph.blocks.len));
+        reportAdd("control_edges", @intCast(graph.edge_len));
+        reportAdd("control_continuations", accounting.continuations);
     }
 }
 
@@ -1922,6 +2373,120 @@ test "compiler_v2.cfg: alias group coalescing is downstream-indistinguishable" {
     try std.testing.expectEqualStrings(
         "identity kinds=5 instances=2 fan-out{mean=2.00 p95=2 max=2} chain{mean=3.00 p95=3 max=3 +final-hop=0} final-source{events=0 on-identity=0 between-identities=0} unanchored{source=0 fold=0 contested=0}",
         formatIdentityHealth(&health_buffer, census),
+    );
+}
+
+test "compiler_v2.cfg: oracle report counts boundary categories" {
+    resetOracleReport();
+    defer resetOracleReport();
+    if (comptime !audit_oracles) return;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var input = builder.Builder.init(&rt.memory, &rt.atoms);
+    defer input.deinit();
+    const target = try input.newLabel();
+    try input.emitJump(op.if_false, target);
+    try input.emitOp(op.return_undef);
+    try input.bindLabel(target);
+    try input.addSourceMarker(10, 2);
+    try input.emitOp(op.return_undef);
+
+    var binds = [_]BindEntry{.{
+        .input_offset = input.label_slots[target.index()].bound_offset,
+        .label_index = target.index(),
+    }};
+    var graph = try build(&rt.memory, &input, &binds);
+    defer graph.deinit();
+    var product_labels = [_]labels.LabelSlot{.{
+        .bound_offset = input.label_slots[target.index()].bound_offset,
+        .flags = .{ .bound = true },
+    }};
+    try auditBoundaryUniqueness(
+        &rt.memory,
+        &input,
+        &graph,
+        &binds,
+        &product_labels,
+        &.{},
+    );
+
+    const report = oracleReportSnapshot();
+    // Instruction starts are 0, 5, and 6, plus sentinel 7: four claims and
+    // four union offsets. Control flow claims target 6 and terminals 5 and 6:
+    // three claims over two offsets, hence one duplicate. The source marker
+    // contributes one debug claim at 6; there are no optimization claims.
+    try std.testing.expectEqual(@as(u64, 8), report.legacy_boundaries);
+    try std.testing.expectEqual(@as(u64, 4), report.v2_boundaries);
+    try std.testing.expectEqual(@as(u64, 0), report.missing_boundaries);
+    try std.testing.expectEqual(@as(u64, 0), report.extra_boundaries);
+    try std.testing.expectEqual(@as(u64, 1), report.duplicated_boundaries);
+    try std.testing.expectEqual(@as(u64, 4), report.instruction_claims);
+    try std.testing.expectEqual(@as(u64, 3), report.control_flow_claims);
+    try std.testing.expectEqual(@as(u64, 0), report.optimization_claims);
+    try std.testing.expectEqual(@as(u64, 1), report.debug_claims);
+}
+
+test "compiler_v2.cfg: oracle report formats summary then diff buckets" {
+    resetOracleReport();
+    defer resetOracleReport();
+    if (comptime !audit_oracles) return;
+
+    const report: OracleReport = .{
+        .legacy_boundaries = 101,
+        .v2_boundaries = 102,
+        .missing_boundaries = 103,
+        .extra_boundaries = 104,
+        .duplicated_boundaries = 105,
+        .instruction_claims = 201,
+        .control_flow_claims = 202,
+        .optimization_claims = 203,
+        .debug_claims = 204,
+        .ownership_create = 301,
+        .ownership_transfer = 302,
+        .ownership_release = 303,
+        .ownership_unbalanced = 304,
+        .control_blocks = 401,
+        .control_edges = 402,
+        .control_continuations = 403,
+        .buckets = .{ 501, 502, 503, 504, 505, 506 },
+    };
+    var buffer: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        \\ZJS-V2-ORACLE-REPORT
+        \\Summary:
+        \\  boundaries: legacy=101 v2=102 missing=103 extra=104 duplicated=105
+        \\  boundary categories: instruction=201 control-flow=202 optimization=203 debug=204
+        \\  ownership events: create=301 transfer=302 release=303
+        \\  atom balanced: no
+        \\  control totals: blocks=401 edges=402 continuations=403
+        \\Diff buckets:
+        \\  BOUNDARY_MISMATCH=501
+        \\  OWNERSHIP_MISMATCH=502
+        \\  BINDING_MISMATCH=503
+        \\  CFG_MISMATCH=504
+        \\  CONTINUATION_MISMATCH=505
+        \\  SOURCE_EVENT_MISMATCH=506
+        \\
+    , formatOracleReport(&buffer, report));
+}
+
+test "compiler_v2.cfg: diff bucket names are the ruling's six" {
+    resetOracleReport();
+    defer resetOracleReport();
+
+    try std.testing.expectEqualStrings("BOUNDARY_MISMATCH", DiffBucket.boundary_mismatch.name());
+    try std.testing.expectEqualStrings("OWNERSHIP_MISMATCH", DiffBucket.ownership_mismatch.name());
+    try std.testing.expectEqualStrings("BINDING_MISMATCH", DiffBucket.binding_mismatch.name());
+    try std.testing.expectEqualStrings("CFG_MISMATCH", DiffBucket.cfg_mismatch.name());
+    try std.testing.expectEqualStrings(
+        "CONTINUATION_MISMATCH",
+        DiffBucket.continuation_mismatch.name(),
+    );
+    try std.testing.expectEqualStrings(
+        "SOURCE_EVENT_MISMATCH",
+        DiffBucket.source_event_mismatch.name(),
     );
 }
 

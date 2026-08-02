@@ -5,6 +5,7 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const atom = @import("../core/atom.zig");
 const value_mod = @import("../core/value.zig");
+const cfg = @import("cfg.zig");
 
 const JSValue = value_mod.JSValue;
 const opcode = bytecode.opcode;
@@ -37,6 +38,49 @@ const Tier = enum {
     continuation,
     normalized,
 };
+
+/// The ruling: every diff names its bucket first and its coordinates second,
+/// and nothing is keyed by instruction offset. The tier gives the base
+/// bucket; a short, explicitly enumerated list of field-name families
+/// overrides it, checked in this exact order (first match wins).
+fn diffBucket(tier: Tier, field: []const u8) cfg.DiffBucket {
+    const base: cfg.DiffBucket = switch (tier) {
+        .l0 => .ownership_mismatch,
+        .structural => .binding_mismatch,
+        .cfg => .cfg_mismatch,
+        .continuation => .continuation_mismatch,
+        .normalized => .boundary_mismatch,
+    };
+
+    // The line/col arm is deliberately anchored rather than a bare "line"
+    // substring: `flags.simple_inline`, `flags.snapshot_inline` and
+    // `flags.strict_simple_inline` all contain "line" and are structural
+    // binding flags, not source events.
+    if (std.mem.indexOf(u8, field, "source") != null or
+        std.mem.indexOf(u8, field, "pc2line") != null or
+        std.mem.eql(u8, field, "line_num") or
+        std.mem.eql(u8, field, "col_num") or
+        std.mem.endsWith(u8, field, ".line") or
+        std.mem.endsWith(u8, field, ".col") or
+        std.mem.endsWith(u8, field, ".start_line") or
+        std.mem.endsWith(u8, field, ".start_col"))
+    {
+        return .source_event_mismatch;
+    }
+    if (std.mem.indexOf(u8, field, "atom") != null)
+        return .ownership_mismatch;
+    if (std.mem.indexOf(u8, field, "label") != null or
+        std.mem.indexOf(u8, field, "reloc") != null)
+    {
+        return .binding_mismatch;
+    }
+    if (std.mem.eql(u8, field, "cont_count") or
+        std.mem.startsWith(u8, field, "cont["))
+    {
+        return .continuation_mismatch;
+    }
+    return base;
+}
 
 const AtomPair = struct {
     legacy: atom.Atom,
@@ -74,11 +118,13 @@ const CompareState = struct {
         legacy: anytype,
         v2: anytype,
     ) CompareError {
+        const bucket = diffBucket(tier, field);
+        cfg.recordDiffBucket(bucket);
         if (self.failed_tier == null) self.failed_tier = tier;
         if (self.opts.diag) {
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier={s} mode={s} fn={s} field={s} legacy={any} v2={any}\n",
-                .{ tierName(tier), self.mode, path, field, legacy, v2 },
+                "ZJS-DUAL-MISMATCH bucket={s} tier={s} mode={s} fn={s} field={s} legacy={any} v2={any}\n",
+                .{ bucket.name(), tierName(tier), self.mode, path, field, legacy, v2 },
             );
         }
         return error.DualCompileMismatch;
@@ -92,11 +138,13 @@ const CompareState = struct {
         legacy: []const u8,
         v2: []const u8,
     ) CompareError {
+        const bucket = diffBucket(tier, field);
+        cfg.recordDiffBucket(bucket);
         if (self.failed_tier == null) self.failed_tier = tier;
         if (self.opts.diag) {
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier={s} mode={s} fn={s} field={s} legacy={s} v2={s}\n",
-                .{ tierName(tier), self.mode, path, field, legacy, v2 },
+                "ZJS-DUAL-MISMATCH bucket={s} tier={s} mode={s} fn={s} field={s} legacy={s} v2={s}\n",
+                .{ bucket.name(), tierName(tier), self.mode, path, field, legacy, v2 },
             );
         }
         return error.DualCompileMismatch;
@@ -110,11 +158,14 @@ const CompareState = struct {
         legacy: []const u8,
         v2: []const u8,
     ) CompareError {
+        const bucket = diffBucket(tier, field);
+        cfg.recordDiffBucket(bucket);
         if (self.failed_tier == null) self.failed_tier = tier;
         if (self.opts.diag) {
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier={s} mode={s} fn={s} field={s} legacy=len:{d}:hash:{x} v2=len:{d}:hash:{x}\n",
+                "ZJS-DUAL-MISMATCH bucket={s} tier={s} mode={s} fn={s} field={s} legacy=len:{d}:hash:{x} v2=len:{d}:hash:{x}\n",
                 .{
+                    bucket.name(),
                     tierName(tier),
                     self.mode,
                     path,
@@ -1134,17 +1185,19 @@ fn decoderMismatch(
     pc: anytype,
     reason: []const u8,
 ) CompareError {
+    const bucket = diffBucket(tier, reason);
+    cfg.recordDiffBucket(bucket);
     if (state.failed_tier == null) state.failed_tier = tier;
     if (state.opts.diag) {
         if (std.mem.eql(u8, side, "legacy")) {
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier={s} mode={s} fn={s} field=decoder legacy=pc:{d}:{s} v2=valid\n",
-                .{ tierName(tier), state.mode, path, pc, reason },
+                "ZJS-DUAL-MISMATCH bucket={s} tier={s} mode={s} fn={s} field=decoder legacy=pc:{d}:{s} v2=valid\n",
+                .{ bucket.name(), tierName(tier), state.mode, path, pc, reason },
             );
         } else {
             std.debug.print(
-                "ZJS-DUAL-MISMATCH tier={s} mode={s} fn={s} field=decoder legacy=valid v2=pc:{d}:{s}\n",
-                .{ tierName(tier), state.mode, path, pc, reason },
+                "ZJS-DUAL-MISMATCH bucket={s} tier={s} mode={s} fn={s} field=decoder legacy=valid v2=pc:{d}:{s}\n",
+                .{ bucket.name(), tierName(tier), state.mode, path, pc, reason },
             );
         }
     }
@@ -1251,12 +1304,12 @@ fn isDeadTailTerminal(op_id: u8) bool {
 
 fn appendCfgEdge(
     state: *CompareState,
-    cfg: *NormalizedCfg,
+    graph: *NormalizedCfg,
     edge: CfgEdge,
 ) CompareError!void {
-    try cfg.edges.append(state.allocator, edge);
+    try graph.edges.append(state.allocator, edge);
     if (edge.to_block <= edge.from_block)
-        try cfg.back_edges.append(state.allocator, edge);
+        try graph.back_edges.append(state.allocator, edge);
 }
 
 fn blockForLeader(starts: []const u32, ordinal: u32) ?u32 {
@@ -1924,6 +1977,47 @@ fn expectedShortSemantic(op_id: u8) ?u8 {
     };
 }
 
+test "compiler_v2.compare: diff buckets classify every tier and override family" {
+    const Case = struct {
+        tier: Tier,
+        field: []const u8,
+        expected: cfg.DiffBucket,
+    };
+    const cases = [_]Case{
+        .{ .tier = .l0, .field = "ledger.functions_lowered", .expected = .ownership_mismatch },
+        .{ .tier = .l0, .field = "ledger.source_events_emitted", .expected = .source_event_mismatch },
+        .{ .tier = .l0, .field = "ledger.labels_unbound", .expected = .binding_mismatch },
+        .{ .tier = .l0, .field = "ledger.relocs_applied", .expected = .binding_mismatch },
+        .{ .tier = .l0, .field = "atom_delta", .expected = .ownership_mismatch },
+        .{ .tier = .structural, .field = "flags.strict", .expected = .binding_mismatch },
+        .{ .tier = .structural, .field = "vardef[0].var_kind", .expected = .binding_mismatch },
+        .{ .tier = .structural, .field = "cpool[0].value", .expected = .binding_mismatch },
+        .{ .tier = .structural, .field = "debug.source_hash", .expected = .source_event_mismatch },
+        // "inline" contains "line": these must stay structural bindings.
+        .{ .tier = .structural, .field = "flags.simple_inline", .expected = .binding_mismatch },
+        .{ .tier = .structural, .field = "flags.snapshot_inline", .expected = .binding_mismatch },
+        .{ .tier = .structural, .field = "flags.strict_simple_inline", .expected = .binding_mismatch },
+        .{ .tier = .normalized, .field = "source.start_line", .expected = .source_event_mismatch },
+        .{ .tier = .normalized, .field = "source.start_col", .expected = .source_event_mismatch },
+        .{ .tier = .normalized, .field = "source.col", .expected = .source_event_mismatch },
+        .{ .tier = .cfg, .field = "block_count", .expected = .cfg_mismatch },
+        .{ .tier = .cfg, .field = "edge[3]", .expected = .cfg_mismatch },
+        .{ .tier = .continuation, .field = "cont_count", .expected = .continuation_mismatch },
+        .{ .tier = .continuation, .field = "cont[2].target", .expected = .continuation_mismatch },
+        .{ .tier = .normalized, .field = "semantic_opcode", .expected = .boundary_mismatch },
+        .{ .tier = .normalized, .field = "target_ordinal", .expected = .boundary_mismatch },
+        .{ .tier = .normalized, .field = "atom_operand", .expected = .ownership_mismatch },
+        .{ .tier = .normalized, .field = "source.line", .expected = .source_event_mismatch },
+        .{ .tier = .normalized, .field = "pc2line_event", .expected = .source_event_mismatch },
+        .{ .tier = .normalized, .field = "label16_operand", .expected = .binding_mismatch },
+        .{ .tier = .normalized, .field = "const", .expected = .boundary_mismatch },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, diffBucket(case.tier, case.field));
+    }
+}
+
 test "compiler_v2.compare: independently compiled identical trees pass" {
     const parser = @import("../parser.zig");
 
@@ -2015,8 +2109,11 @@ test "compiler_v2.compare: tagged-template constants compare by frozen array pro
     try std.testing.expectEqual(Tier.structural, state.failed_tier.?);
 }
 
-test "compiler_v2.compare: plain branch target perturbation fails tier 1.5" {
+test "compiler_v2.compare: plain branch target perturbation fails tier 1.5 and records CFG_MISMATCH" {
     const parser = @import("../parser.zig");
+
+    cfg.resetOracleReport();
+    defer cfg.resetOracleReport();
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2068,6 +2165,13 @@ test "compiler_v2.compare: plain branch target perturbation fails tier 1.5" {
         compareTierCfg(&state, first_root, second_root, &path),
     );
     try std.testing.expectEqual(Tier.cfg, state.failed_tier.?);
+    if (comptime cfg.audit_oracles) {
+        const report = cfg.oracleReportSnapshot();
+        try std.testing.expectEqual(
+            @as(u64, 1),
+            report.buckets[@intFromEnum(cfg.DiffBucket.cfg_mismatch)],
+        );
+    }
 }
 
 test "compiler_v2.compare: finally target perturbation fails tier 1.75" {

@@ -151,6 +151,7 @@ fn runFileModule(
 pub fn main(init: std.process.Init) !void {
     const total_start = monotonicNanos();
     setupHostDispatchStatsExitDump(init.environ_map);
+    setupV2OracleReportExitDump(init.environ_map);
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
@@ -841,6 +842,21 @@ fn writeHostDispatchStatsAtExit() callconv(.c) void {
     if (comptime !host_dispatch_stats.enabled) return;
     if (host_dispatch_stats_path_len == 0) return;
     host_dispatch_stats.appendToFile(&host_dispatch_stats_path_buf);
+}
+
+fn setupV2OracleReportExitDump(environ_map: *std.process.Environ.Map) void {
+    if (comptime !engine.compiler_v2.oracle_report_enabled) return;
+    const flag = environ_map.get("ZJS_V2_ORACLE_REPORT") orelse return;
+    if (flag.len == 0 or std.mem.eql(u8, flag, "0")) return;
+    _ = atexit(writeV2OracleReportAtExit);
+}
+
+fn writeV2OracleReportAtExit() callconv(.c) void {
+    if (comptime !engine.compiler_v2.oracle_report_enabled) return;
+    var buffer: [1024]u8 = undefined;
+    const text = engine.compiler_v2.formatOracleReport(&buffer);
+    if (text.len == 0) return;
+    std.debug.print("{s}\n", .{text});
 }
 
 fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {

@@ -44,6 +44,8 @@ pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
 pub const runtime = @import("runtime/root.zig");
+// QCP-1 scratch oracle surface for the CLI.
+pub const compiler_v2 = @import("compiler_v2/root.zig");
 
 test {
     const std = @import("std");

@@ -178,6 +178,7 @@ fn retiredIdentityStillReferenced(entry: BindEntry, slot: labels.LabelSlot) bool
 }
 
 fn panicFinalBoundaryUniquenessViolation(
+    bucket: cfg.DiffBucket,
     category: []const u8,
     role: []const u8,
     canonical_identities: [2]u32,
@@ -185,9 +186,11 @@ fn panicFinalBoundaryUniquenessViolation(
     product_offsets: [2]u32,
     final_addresses: [2]u32,
 ) noreturn {
+    cfg.recordDiffBucket(bucket);
     std.debug.panic(
-        "compiler_v2 boundary-uniqueness violation: category={s} role={s} construct=resolve_labels_v2 key=canonical_identities={d},{d}:raw_labels={d},{d} identities=[canonical_label#{d}@{d}, canonical_label#{d}@{d}] block=none label=none source=none addresses=[{d},{d}]",
+        "compiler_v2 oracle violation: bucket={s} category={s} role={s} construct=resolve_labels_v2 key=canonical_identities={d},{d}:raw_labels={d},{d} identities=[canonical_label#{d}@{d}, canonical_label#{d}@{d}] block=none label=none source=none addresses=[{d},{d}]",
         .{
+            bucket.name(),
             category,
             role,
             canonical_identities[0],
@@ -2461,6 +2464,7 @@ const Resolver = struct {
 
             if (finalAliasSplit(group, self.addr)) |split| {
                 panicFinalBoundaryUniquenessViolation(
+                    .boundary_mismatch,
                     "alias_final_address_split",
                     "position",
                     .{ canonical_identity, canonical_identity },
@@ -2471,6 +2475,7 @@ const Resolver = struct {
             }
             if (aliasLivenessSplit(group, self.addr)) |split| {
                 panicFinalBoundaryUniquenessViolation(
+                    .boundary_mismatch,
                     "alias_liveness_split",
                     "position",
                     .{ canonical_identity, canonical_identity },
@@ -2486,6 +2491,7 @@ const Resolver = struct {
                     const slot = self.product.label_slots[entry.label_index];
                     if (retiredIdentityStillReferenced(entry, slot)) {
                         panicFinalBoundaryUniquenessViolation(
+                            .binding_mismatch,
                             "retired_identity_still_referenced",
                             "position",
                             .{ canonical_identity, canonical_identity },
@@ -2532,6 +2538,7 @@ const Resolver = struct {
             }
             if (jump_identity != boundary_identity) {
                 panicFinalBoundaryUniquenessViolation(
+                    .binding_mismatch,
                     "cross_subsystem_identity_split",
                     "jump_target",
                     .{ jump_identity, boundary_identity },
@@ -2549,6 +2556,7 @@ const Resolver = struct {
             const target_address = self.addr[jump.label];
             if (target_address == labels.unbound or encoded_address != target_address) {
                 panicFinalBoundaryUniquenessViolation(
+                    .binding_mismatch,
                     "cross_subsystem_identity_split",
                     "jump_target",
                     .{ jump_identity, boundary_identity },

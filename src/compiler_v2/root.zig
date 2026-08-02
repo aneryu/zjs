@@ -22,8 +22,8 @@
 
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
-const cfg = @import("cfg.zig");
 
+pub const cfg = @import("cfg.zig");
 pub const labels = @import("labels.zig");
 pub const builder = @import("builder.zig");
 pub const resolve_variables = @import("resolve_variables.zig");
@@ -35,6 +35,15 @@ pub const LabelSlot = labels.LabelSlot;
 pub const RelocEntry = labels.RelocEntry;
 pub const Builder = builder.Builder;
 pub const ResolvedProduct = resolve_variables.ResolvedProduct;
+pub const DiffBucket = cfg.DiffBucket;
+pub const oracle_report_enabled = cfg.audit_oracles;
+
+/// Scratch-only: format the corpus-level oracle report. Returns an empty
+/// slice when the counters are comptime-erased (ReleaseFast).
+pub fn formatOracleReport(buffer: []u8) []const u8 {
+    if (comptime !cfg.audit_oracles) return "";
+    return cfg.formatOracleReport(buffer, cfg.oracleReportSnapshot());
+}
 
 /// QCP-1 v2 per-function lowering: resolve_variables_v2 then resolve_labels_v2,
 /// installing final executable code/atoms/source slots on `function` (the
