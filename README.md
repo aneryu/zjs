@@ -75,6 +75,7 @@ zig build smoke --seed 0 --summary all
 zig build test262-smoke --seed 0 --summary all
 zig build test-oom --seed 0 --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
 zig build test -Dzjs_force_gc=true --seed 0 --summary all
+zig build test -Dzjs_ownership_audit=true --seed 0 --summary all # atom 所有权审计档（一格槽位隔离区，ASAN 那一档；默认关、不进 ReleaseFast）/ atom-ownership audit tier (one-slot quarantine; ASAN-class, default off, never ReleaseFast) — docs/borrowed_atom_audit.md §7
 zig build perf-self-check --seed 0 --summary all
 zig build engine-production-gate --seed 0 --summary all
 ```

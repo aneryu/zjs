@@ -279,8 +279,11 @@ atom 710 被 wedge 抢走并**改绑到另一个字符串**；`addModuleExportNa
 
 ### 4.4 全局探测器：延后一拍的槽位回收
 
-为了不止于「已知嫌疑人」，给 `AtomTable` 加了一个**一格隔离区**（临时补丁，
-不入库）：刚死的槽位先进隔离区，等下一次有别的槽位死掉才进自由链。这样
+> 审计当时是临时补丁；现已产品化为 build option `-Dzjs_ownership_audit`，
+> 见 §7。
+
+为了不止于「已知嫌疑人」，给 `AtomTable` 加了一个**一格隔离区**（审计当时是
+临时补丁，不入库）：刚死的槽位先进隔离区，等下一次有别的槽位死掉才进自由链。这样
 「释放后立刻重新内插同一个字符串」再也拿不回自己的 id，任何 borrowed-atom
 use-after-free 都会撞 `dup` 的 `hasLiveValue` 断言。相对完全关闭回收，这个改法
 不改变表的规模，不影响 teardown 不变量。
@@ -351,7 +354,9 @@ runner，断言本就编译掉了，对本审计不提供证据。）
 回归测试；`8c8787cd` 那种 atom-table 收支平衡断言在修复前也是平的
 （死 atom 被同名重内插取回后，`addExport` 的 dup 与 record 的 free 依然配平）。
 
-能持续守住这条不变量的唯一办法是把 §4.4 的探测器产品化——见 §6 第 6 条。
+能持续守住这条不变量的唯一办法是把 §4.4 的探测器产品化——现已落地为
+`-Dzjs_ownership_audit`，见 §7；§7.4 给出「撤销本次修复 → 审计构建当场 panic」
+的复现步骤，那就是这条修复的回归测试形态（黑盒仍然写不出来）。
 在那之前，本条修复由 §4.1/§4.2 的一次性探针实验和 §4.4 的探测器全绿背书。
 
 ---
@@ -375,6 +380,110 @@ runner，断言本就编译掉了，对本审计不提供证据。）
    `last_declared_atom` / `current_namespace_atom` 两个 state 字段，一起改才闭合。
 5. **死代码 `isDeleteSuperReference` / `parseDeleteSuperReference`**：无调用者，
    Zig 也不做语义分析。要么接进 `delete` 解析路径，要么删除。
-6. **可考虑把 §4.4 的隔离区探测器做成 build option**（例如
-   `-Dzjs_atom_no_slot_reuse=true`），让「借用越过 owner」在 CI 里可持续检出，
-   而不是只在人工审计时临时打补丁。
+6. ~~**可考虑把 §4.4 的隔离区探测器做成 build option**，让「借用越过 owner」
+   在 CI 里可持续检出，而不是只在人工审计时临时打补丁。~~
+   **已落地**：`-Dzjs_ownership_audit`，见 §7。
+
+---
+
+## 7. 审计构建 `-Dzjs_ownership_audit`（§4.4 探测器的产品化形态）
+
+落地 commit 见本文件所在提交；实现在 `src/core/atom.zig`
+（`AtomTable.OwnershipAuditState` + `finalizeDeadEntry` 的回收臂），
+选项在 `build.zig`，与 `zjs_force_gc` / `zjs_nan_boxing` 走同一套 option 分发
+（`engine_options` / `plugin_fixture_options` / `profile_engine_options` /
+`test_options`）。
+
+### 7.1 它做什么
+
+`finalizeDeadEntry` 释放的槽位先在**一格隔离区**里待一轮，等下一个槽位死掉才
+进自由链。于是「free 掉一个 atom，紧接着重新内插同一个字符串」再也拿不回同一个
+id，§1.1 情形 1 的「靠槽位回收的运气」被拆掉：一个借用越过 owner 的 stale id
+要么指向空槽（`dup` 撞 `hasLiveValue`，Debug / ReleaseSafe 直接 panic），
+要么在再下一次内插之后指向别的字符串（错值，由调用方自己的检查暴露）。
+
+**为什么是「一格」而不是「彻底关掉回收」**（这条写进了代码注释）：回收只是被
+推迟一次死亡，表的稳态规模只多出那一个被隔离的槽——`entries` 数量、`next_id`
+增长、`deinit` 的收尾不变量都还是默认构建的那一套。彻底关掉回收会让表随
+intern/free churn 单调增长，审计本身就可能把一个高 churn 的测试变成 OOM 或
+另一种表几何下的失败，那样查出来的东西就不可信了。
+
+`src/tests/core.zig` 里配了一条 liveness 自检
+（`ownership audit quarantines the most recently freed atom slot`）：审计关时
+`SkipZigTest`，审计开时断言「刚死的槽位不会被下一次 intern 拿走，但在再死一个
+槽位之后会被回收」。把隔离区改回直接压链，这条测试当场红。没有它，审计档位可以
+被改瘸而每次 CI 还是全绿——那正是这个选项要消灭的那种静默。
+
+### 7.2 档位：ASAN / leak-checker 那一档
+
+CI、fuzzing、回归复现专用。**默认关，永远不进 ReleaseFast，不进生产路径。**
+关闭时整套机制 comptime 消失：`OwnershipAuditState` 退化成空结构体，字段、
+代码、连名字都不进二进制。
+
+零生产代价的实测（2026-08-02，本树，`zig build zjs` 默认 ReleaseFast）：
+
+- `nm -a zig-out/bin/zjs | grep -i quarantin` 与
+  `strings -a zig-out/bin/zjs | grep -i quarantin` 均 0 命中
+  （二进制里只留下 build_options blob 里的选项名本身，和 `zjs_force_gc` 一样）；
+- 默认二进制的 `.text` 与「只往 `atom.zig` 加一行注释」的空对照构建**逐字节
+  相同**（`44c58c48…`，3851804 B），即本改动对默认构建的机器码零影响；整个
+  二进制的 sha 只差在 build_options 与调试信息上。（对照是必要的：任何一次
+  touch `atom.zig` 的重建都会相对冷构建产生一次布局位移，不做对照会把布局
+  彩票误读成代价。）
+- `tools/perf/codeload/run_codeload_micro.py --a <空对照> --b <本改动>
+  --samples 8 --cpu 19`：compile 模式 instructions median **1.00000**
+  MAD 0.00000（23,102,180,030 → 23,102,190,161）；atom 模式（专测 intern
+  miss + free-slot churn）instructions median **1.00000** MAD 0.00000
+  （24,351,531,576 → 24,351,501,514）。
+
+### 7.3 怎么跑
+
+```bash
+zig build test        --seed 0 --summary all -Dzjs_ownership_audit=true   # 统一套件
+zig build test-parser --seed 0               -Dzjs_ownership_audit=true   # 单子树，失败定位更快
+zig build test-oom    --seed 0 --summary all -Dzjs_ownership_audit=true
+zig build zjs-dev                            -Dzjs_ownership_audit=true   # 手工语料复现
+zig build run-test262-dev                    -Dzjs_ownership_audit=true   # test262 子树
+./zig-out/bin/run-test262-dev -c test262.conf -d test262/test/language/module-code
+```
+
+断言只在 Debug / ReleaseSafe 生效（`std.debug.assert`）。在 ReleaseFast 下打开
+这个选项没有意义：`dup` 的断言被编译掉，隔离区只会白白改变槽位分配顺序。
+
+**test262 请按子树跑，不要一次跑全量。** Debug runner 在约 7000 个用例处会撞
+`src/core/runtime.zig:1294` 的
+`std.debug.assert(self.memory.allocation_count == 1)`。这是**既有问题、与本
+审计无关**：把审计补丁完全撤掉、用纯净 `3d869065` 重建 `run-test262-dev` 复跑，
+崩在同一处、同一进度（§4.5）。所以按 `-d test262/test/language/<子树>` 分段
+执行——§4.4 那 14611 个用例就是这么跑出来的。
+
+### 7.4 它抓得住原始缺陷（可复现）
+
+把 `ada949be` 的 parser hunk 在工作区里临时撤销：
+
+```bash
+git show ada949be -- src/parser.zig | git apply -R --3way
+# exportDefaultClassName 一处会与 1906d45c（lexer 位置恢复先于可失败 peek）
+# 冲突：保留 1906d45c 的顺序，只把 dup 撤掉。
+```
+
+然后：
+
+- `zig build test-parser --seed 0`（审计**关**）→ **474 passed / 0 failed**。
+  这正是 §5.3 说的掩蔽：黑盒测试看不见这个 use-after-free。
+- `zig build test-parser --seed 0 -Dzjs_ownership_audit=true` → SIGABRT：
+
+```
+thread panic: reached unreachable code
+src/core/atom.zig:1069:29         in dup    std.debug.assert(entry.hasLiveValue());
+src/bytecode.zig:1151:53          in addExport
+src/parser.zig:17651:25           in addModuleExportName
+src/parser.zig:17963:58           in parseExport
+src/tests/parser.zig:4814:42      in test.W5: generator parameter boundary emits
+                                     initial_yield in scripts and modules
+    var module = try parseModuleStatement(&env, "export function* g(x = 1) { yield x; }");
+```
+
+`git checkout -- src/parser.zig` 恢复之后（即当前 main），同一条命令全绿。
+这就是这个 bug 类唯一可用的「红 → 绿」形态：不是黑盒回归测试，而是**已有测试
+在审计档位下的行为差**。

@@ -26,6 +26,17 @@ pub fn build(b: *std.Build) void {
     // `zig build test-oom -Dzjs_oom_coverage=true` prints the count.
     const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;
     const zjs_force_gc = b.option(bool, "zjs_force_gc", "Force a full GC before each runtime heap allocation") orelse false;
+    // Atom-ownership audit instrumentation: a one-slot quarantine on the
+    // atom table's dead-slot free list (core/atom.zig) so a just-freed atom
+    // id cannot be handed straight back by the very next intern. This turns
+    // "borrow an atom out of a token, then use it after the owner released
+    // it" from a silently masked hazard into a `dup` liveness assertion.
+    // This is the ASAN / leak-checker tier: CI, fuzzing and regression runs
+    // only. Default off, comptime erased when off (no field, no code, no
+    // string in the default binary), and never part of the production path.
+    // `zig build test -Dzjs_ownership_audit=true`; see
+    // docs/borrowed_atom_audit.md §6.
+    const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine one just-freed atom slot so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
     const zjs_dossier_simple_ctor = b.option([]const u8, "zjs_dossier_simple_ctor", "Dossier-only simple-constructor variant: a, b, or c") orelse "a";
     if (!std.mem.eql(u8, zjs_dossier_simple_ctor, "a") and
         !std.mem.eql(u8, zjs_dossier_simple_ctor, "b") and
@@ -49,6 +60,7 @@ pub fn build(b: *std.Build) void {
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    engine_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
     engine_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
     engine_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
 
@@ -65,6 +77,7 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     plugin_fixture_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    plugin_fixture_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
     plugin_fixture_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
     plugin_fixture_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     const plugin_fixture_zjs_mod = b.createModule(.{
@@ -145,6 +158,7 @@ pub fn build(b: *std.Build) void {
     profile_engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     profile_engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     profile_engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    profile_engine_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
     profile_engine_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
     profile_engine_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     const internal_profile_mod = b.createModule(.{
@@ -732,6 +746,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
+    test_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
     test_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
     test_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
