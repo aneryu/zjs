@@ -1,0 +1,165 @@
+{
+ "tool": "zjs-zoo-compare",
+ "schemaVersion": 1,
+ "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
+ "timestamp": "2026-08-02T03:03:10Z",
+ "samplesPerEnginePerBench": 12,
+ "samplingOrder": "alternating by sample parity; each engine leads exactly half the samples",
+ "firstPositionBalanced": true,
+ "cpu": 19,
+ "effectiveAffinity": [
+  19
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/home/aneryu/.claude/jobs/9023bf51/tmp/zjs-mainfix-A",
+   "sha256": "514e23dc90623acc5f7cf3f23b76f16ecfff4eef6874cd4cae7ae505960f2c8e",
+   "repo": {
+    "path": "/home/aneryu/.claude/jobs/9023bf51/tmp/wt-stab3b",
+    "commit": "8c8787cdacbb7c42ff319814bfbe7798093d3a0c",
+    "dirty": false
+   }
+  },
+  "qjs": {
+   "path": "/home/aneryu/.claude/jobs/9023bf51/tmp/zjs-mainfix-B",
+   "sha256": "514e23dc90623acc5f7cf3f23b76f16ecfff4eef6874cd4cae7ae505960f2c8e",
+   "repo": {
+    "path": "/home/aneryu/.claude/jobs/9023bf51/tmp",
+    "commit": null,
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "code-load": {
+   "scores": {
+    "CodeLoad": {
+     "zjs": {
+      "median": 14548,
+      "min": 14519,
+      "max": 14562,
+      "samples": [
+       14548,
+       14555,
+       14533,
+       14548,
+       14562,
+       14519,
+       14555,
+       14550,
+       14548,
+       14519,
+       14548,
+       14519
+      ]
+     },
+     "qjs": {
+      "median": 14552,
+      "min": 14485,
+      "max": 14567,
+      "samples": [
+       14548,
+       14564,
+       14560,
+       14552,
+       14524,
+       14545,
+       14550,
+       14485,
+       14564,
+       14552,
+       14567,
+       14559
+      ]
+     },
+     "ratioZjsOverQjs": 0.9997251236943375,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0176836270838976,
+    "qjs": 2.0168733408208936
+   }
+  }
+ },
+ "summary": {
+  "throughputGeomean": 0.9997251236943375,
+  "throughputRatios": {
+   "code-load": 0.9997251236943375
+  },
+  "latencyRatios": {},
+  "zjsFaster": [],
+  "zjsSlower": [
+   "code-load"
+  ]
+ },
+ "orderLog": [
+  {
+   "bench": "code-load",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 8,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 9,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 10,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 11,
+   "order": "zjs->qjs"
+  }
+ ]
+}
