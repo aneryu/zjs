@@ -55,9 +55,18 @@ pub fn compileFunctionV2(
     fd: *bytecode.function_def.FunctionDef,
     ledger: ?*compare.Ledger,
 ) resolve_variables.Error!void {
-    const input = fd.v2_builder orelse return error.InvalidBytecode;
+    if (fd.v2_builder == null) return error.InvalidBytecode;
     var product = try resolve_variables.run(function, fd);
     defer product.deinitUncommitted();
+    var input_labels_unbound: usize = 0;
+    var input_source_markers: usize = 0;
+    if (ledger != null) {
+        const input = fd.v2_builder orelse return error.InvalidBytecode;
+        for (input.label_slots[0..input.label_len]) |slot|
+            input_labels_unbound += @intFromBool(!slot.flags.bound);
+        input_source_markers = input.source_len;
+    }
+    releaseConsumedBuilder(fd);
     // Only dual compilation pays for the diagnostic walks. Ordinary v2 mode
     // passes null and performs exactly the S3 -> S4 pipeline work.
     const live_relocs = if (ledger != null) try countLiveRelocs(&product) else 0;
@@ -66,21 +75,35 @@ pub fn compileFunctionV2(
     if (ledger) |out| {
         try addLedger(&out.functions_lowered, 1);
         try addLedger(&out.labels_created, product.label_len);
-        var unbound: usize = 0;
-        for (input.label_slots[0..input.label_len]) |slot|
-            unbound += @intFromBool(!slot.flags.bound);
-        try addLedger(&out.labels_unbound, unbound);
+        try addLedger(&out.labels_unbound, input_labels_unbound);
         // The S3 product is the first relocation ledger after exact-CFG dead
         // stripping. Counting its label-bearing instructions therefore counts
         // the exact live subset; S4 must consume every one before returning.
         try addLedger(&out.relocs_created, live_relocs);
         try addLedger(&out.relocs_applied, live_relocs);
-        try addLedger(&out.source_markers, input.source_len);
+        try addLedger(&out.source_markers, input_source_markers);
         try addLedger(&out.source_events_emitted, countEncodedSourceEvents(function));
         try addLedger(&out.closure_sources_threaded, fd.closure_var.len);
     }
 
     if (comptime cfg.audit_oracles) emitIdentityHealth();
+}
+
+/// RELEASE AT THE CONSUMPTION POINT. `resolve_variables.run` is the last
+/// reader of the compact stream (dual's ledger scalars are taken above, at
+/// the same instant), so the producer becomes inert here: its slice fields
+/// reset to empty, capacity 0, backings freed, and the FunctionDef no longer
+/// names it. `FunctionDef.deinit` stays as the parse-time / error-path
+/// backstop only. This lives with the CONSUMER, so it moves with the
+/// consumer when builder ownership relocates into a `V2Emitter`.
+fn releaseConsumedBuilder(fd: *bytecode.function_def.FunctionDef) void {
+    const consumed = fd.v2_builder orelse return;
+    fd.v2_builder = null;
+    consumed.deinit();
+    std.debug.assert(consumed.code_capacity == 0 and consumed.atom_capacity == 0 and
+        consumed.label_capacity == 0 and consumed.reloc_capacity == 0 and
+        consumed.source_capacity == 0);
+    fd.memory.destroy(Builder, consumed);
 }
 
 fn emitIdentityHealth() void {

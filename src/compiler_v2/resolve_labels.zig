@@ -459,6 +459,13 @@ const Resolver = struct {
         self.jump_slots = &.{};
     }
 
+    fn releaseConsumedProduct(self: *Resolver) void {
+        self.code = &.{};
+        self.input_atoms = &.{};
+        self.input_sources = &.{};
+        self.product.releaseConsumedStreams();
+    }
+
     fn initScratch(self: *Resolver) Error!void {
         if (self.product.label_len != 0) {
             self.addr = self.memory.alloc(u32, self.product.label_len) catch
@@ -2606,18 +2613,6 @@ const Resolver = struct {
         cfg.recordFinalBoundaryHops(live_group_count);
     }
 
-    fn exactCopy(
-        self: *Resolver,
-        comptime T: type,
-        source: []const T,
-    ) Error![]T {
-        if (source.len == 0) return &.{};
-        const owned = self.memory.alloc(T, source.len) catch
-            return error.OutOfMemory;
-        @memcpy(owned, source);
-        return owned;
-    }
-
     fn validateFinalOutput(self: *const Resolver) Error!void {
         const code = self.output[0..self.output_len];
         var position: u32 = 0;
@@ -2652,57 +2647,51 @@ const Resolver = struct {
         self: *Resolver,
         function: *bytecode.Bytecode,
         owned: []SourceLocSlot,
+        owned_capacity: usize,
     ) void {
+        std.debug.assert(owned.len <= owned_capacity);
+        std.debug.assert(owned_capacity != 0 or owned.len == 0);
         const old = function.source_loc_slots;
         const old_capacity = function.source_loc_capacity;
         function.source_loc_slots = owned;
-        function.source_loc_capacity = owned.len;
+        function.source_loc_capacity = owned_capacity;
         if (old_capacity != 0)
             self.memory.free(SourceLocSlot, old.ptr[0..old_capacity]);
     }
 
-    fn commit(self: *Resolver) Error!void {
-        const exact_code = try self.exactCopy(
-            u8,
-            self.output[0..self.output_len],
-        );
-        errdefer if (exact_code.len != 0) self.memory.free(u8, exact_code);
+    /// Sole ownership-transfer point for the growable final outputs. Every
+    /// operation is allocation-free and infallible, so no observable
+    /// half-install can escape by construction.
+    fn commit(self: *Resolver) void {
+        const owned_code = self.output[0..self.output_len];
+        const owned_code_capacity = self.output_capacity;
+        self.output = &.{};
+        self.output_capacity = 0;
+        self.output_len = 0;
+        self.function.installCodeWithCapacity(owned_code, owned_code_capacity);
 
-        const exact_atoms = try self.exactCopy(
-            core.atom.Atom,
-            self.output_atoms[0..self.output_atom_len],
-        );
-        // The retains remain owned by self until all exact buffers exist.
-        errdefer if (exact_atoms.len != 0)
-            self.memory.free(core.atom.Atom, exact_atoms);
-
-        const exact_sources = try self.exactCopy(
-            SourceLocSlot,
-            self.output_sources[0..self.output_source_len],
-        );
-        errdefer if (exact_sources.len != 0)
-            self.memory.free(SourceLocSlot, exact_sources);
-
-        // Transfer the atom retains from the growable ledger to exact_atoms.
-        if (self.output_atom_capacity != 0)
-            self.memory.free(core.atom.Atom, self.output_atoms);
+        const owned_atoms = self.output_atoms[0..self.output_atom_len];
+        const owned_atom_capacity = self.output_atom_capacity;
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
-
-        // Every operation below is allocation-free: this is the sole commit
-        // point, so no observable half-install can escape.
-        self.function.installCode(exact_code);
         for (self.function.atom_operands) |old_atom|
             self.atoms.free(old_atom);
-        self.function.installAtomOperands(exact_atoms);
-        self.installSourceLocsNoFail(self.function, exact_sources);
+        self.function.installAtomOperandsWithCapacity(owned_atoms, owned_atom_capacity);
+
+        const owned_sources = self.output_sources[0..self.output_source_len];
+        const owned_source_capacity = self.output_source_capacity;
+        self.output_sources = &.{};
+        self.output_source_capacity = 0;
+        self.output_source_len = 0;
+        self.installSourceLocsNoFail(self.function, owned_sources, owned_source_capacity);
     }
 };
 
 /// Final emission over the S3 product. product label-slot ref_counts and
 /// first_reloc heads are mutated in place qjs-style. All fallible output work
-/// finishes before the Bytecode's single allocation-free commit point.
+/// finishes before the Bytecode's single allocation-free ownership-transfer
+/// commit point.
 pub fn run(
     comptime layout: LayoutMode,
     function: *bytecode.Bytecode,
@@ -2730,10 +2719,13 @@ pub fn run(
     defer resolver.deinit();
     try resolver.initScratch();
     try resolver.walk(layout);
+    resolver.releaseConsumedProduct();
     if (layout == .short) try resolver.relaxJumps();
     if (comptime cfg.audit_oracles) try resolver.auditFinalBoundaryIdentity();
     try resolver.validateFinalOutput();
-    try resolver.commit();
+    resolver.commit();
+    std.debug.assert(resolver.output_capacity == 0 and
+        resolver.output_atom_capacity == 0 and resolver.output_source_capacity == 0);
 }
 
 const ResolveLabelsTestHarness = struct {

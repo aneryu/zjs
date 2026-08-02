@@ -60,6 +60,30 @@ pub const ResolvedProduct = struct {
     /// qjs s->jump_size analog counted by this pass.
     jump_size: u32 = 0,
 
+    /// RELEASE AT THE CONSUMPTION POINT: the S4 walk is the last reader of the
+    /// resolved stream, the atom ledger and the source markers. They become
+    /// inert here (slices empty, capacity 0, owned atom refs released item-wise)
+    /// while `label_slots` stays live, because S4 keeps mutating label ref
+    /// counts after the walk. Idempotent, and `deinitUncommitted` remains
+    /// correct whether or not this ran.
+    pub fn releaseConsumedStreams(self: *ResolvedProduct) void {
+        for (self.atom_operands[0..self.atom_len]) |atom_id| self.atoms.free(atom_id);
+
+        if (self.code_capacity != 0) self.memory.free(u8, self.code);
+        if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
+        if (self.source_capacity != 0) self.memory.free(builder.SourceSlot, self.source_slots);
+
+        self.code = &.{};
+        self.code_capacity = 0;
+        self.code_len = 0;
+        self.atom_operands = &.{};
+        self.atom_capacity = 0;
+        self.atom_len = 0;
+        self.source_slots = &.{};
+        self.source_capacity = 0;
+        self.source_len = 0;
+    }
+
     /// Item-wise release of the owned atom prefix, then free each backing by
     /// full capacity. Idempotent. Mirrors Builder.deinit discipline.
     pub fn deinitUncommitted(self: *ResolvedProduct) void {

@@ -3573,6 +3573,8 @@ pub const function_def = struct {
             self.atoms.free(script_or_module);
 
             if (comptime compiler_v2_available) {
+                // Parse-time/error-path backstop; successful v2 lowering
+                // releases the builder at its consumption point.
                 if (self.v2_builder) |v2b| {
                     self.v2_builder = null;
                     v2b.deinit();
@@ -12728,9 +12730,8 @@ pub const pipeline_finalize = struct {
         lowered.flags.runtime_strict = compile_context.policy.runtime_strict;
         if (comptime compiler_v2_available) {
             if (fd.v2_builder != null) {
-                // QCP-1 v2 lowering. The phase-1 buffers stay owned by fd
-                // (released by fd.deinit); the v2 product is installed directly
-                // on the lowered carrier at final positions, so no move happens.
+                // QCP-1 v2 lowering releases its compact producer at the
+                // consumption point and transfers final buffers to `lowered`.
                 if (fd.finalization_state != .prepared) return error.InvalidBytecode;
                 compiler_v2.compileFunctionV2(&lowered, fd, compile_context.v2_ledger) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -12738,6 +12739,9 @@ pub const pipeline_finalize = struct {
                     error.BytecodeOverflow => return error.BytecodeOverflow,
                     error.ClosureVarNotFound => return error.ClosureVarNotFound,
                 };
+                // Single-owner invariant: compileFunctionV2 released the builder at its
+                // consumption point, so the FunctionDef no longer owns compiler input here.
+                std.debug.assert(fd.v2_builder == null);
                 // Same bookkeeping runPhases performs between the two resolve
                 // passes.
                 fd.consumeGlobalVars();

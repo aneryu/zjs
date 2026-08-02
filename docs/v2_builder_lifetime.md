@@ -442,3 +442,80 @@ zig build zjs-dev -Dzjs_compiler=legacy
 (one Closure `base.js` compile + one jQuery 1.7.2 compile, `CHECKSUM: 2/2`).
 The per-phase probe described in §1 was scratch-only and is not part of this
 commit; §1 records its exact probe points so it can be reconstructed.
+
+---
+
+## 9. Resolution (stage C2-B): release at the consumption point
+
+Every release below is expressed **in the consumer, at the instant it stops
+reading**, so it moves with the consumer when builder ownership later relocates
+into a `V2Emitter`. No owner "keeps it until deinit".
+
+| id | consumption point the release now sits at | status |
+| --- | --- | --- |
+| **D4** | `compileFunctionV2` (`src/compiler_v2/root.zig`), immediately after `resolve_variables.run` returns and after dual's two ledger scalars are taken from the input. `releaseConsumedBuilder` makes the producer inert (`Builder.deinit`, asserted capacity 0 on all five backings) and destroys it; `fd.v2_builder` becomes null. `FunctionDef.deinit` stays as the parse-time / error-path backstop only. | **closed** |
+| **D1** | same point — the builder is gone before `resolve_labels.run` ever sees the product, so builder and `ResolvedProduct` are never co-resident after S3. | **closed** |
+| **D2** | `resolve_labels.run`, on the line after `resolver.walk(layout)`. `Resolver.releaseConsumedProduct` blanks the borrowed views (`code` / `input_atoms` / `input_sources`) and calls `ResolvedProduct.releaseConsumedStreams`, which releases the resolved stream, the owned atom ledger and the source markers. `label_slots` stays live because S4 keeps mutating ref counts in `relaxJumps`. | **closed** |
+| **D3** | `Resolver.commit` is now an ownership **transfer**, not a duplication: the growable `output` / `output_atoms` / `output_sources` backings are handed to the carrier through `installCodeWithCapacity` / `installAtomOperandsWithCapacity` / `installSourceLocsNoFail(…, capacity)`, with the resolver's own fields zeroed first. `exactCopy` is deleted. `commit` is now allocation-free **and infallible**, so "no observable half-install can escape" holds by construction rather than by ordering. | **closed** |
+| **D5** | not an ownership defect: `cfg.Graph` and the bind index are *derived from* the builder while the pass is still reading it, and both are already released by the `defer`s of the pass that created them. Its tail (the builder outliving the pass) is closed by D4. Measured non-binding below. | **inherent** |
+
+### 9.1 C2 re-measured (Debug, `mc1.js`, every binary run through one fixed path)
+
+| counter | legacy | v2 before | before ratio | v2 after | after ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `allocated_bytes_peak` | 2,684,108 | 3,273,334 | 1.2195x | **2,886,947** | **1.0756x** |
+| peak − bootstrap | 2,558,359 | 3,147,577 | 1.2303x | **2,761,190** | **1.0793x** |
+| `allocation_count_peak` | 6,204 | 9,007 | 1.4518x | **7,393** | **1.1917x** |
+| peak allocs − bootstrap | 5,405 | 8,199 | 1.5169x | **6,585** | **1.2183x** |
+| `alloc_calls` | 34,750 | 47,168 | 1.3573x | 45,434 | 1.3074x |
+| `create_calls` | 1,775 | 2,371 | 1.3358x | 2,371 | 1.3358x |
+| `allocated_bytes` (end) | 385,464 | 385,464 | 1.0000x | 385,464 | 1.0000x |
+
+Legacy is a control and is byte-identical before and after. No allocation event
+count regressed; `alloc_calls` fell by 1,734 (the three per-function exact
+copies D3 used to make).
+
+### 9.2 The census now drains, and the peak instant moved to parse end
+
+Scratch probe at `createFunctionBytecode` entry/exit (`ZJS_C2B=1`, reverted
+before commit), jQuery compile:
+
+| | v2 after | legacy |
+| --- | ---: | ---: |
+| live at `T0_parse_end` | 2,882,631 | 2,660,488 |
+| live at `T5_finalize_end` | 2,287,611 (**−595,020**) | 2,112,497 (−547,991) |
+| whole-run peak | 2,886,830 | 2,683,991 |
+| **peak above parse-end live** | **+4,199** | +23,503 |
+| live allocations at `T0_parse_end` | 7,374 | 6,151 |
+| **peak allocations above parse end** | **+19** | +53 |
+
+Before the fix v2's live bytes *rose* +301,959 across finalize (§4); they now
+fall, like legacy's. **The compile phase's own peak contribution is 4,199 B /
++19 allocations for v2 against 23,503 B / +53 for legacy — 0.18x and 0.36x, i.e.
+the part of the peak that lowering controls now passes the 0.7x bar with room to
+spare.** D1/D2/D3/D5 combined are inside that 4,199 B, which is why D5 needs no
+further work.
+
+### 9.3 Verdict: C2 still FAILS, and the residual is structural, not lifetime
+
+`allocated_bytes_peak` is 1.0756x legacy where the gate wants < 0.7x; on the
+peak-minus-bootstrap basis 2,761,190 against a 1,790,851 budget, i.e. **970,339 B
+too high**. None of it is duplicate ownership:
+
+* v2's peak is now its **parse-end resident set** (+4,199 B). That set is
+  established before a single byte is consumed, so no consumption-point release
+  can reach it.
+* The parse-end delta versus legacy is +222,143 B (2,882,631 vs 2,660,488),
+  attributed in §6: +77,568 B because a v2 `FunctionDef` carries a 168 B
+  `Builder` plus up to five backings where legacy carries three phase-1 buffers,
+  and +144,575 B of parse-arena *geometry* (v2 takes one extra doubling step).
+* Even a v2 with literally zero compile-time transient would sit at
+  2,882,631 / 2,684,108 = **1.074x**.
+
+The bar is therefore a **phase-structure** requirement, not an ownership one:
+the whole-process peak is dominated by holding the entire `FunctionDef` +
+emission tree resident at once, which both pipelines do. Reaching < 0.7x means
+lowering each function **on pop, during parsing** (QuickJS's `js_create_function`
+at the end of each function body), so the emission census is O(depth) rather than
+O(tree). That removes ~890 KB from v2's peak — the only remaining lever of that
+size — and is a pipeline-topology change, not a lifetime change.
