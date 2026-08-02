@@ -11637,3 +11637,148 @@ test "flow-tail summary: label/patch/move/truncate corpus compiles under the Deb
         try std.testing.expect(parsed.syntax_error == null);
     }
 }
+
+/// Sum every live strong retain held by the runtime atom table. Mirrors the
+/// L0 compile-product invariant the compiler-v2 comparator checks around a
+/// compile: a finished compile must return the table to its entry balance.
+fn atomStrongRefTotal(rt: *const core.JSRuntime) usize {
+    var total: usize = 0;
+    for (rt.atoms.entries) |entry| total +|= entry.strongRefCount();
+    return total;
+}
+
+test "parser releases identifier and private-name token atoms" {
+    // qjs `free_token` drops the identifier/private-name atom that
+    // `next_token` interned into the token (quickjs.c:22190-22208). Without
+    // that release every identifier occurrence leaks one atom retain, so the
+    // atom table never returns to its pre-compile balance.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\class ZjsTokenOwnershipProbe {
+        \\  #zjsHiddenCounter = 0;
+        \\  static zjsStaticSeed = 1;
+        \\  zjsBump(zjsAmountArgument) {
+        \\    this.#zjsHiddenCounter += zjsAmountArgument;
+        \\    return this.#zjsHiddenCounter;
+        \\  }
+        \\  zjsHas(zjsOtherProbeObject) {
+        \\    return #zjsHiddenCounter in zjsOtherProbeObject;
+        \\  }
+        \\}
+        \\function zjsOuterHelperFunction(zjsFirstParameter, zjsSecondParameter) {
+        \\  var zjsLocalVariableName = zjsFirstParameter;
+        \\  let zjsLexicalBindingName = zjsSecondParameter;
+        \\  const zjsConstBindingName = { zjsObjectPropertyKey: zjsLexicalBindingName };
+        \\  zjsOuterLabelName: for (var zjsLoopIndexName = 0; zjsLoopIndexName < 2; zjsLoopIndexName++) {
+        \\    if (zjsLoopIndexName) continue zjsOuterLabelName;
+        \\    break zjsOuterLabelName;
+        \\  }
+        \\  const zjsArrowExpression = function zjsNamedFunctionExpression(zjsInnerParameter) {
+        \\    return zjsInnerParameter + zjsLocalVariableName;
+        \\  };
+        \\  return zjsArrowExpression(zjsConstBindingName.zjsObjectPropertyKey);
+        \\}
+        \\new ZjsTokenOwnershipProbe().zjsBump(zjsOuterHelperFunction(1, 2));
+    ;
+
+    // One warm-up compile publishes every atom this source keeps alive for
+    // the process (filenames, interned literals reused by the table), so the
+    // measured window sees only the per-compile balance.
+    {
+        var warmup = try compileForTest(rt, source, .{ .mode = .script, .filename = "token-ownership.js" });
+        defer warmup.deinit();
+        try std.testing.expect(warmup.syntax_error == null);
+    }
+
+    const before = atomStrongRefTotal(rt);
+    {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "token-ownership.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+    const after = atomStrongRefTotal(rt);
+    try std.testing.expectEqual(before, after);
+}
+
+test "parser releases module and import-attribute token atoms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\import zjsDefaultBindingName from "./zjs-token-module.js" with { zjsAttrKey: "zjsAttrValue" };
+        \\import { zjsNamedExportName as zjsRenamedLocalName } from "./zjs-token-other.js";
+        \\import * as zjsNamespaceBindingName from "./zjs-token-third.js";
+        \\export { zjsRenamedLocalName as zjsPublicExportName };
+        \\export * as zjsStarNamespaceName from "./zjs-token-fourth.js";
+        \\export function zjsExportedFunctionName(zjsExportedParameterName) {
+        \\  return zjsExportedParameterName;
+        \\}
+        \\zjsDefaultBindingName;
+        \\zjsNamespaceBindingName;
+    ;
+
+    {
+        var warmup = try compileForTest(rt, source, .{ .mode = .module, .filename = "token-ownership-module.js" });
+        defer warmup.deinit();
+        try std.testing.expect(warmup.syntax_error == null);
+    }
+
+    const before = atomStrongRefTotal(rt);
+    {
+        var parsed = try compileForTest(rt, source, .{ .mode = .module, .filename = "token-ownership-module.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+    const after = atomStrongRefTotal(rt);
+    try std.testing.expectEqual(before, after);
+}
+
+test "parser returns the atom table to balance across every token-bearing construct" {
+    // Wider guard for the same `free_token` contract: each source exercises a
+    // different parse path that takes an identifier/private-name atom out of a
+    // token (declarations, patterns, class bodies, labels, modules, TS enum and
+    // namespace). Any path that forgets to retain-then-release shows up as a
+    // non-zero delta over an identical second compile.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Case = struct { src: []const u8, file: []const u8, mode: parser.Mode };
+    const cases = [_]Case{
+        .{ .src = "var { zjsAlphaKey: zjsAlphaTarget = 1, ...zjsRestBinding } = zjsSourceObject; var [zjsFirstElem, [zjsNestedElem] = [], ...zjsTailElems] = zjsArraySource;", .file = "bal-pattern.js", .mode = .script },
+        .{ .src = "const zjsObjLit = { zjsPlainKey: 1, zjsShorthandKey, get zjsGetterName() { return 1 }, set zjsSetterName(zjsSetterParam) {}, [zjsComputedKeyExpr]: 2, zjsMethodName(zjsMethodParam) { return zjsMethodParam }, *zjsGenName() { yield 1 }, async zjsAsyncName() {} };", .file = "bal-objlit.js", .mode = .script },
+        .{ .src = "class ZjsBigClass extends ZjsBaseClass { #zjsPrivField = 1; static #zjsStaticPriv = 2; #zjsPrivMethod() { return this.#zjsPrivField } get #zjsPrivGetter() { return 1 } static { ZjsBigClass.zjsStaticInit = 1; } zjsPub = 3; static zjsStaticPub = 4; constructor(zjsCtorParam) { super(zjsCtorParam); } }", .file = "bal-class.js", .mode = .script },
+        .{ .src = "function* zjsGenFn(zjsGenParam = zjsDefaultExpr) { yield* zjsDelegateIter; } async function zjsAsyncFn(zjsAsyncParam) { for await (const zjsAwaitItem of zjsAsyncIterable) { await zjsAwaitItem; } }", .file = "bal-generator.js", .mode = .script },
+        .{ .src = "try { zjsRiskyCall(); } catch (zjsCaughtError) { zjsHandle(zjsCaughtError); } finally { zjsCleanupCall(); } try { zjsOther(); } catch { }", .file = "bal-try.js", .mode = .script },
+        .{ .src = "zjsOuterLbl: for (const zjsForOfItem of zjsIterableSource) { zjsInnerLbl: for (var zjsForInKey in zjsObjectSource) { if (zjsForInKey) continue zjsOuterLbl; else break zjsInnerLbl; } } do { zjsBodyCall(); } while (zjsCondCall());", .file = "bal-label.js", .mode = .script },
+        .{ .src = "switch (zjsSwitchDisc) { case zjsCaseOne: zjsBodyOne(); break; case zjsCaseTwo: default: zjsBodyTwo(); }", .file = "bal-switch.js", .mode = .script },
+        .{ .src = "const zjsArrowOne = (zjsArrowParamA, zjsArrowParamB = 2, ...zjsArrowRest) => zjsArrowParamA; const zjsArrowTwo = async (zjsAsyncArrowParam) => { return zjsAsyncArrowParam; }; zjsTagFn`zjsRawText${zjsInterpValue}more`;", .file = "bal-arrow.js", .mode = .script },
+        .{ .src = "zjsOptionalBase?.zjsOptionalProp?.[zjsOptionalIndex]?.(zjsOptionalArg); zjsSpreadTarget(...zjsSpreadArgs); new zjsCtorName(...zjsCtorArgs); delete zjsDeleteTarget.zjsDeleteProp; typeof zjsTypeofOperand;", .file = "bal-optional.js", .mode = .script },
+        .{ .src = "with (zjsWithObject) { zjsWithBody(); } function zjsSloppyOuter() { var zjsHoistedVar; { function zjsAnnexBFn() {} } return zjsAnnexBFn; }", .file = "bal-with.js", .mode = .script },
+        .{ .src = "enum ZjsEnumName { ZjsMemberA, ZjsMemberB = 5, ZjsMemberC = \"zjsStr\" } namespace ZjsNamespaceName { export const zjsNsConst = 1; }", .file = "bal-enum.ts", .mode = .script },
+        .{ .src = "function zjsUsingHost() { { using zjsUsingBinding = zjsDisposable; } } zjsUsingHost();", .file = "bal-using.js", .mode = .script },
+        .{ .src = "import zjsDefB, { zjsNamedB as zjsAliasB, \"zjsStringName\" as zjsStrAlias } from \"./m1.js\"; export { zjsAliasB as zjsOutName, zjsStrAlias }; export default function zjsDefaultExport() {}", .file = "bal-import.js", .mode = .module },
+        .{ .src = "export * from \"./m2.js\"; export * as zjsStarNs from \"./m3.js\"; import * as zjsNsB from \"./m4.js\" with { zjsAttrK: \"zjsAttrV\" }; export const zjsExportedConst = zjsNsB;", .file = "bal-export.js", .mode = .module },
+    };
+
+    for (cases, 0..) |c, index| {
+        const options: parser.Options = .{ .mode = c.mode, .filename = c.file };
+        {
+            var warmup = try compileForTest(rt, c.src, options);
+            defer warmup.deinit();
+            try std.testing.expect(warmup.syntax_error == null);
+        }
+        const before = atomStrongRefTotal(rt);
+        {
+            var parsed = try compileForTest(rt, c.src, options);
+            defer parsed.deinit();
+            try std.testing.expect(parsed.syntax_error == null);
+        }
+        const after = atomStrongRefTotal(rt);
+        if (before != after) {
+            std.debug.print("atom balance case {d} ({s}): before={d} after={d}\n", .{ index, c.file, before, after });
+            return error.TestExpectedEqual;
+        }
+    }
+}
