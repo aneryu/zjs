@@ -15,23 +15,7 @@ const parser_core = zjs.parser.Parser;
 const atom = zjs.core.atom;
 const function_def_mod = zjs.bytecode.function_def;
 const ParseState = engine.parser.Parser.ParseState;
-
-fn configureScriptRoot(state: *ParseState) void {
-    state.function_def.is_eval = true;
-    state.function_def.is_global_var = true;
-    state.top_level_functions_as_children = true;
-    state.top_level_lexical_as_global_ref = true;
-}
-
-fn configureModuleRoot(state: *ParseState) void {
-    state.function_def.is_eval = true;
-    state.function_def.is_module = true;
-    state.function_def.is_global_var = true;
-    state.function_def.is_strict_mode = true;
-    state.is_strict = true;
-    state.top_level_functions_as_children = true;
-    state.top_level_lexical_as_module_ref = true;
-}
+const test_entry = zjs.compiler_v2.test_entry;
 
 // ================== LEXER TESTS ==================
 
@@ -714,7 +698,7 @@ fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecod
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseExpr(&state);
     try function.appendCode(&.{op.return_undef});
@@ -732,7 +716,7 @@ fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     lex.is_strict_mode = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     state.is_strict = true;
     state.function_def.is_strict_mode = true;
     try parser_core.parseExpr(&state);
@@ -752,7 +736,7 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try function.appendCode(&.{op.return_undef});
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
@@ -770,7 +754,7 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try function.appendCode(&.{op.return_undef});
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
@@ -788,7 +772,7 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseDirectives(&state);
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -806,7 +790,7 @@ fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.by
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try function.appendCode(&.{op.return_undef});
@@ -825,7 +809,7 @@ fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecod
     lex.is_module = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureModuleRoot(&state);
+    test_entry.configureModuleRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try function.appendCode(&.{op.return_undef});
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
@@ -843,7 +827,7 @@ fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     lex.is_module = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureModuleRoot(&state);
+    test_entry.configureModuleRoot(&state);
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try function.appendCode(&.{op.return_undef});
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
@@ -2466,7 +2450,7 @@ test "M3.1 F4: parser emits QuickJS line_num temp and finalize strips it" {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "x;");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -5897,7 +5881,7 @@ fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     return function;
 }
@@ -5914,19 +5898,14 @@ fn parseRawExprWithRuntime(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     return function;
 }
 
-fn parseRawTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
-    const name = try env.rt.internAtom("scope-events-ts");
-    defer env.rt.atoms.free(name);
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
-    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    defer lex.deinit();
-    try lex.enableTypeScript();
-    var state = try ParseState.init(&lex, &function);
-    defer state.deinit(env.rt);
-    configureScriptRoot(&state);
-    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    return function;
+fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
+    return test_entry.parseAndCompileV2TestProgram(
+        env.rt,
+        std.testing.allocator,
+        "scope-events-ts",
+        src,
+        .{ .source_kind = .typescript },
+    );
 }
 
 test "M-SCOPE event producers: ordinary scopes match QuickJS phase-1 events" {
@@ -6107,9 +6086,13 @@ test "M-SCOPE event producers: structural body and namespace scopes stay identit
         });
     }
     {
-        var namespace = try parseRawTSProgram(&env, "namespace N { let value = 1; }");
-        defer namespace.deinit(env.rt);
-        try expectPhase1ScopeEvents(namespace.code, &.{
+        var program = try parseRawTSProgram(&env, "namespace N { let value = 1; }");
+        defer program.deinit(env.rt);
+        try test_entry.expectNoUnallowedFallback(program.observation());
+        // When program.split_stream is true (while ts_namespace is on the L3
+        // allowlist), a v2 build sees only the root marker here: this assertion
+        // is a partial view. L4 migration makes it whole-program again.
+        try expectPhase1ScopeEvents(program.phase1Code(), &.{
             .{ .kind = .enter, .scope = 1 },
         });
     }
@@ -6125,7 +6108,7 @@ test "M-SCOPE event producers: structural body and namespace scopes stay identit
     );
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -6276,7 +6259,7 @@ test "M-SCOPE negative contract: return cleanup and throw synthesize no scope le
         );
         var state = try ParseState.init(&lex, &function);
         defer state.deinit(env.rt);
-        configureScriptRoot(&state);
+        test_entry.configureScriptRoot(&state);
         state.top_level_functions_as_children = true;
         try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
@@ -6350,7 +6333,7 @@ test "F10.1a FunctionDef: QuickJS root declaration rows keep body and block orig
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "var a; let b; { var c; let d; }");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -6380,7 +6363,7 @@ test "F10.1a FunctionDef: function vars retain parser origins without entering l
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "function f(p){ var x; { var y; let z; } let w; }");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -6417,7 +6400,7 @@ test "F10.1a FunctionDef: every parsed function body has identity except class f
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "const arrow = () => 1; class C { x = 1; }");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -6835,7 +6818,7 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ var v = 1; }");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    configureScriptRoot(&state);
+    test_entry.configureScriptRoot(&state);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 

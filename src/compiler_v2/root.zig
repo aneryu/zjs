@@ -24,6 +24,8 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 
 pub const cfg = @import("cfg.zig");
+pub const coverage = @import("coverage.zig");
+pub const test_entry = @import("test_entry.zig");
 pub const labels = @import("labels.zig");
 pub const builder = @import("builder.zig");
 pub const resolve_variables = @import("resolve_variables.zig");

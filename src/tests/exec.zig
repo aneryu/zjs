@@ -14,6 +14,7 @@ const object_ops = zjs.exec.object_ops;
 const array_ops = zjs.exec.array_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
+const test_entry = zjs.compiler_v2.test_entry;
 
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
@@ -3685,6 +3686,24 @@ test "strict generator resident frame supports qjs argument counts beyond u16 st
 }
 
 pub const helpers = struct {
+    /// Every TypeScript execution test goes through here. Besides evaluating,
+    /// it asserts the compile took no un-allowlisted legacy emission — that is
+    /// the half of the L3 gate that only a real compile can observe.
+    pub fn evalTypeScriptChecked(engine_instance: *TestEngine, source: []const u8, options: EvalOptions) RuntimeError!core.JSValue {
+        const observation_start = test_entry.beginObservation();
+        const result = engine_instance.evalWithOptions(source, options) catch |eval_err| {
+            const observation = test_entry.endObservation(observation_start);
+            try test_entry.expectNoUnallowedFallback(observation);
+            return eval_err;
+        };
+        const observation = test_entry.endObservation(observation_start);
+        test_entry.expectNoUnallowedFallback(observation) catch |err| {
+            result.free(engine_instance.runtime);
+            return err;
+        };
+        return result;
+    }
+
     /// Install the standard + host globals on a bare `core.JSRuntime` global for
     /// tests that build a runtime directly (bypassing the binding-layer context
     /// create that wires the installer). The deep setup interface keeps the
@@ -9174,7 +9193,7 @@ test "Engine eval strips TypeScript source kind before execution" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\type Label = string;
         \\interface Box { value: number }
         \\const value: number = 41;
@@ -9189,7 +9208,7 @@ test "Engine eval strips TypeScript method annotations" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\class C { m(x: number): number { return x; } }
         \\const object = { m(x: number): number { return x + 1; } };
         \\assert.sameValue(new C().m(41), 41);
@@ -9203,7 +9222,7 @@ test "Engine eval preserves as and satisfies runtime property names in TypeScrip
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\const obj = { as: 1, satisfies: 2 };
         \\assert.sameValue(obj.as + obj.satisfies, 3);
     , .{ .source_kind = .typescript });
@@ -9215,7 +9234,7 @@ test "Engine eval supports TypeScript parameter properties" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    var result = try js.evalWithOptions(
+    var result = try helpers.evalTypeScriptChecked(js,
         \\class Box {
         \\    constructor(public value: number) {}
         \\}
@@ -9230,7 +9249,7 @@ test "Engine eval strips TypeScript automatically for ts filenames" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\const value: number = 42;
         \\assert.sameValue(value, 42);
     , .{ .filename = "sample.ts" });

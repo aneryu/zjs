@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const coverage = @import("coverage.zig");
 const labels = @import("labels.zig");
 const core = @import("../core/root.zig");
 
@@ -973,6 +974,10 @@ pub const Builder = struct {
     }
 
     fn reserveCode(self: *Builder, need: usize) Error!void {
+        // One event per emitted instruction, plus one per spliced segment.
+        // Legacy counts its byte-append events, so the measures are comparable
+        // emission funnels rather than byte-identical totals.
+        if (comptime coverage.enabled) coverage.noteV2Emission();
         const required = @as(u64, self.code_len) + @as(u64, @intCast(need));
         if (required > std.math.maxInt(u32)) return error.BytecodeOverflow;
         try reserve(

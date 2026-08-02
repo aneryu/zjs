@@ -3512,6 +3512,7 @@ pub const parser_core = struct {
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
     const compiler_v2 = @import("compiler_v2/root.zig");
+    const coverage = compiler_v2.coverage;
 
     /// QCP-1: comptime compiler selection parsed from -Dzjs_compiler.
     pub const CompilerMode = enum { legacy, v2, dual };
@@ -3915,6 +3916,10 @@ pub const parser_core = struct {
         last_token_line_num: u32 = 1,
         last_token_col_num: u32 = 1,
         last_opcode_source_offset: ?u32 = null,
+        /// QCP-1 L3: the parser construct that an in-v2-scope legacy emission is
+        /// attributed to. `.none` = undeclared fallback = gate violation.
+        legacy_emission_scope: if (coverage.enabled) coverage.LegacyConstruct else void =
+            if (coverage.enabled) .none else {},
         /// Lazily-built line-start byte offsets for O(1) (line,col)->offset
         /// conversion in `emitSourcePos`. This replaces an O(n) rescan of the
         /// whole source from byte 0 on EVERY opcode source-position emit, which
@@ -5713,6 +5718,34 @@ pub const parser_core = struct {
         // Direct byte writes into `function.code`. Keep these local until the
         // remaining legacy emitter callers are retired.
 
+        inline fn pushLegacyEmissionScope(
+            self: *State,
+            comptime construct: coverage.LegacyConstruct,
+        ) @TypeOf(self.legacy_emission_scope) {
+            if (comptime !coverage.enabled) return {};
+            const saved = self.legacy_emission_scope;
+            self.legacy_emission_scope = construct;
+            return saved;
+        }
+
+        inline fn popLegacyEmissionScope(
+            self: *State,
+            saved: @TypeOf(self.legacy_emission_scope),
+        ) void {
+            if (comptime !coverage.enabled) return;
+            self.legacy_emission_scope = saved;
+        }
+
+        inline fn noteLegacyEmissionFunnel(self: *State, comptime count_event: bool) void {
+            if (comptime !coverage.enabled) return;
+            const in_v2 = v2_available and self.emit_v2;
+            coverage.noteLegacyEmission(
+                in_v2,
+                if (comptime coverage.enabled) self.legacy_emission_scope else .none,
+                count_event,
+            );
+        }
+
         const EmissionSnapshot = struct {
             code_len: usize,
             atom_len: usize,
@@ -5803,8 +5836,7 @@ pub const parser_core = struct {
         }
 
         fn appendBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
-            // QCP-1: any un-migrated construct reaching legacy emission during a v2 parse must fail loudly (Debug) instead of corrupting two streams.
-            std.debug.assert(!(v2_available and self.emit_v2));
+            self.noteLegacyEmissionFunnel(true);
             const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 self.cur_func().appendByteCodeAssumeCapacity(bytes);
@@ -6849,7 +6881,14 @@ pub const parser_core = struct {
         /// exact; a rewrite that could lower the current absolute watermark
         /// falls back to lazy invalidation (the next query rebuilds).
         fn publishParserLabelTarget(self: *State, operand_offset: usize, target: u32) Error!void {
-            std.debug.assert(!(v2_available and self.emit_v2));
+            // QCP-1 L3: mutating a legacy absolute-PC operand during a v2 parse
+            // is the same class of migration hole as emitting into the legacy
+            // stream — it is only reachable from a construct that also emitted
+            // there. Route it through the same gate (non-counting: this writes
+            // no new instruction) so an undeclared construct fails loudly with
+            // a symbolized trace and a declared one is accounted, instead of a
+            // bare assert that can only report the first offender.
+            self.noteLegacyEmissionFunnel(false);
             var code = self.currentCode();
             if (operand_offset + 4 > code.len) return Error.UnexpectedToken;
             const ft = self.flowTail();
@@ -6929,7 +6968,7 @@ pub const parser_core = struct {
         }
 
         fn appendBytesNoSource(self: *State, bytes: []const u8) Error!void {
-            std.debug.assert(!(v2_available and self.emit_v2));
+            self.noteLegacyEmissionFunnel(true);
             const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
                 try self.cur_func().appendByteCode(bytes);
@@ -6940,7 +6979,7 @@ pub const parser_core = struct {
         }
 
         fn emitSourcePosAndLoc(self: *State, line_num: u32, col_num: u32) Error!usize {
-            std.debug.assert(!(v2_available and self.emit_v2));
+            self.noteLegacyEmissionFunnel(false);
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             try self.emitSourcePos(line_num, col_num);
@@ -6956,7 +6995,7 @@ pub const parser_core = struct {
         }
 
         fn appendBytesAt(self: *State, bytes: []const u8, line_num: u32, col_num: u32) Error!void {
-            std.debug.assert(!(v2_available and self.emit_v2));
+            self.noteLegacyEmissionFunnel(false);
             const snapshot = self.takeEmissionSnapshot();
             errdefer self.rollbackEmission(snapshot);
             _ = try self.emitSourcePosAndLoc(line_num, col_num);
@@ -7176,7 +7215,9 @@ pub const parser_core = struct {
         /// truncation so a re-emission after rollback does not have to
         /// reallocate.
         fn truncateCode(self: *State, target_len: usize) Error!void {
-            std.debug.assert(!(v2_available and self.emit_v2));
+            // QCP-1 L3 gate (non-counting): rewinding the legacy stream during
+            // a v2 parse belongs to the same migration hole as emitting into it.
+            self.noteLegacyEmissionFunnel(false);
             if (self.cur_func().last_opcode_pos >= 0 and
                 @as(usize, @intCast(self.cur_func().last_opcode_pos)) >= target_len)
             {
@@ -13526,6 +13567,9 @@ pub const parser_core = struct {
     }
 
     fn parseEnumDeclaration(s: *State) Error!void {
+        const saved_legacy_emission_scope = s.pushLegacyEmissionScope(.ts_enum);
+        defer s.popLegacyEmissionScope(saved_legacy_emission_scope);
+
         try s.expectToken(tok.TOK_ENUM);
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
         const enum_atom = s.token.payload.ident.atom;
@@ -13581,7 +13625,11 @@ pub const parser_core = struct {
                         if (!is_simple) return Error.UnexpectedToken;
                         has_explicit = true;
                         val = @intFromFloat(s.token.payload.num.value);
-                        try parseAssignExpr(s);
+                        {
+                            const saved_initializer_scope = s.pushLegacyEmissionScope(.none);
+                            defer s.popLegacyEmissionScope(saved_initializer_scope);
+                            try parseAssignExpr(s);
+                        }
                     } else if (s.peekKind() == '-' and s.peekNextKind() == tok.TOK_NUMBER) {
                         try s.advance(); // consume '-'
                         const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
@@ -13648,6 +13696,9 @@ pub const parser_core = struct {
     }
 
     fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
+        const saved_legacy_emission_scope = s.pushLegacyEmissionScope(.ts_namespace);
+        defer s.popLegacyEmissionScope(saved_legacy_emission_scope);
+
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
         const ns_atom = s.token.payload.ident.atom;
 
@@ -13682,7 +13733,11 @@ pub const parser_core = struct {
                 s.popScopeIdentity();
             }
 
-            try parseNamespaceDeclarationWithIdent(s);
+            {
+                const saved_recursive_scope = s.pushLegacyEmissionScope(.none);
+                defer s.popLegacyEmissionScope(saved_recursive_scope);
+                try parseNamespaceDeclarationWithIdent(s);
+            }
 
             if (s.last_declared_atom) |nested_atom| {
                 try s.emitScopeGetVar(ns_atom);
@@ -13713,8 +13768,12 @@ pub const parser_core = struct {
             s.popScopeIdentity();
         }
 
-        while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-            try parseNamespaceStatement(s);
+        {
+            const saved_statement_scope = s.pushLegacyEmissionScope(.none);
+            defer s.popLegacyEmissionScope(saved_statement_scope);
+            while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+                try parseNamespaceStatement(s);
+            }
         }
 
         try s.expectToken('}');
@@ -15696,7 +15755,8 @@ pub const parser_core = struct {
     }
 
     fn patchForwardJump(s: *State, operand_offset: usize) Error!void {
-        std.debug.assert(!(v2_available and s.emit_v2));
+        // QCP-1 L3 gate lives in publishParserLabelTarget, the single mutation
+        // primitive every patch helper funnels through.
         const target: u32 = @intCast(s.currentCodeLen());
         try s.publishParserLabelTarget(operand_offset, target);
         // Patching to the current position represents a normal QuickJS label.
@@ -15705,12 +15765,10 @@ pub const parser_core = struct {
     }
 
     fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
-        std.debug.assert(!(v2_available and s.emit_v2));
         try s.publishParserLabelTarget(operand_offset, target);
     }
 
     fn patchAbsoluteTarget(s: *State, operand_offset: usize) Error!void {
-        std.debug.assert(!(v2_available and s.emit_v2));
         try s.publishParserLabelTarget(operand_offset, @intCast(s.currentCodeLen()));
         s.invalidateLastOpcode();
     }
@@ -16081,9 +16139,13 @@ pub const parser_core = struct {
             try s.advance();
             if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
 
-            const value_loc = try appendAnonymousTempLocal(s);
-            iteration_using_value_loc = value_loc;
-            try s.emitOpU16(opcode.op.put_loc, value_loc);
+            {
+                const saved_using_scope = s.pushLegacyEmissionScope(.using_declaration_in_for_of);
+                defer s.popLegacyEmissionScope(saved_using_scope);
+                const value_loc = try appendAnonymousTempLocal(s);
+                iteration_using_value_loc = value_loc;
+                try s.emitOpU16(opcode.op.put_loc, value_loc);
+            }
         } else if ((var_tok == tok.TOK_VAR or var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST) and
             !let_as_identifier)
         {
@@ -21097,7 +21159,11 @@ pub const parser_core = struct {
                     if (class_name) |class_atom| {
                         try s.emitScopeGetVar(ns_atom);
                         try s.emitScopeGetVar(class_atom);
-                        try s.emitOpAtom(opcode.op.put_field, class_atom);
+                        {
+                            const saved_export_scope = s.pushLegacyEmissionScope(.ts_namespace_class_export);
+                            defer s.popLegacyEmissionScope(saved_export_scope);
+                            try s.emitOpAtom(opcode.op.put_field, class_atom);
+                        }
                     }
                 }
             }

@@ -7,8 +7,10 @@ const object_ops = @import("../exec/object_ops.zig");
 const stack_mod = @import("../exec/stack.zig");
 const standard_globals = @import("../exec/standard_globals.zig");
 const builder_mod = @import("builder.zig");
+const coverage = @import("coverage.zig");
 const labels = @import("labels.zig");
 const resolve_variables = @import("resolve_variables.zig");
+const test_entry = @import("test_entry.zig");
 const P = parser_mod.Parser;
 const opcode = bytecode_mod.opcode;
 const qop = bytecode_mod.opcode.op;
@@ -4299,4 +4301,113 @@ test "compiler_v2.s4: installed for loop uses plain layout" {
     defer result.free(h.rt);
     try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
     try std.testing.expect(!h.installed_short_opcode);
+}
+
+test "compiler_v2.coverage: production constructs never fall back to legacy emission" {
+    const Case = struct {
+        source: []const u8,
+        source_kind: test_entry.SourceKind = .javascript,
+    };
+    const cases = [_]Case{
+        .{ .source = "let value = 1 + 2; value *= 3; value;" },
+        .{ .source = "let value = 0; if (true) value = 1; else value = 2;" },
+        .{ .source = "let value = 0; while (value < 3) { value++; }" },
+        .{ .source = "for (let index = 0; index < 3; index++) { index; }" },
+        .{ .source = "for (const key in { a: 1 }) { key; }" },
+        .{ .source = "for (const value of [1, 2]) { value; }" },
+        .{ .source = "let value = 0; do { value++; } while (value < 2);" },
+        .{ .source = "switch (1) { case 0: break; case 1: value: { break value; } default: break; }" },
+        .{ .source = "try { throw 1; } catch (error) { error; } finally { 0; }" },
+        .{ .source = "outer: for (let i = 0; i < 2; i++) { inner: while (true) { continue outer; break inner; } break outer; }" },
+        .{ .source = "function declared(a, b = 1) { return a + b; }" },
+        .{ .source = "const expression = function named(value) { return value; }; const arrow = value => value + 1;" },
+        .{ .source = "const object = { method(value) { return value; }, get item() { return 1; }, set item(value) { this.saved = value; } };" },
+        .{ .source = "function* generator() { yield 1; yield* [2, 3]; }" },
+        .{ .source = "async function task() { return await Promise.resolve(1); }" },
+        .{ .source = "async function* stream() { yield await Promise.resolve(1); }" },
+        .{ .source = "class Base { method() { return 1; } } class Derived extends Base { constructor() { super(); } static method() { return 2; } }" },
+        .{ .source = "const key = 'computed'; class Features { #field = 1; static #staticField = 2; #method() { return this.#field; } static #staticMethod() { return this.#staticField; } [key] = 3; [key + 'Method']() { return 4; } static { this.ready = true; } }" },
+        .{ .source = "const [first = 1, , ...rest] = [undefined, 2, 3];" },
+        .{ .source = "const { a: { b = 1 } = {}, c: renamed = 2, ...rest } = source;" },
+        .{ .source = "const array = [0, ...items]; const object = { base: 1, ...extra }; fn(...array);" },
+        .{ .source = "const name = 'world'; const text = `hello ${name}`;" },
+        .{ .source = "function tag(strings, value) { return value; } tag`value ${1}`;" },
+        .{ .source = "object?.property; object?.[key]; callable?.();" },
+        .{ .source = "let a = null; let b = a ?? 1; a ??= 2; b &&= 3; b ||= 4;" },
+        .{ .source = "class Item {} const item = new Item(); function factory() { return new.target; }" },
+        .{ .source = "new.target;" },
+        .{ .source = "delete object.value; typeof missing; void value;" },
+        .{ .source = "const pattern = /a+b?/gi; const integer = 12345678901234567890n;" },
+        .{ .source = "const shorthand = 1; const key = 'dynamic'; const object = { __proto__: null, shorthand, get value() { return 1; }, set value(input) {}, [key]: 2, ...extra };" },
+        .{ .source = "with ({ value: 1 }) { value; }" },
+        .{ .source = "eval('1 + 1'); (0, eval)('2 + 2');" },
+        .{ .source = "function dispose() { using resource = { [Symbol.dispose]() {} }; }" },
+        .{ .source = "for (using resource of resources) { resource; }" },
+        .{ .source = "async function dispose() { await using resource = value; await resource; }" },
+        .{ .source = "interface Box<T> { value: T } type Pair = [number, string]; const value: number = 1; function typed(input: number): number { return input; }", .source_kind = .typescript },
+        .{ .source = "enum Direction { Up, Down = 4, Name = 'name' }", .source_kind = .typescript },
+        .{ .source = "const enum Flag { A = 1, B = 2 } const flag: Flag = Flag.A;", .source_kind = .typescript },
+        .{ .source = "namespace Basic { const value = 1; }", .source_kind = .typescript },
+        .{ .source = "namespace A.B { export const value = 1; }", .source_kind = .typescript },
+        .{ .source = "namespace Exported { export const value = 1; export function make() { return value; } export class Item {} }", .source_kind = .typescript },
+        .{ .source = "class Box { constructor(public value: number, private label: string, readonly id: number) {} }", .source_kind = .typescript },
+        .{ .source = "const value = ({ count: 1 } as { count: number }) satisfies { count: number };", .source_kind = .typescript },
+        .{ .source = "function identity<T>(value: T): T { return value; } const arrow = <T>(value: T): T => value; class Store<T> { value!: T; }", .source_kind = .typescript },
+        .{ .source = "interface Merged { first: number } interface Merged { second: string } namespace Merged { export const value = 1; }", .source_kind = .typescript },
+    };
+
+    coverage.reset();
+    defer if (coverage.collectMode()) coverage.dumpReport();
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var skipped: usize = 0;
+    var all_fallbacks: std.EnumSet(coverage.LegacyConstruct) = .empty;
+    var total_unallowed: u64 = 0;
+    for (cases, 0..) |case, index| {
+        var program = test_entry.parseAndCompileV2TestProgram(
+            rt,
+            std.testing.allocator,
+            "compiler-v2-coverage-corpus",
+            case.source,
+            .{ .source_kind = case.source_kind },
+        ) catch |err| {
+            skipped += 1;
+            std.debug.print(
+                "compiler_v2.coverage skipped snippet[{d}] ({s}): {s}\n  {s}\n",
+                .{ index, @tagName(case.source_kind), @errorName(err), case.source },
+            );
+            continue;
+        };
+        defer program.deinit(rt);
+
+        all_fallbacks.setUnion(program.fallbacks);
+        total_unallowed +|= program.unallowed_emissions;
+        if (coverage.collectMode()) {
+            var iterator = program.fallbacks.iterator();
+            while (iterator.next()) |construct| {
+                std.debug.print(
+                    "compiler_v2.coverage fallback construct={s} snippet[{d}]={s}\n",
+                    .{ @tagName(construct), index, case.source },
+                );
+            }
+            if (program.unallowed_emissions != 0) {
+                std.debug.print(
+                    "compiler_v2.coverage OFFENDING snippet[{d}] unallowed={d}: {s}\n",
+                    .{ index, program.unallowed_emissions, case.source },
+                );
+            }
+        }
+    }
+
+    std.debug.print(
+        "compiler_v2.coverage corpus skipped={d} total={d}\n",
+        .{ skipped, cases.len },
+    );
+    try std.testing.expect(skipped * 2 <= cases.len);
+    try test_entry.expectNoUnallowedFallback(.{
+        .fallbacks = all_fallbacks,
+        .unallowed = total_unallowed,
+    });
 }
