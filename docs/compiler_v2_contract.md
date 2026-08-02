@@ -469,27 +469,27 @@ snapshot discipline covers it), **Audit** (does the committed arm match).
 - Audit: spot-checked **matches**; the class-side detach/splice and ctor
   rollback audits are §4.20-4.22.
 
-### 4.24 async resume / generator resume — NOT MIGRATED (see Findings F-1)
+### 4.24 async resume / generator resume — MIGRATED (closes the old F-1)
 
-The mandated resume producers currently have **no v2 arms**:
+Every mandated resume producer now has a v2 arm; the paragraph this section
+used to carry ("no v2 arms") is obsolete and was rewritten at QCP-1 L4:
 
-- `initial_yield` (15869) — emitted ungated via legacy `s.emitOp` inside the
-  otherwise-migrated function-decl arm;
-- `yield` expression (8540-8548) — includes a legacy forward jump +
-  `patchForwardJump` and an `emitReturnValue` resume split;
-- `await` unary (8585), `yield*` delegation (`emitYieldStarDelegation`
-  8598-8670, a full legacy label/patch machine), `using`-await
-  (11961-11973), and the async-generator `return()`-close walk in the
-  return-cleanup path (explicitly fail-loud: parser.zig:16913
-  `std.debug.assert(!(v2_available and s.emit_v2))`).
+- `initial_yield` — `v2FEmitOp(s, opcode.op.initial_yield)` behind the standard
+  gate (`parseFunction`, search `opcode.op.initial_yield`);
+- `yield` expression — gated `v2FEmitOp(s, opcode.op.yield)`; the resume split
+  is a real `LabelId` pair, no `patchForwardJump`;
+- `await` unary — gated `v2FEmitOp(s, opcode.op.await)`;
+- `yield*` delegation — `emitYieldStarDelegation` dispatches on its first line
+  (`if (v2_available and s.emit_v2) return emitYieldStarDelegationV2(...)`) to a
+  complete `LabelId` twin of the qjs TOK_YIELD delegation machine;
+- `using`-await — `emitUsingAwaitIfNeeded` carries a
+  `v2FNewLabel`/`v2FEmitJump`/`v2FBindLabel` triple;
+- the async-generator `return()`-close walk — its
+  `std.debug.assert(!(v2_available and s.emit_v2))` is gone; **no**
+  `assert(!(v2_available` remains anywhere in `src/parser.zig`, the QCP-1 L3
+  coverage gate having replaced all nine of them.
 
-Contract for their future migration: `yield`'s resume split is one label
-(`if_false → normal-resume` around the abrupt-completion `emitReturnValue`);
-`yield*` needs loop/dispatch labels exactly mirroring the qjs TOK_YIELD
-delegation machine (quickjs.c:28005-28150: loop head bound label, backward
-`if_false` re-entries, throw/return dispatch labels), all born as
-`LabelId`s; `initial_yield` (qjs quickjs.c:36879) is a plain op behind the
-standard gate. No new identity kinds are required.
+No new identity kinds were required, exactly as this section predicted.
 
 ## 5. Liveness note (S3 → S3R)
 
@@ -511,72 +511,95 @@ assumption. The identity taxonomy above is the S3R input contract and must
 not be weakened (in particular: every label bound, binds ordered, ref_count
 exact under rollback/detach/splice).
 
-## 6. Findings (S0.5 audit)
+## 6. Findings (S0.5 audit, re-audited at QCP-1 L4)
 
 Audit rule applied: any deviation, missing rollback coverage, or absolute-PC
 leak in a **committed v2 arm** is a finding; un-migrated producers on the
-mandated list are inventory findings. No code was changed in this stage.
+mandated list are inventory findings.
 
-- **F-1 (inventory gap, mandated producers): generator/async resume group has
-  no v2 arms.** `initial_yield` (parser.zig:15869) is emitted through legacy
-  `s.emitOp` with no `emit_v2` gate inside an arm whose neighbors
-  (check_ctor 15854, epilogue 15909) are migrated; `yield` (8545),
-  `await` (8585), `yield*` (8598), and `using`-await (11964) are entirely
-  legacy. Under `emit_v2` these hit the fail-loud funnel assert
-  (Debug/ReleaseSafe); in ReleaseFast they would emit into the legacy stream
-  mid-v2-parse (mixed streams). Fail-closed today, but the mandated-list
-  surface is not covered; the async-generator return()-close site carries an
-  explicit local assert (16913) while `initial_yield`/`yield`/`await` rely
-  only on the funnel assert.
-- **F-2 (half-migrated seam): logical assignment (`&&=`, `||=`, `??=`).**
-  `parseAssignExpr2` routes `getLValue` → `v2GetLValue` under v2 (7538), but
-  `emitLogicalAssignLValue` (7373-7413) — reached immediately after (7311) —
-  is ungated legacy: it emits `dup`/`if_true|if_false` forward jumps and
-  `patchForwardJump` absolute patches. Under `emit_v2`, the getter rewind
-  mutates the v2 stream and then the first legacy emission asserts: the v2
-  half runs before the fail-loud stop. Same fail-closed caveat as F-1; the
-  seam should either gain its v2 arm (two labels: skip-assign, end) or a
-  local up-front assert before `v2GetLValue` runs.
-- **F-3 (gated reachability, documented): the `scope_make_ref` aux-label arm
-  (§4.18) is unreachable from the parser today** because the phase-1
-  scope-event group is un-migrated and the v2 harness parses with
-  `emit_phase1_temp = false` (tests.zig:32, 558-560). The arm and the
-  Builder aux32 mechanics are committed and inline-tested; parser-level
-  aux32 coverage lands with the scope-group migration. (Recorded so no later
-  stage mistakes "no parser aux32" for dead code.)
-- **F-4 (inventory note, off the mandated list): `with` (`parseWith`, 14520)
-  is fully legacy** (zero gates), as are module import/export emission paths;
-  they fail loudly under `emit_v2` via the funnel assert.
-- **F-5 (dead symmetric code, benign): `BlockEnv.v2_label_finally` is never
-  assigned** (§3); its consumer arm (14173-14179) mirrors legacy
-  `label_finally >= 0`, which is equally never taken in zjs. Keep or drop
-  with the legacy field, together.
-- **F-6 (dead legacy code, benign): the four `*NoFinallyCapture`
-  break/continue emitters** (5268, 5287, 11334, 11346) have no callers on
-  the branch tip; they predate `emitControlThroughFinally` and never gained
-  v2 arms. Removal is safe and would shrink the audit surface.
-- **F-7 (half-migrated seam, mandated producer): optional-call chains.**
-  The v2 optional-chain test arm runs for `?.(` (parser.zig:9412-9419), but
-  `prepareCallReference` / `emitPreparedCall` (8912-9029) remain legacy: the
-  former reads `FunctionDef.last_opcode_pos` and the legacy byte stream, and
-  the latter calls `emitSourcePosAndLoc` (9001), whose v2 guard asserts
-  (6807). Thus direct optional calls and calls after an optional member emit
-  v2 chain labels before failing loudly; in ReleaseFast they would mix the
-  call into the legacy stream. Field/element-only optional chains remain
-  sound.
-- **F-8 (half-migrated seam, mandated LHS / for-in/of surface): direct
-  binding lvalues.** With `emit_phase1_temp = false`, `emitScopeGetVar`
-  lowers an identifier through the v2 `get_var` arm (parser.zig:6115-6121,
-  6561-6564), but `v2GetLValue` recognizes only the scope, field, private,
-  array, and super getter forms and rejects every other opcode
-  (7696-7785). Valid identifier assignment/update and non-declaration
-  `for (x in/of y)` targets (14715-14718) therefore return
-  `InvalidAssignmentTarget`; the current tests cover field/array lvalues and
-  declaration-target for-in/of forms, not this path.
+**Read this section as a scoreboard, not as an outstanding-gap list.** Six of
+the eight S0.5 findings are closed. F-1, F-2, F-4, F-7 and F-8 were closed by
+the S2-G/S3R/S4 parser migration and re-verified by direct code inspection at
+L4; F-3 was closed by the production `emit_phase1_temp` default. Only F-5 and
+F-6 (both dead code, both benign) are still open, and both are removals rather
+than migrations. Anyone treating F-1/F-2/F-4/F-7/F-8 as work-to-do is reading a
+stale snapshot.
+
+- **F-1 — CLOSED (was: generator/async resume group has no v2 arms).**
+  `initial_yield`, `yield`, `await`, `yield*` (via the
+  `emitYieldStarDelegation` → `emitYieldStarDelegationV2` first-line dispatch)
+  and `using`-await all carry v2 arms; see §4.24. The async-generator
+  `return()`-close site's local `std.debug.assert(!(v2_available and
+  s.emit_v2))` is gone along with the other eight — `grep -c
+  'std.debug.assert(!(v2_available' src/parser.zig` is 0 — because the QCP-1 L3
+  coverage gate (`docs/v2_emission_coverage.md`) replaced them with a strictly
+  stronger construct-naming check.
+- **F-2 — CLOSED (was: logical assignment `&&=` / `||=` / `??=` seam).**
+  `emitLogicalAssignLValue` now opens with the standard fork; its v2 arm emits
+  `dup` / optional `is_undefined_or_null` / `if_true|if_false` against a
+  `v2FNewLabel` skip-assign label and never calls `patchForwardJump`. The
+  `set_name` tail is forked too.
+- **F-3 — CLOSED (was: the `scope_make_ref` aux-label arm is parser-
+  unreachable).** `emit_phase1_temp` defaults to `true` in
+  `ParseState` (parser.zig) and in `compiler_v2/test_entry.zig`; only the
+  `compiler_v2/tests.zig` harness turns it off. `v2GetLValue`'s
+  `scope_get_var` case therefore runs in production, and its `with`-scope
+  branch emits `scope_make_ref` with a real aux `LabelId`. The arm is live, not
+  dead.
+- **F-4 — CLOSED (was: `with` and module import/export are fully legacy).**
+  `parseWith` forks `to_object` + `put_loc` (`v2FEmitOp` / `v2FEmitOpU16`)
+  behind the standard gate. The module paths never had ungated emitters of
+  their own: `parseImport` and `parseExport` contain **zero** direct emission
+  calls, reaching bytecode only through `emitScopePutVarInit` and
+  `emitAnonymousDefaultName`, both of which are v2-aware; dynamic `import()`
+  forks `opcode.op.import`.
+- **F-5 — OPEN (dead symmetric code, benign): `BlockEnv.v2_label_finally` is
+  never assigned.** Still true. The only writes to a `v2_label_finally` name in
+  `src/parser.zig` are to the *local* variable in the `TOK_TRY` arm; the
+  `BlockEnv` field keeps its `null` default forever, so the consumer arm in the
+  break path is unreachable — exactly mirroring legacy `label_finally >= 0`,
+  which is equally never taken in zjs (the field's own doc comment says so:
+  "both unset in zjs — try uses return_finally_frames"). Keep or drop with the
+  legacy field, together.
+- **F-6 — OPEN (dead legacy code, benign): the four `*NoFinallyCapture`
+  break/continue emitters.** Still true: `emitLabelledBreakNoFinallyCapture`,
+  `emitLabelledContinueNoFinallyCapture`, `emitUnlabelledBreakNoFinallyCapture`
+  and `emitUnlabelledContinueNoFinallyCapture` each occur exactly once in
+  `src/parser.zig` — their own definition. They predate
+  `emitControlThroughFinally` and never gained v2 arms. Removal is safe and
+  would shrink the audit surface.
+- **F-7 — CLOSED (was: optional-call chains half-migrated).**
+  `prepareCallReference` opens with a full v2 branch that reads
+  `Builder.last_opcode_pos` / `Builder.code` (never the legacy stream), rewrites
+  `get_field_opt_chain` → `get_field2` in the v2 buffer, and moves the chain
+  exit by assigning `label_slots[...].bound_offset`. `emitPreparedCall` has a
+  v2 branch that snapshots the Builder, emits one source marker via
+  `v2FAddSourceMarker` and then the `call` / `call_method` / `eval` /
+  `apply` / `apply_eval` tail with `*NoSource` sinks.
+- **F-8 — CLOSED (was: direct binding lvalues rejected).** `v2GetLValue`'s
+  first case is `opcode.op.scope_get_var`: it decodes the phase-1 getter,
+  validates the atom ledger, takes the atom back with `v2FTakeLastAtomOwned`,
+  truncates the marked opcode, and — when a `with` scope is in the chain —
+  upgrades the descriptor to `ref_value` plus a `scope_make_ref` aux label.
+  Identifier assignment/update and non-declaration `for (x in/of y)` targets
+  work under v2; the nine v2-mode test262 failures that remained were caused by
+  the `using`-in-`for-of` `put_loc`, not by this path, and are now 0.
+
+Re-audit method (L4): each finding was re-checked by reading the cited function
+in `src/parser.zig` on this tree, not by re-running a behaviour test — a green
+test suite is what let these seams hide in the first place. The QCP-1 L3
+coverage gate (`docs/v2_emission_coverage.md`) is the mechanical successor to
+this section: it panics on any legacy emission during a v2 parse, so a *new*
+F-1-shaped finding can no longer accumulate silently.
 
 No absolute-PC leak was found in any committed v2 arm: every jump operand in
 the v2 temp stream holds a `LabelId` (jump32) or aux `LabelId` (aux32); all
 byte-offset uses are stream-editing coordinates per the byte-PC rule (§1).
 No committed snapshot/detach site violates the boundary-bind caveat: all four
 Builder-snapshot sites (9628, 12963, 17723, 19095) snapshot before any
-emission or bind they may revert.
+emission or bind they may revert. The five arms added at L4
+(`parseEnumDeclaration`, `parseNamespaceDeclarationWithIdent`, `parseClass`'s
+namespace re-export, `parseForInOf`'s `using` store, `parseNewExpr`'s
+`new.target` fallback) hold to the same rule: the two `X = X || {}` prologues
+became `v2FNewLabel` / `v2FEmitJump` / `v2FBindLabel` triples rather than
+`emitForwardJump` / `patchForwardJump` absolute pairs.

@@ -10132,7 +10132,12 @@ pub const parser_core = struct {
             if (s.emit_to_function_def) {
                 try s.emitScopeGetVar(atom_new_target);
             } else {
-                try s.emitOpU8(opcode.op.special_object, 3);
+                // Test-only: ParseState.init leaves emit_to_function_def false; initCanonicalRootWithRuntime sets it true.
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOpU8(s, opcode.op.special_object, 3);
+                } else {
+                    try s.emitOpU8(opcode.op.special_object, 3);
+                }
             }
             return;
         }
@@ -13567,9 +13572,6 @@ pub const parser_core = struct {
     }
 
     fn parseEnumDeclaration(s: *State) Error!void {
-        const saved_legacy_emission_scope = s.pushLegacyEmissionScope(.ts_enum);
-        defer s.popLegacyEmissionScope(saved_legacy_emission_scope);
-
         try s.expectToken(tok.TOK_ENUM);
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
         const enum_atom = s.token.payload.ident.atom;
@@ -13584,11 +13586,20 @@ pub const parser_core = struct {
 
         // Emit Enum = Enum || {}
         try s.emitScopeGetVarUndef(enum_atom);
-        try s.emitOp(opcode.op.dup);
-        const skip_jump = try emitForwardJump(s, opcode.op.if_true);
-        try s.emitOp(opcode.op.drop);
-        try s.emitOp(opcode.op.object);
-        try patchForwardJump(s, skip_jump);
+        if (v2_available and s.emit_v2) {
+            try v2FEmitOp(s, opcode.op.dup);
+            const skip_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.if_true, skip_label);
+            try v2FEmitOp(s, opcode.op.drop);
+            try v2FEmitOp(s, opcode.op.object);
+            try v2FBindLabel(s, skip_label);
+        } else {
+            try s.emitOp(opcode.op.dup);
+            const skip_jump = try emitForwardJump(s, opcode.op.if_true);
+            try s.emitOp(opcode.op.drop);
+            try s.emitOp(opcode.op.object);
+            try patchForwardJump(s, skip_jump);
+        }
         try s.emitScopePutVar(enum_atom);
 
         try s.expectToken('{');
@@ -13616,7 +13627,11 @@ pub const parser_core = struct {
                     try s.emitScopeGetVar(enum_atom);
                     try emitStringLiteralValue(s, s.token.payload.str.bytes);
                     try s.advance();
-                    try s.emitOpAtom(opcode.op.put_field, member_atom);
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(member_atom));
+                    } else {
+                        try s.emitOpAtom(opcode.op.put_field, member_atom);
+                    }
                 } else {
                     var has_explicit = false;
                     var val: i32 = 0;
@@ -13625,11 +13640,7 @@ pub const parser_core = struct {
                         if (!is_simple) return Error.UnexpectedToken;
                         has_explicit = true;
                         val = @intFromFloat(s.token.payload.num.value);
-                        {
-                            const saved_initializer_scope = s.pushLegacyEmissionScope(.none);
-                            defer s.popLegacyEmissionScope(saved_initializer_scope);
-                            try parseAssignExpr(s);
-                        }
+                        try parseAssignExpr(s);
                     } else if (s.peekKind() == '-' and s.peekNextKind() == tok.TOK_NUMBER) {
                         try s.advance(); // consume '-'
                         const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
@@ -13661,13 +13672,27 @@ pub const parser_core = struct {
             if (!is_string_init) {
                 // Double mapping: Enum[Enum["Member"] = value] = "Member"
                 try s.emitScopeGetVar(enum_atom); // Stack: [value, outer_obj]
-                try s.emitOp(opcode.op.swap); // Stack: [outer_obj, value]
-                try s.emitOp(opcode.op.dup); // Stack: [outer_obj, value, value]
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOp(s, opcode.op.swap); // Stack: [outer_obj, value]
+                    try v2FEmitOp(s, opcode.op.dup); // Stack: [outer_obj, value, value]
+                } else {
+                    try s.emitOp(opcode.op.swap); // Stack: [outer_obj, value]
+                    try s.emitOp(opcode.op.dup); // Stack: [outer_obj, value, value]
+                }
                 try s.emitScopeGetVar(enum_atom); // Stack: [outer_obj, value, value, inner_obj]
-                try s.emitOp(opcode.op.swap); // Stack: [outer_obj, value, inner_obj, value]
-                try s.emitOpAtom(opcode.op.put_field, member_atom); // Stack: [outer_obj, value]
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOp(s, opcode.op.swap); // Stack: [outer_obj, value, inner_obj, value]
+                    try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(member_atom)); // Stack: [outer_obj, value]
+                } else {
+                    try s.emitOp(opcode.op.swap); // Stack: [outer_obj, value, inner_obj, value]
+                    try s.emitOpAtom(opcode.op.put_field, member_atom); // Stack: [outer_obj, value]
+                }
                 try emitStringLiteralValue(s, member_name); // Stack: [outer_obj, value, "Member"]
-                try s.emitOp(opcode.op.put_array_el);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitOp(s, opcode.op.put_array_el);
+                } else {
+                    try s.emitOp(opcode.op.put_array_el);
+                }
                 counter += 1;
             }
 
@@ -13685,7 +13710,11 @@ pub const parser_core = struct {
             if (s.current_namespace_atom) |ns_atom| {
                 try s.emitScopeGetVar(ns_atom);
                 try s.emitScopeGetVar(enum_atom);
-                try s.emitOpAtom(opcode.op.put_field, enum_atom);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(enum_atom));
+                } else {
+                    try s.emitOpAtom(opcode.op.put_field, enum_atom);
+                }
             }
         }
     }
@@ -13696,9 +13725,6 @@ pub const parser_core = struct {
     }
 
     fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
-        const saved_legacy_emission_scope = s.pushLegacyEmissionScope(.ts_namespace);
-        defer s.popLegacyEmissionScope(saved_legacy_emission_scope);
-
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
         const ns_atom = s.token.payload.ident.atom;
 
@@ -13712,11 +13738,20 @@ pub const parser_core = struct {
 
         // Emit Namespace = Namespace || {}
         try s.emitScopeGetVarUndef(ns_atom);
-        try s.emitOp(opcode.op.dup);
-        const skip_jump = try emitForwardJump(s, opcode.op.if_true);
-        try s.emitOp(opcode.op.drop);
-        try s.emitOp(opcode.op.object);
-        try patchForwardJump(s, skip_jump);
+        if (v2_available and s.emit_v2) {
+            try v2FEmitOp(s, opcode.op.dup);
+            const skip_label = try v2FNewLabel(s);
+            try v2FEmitJump(s, opcode.op.if_true, skip_label);
+            try v2FEmitOp(s, opcode.op.drop);
+            try v2FEmitOp(s, opcode.op.object);
+            try v2FBindLabel(s, skip_label);
+        } else {
+            try s.emitOp(opcode.op.dup);
+            const skip_jump = try emitForwardJump(s, opcode.op.if_true);
+            try s.emitOp(opcode.op.drop);
+            try s.emitOp(opcode.op.object);
+            try patchForwardJump(s, skip_jump);
+        }
         try s.emitScopePutVar(ns_atom);
 
         if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
@@ -13733,16 +13768,16 @@ pub const parser_core = struct {
                 s.popScopeIdentity();
             }
 
-            {
-                const saved_recursive_scope = s.pushLegacyEmissionScope(.none);
-                defer s.popLegacyEmissionScope(saved_recursive_scope);
-                try parseNamespaceDeclarationWithIdent(s);
-            }
+            try parseNamespaceDeclarationWithIdent(s);
 
             if (s.last_declared_atom) |nested_atom| {
                 try s.emitScopeGetVar(ns_atom);
                 try s.emitScopeGetVar(nested_atom);
-                try s.emitOpAtom(opcode.op.put_field, nested_atom);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(nested_atom));
+                } else {
+                    try s.emitOpAtom(opcode.op.put_field, nested_atom);
+                }
             }
 
             s.last_declared_atom = ns_atom;
@@ -13750,7 +13785,11 @@ pub const parser_core = struct {
                 if (s.current_namespace_atom) |parent_ns| {
                     try s.emitScopeGetVar(parent_ns);
                     try s.emitScopeGetVar(ns_atom);
-                    try s.emitOpAtom(opcode.op.put_field, ns_atom);
+                    if (v2_available and s.emit_v2) {
+                        try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(ns_atom));
+                    } else {
+                        try s.emitOpAtom(opcode.op.put_field, ns_atom);
+                    }
                 }
             }
             return;
@@ -13768,12 +13807,8 @@ pub const parser_core = struct {
             s.popScopeIdentity();
         }
 
-        {
-            const saved_statement_scope = s.pushLegacyEmissionScope(.none);
-            defer s.popLegacyEmissionScope(saved_statement_scope);
-            while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-                try parseNamespaceStatement(s);
-            }
+        while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+            try parseNamespaceStatement(s);
         }
 
         try s.expectToken('}');
@@ -13783,7 +13818,11 @@ pub const parser_core = struct {
             if (saved_namespace_atom) |parent_ns| {
                 try s.emitScopeGetVar(parent_ns);
                 try s.emitScopeGetVar(ns_atom);
-                try s.emitOpAtom(opcode.op.put_field, ns_atom);
+                if (v2_available and s.emit_v2) {
+                    try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(ns_atom));
+                } else {
+                    try s.emitOpAtom(opcode.op.put_field, ns_atom);
+                }
             }
         }
     }
@@ -16139,11 +16178,11 @@ pub const parser_core = struct {
             try s.advance();
             if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
 
-            {
-                const saved_using_scope = s.pushLegacyEmissionScope(.using_declaration_in_for_of);
-                defer s.popLegacyEmissionScope(saved_using_scope);
-                const value_loc = try appendAnonymousTempLocal(s);
-                iteration_using_value_loc = value_loc;
+            const value_loc = try appendAnonymousTempLocal(s);
+            iteration_using_value_loc = value_loc;
+            if (v2_available and s.emit_v2) {
+                try v2FEmitOpU16(s, opcode.op.put_loc, value_loc);
+            } else {
                 try s.emitOpU16(opcode.op.put_loc, value_loc);
             }
         } else if ((var_tok == tok.TOK_VAR or var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST) and
@@ -21159,9 +21198,9 @@ pub const parser_core = struct {
                     if (class_name) |class_atom| {
                         try s.emitScopeGetVar(ns_atom);
                         try s.emitScopeGetVar(class_atom);
-                        {
-                            const saved_export_scope = s.pushLegacyEmissionScope(.ts_namespace_class_export);
-                            defer s.popLegacyEmissionScope(saved_export_scope);
+                        if (v2_available and s.emit_v2) {
+                            try v2FEmitAtomOpOwned(s, opcode.op.put_field, s.function.atoms.dup(class_atom));
+                        } else {
                             try s.emitOpAtom(opcode.op.put_field, class_atom);
                         }
                     }

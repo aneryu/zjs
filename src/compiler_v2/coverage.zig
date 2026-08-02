@@ -7,10 +7,6 @@ pub const enabled: bool = builtin.mode == .Debug or builtin.mode == .ReleaseSafe
 
 pub const LegacyConstruct = enum(u8) {
     none = 0,
-    ts_enum,
-    ts_namespace,
-    ts_namespace_class_export,
-    using_declaration_in_for_of,
 };
 
 pub const Reachability = enum {
@@ -26,32 +22,7 @@ pub const AllowlistEntry = struct {
     reachable_from: Reachability,
 };
 
-pub const legacy_allowlist = [_]AllowlistEntry{
-    .{
-        .construct = .ts_enum,
-        .reason = "parseEnumDeclaration still emits enum initialization and member mappings through legacy funnels",
-        .exit_milestone = "QCP-1 L4 construct migration",
-        .reachable_from = .typescript,
-    },
-    .{
-        .construct = .ts_namespace,
-        .reason = "parseNamespaceDeclarationWithIdent still emits namespace initialization and exports through legacy funnels",
-        .exit_milestone = "QCP-1 L4 construct migration",
-        .reachable_from = .typescript,
-    },
-    .{
-        .construct = .ts_namespace_class_export,
-        .reason = "parseClass still emits a namespace-exported class re-export through the legacy put_field funnel",
-        .exit_milestone = "QCP-1 L4 construct migration",
-        .reachable_from = .typescript,
-    },
-    .{
-        .construct = .using_declaration_in_for_of,
-        .reason = "parseForInOf still stores the using iteration value through the legacy put_loc funnel",
-        .exit_milestone = "QCP-1 L4 construct migration",
-        .reachable_from = .ecmascript,
-    },
-};
+pub const legacy_allowlist = [_]AllowlistEntry{};
 
 comptime {
     for (legacy_allowlist) |entry| {
