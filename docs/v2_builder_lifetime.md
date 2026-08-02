@@ -519,3 +519,444 @@ lowering each function **on pop, during parsing** (QuickJS's `js_create_function
 at the end of each function body), so the emission census is O(depth) rather than
 O(tree). That removes ~890 KB from v2's peak — the only remaining lever of that
 size — and is a pipeline-topology change, not a lifetime change.
+
+---
+
+## 10. Stage C2-DECOMP: the three questions, separated
+
+The single "peak scratch < 0.7x" bar is retired. C2 is three questions and they
+are answered separately below:
+
+| | question | bar |
+| --- | --- | --- |
+| **C2-A** | transient lowering memory — peak temporary bytes/allocations attributable to the lowering passes | hard, < 0.7x |
+| **C2-B** | artifact residency — what the compile leaves behind | report the delta, not bar-gated |
+| **C2-C** | peak live set — decomposed as transient + artifact + overlap, answering *where the increase is* | must be explained |
+
+### 10.1 How C2-DECOMP was measured
+
+Same two Debug binaries as §1 (`zig build zjs-dev -Dzjs_compiler=v2|legacy`,
+branch tip `95ce9930`), same source (`mc1.js`, the vendored Octane `code-load`
+payload: one Closure `base.js` compile, one jQuery 1.7.2 compile of 535
+`FunctionDef`s). A second scratch probe (`ZJS_C2D=1`, Debug-only, added,
+measured and reverted — it is deliberately **not** part of this commit) added
+five instruments that the C2-A probe did not have:
+
+1. **Per-item producer census** over the whole `FunctionDef` tree at
+   `createFunctionBytecode` entry, one counter per buffer *role* rather than a
+   single builder total.
+2. **Artifact census** over the published `FunctionBytecode` tree at
+   `createFunctionBytecode` exit, bucketed into the three C2-B groups.
+3. **Parser-arena instrumentation**: the arena's *child* allocator is wrapped,
+   so every block it takes from the runtime is recorded with address, size and
+   pipeline phase; the arena facade handed to the parser is wrapped too, so
+   requested bytes/calls are counted per phase (parse / finalize / State
+   teardown).
+4. **Arena-pointer audit**: every pointer reachable from the `FunctionDef` tree
+   at parse end, and every pointer reachable from the published FB tree, tested
+   for membership in the recorded arena block ranges.
+5. **Lifetime classification** via the existing `-T` allocation trace plus
+   `M <tag>` phase markers emitted at each per-function lowering
+   enter/exit, replayed offline to compute, for every lowering window, the peak
+   live bytes/allocations of allocations *born inside that window*.
+
+Trace replay reconstructs live bytes to within 0.4% of the account's own
+`allocated_bytes` (11,492 B of 2,882,631 for v2, 10,818 B of 2,660,488 for
+legacy); the gap is the in-place `resize`/`remap` paths, which adjust
+`allocated_bytes` without emitting a trace event. Every headline number below
+comes from the direct per-resource census, not from the replay; the replay is
+used only where an *exhaustive* class total is needed (C2-A's legacy side).
+
+---
+
+## 11. C2-B — artifact residency, three groups
+
+### 11.1 First, a correction: 385,425 is not the artifact
+
+`allocated_bytes` at process exit is **385,425 B / 864 live allocations on both
+pipelines** (reproduced this stage on branch tip `95ce9930`; §1 recorded the
+same 385,425 and §9.1 recorded 385,464 for this counter on a slightly different
+tree state — the identity between pipelines is what matters and it holds in
+every measurement). It is identical — but it is **not**
+evidence about artifact residency, because the artifact is not in it. The
+jQuery tree alone is 535 packed `FunctionBytecode`s plus 535 pc2line buffers
+plus 534 source copies = 1,604 allocations, and only 864 allocations are live at
+exit. The compiled artifact is released when the eval result is dropped; what
+385,425 measures is the **runtime bootstrap residue** (atom table, shapes,
+globals), which no compiler change touches.
+
+Artifact residency therefore has to be measured while the artifact is alive.
+The census below runs at `createFunctionBytecode` exit, i.e. at the artifact's
+birth, walking the published FB tree through the cpool.
+
+### 11.2 The three groups, jQuery tree (535 functions), legacy vs v2
+
+Bytes unless the row says otherwise.
+
+| group | item | legacy | v2 | delta |
+| --- | --- | ---: | ---: | ---: |
+| **(i) FunctionBytecode** | code bytes | 59,056 | **89,274** | **+30,218** |
+| | atom operands (*count* of refs embedded in code; storage is inside the code bytes above) | 5,221 | **5,488** | **+267** |
+| | metadata — FB header (96 B x 535) | 51,360 | 51,360 | 0 |
+| | metadata — `DebugInfo` (32 B x 535) | 17,120 | 17,120 | 0 |
+| | metadata — cpool storage | 12,320 | 12,320 | 0 |
+| | metadata — vardefs | 24,240 | 24,240 | 0 |
+| | metadata — closure rows | 9,360 | 9,360 | 0 |
+| | metadata — hot extension | 4,280 | 4,280 | 0 |
+| | **group (i) bytes / allocations** | **177,736 / 535** | **207,954 / 535** | **+30,218 / 0** |
+| **(ii) persistent tables** | labels | **0** | **0** | 0 |
+| | boundaries | **0** | **0** | 0 |
+| | source events (pc2line buffers) | 41,588 / 535 | 41,589 / 535 | **+1 / 0** |
+| | runtime metadata (source text copies) | 222,217 / 534 | 222,217 / 534 | 0 |
+| | **group (ii) bytes / allocations** | **263,805 / 1,069** | **263,806 / 1,069** | **+1 / 0** |
+| **(iii) ownership retained** | atom refs — names (func/file/vardef/closure) | 4,260 | 4,260 | 0 |
+| | atom refs — code operands | 5,221 | 5,488 | **+267** |
+| | atom refs total | 9,481 | 9,748 | +267 |
+| | atom table live entries / capacity | 1,038 / 2,048 | 1,038 / 2,048 | 0 |
+| | closures (closure_var rows) | 1,170 | 1,170 | 0 |
+| | modules (module records) | 0 | 0 | 0 |
+| | cpool values / of which child FBs | 770 / 534 | 770 / 534 | 0 |
+| | **artifact total (i)+(ii)** | **441,541 / 1,604** | **471,760 / 1,604** | **+30,219 / 0** |
+
+The `base.js` tree (59 functions) shows the same shape at 1/9 scale: group (i)
+14,353 -> 15,687 (code 3,165 -> 4,499), group (ii) 10,034 both, atom refs 609 ->
+620.
+
+### 11.3 Verdict: NOT identical — and the difference is not smuggling
+
+The ruling asked for an explicit statement. **`legacy artifact == v2 artifact`
+is FALSE, and the group that differs is (i) FunctionBytecode, specifically the
+code bytes: +30,218 B, +51.2%.** Groups (ii) and (iii) are equal to within one
+byte and 267 atom refs, and those 267 refs are not an independent difference —
+they are exactly the atom-operand opcodes that the extra code bytes contain.
+
+The cause is a known and deliberate property of the current v2 pipeline, not a
+lifetime defect: `resolve_labels.default_layout` is `.plain`
+(`src/compiler_v2/resolve_labels.zig:21`). The short-form relaxation pass
+(`LayoutMode.short`, which is what shrinks jumps and selects short opcodes)
+exists and is exercised, but is not the production default yet, so v2 publishes
+long-form code. Group (i) is the *only* group that can register that, and it
+does.
+
+What the ruling wanted to retire is nevertheless retired, by the evidence that
+actually bears on it:
+
+* **Allocation counts are identical group by group** — 535 FAM allocations, 535
+  pc2line buffers, 534 source copies, on both pipelines. A smuggled temporary
+  would be an *extra owner*, and there is none.
+* **There is no v2-only persistent table.** Labels = 0 and boundaries = 0 on
+  both; the label table, reloc array and source-slot array that v2 builds during
+  lowering appear nowhere in the artifact.
+* **Nothing v2 retains is arena-backed.** Of the 1,604 pointers reachable from
+  the published FB tree, **0** fall inside a parser-arena block, on both
+  pipelines.
+* **The retained atom refs are accounted for exactly**: names 4,260 identical,
+  code operands equal to the number of atom-operand opcodes in the published
+  code.
+
+So: **V2 did not smuggle temporary data into long-lived state.** Its artifact is
+larger because it emits larger code, and that is a lowering-quality question for
+the `.short` layout switch, not an ownership question.
+
+---
+
+## 12. C2-C — the peak live set, itemized
+
+v2's whole-run peak is 2,886,830 and is reached 4,199 B above its parse-end live
+set of 2,882,631; legacy's is 2,683,991, 23,503 B above its parse-end live set of
+2,660,488. The peak is therefore the parse-end set on both pipelines:
+
+```
+peak gap  = parse-end gap − (legacy's lowering headroom − v2's)
++202,839  = +222,143      − (23,503 − 4,199 = 19,304)
+```
+
+so the whole peak question is the **+222,143 B parse-end gap**, which decomposes
+with no unexplained remainder:
+
+| term | bytes | share |
+| --- | ---: | ---: |
+| per-`FunctionDef` producer footprint (§12.1) | **+77,568** | 34.9% |
+| parser arena (§12.2) | **+144,488** | 65.0% |
+| unattributed residual | **+87** | 0.04% |
+| **total** | **+222,143** | 100% |
+
+(The same +87 B residual appears on the `base.js` compile: +10,320 producer,
+−182 arena, +10,225 measured gap. It is one constant-size allocation, not a
+per-function term.)
+
+Shared `FunctionDef` metadata is **byte-identical on both pipelines** and
+contributes 0: vars 55,680, args 78,912, scopes 38,528, cpool 28,672, globals
+160, child lists 10,816, source text 222,217, in 1,953 allocations — the same on
+legacy and v2. "Parsed AST metadata" and "temporary binding state" are therefore
+*not* part of the increase, measured rather than assumed.
+
+### 12.1 The +77,568 B producer footprint, per item
+
+Both censuses are taken at `createFunctionBytecode` entry over the whole 535-node
+tree. Items are matched by *role*, so the two pipelines' equivalents sit on the
+same row.
+
+| item | legacy | v2 | delta | allocations (legacy -> v2) |
+| --- | ---: | ---: | ---: | --- |
+| temporary code stream | 344,368 | 198,288 | **−146,080** | 535 -> 535 |
+| atom ledger | 84,224 | 84,224 | **0** | 527 -> 527 |
+| source events (marker slots) | 390,816 | 386,208 | **−4,608** | 535 -> 535 |
+| label table | 0 | 79,616 | **+79,616** | 0 -> 343 |
+| reloc entries | 0 | 58,752 | **+58,752** | 0 -> 343 |
+| `Builder` object (168 B each) | 0 | 89,880 | **+89,880** | 0 -> 535 |
+| root-only legacy `byte_code` stub | 0 | 8 | **+8** | 0 -> 1 |
+| **total** | **819,408** | **896,976** | **+77,568** | **1,597 -> 2,819** |
+
+The v2 producer is *smaller* on both shared items (−150,688 B: the compact
+temporary stream is 0.58x legacy's phase-1 byte_code, and the marker slots are
+slightly smaller). The entire +77,568 is three v2-only items totalling
++228,248 B, and the allocation-count increase (+1,222, i.e. 5.27 live
+allocations per function against legacy's 2.99) is entirely those three.
+
+Per item — create point, last use, release point:
+
+| item | create point | last use | release point |
+| --- | --- | --- | --- |
+| **`Builder` object** | `State.v2EnsureBuilderForFd` (`src/parser.zig:7097`) via `fd.memory.create(Builder)`, called from `pushFunction` (`:4505`) per nested function and `beginV2ProgramEmission` (`:7118`) for the root | `resolve_variables.run` holds it as `Resolver.input` for the whole S3 pass; in dual mode the two ledger scalars are read one statement later in `compileFunctionV2` | `releaseConsumedBuilder` in `compileFunctionV2` (`src/compiler_v2/root.zig`), immediately after `resolve_variables.run` returns. `FunctionDef.deinit` (`src/bytecode.zig:3576`) is now the parse-time / error-path backstop only |
+| **temporary code stream** (`Builder.code`) | first `emit*` -> `reserve(u8,…)` (`src/compiler_v2/builder.zig:71`), doubling, min 32 | `Resolver.code = input.code[0..code_len]` inside `resolve_variables.run` (`resolve_variables.zig:2017`) | same point (`Builder.deinit` from `releaseConsumedBuilder`) |
+| **atom ledger** (`Builder.atom_operands`) | first atom-bearing `emit*`; every appended atom is retained | `Resolver.atom_ledger`; S3 re-retains survivors into `ResolvedProduct.atom_operands` | same point; refs released item-wise |
+| **label table** (`Builder.label_slots`) | first `Builder.newLabel` (`builder.zig:168`), 16 B/slot, doubling min 8 | `initializeLabels` copies them into the product (`resolve_variables.zig:2009`); dual re-walks the input array once for `labels_unbound` | same point |
+| **reloc entries** (`Builder.relocs`) | first `Builder.emitJump` (`builder.zig:189`), 12 B/entry | `cfg.build` sizes edge storage from `input.reloc_len` (`cfg.zig:641`); `resolve_labels` builds its own chains and never reads this array | same point — provably dead the moment `resolve_variables.run` returns |
+| **source events** (`Builder.source_slots`) | first `Builder.addSourceMarker`, 12 B/slot | `Resolver.input_sources`; S3 writes output-offset copies into the product | same point |
+| **parsed AST metadata** (`vars`/`args`/`scopes`/`cpool`/`closure_var`/`global_vars`/`child_list`/`source_text`) | `FunctionDef` growable appenders during parse; **identical on both pipelines** | read throughout lowering (`publishLoweredMetadata`, layout sizing, vardef/closure emission) | `FunctionDef.deinit` — unchanged by v2, contributes 0 to the delta |
+| **temporary binding state** (`vars_htab`, `jump_slots`) | `FunctionDef` binding-index growth | legacy resolve passes | `FunctionDef.deinit`; both are **0 bytes at parse end on both pipelines** — they are populated and drained inside lowering, so they are not part of the parse-end footprint at all |
+
+### 12.2 The +144,488 B parser arena: geometry, on top of a real boundary error
+
+The ruling posed a specific hypothesis — *"parse finished but the arena is held
+until emit"* — and asked whether that is a phase-ownership boundary error. Both
+halves have to be answered separately, because **the answer is yes to the
+retention and no to the delta.**
+
+#### 12.2.1 The retention is real, and it is a boundary error
+
+`Parser.compile` (`src/parser.zig:22282`) creates
+`std.heap.ArenaAllocator.init(rt.memory.persistent_allocator)`, points
+`rt.memory.allocator` at it for the parse, and calls `arena.deinit()` only at the
+very end of `compile()` — after `createFunctionBytecode` has returned *and* after
+`compileQjsProgram`'s `defer state.deinit(rt)` has torn the parser State down.
+Measured, jQuery compile:
+
+| | v2 | legacy |
+| --- | ---: | ---: |
+| arena blocks / bytes at parse end | 11 / **488,548** | 10 / **344,060** |
+| high-water instant | during **parse** (phase 1) | during **parse** (phase 1) |
+| bytes requested from the arena during **finalize** | **0** (0 calls) | **0** (0 calls) |
+| bytes requested from the arena during **State teardown** | **0** (0 calls) | **0** (0 calls) |
+| arena bytes still held at `createFunctionBytecode` exit | **488,548** | **344,060** |
+| arena bytes after `arena.deinit()` at `compile()` exit | 0 | 0 |
+| `FunctionDef`-tree pointers at parse end / of which inside an arena block | 11,234 / **0** | 8,024 / **0** |
+| published FB-tree pointers / of which inside an arena block | 1,604 / **0** | 1,604 / **0** |
+
+So the emit phase cannot even reach the arena: its only inputs are the
+`FunctionDef` tree and the `CompileContext`, and **no pointer reachable from the
+`FunctionDef` tree lands in arena memory**, while `rt.memory.allocator` is
+switched to `compile_context.artifactAllocator()` for the duration
+(`src/parser.zig:22673`), which is why the requested-bytes counter is 0.
+
+Executable confirmation: with the probe's `ZJS_C2D_POISON=1` mode, every byte of
+every arena block is overwritten with `0xDD` at parse end. On **both** pipelines
+`createFunctionBytecode` then runs to completion and the artifact census it
+produces is **byte-identical to the unpoisoned run** (all three compiles, all
+groups). The process does eventually fault — at
+`ParseState.deinit -> deinitDeclarationConflictIndices -> HashMapUnmanaged.deinit`
+(`src/parser.zig:4272`, `:3578`), i.e. inside `compileQjsProgram`'s
+`defer state.deinit(rt)`, which runs *after* finalize and only reads the arena to
+free arena-backed containers.
+
+**Conclusion:** from parse end to `compile()` exit, the entire arena — 488,548 B
+for v2, 344,060 B for legacy — is retained with **no reader in the emit phase**;
+its only remaining reader is the parser State's own destructor, which is pure
+bookkeeping over containers whose storage the arena is about to discard anyway.
+This is a phase-ownership boundary error, it is worth **16.9% of v2's peak** and
+**12.8% of legacy's**, and it is present in both pipelines identically. It is
+also, as the ruling suspected, much simpler to fix than lower-on-pop: it needs
+the parse-scratch teardown moved ahead of finalize (or made arena-aware) so
+`arena.deinit()` can run at parse end. It is *not* v2 work.
+
+#### 12.2.2 The +144,488 delta is allocation geometry, proven
+
+The boundary error explains why the arena is on the peak at all. It does **not**
+explain why v2's arena is bigger, and the ruling asked for that to be proven the
+other way if it is geometry. It is.
+
+`std.heap.ArenaAllocator` sizes each new node as
+`alignForward(1.5 * (prev_node_size + request + sizeof(Node) + alignment + 16), 2)`
+(`std/heap/ArenaAllocator.zig`) — a 1.5x geometric ladder on the previous node.
+Measured node ladders for the jQuery parse:
+
+```
+legacy (10 nodes, 344,060 B):  312  958  1936  3920  8152  15788  30708  57288  89908  135090
+v2     (11 nodes, 488,548 B):  312  958  1936  3850  8096  16228  24636  49056  77688  116826  188962
+```
+
+What the parser actually asks the arena for:
+
+| | legacy | v2 | delta |
+| --- | ---: | ---: | ---: |
+| arena allocation calls (cumulative, parse) | 2,374 | 2,547 | +173 (+7.3%) |
+| bytes requested (cumulative, parse) | 428,277 | 446,497 | **+18,220 (+4.3%)** |
+| resident arena blocks at parse end | 344,060 | 488,548 | **+144,488 (+42.0%)** |
+
+**A 4.3% increase in demand became a 42.0% increase in resident bytes because it
+crossed exactly one node boundary.** The proof is in the ladder: v2's first ten
+nodes total 299,586 B, which is 44,474 B *less* than legacy's ten-node total of
+344,060 B. The entire delta is v2's eleventh node, 188,962 B, which the ladder
+sizes at 1.5x its tenth (a ~9.1 KB request against a 116,826 B previous node);
+legacy's parse finished on node ten. There is no second owner and no retained
+structure behind the +144,488 — it is one extra rung.
+
+Consequences for planning: this term is **not** addressable by ownership work,
+and it is fragile in both directions (a 4% swing in parser scratch moves it by
+145 KB). Releasing the arena at parse end (§12.2.1) removes it from the peak
+entirely on both pipelines, which is the only reason to care about it.
+
+### 12.3 Transient + artifact + overlap, at the peak instant
+
+The ruling asks the peak to be decomposed as transient + artifact + overlap. The
+peak instant is the parse-end set, and at that instant two of the three terms are
+zero:
+
+| term at parse end (the peak instant) | legacy | v2 | delta |
+| --- | ---: | ---: | ---: |
+| lowering transient (no pass has run yet) | 0 | 0 | 0 |
+| artifact (nothing published yet) | 0 | 0 | 0 |
+| transient/artifact overlap | 0 | 0 | 0 |
+| producer footprint (§12.1) | 819,408 | 896,976 | +77,568 |
+| parser arena (§12.2) | 344,060 | 488,548 | +144,488 |
+| shared parse-resident state (FunctionDef metadata, atom table, source text, runtime) | 1,497,020 | 1,497,107 | +87 |
+| **parse-end live** | **2,660,488** | **2,882,631** | **+222,143** |
+| lowering headroom above parse end | +23,503 | +4,199 | −19,304 |
+| **whole-run peak** | **2,683,991** | **2,886,830** | **+202,839** |
+
+The peak terms the ruling expected to trade off against each other are therefore
+*both zero where it counts*. The per-function overlaps catalogued as D1-D5 in §5
+are all closed (§9) and all fit inside the 4,199 B by which v2's peak exceeds its
+parse-end set; their own maxima are 76,196 B (§13.1) and 118,954 B (§13.2), i.e.
+they are real but they land in the middle of the walk, hundreds of KB below the
+peak. **There is no remaining transient/artifact overlap term at the peak.**
+
+---
+
+## 13. C2-A restated as an attribution
+
+§9.2 reported "peak above parse-end live" — 4,199 B / +19 allocations for v2
+against 23,503 B / +53 for legacy, i.e. 0.18x and 0.36x. That is a **delta**: it
+nets the producer census draining away against the lowering passes allocating,
+and it would report a small number even for a pass that allocated a great deal,
+as long as it freed slightly less than the producer drained. It is not an
+attribution and C2-A must not rest on it.
+
+The attributed figure is the maximum, over the lowering window, of live bytes
+belonging to temporary compiler structures.
+
+### 13.1 Per-resource census (v2, the structures by name)
+
+Worst function of the jQuery tree, from the per-resource census at each pass
+boundary:
+
+| instant | `ResolvedProduct` | S3 scratch (`cfg.Graph` + bind index + pending/boundary arrays) | S4 scratch (growable output/atoms/sources + relocs + addr + binds + jump slots) | attributed total |
+| --- | ---: | ---: | ---: | ---: |
+| end of `resolve_variables.run` | 37,392 | 2,064 | — | 39,456 |
+| after `Resolver.walk`, before `releaseConsumedProduct` | 37,392 | 0 | 38,804 | **76,196** |
+| after `validateFinalOutput`, before `commit` | 528 | 0 | 38,804 | 39,332 |
+
+**Max attributed transient for the v2 passes = 76,196 B in 11 live allocations**
+(product 4 + resolver 7). Composition at that instant: growable output 8,192 +
+output atoms 4,096 + output sources 24,576 + relocs 768 + addr 132 + binds 384 +
+jump slots 656, against product code 8,192 + atoms 4,096 + labels 528 + sources
+24,576. The source table is materialised twice at 24,576 B and dominates both
+halves — it is 64.5% of the 76,196 on its own.
+
+### 13.2 Exhaustive per-window classification (both pipelines)
+
+The census above names v2's structures but has no legacy counterpart, so the
+symmetric figure is computed by classification instead of enumeration: replay the
+allocation trace and, for each per-function lowering window
+(`createFunctionBytecodeAfterChildren` entry -> exit), track the live bytes and
+live allocation count of allocations *born inside that window*. This catches
+every temporary, named or not, on both pipelines.
+
+| | legacy | v2 | ratio | C2-A bar |
+| --- | ---: | ---: | ---: | --- |
+| peak in-window transient bytes | 208,605 | **118,954** | **0.5702x** | < 0.7x -> **PASS** |
+| of which survives the window (the artifact born in it) | 16,860 | 18,301 | — | — |
+| peak transient bytes, survivors excluded | 191,745 | **100,653** | **0.5249x** | **PASS** |
+| peak in-window transient live allocations | 15 | **24** | **1.60x** | < 0.7x -> **FAIL** |
+
+596 lowering windows on each side (535 jQuery + 59 base.js + 2 roots).
+
+### 13.3 Verdict
+
+**C2-A passes the bar on bytes under attribution (0.57x, and 0.52x once the
+artifact born inside the window is excluded), and fails it on allocation count
+(1.60x).** The 0.36x allocation figure in §9.2 was the delta artifact described
+above; the attributed number is 24 concurrent live temporary allocations per
+lowering against legacy's 15, which is the direct consequence of v2's pass
+topology — the S3 product carries four independent backings and the S4 resolver
+seven, where legacy mutates a moved-in buffer in place.
+
+This is a real and reportable difference, but it is *nine extra live allocations
+at one instant for one function*, not a residency or peak term: v2's whole-run
+`allocation_count_peak` is 7,394 against legacy's 6,204, and §12 attributes that
+gap to the parse-end set (2,819 producer allocations against 1,597), not to these
+nine. Whether C2-A "passes" therefore depends on which axis the bar is read
+against; the honest statement is **bytes PASS at 0.57x, allocations FAIL at
+1.60x, and neither is what makes C2 fail.**
+
+---
+
+## 14. Where this leaves C2
+
+* **C2-A** — attributed transient: 0.5702x bytes (PASS), 1.60x allocations
+  (FAIL). Not the binding constraint either way.
+* **C2-B** — artifact residency: +30,219 B (+6.8%), **entirely group (i) code
+  bytes**, caused by `default_layout = .plain`. Groups (ii) and (iii) match to
+  within 1 byte, allocation counts match exactly, and nothing arena-backed or
+  producer-shaped escapes into the artifact: **no temporary data was smuggled
+  into long-lived state.**
+* **C2-C** — peak live set: the peak *is* the parse-end set on both pipelines,
+  and the +222,143 B gap is 77,568 producer footprint + 144,488 parser-arena
+  geometry + 87 unattributed, with zero transient/artifact overlap at that
+  instant.
+
+Two levers are now separated and sized, and neither is an ownership fix:
+
+1. **Release the parser arena at parse end** (a phase-ownership boundary fix;
+   measured above as having no reader in the emit phase, and confirmed by the
+   poison test): −488,548 B from v2's peak, −344,060 B from legacy's, i.e.
+   2,398,282 against 2,339,931, ratio 1.0755x -> **1.0249x**. It applies to both
+   pipelines so it barely moves the ratio, but it is the cheapest large absolute
+   reduction on the table and it removes the whole §12.2 term — 65% of the
+   parse-end gap — from the discussion permanently.
+2. **Lower on pop during parsing** (§9.3): removes the O(tree) producer census
+   from the peak. Still the only change that can reach < 0.7x.
+
+## 15. Reproduction
+
+```
+zig build zjs-dev -Dzjs_compiler=v2
+zig build zjs-dev -Dzjs_compiler=legacy
+
+./zjs-dev --perf-json mc1.js          # allocated_bytes / *_peak, both modes
+ZJS_C2D=1        ./zjs-dev --perf-json mc1.js 2>census.txt   # §11/§12 censuses
+ZJS_C2D=1        ./zjs-dev -T         mc1.js >trace.txt      # §13.2 classification
+ZJS_C2D=1 ZJS_C2D_POISON=1 ./zjs-dev  mc1.js                 # §12.2.1 poison test
+```
+
+`ZJS_C2D=1` alone is measurement-neutral: the probe only reads state and writes
+to stderr, and the `--perf-json` counters are identical with and without it.
+`ZJS_C2D_POISON=1` is destructive by design — the run is expected to fault in
+`ParseState.deinit` after the last compile; the evidence it produces is the
+`C2D-ART` census lines emitted *before* that fault, which must be byte-identical
+to the unpoisoned run.
+
+The `ZJS_C2D` probe is scratch-only and is not part of this commit; §10.1 records
+what it instruments and where, so it can be reconstructed. The working patch is
+archived outside the tree next to the C2-A probe.
