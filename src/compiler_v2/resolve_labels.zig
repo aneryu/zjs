@@ -1644,24 +1644,49 @@ const Resolver = struct {
                         .{ .options = &.{op.goto} },
                     })) |match| {
                         if (try self.codeHasLabel(match.end, label_index)) {
-                            self.absorbSources(match.end);
-                            _ = try updateLabel(self.product, label_index, -1);
-                            label_index = try readU32At(
+                            const goto_label = try readU32At(
                                 self.code,
                                 match.positions[0],
                                 1,
                             );
-                            const inverted = if (instruction.op_id == op.if_false)
-                                op.if_true
-                            else
-                                op.if_false;
-                            position_next = try self.emitHasLabel(
-                                layout,
-                                position,
-                                match.end,
-                                inverted,
-                                label_index,
-                            );
+                            if (try self.codeHasLabel(match.end, goto_label)) {
+                                // Both arms land on `match.end`: the taken arm
+                                // through `label_index`, the fallthrough arm
+                                // through the `goto`'s own target. The test is
+                                // therefore pure stack discipline, so the pair
+                                // collapses to the same `drop` the direct
+                                // next-label case above emits. QuickJS's
+                                // syntactic `code_has_label` (qjs:34968-34982)
+                                // stops at the intervening `goto` and leaves
+                                // the inverted branch standing; the legacy
+                                // backend resolves targets after layout and
+                                // folds it, and dual-mode identity is measured
+                                // against the legacy product. Reached by an
+                                // empty `case` clause that falls directly into
+                                // a trailing `default`, e.g.
+                                // `switch (d) { case c: default: e(); }`.
+                                self.absorbSources(match.end);
+                                _ = try updateLabel(self.product, label_index, -1);
+                                _ = try updateLabel(self.product, goto_label, -1);
+                                try self.attachSource();
+                                try self.appendByte(op.drop);
+                                position_next = match.end;
+                            } else {
+                                self.absorbSources(match.end);
+                                _ = try updateLabel(self.product, label_index, -1);
+                                label_index = goto_label;
+                                const inverted = if (instruction.op_id == op.if_false)
+                                    op.if_true
+                                else
+                                    op.if_false;
+                                position_next = try self.emitHasLabel(
+                                    layout,
+                                    position,
+                                    match.end,
+                                    inverted,
+                                    label_index,
+                                );
+                            }
                         } else {
                             position_next = try self.emitHasLabel(
                                 layout,
