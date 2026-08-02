@@ -359,6 +359,10 @@ runner，断言本就编译掉了，对本审计不提供证据。）
 的复现步骤，那就是这条修复的回归测试形态（黑盒仍然写不出来）。
 在那之前，本条修复由 §4.1/§4.2 的一次性探针实验和 §4.4 的探测器全绿背书。
 
+运行期探测器只在「测试恰好跑到那条路径」时才说话。把源码形态本身禁掉的那一半
+在 §8：`tools/architecture/check_borrowed_atoms.js`。两半合起来才是这个 bug 类
+可用的「回归测试」替代品。
+
 ---
 
 ## 6. 遗留项（follow-up，不在本次提交范围）
@@ -383,6 +387,12 @@ runner，断言本就编译掉了，对本审计不提供证据。）
 6. ~~**可考虑把 §4.4 的隔离区探测器做成 build option**，让「借用越过 owner」
    在 CI 里可持续检出，而不是只在人工审计时临时打补丁。~~
    **已落地**：`-Dzjs_ownership_audit`，见 §7。
+
+上面 1-4 条现在**不再只写在这份文档里**：它们每一条都对应
+`tools/architecture/borrowed-atoms-allowlist.json` 的一条 entry，
+带 `reason` 与 `exit_milestone`（milestone 文字直接引用本节编号）。
+做完某一条就删掉对应 entry；不删的话 checker 会因为 entry 变 stale 而报红，
+所以「改完忘了销账」和「悄悄新增一个同形态站点」都会被门禁拦住。见 §8。
 
 ---
 
@@ -487,3 +497,195 @@ src/tests/parser.zig:4814:42      in test.W5: generator parameter boundary emits
 `git checkout -- src/parser.zig` 恢复之后（即当前 main），同一条命令全绿。
 这就是这个 bug 类唯一可用的「红 → 绿」形态：不是黑盒回归测试，而是**已有测试
 在审计档位下的行为差**。
+
+---
+
+## 8. 静态规则 `check_borrowed_atoms.js`（把「借用外逃」的源码形态禁掉）
+
+落地位置：`tools/architecture/check_borrowed_atoms.js` +
+`tools/architecture/borrowed-atoms-allowlist.json`，挂在
+`zig build architecture-check` 上（与 `check_deps.js` / `check_oom_panics.js`
+同一层，同一套 allowlist 形状）。扫描范围 `src/**.zig`（不含 `src/tests/`）。
+
+### 8.1 为什么需要它——它和 §7 各管一半
+
+§5.3 论证了黑盒回归测试写不出来。剩下的两个手段各自只覆盖一半：
+
+| | `-Dzjs_ownership_audit`（§7） | `check_borrowed_atoms.js`（本节） |
+|---|---|---|
+| 生效时机 | 运行时 | 评审 / CI 静态 |
+| 判据 | 槽位隔离一拍后，stale id 撞 `dup` 的 `hasLiveValue` 断言或读到错值 | 源码形态：借来的 atom 逃出 token 生命期 |
+| 抓得住 | 真正被执行到的越界借用，包括本文没想到的路径 | 一切新写出来的同形态代码，哪怕当前无测试覆盖 |
+| 抓不住 | 没有测试覆盖的路径；ReleaseFast（断言被编译掉）；不可达代码（如 C-3） | 运行期才成立的所有权（第三方 sink 顺手 dup），跨函数/跨文件传播，见 §8.6 |
+
+`ada949be` 的 class C 正是「静态一眼可见、运行时靠运气看不见」的形状：
+`return <token>.payload.ident.atom` 加上函数出口的 `defer freeToken`。
+所以这条规则的第一性目标就是**让这个形状永远编不过门禁**。
+
+### 8.2 规则本体
+
+**borrowed atom** 的三种来源：
+
+1. `<token>.payload.<field>.atom` 且处于**值位置**——
+   `atomNameEquals(s, s.token.payload.ident.atom, "of")` 这种**实参位置**的读
+   是在 token 存活区间内消费掉的，不算借用（34 处 token-atom 读因此收敛到
+   10 处真借用，这是精度的主要来源）；`@as` / `@intCast` 这类 builtin 是透明的，
+   扫描会穿过去；
+2. 同文件内「自己就返回借用 atom」的 helper 的返回值——helper 集合按定点迭代
+   算出，当前是 `identifierLikeAtom` / `classNameAtom` / `labelStartAtom`；
+3. 绑定（`const` / `var`）或重新赋值（`nm = ...`）到上面两者的局部变量；
+   `const` 声明还会做一层局部传染（`const name = private_atom orelse raw_name;`）。
+   传染只走**保值表达式**：`const hit = nm == other;` 产出的是 bool，不是 atom，
+   顶层出现比较 / 布尔运算就断链。重新绑定到 owned 值（`nm = atoms.dup(nm);`）
+   会**关掉**这个借用点的窗口。
+
+所有权是**按位置**判定的，不是「这条语句里出现过 `dup`」：`.dup(x)` 把 `x` 放进
+实参位置，所以「duped 的读」压根就不是借用读。于是
+`return if (c) atoms.dup(a) else t.payload.ident.atom;` 里的 else 臂照样报红——
+整句粒度的「含有 dup 就放行」会漏掉它。
+
+**四条 escape 规则**（一个借用点只报一次，取优先级最高的那条）：
+
+| pattern | 禁止的形状 |
+|---|---|
+| `borrowed-return` | 把借来的 atom `return` 出去（= `ada949be` 那个 bug） |
+| `borrowed-state-store` | 把借来的 atom 存进 `State` 的长命 atom 字段（字段活得比 token 长） |
+| `borrowed-use-after-release` | 在同一函数内、非 `defer` 的 `advance()` / `freeToken()` 之后再读它 |
+| `owned-escape-state-store` | 把「只由 `defer ...free(x)` 持有」的局部存进本函数不会 restore 的长命 atom 字段（= B-6 那个形状） |
+
+「长命 atom 字段」不是硬编码列表：checker 从结构体作用域扫出所有
+`Atom` / `?Atom` 字段名（跳过函数体，所以多行参数表不会被当成字段），
+再要求接收者是本函数签名里绑定到 `*State` 的那个名字。于是以后新增一个同类
+字段当天就自动被覆盖，而隔壁结构体自己的 `self.<atom 字段>` 不会被误判。
+
+**三种合法写法**（推荐顺序）：
+
+1. 在逃逸表达式里当场取所有权：`.dup(` / `.internString(` / `.newSymbol(` /
+   调用某个 `*Owned(`；
+2. 函数名以 `Owned` 结尾（既有约定：`moduleImportNameAtomOwned`、
+   `exportDefaultFunctionNameOwned`）——**只豁免 `borrowed-return`**，
+   且只豁免「转发别人的借用」（helper 结果 / 传染来的局部，静态证不了），
+   **永远不豁免直接返回 token payload 读**，因为那就是 `ada949be` 本身；
+   而且函数体必须真的产出过 owner，否则后缀是空头支票（实测见 §8.4）；
+3. 在该行正上方写 `// borrowed-atom: <理由>`。理由不能为空——写不出理由，
+   说明契约本来就不存在。rule A / B 只认**逃逸那一行**上方的标记；
+   rule C 额外允许写在借用那一行上方（借用点才是说明「这次借用是故意的」
+   的自然位置）。
+
+**allowlist**：字段 `source` / `pattern` / `reason` / `exit_milestone`，
+外加可选的 `fn`（所在函数）与 `contains`（语句子串）选择器。
+每条 entry 必须恰好命中一条 finding；命不中即 stale 报红，命中多条即
+non-unique 报红，两条 entry 抢同一条 finding 即 overlapping 报红。
+上限 16 条，当前 14 条。
+
+### 8.3 当前 14 条 = 本文 class B 的机器可读形态
+
+```
+src/parser.zig:5273   borrowed-return             labelStartAtom
+src/parser.zig:7093   borrowed-use-after-release  parseAssignExpr2
+src/parser.zig:9988   borrowed-return             identifierLikeAtom                 <- B-1
+src/parser.zig:11364  borrowed-state-store        parseEnumDeclaration               <- B-3
+src/parser.zig:11477  borrowed-state-store        parseNamespaceDeclarationWithIdent <- B-4
+src/parser.zig:12316  borrowed-use-after-release  parseStatementOrDeclSlow           <- B-2
+src/parser.zig:12426  borrowed-state-store        parseUsingDeclaration
+src/parser.zig:13083  owned-escape-state-store    parseVar                           <- B-6
+src/parser.zig:13366  borrowed-use-after-release  parseForInOf
+src/parser.zig:13699  owned-escape-state-store    parseFunctionDecl
+src/parser.zig:13918  borrowed-use-after-release  parseFunctionParameters
+src/parser.zig:14828  borrowed-use-after-release  parseArrowFunction
+src/parser.zig:16362  borrowed-return             classNameAtom                      <- B-5 根因
+src/parser.zig:17156  borrowed-state-store        parseClass                         <- B-5 字段
+```
+
+7 条直接落在本文 B-1…B-6 上。**另外 7 条落在 §3.3 的 class A 表里**，这不是
+误报，是本文那几行的判定口径不一致：那些行的安全理由写的是「调用方 advance 前
+dup」「`appendOwnedParserAtom` / `defineVar` 会 dup」——即 owner 在**别处**，
+而 §2 对 class B 的定义正是「存活靠与本站点无关的第三方 owner」。逐条复核过
+（每条 allowlist entry 的 `reason` 写明了那个第三方 owner 是谁）：
+
+- `labelStartAtom` 转发 `identifierLikeAtom` 的借用 → 与 B-1 同形；
+- `parseAssignExpr2` 的 `direct_lhs_atom` 在 `parseCondExpr` 消费掉 token 之后
+  仍被用于匿名函数命名，靠 `emitScopeGetVar` 发射出的 atom operand、以及
+  direct lvalue 那份 `LValue.name`（`owns_name = true`）撑着；
+- `parseUsingDeclaration` / `parseForInOf` / `parseFunctionParameters` /
+  `parseArrowFunction` 四处都是「先让 `defineVar` 或 `appendOwnedParserAtom`
+  建 owner，再 `advance()`，然后继续用借来的 id」——与 B-2 catch 绑定逐字同形；
+- `parseFunctionDecl` 的 `s.last_declared_atom = name_atom` 与 B-6 同形
+  （dup 被本函数出口的 defer 释放，字段却留着那个 id；之后的 owner 是声明
+  var 行与 `FunctionDef.init` 的 `func_name` dup）。
+
+结论：这 7 条按本文严口径本就该是 B，登记为 follow-up（§6）而不是违规，
+与 ruling 一致。**没有任何一条 finding 落在真正安全的 class A 站点上**
+（`dupToken` 系列快照、纯比较、predefined、`privateNameAtom` 这类返回 owned 的
+helper、`parseMemberChain` / `parseNewCalleeMemberAccess` 的 `retained_name`
+形态、以及 `*Owned` 三兄弟全部零命中）。
+
+### 8.4 精度与强度实测
+
+**(1) 它抓得住原始缺陷。** 在工作区里临时重建 `ada949be` 之前的形状
+（`exportDefaultClassNameOwned` 改回 `exportDefaultClassName`，去掉 `return`
+里的 `dup`）：
+
+```
+Borrowed-atom rule violations:
+  src/parser.zig:18063: in exportDefaultClassName: return if (name.val == tok.TOK_IDENT) name.payload.ident.atom else null;
+    rule A: a borrowed atom must not be returned (dup it, or name the function ...Owned)
+```
+
+`git checkout -- src/parser.zig` 之后重新全绿。
+
+**(2) 合成精度矩阵**（`/tmp` 上的临时 `.zig`，不入库；16 例全部符合预期）：
+
+| 形态 | 期望 | 实测 |
+|---|---|---|
+| pre-fix class-C return | 红 | 红 |
+| `return dup(t.payload.ident.atom)` | 绿 | 绿 |
+| 实参位置的读（`atomNameEquals(...)`） | 绿 | 绿 |
+| Zig 多行字符串 `\\` 里的假样本 | 绿 | 绿（起初是误报，`stripCode` 整行丢弃才修掉） |
+| 注释掉的逃逸 | 绿 | 绿 |
+| `advance()` 之后再读借来的局部 | 红 | 红 |
+| `// borrowed-atom:` 标记 | 绿 | 绿 |
+| **混合分支** `return if (c) dup(a) else t.payload...;` | 红 | 红（整句粒度的 owned 判定会漏，改成按位置判定后修掉） |
+| **`Owned` 后缀 + 无关的 dup** | 红 | 红（后缀不豁免直接的 token payload 读） |
+| `return @as(Atom, t.payload...)` | 红 | 红（builtin 透明） |
+| `var nm: Atom = undefined; nm = t.payload...; return nm;` | 红 | 红 |
+| `const hit = nm == other;` 之后用 `hit` | 绿 | 绿（比较结果不是 atom） |
+| 多行 `defer { freeToken(&t); }` 当成行内释放点 | 绿 | 绿 |
+| `nm = atoms.dup(nm);` 之后再用 | 绿 | 绿（owned 重绑定关掉借用窗口） |
+| 单行函数 `fn nothing() void {}` 吃掉下一个函数的体 | 绿 | 绿 |
+| 非 State 结构体自己的 `self.<atom 字段> = ...` | 绿 | 绿 |
+
+规模数据（当前 main）：152 个 Zig 文件 / 9187 个函数扫描，
+34 处 token-atom 读、其中 10 处在值位置，26 个借用点被跟踪，
+14 条 escape，14 条全部 allowlisted，0 条违规。两次运行输出逐字节一致。
+
+### 8.5 怎么跑
+
+```bash
+zig build architecture-check                             # 门禁（含本规则）
+node tools/architecture/check_borrowed_atoms.js          # 只跑这一条
+node tools/architecture/check_borrowed_atoms.js --list   # 逐条列出 finding + 借用 helper 集合
+```
+
+### 8.6 它抓不到什么（诚实清单）
+
+- **参数上的借用**：只跟踪函数体内的绑定。`fn f(s: *State, name: Atom)` 把借来的
+  `name` 存进长命字段、或包进返回的结构体，都不会被抓——
+  `definePatternBindingAtom` 正是这个形状（它把借来的名字包进
+  `PatternTarget.direct_binding.name` 返回；今天靠 `defineVar` 建的 var 行撑着）。
+  连带的后果：把借用当**实参**交给这种包装函数之后，返回值不再被视为借用。
+- **跨文件传播**：借用 helper 集合按文件内定点迭代算，不跨文件、不跨结构体。
+  今天够用（token payload 只在 `src/parser.zig` 里读），换布局要重新评估。
+- **释放点只认字面量**：`advance()` / `freeToken()`。`expectToken` 之类**内部会
+  advance** 的 helper 不算释放点（不做跨函数摘要），也不做路径敏感分析——
+  一个只在某个分支上执行的 `advance()` 对本函数所有后续行都算释放。
+- **块头截断**：多行 `return .{ ... }` / `return switch (...) {` 的返回表达式在
+  `{` 处断句，纯转发包装会漏。这是为精度付的价：宁可漏一个转发层，也不把整个
+  switch 体当成一条 return 表达式去猜。
+- **`Owned` 后缀的强度有限**：能挡「函数体里根本没有 owner」和「直接返回 token
+  payload 读」，挡不住「dup 了另一个 atom，再转发一个借来的 helper 结果」。
+- **运行期才成立的所有权**：sink 是否 dup、第三方 owner 活多久，静态看不出来。
+  这正是 allowlist 每条都必须写 `reason`（谁在持有）和 `exit_milestone`
+  （怎么把它变成本地契约）的原因。
+- **`test` / `comptime` 块不是函数体**，里面的代码不参与分析；扫描范围也不含
+  `src/tests/`。

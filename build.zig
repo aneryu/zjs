@@ -699,6 +699,16 @@ pub fn build(b: *std.Build) void {
         "tools/architecture/check_oom_panics.js",
     });
 
+    // Borrowed-atom escape rule: an atom id read out of a token (or out of a
+    // helper that returns one) must not be returned, parked in a long-lived
+    // parser State field, or read after advance()/freeToken() released the
+    // token. This is the review-time half of the ada949be class-C fix; the
+    // run-time half is -Dzjs_ownership_audit (docs/borrowed_atom_audit.md §8).
+    const run_architecture_borrowed_atoms = b.addSystemCommand(&.{
+        "node",
+        "tools/architecture/check_borrowed_atoms.js",
+    });
+
     const architecture_public_api_mod = b.createModule(.{
         .root_source_file = b.path("tools/architecture/check_public_api.zig"),
         .target = target,
@@ -719,9 +729,10 @@ pub fn build(b: *std.Build) void {
     update_architecture_public_api.addArg("--write");
     update_architecture_public_api.addArg("reports/api/public-symbols.txt");
 
-    const architecture_check_step = b.step("architecture-check", "Check architecture dependency rules and public API snapshot");
+    const architecture_check_step = b.step("architecture-check", "Check architecture dependency, OOM-panic, borrowed-atom, and public API rules");
     architecture_check_step.dependOn(&run_architecture_deps.step);
     architecture_check_step.dependOn(&run_architecture_oom_panics.step);
+    architecture_check_step.dependOn(&run_architecture_borrowed_atoms.step);
     architecture_check_step.dependOn(&run_architecture_public_api.step);
 
     const architecture_snapshot_step = b.step("architecture-update-api-snapshot", "Refresh the public API snapshot");
