@@ -10922,4 +10922,3 @@ test "fused multiply-subtract matches the reference limb for limb" {
         try std.testing.expectEqualSlices(Limb, reference, under_test);
     }
 }
-
