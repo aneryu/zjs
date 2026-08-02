@@ -18012,9 +18012,14 @@ pub const parser_core = struct {
         const saved_mark_pos = s.lex.mark_pos;
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
-        var first = s.lex.next() catch return null;
+        // The position restore must be armed before the fallible scan: `next()`
+        // moves `pos` past the peeked token before it can fail (the identifier
+        // atom is interned last, quickjs.c mirror at parser.zig lexIdentifier),
+        // so a failure that escaped this frame with the restore still unarmed
+        // would leave the caller parsing from mid-token - `export function f()`
+        // would resume on `(` and report a spurious SyntaxError instead of
+        // letting the allocation failure propagate.
         defer {
-            s.lex.freeToken(&first);
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
@@ -18022,6 +18027,8 @@ pub const parser_core = struct {
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
+        var first = s.lex.next() catch return null;
+        defer s.lex.freeToken(&first);
         if (first.val == @as(tok.TokenKind, @intCast('*'))) {
             var second = s.lex.next() catch return null;
             defer s.lex.freeToken(&second);
@@ -18041,9 +18048,9 @@ pub const parser_core = struct {
         const saved_mark_pos = s.lex.mark_pos;
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
-        var name = s.lex.next() catch return null;
+        // Same ordering contract as `exportDefaultFunctionNameOwned`: arm the
+        // position restore before the fallible peek.
         defer {
-            s.lex.freeToken(&name);
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
@@ -18051,6 +18058,8 @@ pub const parser_core = struct {
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
+        var name = s.lex.next() catch return null;
+        defer s.lex.freeToken(&name);
         return if (name.val == tok.TOK_IDENT) s.function.atoms.dup(name.payload.ident.atom) else null;
     }
 
