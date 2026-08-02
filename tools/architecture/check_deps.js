@@ -193,6 +193,7 @@ const TEST_ROOTS = [
   // Focused-suite and gate roots referenced directly by build.zig.
   'src/exec_tests.zig',
   'src/builtins_tests.zig',
+  'src/compiler_v2_tests.zig',
   'src/runtime_tests.zig',
   'src/tests/oom.zig',
   'src/tests/smoke_test.zig',
