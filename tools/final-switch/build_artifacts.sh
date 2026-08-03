@@ -18,12 +18,12 @@
 # gone, `-Dzjs_compiler=legacy` no longer exists and only the candidate side
 # can be built. The script refuses to silently skip it, so the manifest always
 # states which mode produced it.
-set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=./preflight.sh
 source "$HERE/preflight.sh"
+fs_strict "build_artifacts.sh"
 
 OUT="$REPO/reports/perf/final-switch/artifacts"
 WITH_LEGACY=1
@@ -91,4 +91,4 @@ fs_say "MANIFEST"
 cat "$MANIFEST" | sed 's/^/  /'
 fs_provenance | sed 's/^/  /'
 fs_say "build_artifacts rc=$rc"
-exit "$rc"
+fs_finish "$rc"

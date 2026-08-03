@@ -17,6 +17,14 @@ Two rules are enforced here rather than left to whoever writes the report:
     refused (rc=2 from an unpinned invocation, the Gate A defect) the artifact
     is absent, and silently averaging the three that survived would report a
     confident number about a run that did not happen.
+  * **RULE A: the runner's affinity self-report is corroborated, not trusted.**
+    Every runner writes its own `effectiveAffinity`. That is one source
+    attesting itself, which is not verification. `performance.sh` writes an
+    independent ledger (`--affinity-attestation`) from inside each pinned
+    process tree, read out of `/proc/self/status` rather than out of python's
+    `os.sched_getaffinity`, and this file requires the ledger to exist, to show
+    the requested CPU, and to have one line per pinned invocation. A runner
+    claiming a pin the orchestrator did not observe is refused.
 
 Gate in force (docs/qcp1_switch_decision.md 0.1.2), all three jointly:
   1. code-load, v2 / corrected-legacy >= 1.2359x
@@ -25,6 +33,7 @@ Gate in force (docs/qcp1_switch_decision.md 0.1.2), all three jointly:
 
 Usage:
     tools/final-switch/join_results.py --perf DIR [--artifacts DIR]
+                                       [--affinity-attestation FILE]
                                        [--output FILE] [--codeload-gate 1.2359]
 """
 
@@ -65,6 +74,46 @@ def load(path: Path) -> dict:
         return json.load(handle)
 
 
+def load_affinity_attestation(path: Path, expected_runs: int) -> list[tuple[str, str, str]]:
+    """RULE A, second half: the ORCHESTRATOR's own affinity ledger.
+
+    Written by fs_pinned() from inside each pinned process tree via
+    /proc/self/status -- a different process and a different mechanism from the
+    runner's os.sched_getaffinity, so agreement between the two is corroboration
+    rather than a self-report repeated twice.
+    """
+    if not path.is_file():
+        fail(
+            f"missing orchestrator affinity attestation {path}\n"
+            "  the runners' own effectiveAffinity fields are self-reports and are not\n"
+            "  accepted on their own. Run the measurements through performance.sh, which\n"
+            "  sets FS_AFFINITY_ATTEST and invokes every runner via fs_pinned()."
+        )
+    rows: list[tuple[str, str, str]] = []
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            fail(f"{path}:{lineno}: malformed attestation line: {line!r}")
+        rows.append((parts[0], parts[1], "\t".join(parts[2:])))
+    if not rows:
+        fail(f"{path} is empty: no pinned invocation attested its own affinity")
+    for requested, observed, cmd in rows:
+        if requested != observed:
+            fail(
+                f"orchestrator observed affinity [{observed}] while requesting [{requested}] "
+                f"for: {cmd}"
+            )
+    if len(rows) != expected_runs:
+        fail(
+            f"{path} has {len(rows)} attested invocations, expected {expected_runs}\n"
+            "  every artifact must correspond to a pinned invocation the orchestrator saw;\n"
+            "  a runner self-report with no matching attestation is refused"
+        )
+    return rows
+
+
 def geomean(values) -> float:
     values = list(values)
     if not values:
@@ -78,6 +127,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--perf", required=True, help="directory holding zoo-*.json and micro-*.json")
     ap.add_argument("--artifacts", help="directory holding manifest.tsv")
+    ap.add_argument(
+        "--affinity-attestation",
+        help="orchestrator-side affinity ledger written by fs_pinned "
+        "(default: <perf>/affinity-attestation.tsv)",
+    )
     ap.add_argument("--output", help="write the joined summary here")
     ap.add_argument("--codeload-gate", type=float, default=CODELOAD_GATE)
     args = ap.parse_args()
@@ -86,14 +140,33 @@ def main() -> int:
     zoo = {tag: load(perf / f"zoo-{tag}.json") for tag in CAND_TAGS + LEGACY_TAGS}
     micro = {tag: load(perf / f"micro-{tag}.json") for tag in MICRO_TAGS}
 
-    # Every artifact must attest the pin it was measured under. This is the
-    # second half of the affinity fix: performance.sh always passes taskset,
-    # and the join refuses artifacts that nonetheless were not pinned.
+    # RULE A. Two independent sources must agree, and both are required.
+    #
+    #   (1) the ORCHESTRATOR's ledger, read from /proc inside each pinned
+    #       process before the runner was exec'd -- this is the source that
+    #       does not depend on the runner being honest, or even correct;
+    #   (2) each runner's own effectiveAffinity self-report.
+    attest_path = Path(args.affinity_attestation or (perf / "affinity-attestation.tsv"))
+    attestation = load_affinity_attestation(attest_path, len(zoo) + len(micro))
+    attested_cpus = set()
+    for requested, _observed, _cmd in attestation:
+        if not requested.isdigit():
+            fail(
+                f"{attest_path}: attested affinity {requested!r} is not a single CPU; "
+                "a measurement must be pinned to exactly one core"
+            )
+        attested_cpus.add(int(requested))
+
     for tag, doc in list(zoo.items()) + list(micro.items()):
         effective = doc.get("effectiveAffinity")
         cpu = doc.get("cpu")
         if effective != [cpu]:
             fail(f"artifact {tag} was measured with effectiveAffinity={effective}, not [{cpu}]")
+        if cpu not in attested_cpus:
+            fail(
+                f"artifact {tag} claims cpu {cpu}, but the orchestrator attested only "
+                f"{sorted(attested_cpus)}; the runner's self-report is uncorroborated"
+            )
         samples = doc.get("samplesPerEnginePerBench", doc.get("pairedSamples"))
         if samples is None or samples % 2 != 0:
             fail(f"artifact {tag} has an odd/unknown sample count {samples}; ABBA is unbalanced")
@@ -206,6 +279,14 @@ def main() -> int:
             "mean": statistics.fmean(cls),
             "min": min(cls),
             "max": max(cls),
+        },
+        "affinityAttestation": {
+            "source": str(attest_path),
+            "mechanism": "/proc/self/status Cpus_allowed_list, read inside each pinned "
+            "process tree before exec of the runner",
+            "invocations": [
+                {"requested": r, "observed": o, "command": c} for r, o, c in attestation
+            ],
         },
         "noiseFloors": noise,
         "codeloadMicroAttribution": micro_summary,

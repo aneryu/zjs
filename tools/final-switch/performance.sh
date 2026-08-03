@@ -4,14 +4,20 @@
 # Runs ALONE on a quiet host: no correctness job may overlap, not even pinned
 # to other cores. Sequence it after the correctness lanes, never beside them.
 #
-# DEFECT FIXED HERE (found the hard way during Gate A): run_zoo_compare.py
-# ATTESTS effective affinity, it does not SET it. The first Gate A invocation
-# omitted `taskset -c 19` and the runner refused all three runs (rc=2) --
-# fail-closed, exactly as designed, but only because the runner happened to
-# check. Every runner invocation below goes through fs_pinned(), which always
-# supplies taskset, and a refusal (rc=2) is reported as a hard failure rather
-# than being allowed to leave a missing artifact that a later join step would
-# quietly skip.
+# RULE A (AFFINITY) is enforced here. run_zoo_compare.py ATTESTS effective
+# affinity, it does not SET it. The first Gate A invocation omitted
+# `taskset -c 19` and the runner refused all three runs (rc=2) -- fail-closed,
+# exactly as designed, but only because the runner happened to check. The
+# orchestrator should never have been able to request an unpinned measurement.
+#
+# So: every runner invocation below goes through fs_pinned(), which always
+# supplies taskset AND verifies the pin from inside the pinned process before
+# exec'ing the runner; the observations land in $FS_AFFINITY_ATTEST, which
+# join_results.py requires and cross-checks against each runner's own
+# self-report. A refusal (rc=2) is a hard failure rather than a missing
+# artifact a later join step would quietly skip. selftest.sh statically refuses
+# any invocation here that is not fs_pinned, and refuses this file to spell
+# `taskset` itself: preflight.sh is the single audited chokepoint.
 #
 # Four zoo runs, because the two noise floors answer different questions:
 #   cand-b1 vs cand-b2     -- often byte-identical binaries => RUNTIME variance
@@ -26,12 +32,12 @@
 #
 # Usage: tools/final-switch/performance.sh [--artifacts DIR] [--out DIR]
 #                                          [--zoo-samples N] [--micro-samples N]
-set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=./preflight.sh
 source "$HERE/preflight.sh"
+fs_strict "performance.sh"
 
 ART="$REPO/reports/perf/final-switch/artifacts"
 OUT="$REPO/reports/perf/final-switch/perf"
@@ -48,6 +54,13 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$OUT"
 cd "$REPO" || fs_die "cannot enter $REPO"
+
+# RULE A: the orchestrator's own affinity ledger, written from inside each
+# pinned process tree by fs_pinned. join_results.py requires it and refuses to
+# join a runner self-report it does not corroborate.
+export FS_AFFINITY_ATTEST="$OUT/affinity-attestation.tsv"
+: > "$FS_AFFINITY_ATTEST"
+
 fs_preflight_measure
 
 # Contract #3: odd sample counts unbalance ABBA and have twice voided a
@@ -74,7 +87,9 @@ zoo() {
     tail -20 "$OUT/zoo-$tag.log" | sed 's/^/  /'
     if [ "$rc" != 0 ]; then
         printf '  FAIL zoo %s rc=%s\n' "$tag" "$rc"
-        [ "$rc" = 2 ] && printf '  (rc=2 is the runner REFUSING: it attests affinity, it does not set it)\n'
+        if [ "$rc" = 2 ]; then
+            printf '  (rc=2 is the runner REFUSING: it attests affinity, it does not set it)\n'
+        fi
         FAILED=1
     fi
     # A refusal must not leave a hole a later join step reads as "not measured".
@@ -112,9 +127,13 @@ micro a1b2 zjs-legacy-a1 zjs-cand-b2
 micro a2b1 zjs-legacy-a2 zjs-cand-b1
 micro a2b2 zjs-legacy-a2 zjs-cand-b2
 
+fs_say "AFFINITY ATTESTATION (orchestrator-side, independent of every runner)"
+sed 's/^/  /' "$FS_AFFINITY_ATTEST"
+
 fs_say "JOIN"
 python3 "$HERE/join_results.py" --perf "$OUT" --artifacts "$ART" \
+    --affinity-attestation "$FS_AFFINITY_ATTEST" \
     --output "$OUT/final-switch-summary.json" || FAILED=1
 
 fs_say "performance FAILED=$FAILED"
-exit "$FAILED"
+fs_finish "$FAILED"

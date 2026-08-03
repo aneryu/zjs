@@ -838,6 +838,23 @@ pub fn build(b: *std.Build) void {
     const architecture_snapshot_step = b.step("architecture-update-api-snapshot", "Refresh the public API snapshot");
     architecture_snapshot_step.dependOn(&update_architecture_public_api.step);
 
+    // The final-switch standing rules, fault-injected. Each rule encodes a
+    // process defect that produced a wrong or vacuous result during Gate A;
+    // the self-test reintroduces each defect and requires the rule to catch it.
+    // Wired into the build graph so the rules are discoverable without reading
+    // tools/final-switch/ first. It needs the engine for the RULE B probe (the
+    // `-e` path has no TypeScript and must be shown answering SyntaxError).
+    const run_final_switch_selftest = b.addSystemCommand(&.{
+        "bash",
+        "tools/final-switch/selftest.sh",
+    });
+    run_final_switch_selftest.step.dependOn(&install_zjs.step);
+    const final_switch_selftest_step = b.step(
+        "final-switch-selftest",
+        "Fault-inject the final-switch standing rules (affinity, TS probes, L3 collect, corpus skips, strict shell)",
+    );
+    final_switch_selftest_step.dependOn(&run_final_switch_selftest.step);
+
     // Unified tests (runs all tests in one single binary, using src/all_tests.zig as compile root)
     const unified_tests = b.addTest(.{
         .name = "unified-tests",

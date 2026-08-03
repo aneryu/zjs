@@ -11,12 +11,12 @@
 # flags line by line.
 #
 # Usage: tools/final-switch/correctness_default.sh [--out DIR]
-set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=./preflight.sh
 source "$HERE/preflight.sh"
+fs_strict "correctness_default.sh"
 
 OUT="$REPO/reports/perf/final-switch/correctness-default"
 while [ $# -gt 0 ]; do
@@ -112,4 +112,4 @@ printf '  (expectation carried by this build: %s)\n' \
     "$(./zig-out/bin/zjs --print-config-signature 2>&1 | tr -d '\n')"
 
 fs_say "correctness_default FAILED=$FAILED"
-exit "$FAILED"
+fs_finish "$FAILED"

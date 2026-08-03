@@ -12,23 +12,37 @@
 #   * the L3 emission gate -- proves the v2 pipeline is not silently falling
 #     back into legacy emission for production constructs.
 #
-# DEFECT FIXED HERE (found the hard way during Gate A): the L3 collect must run
-# over a REAL WORKLOAD. The first attempt invoked the binary with
-# `--print-config-signature`, which compiles nothing, and so reported
+# RULE C (L3 COLLECT) is enforced here: the collect must run over a REAL
+# WORKLOAD, and `v2_construct_emitted > 0` must be asserted BEFORE
+# `legacy_in_v2_unallowed == 0` is believed. The first Gate A attempt invoked
+# the binary with `--print-config-signature`, which compiles nothing, and so
+# reported
 #     v2_construct_emitted=0 legacy_in_v2_unallowed=0
-# a vacuous zero that reads exactly like a pass. `legacy_in_v2_unallowed == 0`
-# is only evidence when `v2_construct_emitted > 0`; the assertion below refuses
-# the report otherwise.
+# a vacuous zero that reads exactly like a pass. The assertion itself lives in
+# fs_l3_verdict() in preflight.sh -- one implementation, shared with
+# selftest.sh, which fault-injects a vacuous report on every run and requires
+# the verdict VACUOUS.
+#
+# RULE B (TS PROBES) also applies to the TypeScript workload below. It is
+# compiled from a `.ts` FILE, which the engine strips by path; a TypeScript
+# probe must never be expressed as `zjs -e '<ts source>'`, which has no
+# TypeScript handling and reports SyntaxError for every construct --
+# indistinguishable from an engine failure. selftest.sh refuses that form
+# statically and proves the SyntaxError dynamically.
 #
 # Usage: tools/final-switch/migration_gates.sh [--out DIR] [--workload FILE]...
-set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=./preflight.sh
 source "$HERE/preflight.sh"
+fs_strict "migration_gates.sh"
 
 OUT="$REPO/reports/perf/final-switch/migration"
+# Declared empty on purpose. Under `set -u` in bash < 4.4 a bare
+# `"${empty[@]}"` is an unbound-variable error, so this array is only ever
+# expanded with `${#...[@]}` (safe everywhere) or after the fs_die below has
+# proved it non-empty. RULE E: a `set -u` fault killed two Gate A scripts.
 WORKLOADS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -111,47 +125,49 @@ fs_heavy "$FS_ZIG" build zjs-dev > "$OUT/l3-build.log" 2>&1 || rc=$?
 DEV="$REPO/zig-out/bin/zjs-dev"
 
 # Default workloads: real source that actually reaches the compiler. A caller
-# may add more with --workload, but may not reduce the set to nothing.
-if [ "${#WORKLOADS[@]}" = 0 ]; then
+# may ADD more with --workload, but may not reduce the set to nothing: the
+# `[@]+` guard yields the empty string, the count check below then restores the
+# defaults, and an empty final set is a hard failure rather than a silent
+# zero-workload run that would print no FAIL lines at all.
+if [ "${#WORKLOADS[@]}" -eq 0 ]; then
     WORKLOADS=(
         "$HERE/l3_workload.js"
         "$HERE/l3_workload.ts"
     )
 fi
+[ "${#WORKLOADS[@]}" -gt 0 ] || fs_die "no L3 workloads: a collect over nothing is the vacuous-zero defect"
 
 l3_collect() {
     local workload="$1" tag; tag="$(basename "$workload")"
     if [ ! -f "$workload" ]; then
         printf '  FAIL l3-workload %s: file does not exist\n' "$workload"; FAILED=1; return 0
     fi
-    local report
-    report="$(ZJS_V2_EMISSION_COLLECT=1 "$DEV" "$workload" 2>&1 >/dev/null \
-        | grep -E 'QCP-1 L3 emission coverage' | tail -1)"
-    if [ -z "$report" ]; then
-        printf '  FAIL l3-workload %s: no coverage report emitted\n' "$tag"; FAILED=1
-        record "l3-workload-$tag" 1 "<no report>"; return 0
-    fi
-    printf '  %s: %s\n' "$tag" "$report"
-    local emitted unallowed
-    emitted="$(printf '%s' "$report"   | grep -oE 'v2_construct_emitted=[0-9]+'    | cut -d= -f2)"
-    unallowed="$(printf '%s' "$report" | grep -oE 'legacy_in_v2_unallowed=[0-9]+'  | cut -d= -f2)"
-    emitted="${emitted:-0}"; unallowed="${unallowed:-0}"
-    # THE ASSERTION THAT WAS MISSING. A zero unallowed count over a workload
-    # that emitted nothing is not a pass, it is an empty measurement.
-    if [ "$emitted" -le 0 ]; then
-        printf '  FAIL l3-workload %s: v2_construct_emitted=0 -- this workload compiled NOTHING,\n' "$tag"
-        printf '       so legacy_in_v2_unallowed=%s is vacuous and proves nothing.\n' "$unallowed"
+    # Capture the exit status too: a workload that throws (a SyntaxError from a
+    # TypeScript probe expressed the wrong way, say) must not be read as a
+    # clean collect just because a report line happened to be printed.
+    local out run_rc=0
+    out="$(ZJS_V2_EMISSION_COLLECT=1 "$DEV" "$workload" 2>&1 >/dev/null)" || run_rc=$?
+    local report verdict verdict_rc=0
+    report="$(printf '%s\n' "$out" | grep -E 'QCP-1 L3 emission coverage' | tail -1)"
+    # RULE C lives in fs_l3_verdict(): emitted>0 is asserted BEFORE unallowed==0
+    # is believed. selftest.sh fault-injects that exact function every run.
+    verdict="$(fs_l3_verdict "$report")" || verdict_rc=$?
+    printf '  %s: %s\n' "$tag" "${report:-<no coverage line>}"
+    if [ "$run_rc" != 0 ]; then
+        printf '  FAIL l3-workload %s: the workload itself exited rc=%s\n' "$tag" "$run_rc"
+        printf '%s\n' "$out" | grep -vE 'QCP-1 L3 emission coverage' | tail -5 | sed 's/^/       | /'
         FAILED=1
-        record "l3-workload-$tag" 1 "VACUOUS emitted=0 unallowed=$unallowed"; return 0
+        record "l3-workload-$tag" 1 "workload rc=$run_rc"
+        return 0
     fi
-    if [ "$unallowed" -ne 0 ]; then
-        printf '  FAIL l3-workload %s: legacy_in_v2_unallowed=%s over %s emitted constructs\n' \
-            "$tag" "$unallowed" "$emitted"
+    if [ "$verdict_rc" != 0 ]; then
+        printf '  FAIL l3-workload %s: %s\n' "$tag" "$verdict"
         FAILED=1
-        record "l3-workload-$tag" 1 "emitted=$emitted unallowed=$unallowed"; return 0
+        record "l3-workload-$tag" 1 "$verdict"
+        return 0
     fi
-    printf '  PASS l3-workload %s (emitted=%s > 0, unallowed=0)\n' "$tag" "$emitted"
-    record "l3-workload-$tag" 0 "emitted=$emitted unallowed=0"
+    printf '  PASS l3-workload %s: %s\n' "$tag" "$verdict"
+    record "l3-workload-$tag" 0 "$verdict"
     return 0
 }
 
@@ -159,4 +175,4 @@ fs_say "GATE l3-emission-workloads"
 for w in "${WORKLOADS[@]}"; do l3_collect "$w"; done
 
 fs_say "migration_gates FAILED=$FAILED"
-exit "$FAILED"
+fs_finish "$FAILED"

@@ -23,12 +23,12 @@
 # assuming it.
 #
 # Usage: tools/final-switch/correctness_variants.sh [--out DIR]
-set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=./preflight.sh
 source "$HERE/preflight.sh"
+fs_strict "correctness_variants.sh"
 
 OUT="$REPO/reports/perf/final-switch/correctness-variants"
 while [ $# -gt 0 ]; do
@@ -49,9 +49,10 @@ SUMMARY="$OUT/summary.tsv"
 #   zjs-config-v2:compiler=,layout=,repr=,optimize=,force_gc=,ownership_audit=
 # `optimize` is substituted per artifact (a Debug test binary is not evidence
 # of drift for having been built Debug), so it is the one field an expectation
-# cannot pin; every other field is asserted verbatim.
+# cannot pin; every other field is asserted verbatim. The production defaults
+# are `sig v2 short tagged <optimize> off off`; each gate below states its own
+# single deviation from that.
 sig() { printf 'zjs-config-v2:compiler=%s,layout=%s,repr=%s,optimize=%s,force_gc=%s,ownership_audit=%s' "$@"; }
-DEFAULTS=(v2 short tagged Debug off off)
 
 # gate <label> <expect-signature|-> <cmd...>
 gate() {
@@ -132,4 +133,4 @@ gate altrepr - "$FS_ZIG" build test-altrepr
 gate oom     - "$FS_ZIG" build test-oom --summary all
 
 fs_say "correctness_variants FAILED=$FAILED"
-exit "$FAILED"
+fs_finish "$FAILED"

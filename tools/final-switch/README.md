@@ -3,12 +3,13 @@
 Gate A (the QCP-1 compiler switch to V2 + `.short`) was run from scratch shell
 scripts in a job temp directory. They worked, and then they would have been
 thrown away. This directory is that orchestration promoted to a maintained set,
-with the two defects that were found the hard way fixed in the committed
-version rather than carried forward as folklore.
+with the defects that were found the hard way fixed in the committed version
+rather than carried forward as folklore.
 
 | script | lane | needs both compilers? |
 | --- | --- | --- |
-| `preflight.sh` | host + toolchain checks, shared helpers (sourced by all others) | no |
+| `preflight.sh` | host + toolchain checks, shared helpers, the standing rules (sourced by all others) | no |
+| `selftest.sh` | **fault-inject every standing rule** — `zig build final-switch-selftest` | no |
 | `build_artifacts.sh` | two cold builds per side, manifest with sha256 + signature | yes (`--no-legacy` after deletion) |
 | `correctness_default.sh` | correctness on **true production defaults** | no |
 | `correctness_variants.sh` | altrepr, OOM, force-GC, ownership-audit, ReleaseSafe, `.plain` | no |
@@ -20,6 +21,7 @@ version rather than carried forward as folklore.
 Suggested order on a single host, never overlapping:
 
 ```bash
+tools/final-switch/selftest.sh        # seconds; run it first, every time
 tools/final-switch/preflight.sh
 tools/final-switch/build_artifacts.sh
 tools/final-switch/correctness_default.sh
@@ -31,26 +33,83 @@ tools/final-switch/performance.sh     # quiet host: nothing else may run
 `performance.sh` must run **alone**. The correctness lanes may not overlap it,
 not even pinned to other cores.
 
-## The two defects this directory exists to have fixed
+## The five standing rules
 
-**1. The zoo runner attests affinity; it does not set it.**
+Each of these is a **regression test, not a style preference**: each one names a
+process defect that produced a wrong or vacuous result on a real Gate A run.
+Each is enforced by machine, and `selftest.sh` reintroduces each defect on every
+run and requires the rule to catch it — a rule that has only ever been observed
+passing is a comment.
+
+| rule | enforced by | proven by |
+| --- | --- | --- |
+| **A · AFFINITY** — the orchestrator SETS `taskset -c $FS_CPU` and verifies the pin INDEPENDENTLY; a runner's self-report is corroborated, never trusted alone | `fs_pinned()`, `fs_verify_affinity()`, `join_results.py` | `selftest.sh` A1–A8 |
+| **B · TS PROBES** — a TypeScript probe routes through `parseAndCompileV2TestProgram()`, never `zjs -e '<ts source>'` | ban scan over `tools/` + `docs/`; a named test in `src/compiler_v2/tests.zig` | `selftest.sh` B1–B4 |
+| **C · L3 COLLECT** — `v2_construct_emitted > 0` is asserted BEFORE `legacy_in_v2_unallowed == 0` is believed | `fs_l3_verdict()`, called by `migration_gates.sh` | `selftest.sh` C1–C5 |
+| **D · CORPUS SKIPS** — the actual skipped set is compared against an EXPLICIT per-case allowlist, by identity, both ways. No proportional tolerance in any form | `expectCoverageSkipSetMatches()` in `src/compiler_v2/tests.zig` | `selftest.sh` D1–D4 + a Zig self-test |
+| **E · STRICT SHELL** — scripts are shellcheck-clean and ABORT LOUDLY rather than silently emitting nothing | `fs_strict()` / `fs_finish()` + the abort banner | `selftest.sh` E1–E6 |
+
+```bash
+zig build final-switch-selftest       # or: tools/final-switch/selftest.sh
+```
+
+### A · The zoo runner attests affinity; it does not set it
+
 `tools/perf/zoo/run_zoo_compare.py` verifies `os.sched_getaffinity(0) == {--cpu}`
 and refuses otherwise — the caller must supply `taskset -c 19`. The first Gate A
 performance attempt omitted it and the runner refused all three invocations
 (`rc=2`). That was fail-closed behaviour working correctly, but only because
-the runner happened to check. In this directory:
+the runner happened to check; the orchestrator should never have been able to
+request an unpinned measurement at all. So:
 
 * `fs_pinned()` in `preflight.sh` is the only sanctioned way to invoke an
-  affinity-attesting runner, and it always supplies `taskset -c $FS_CPU`;
+  affinity-attesting runner, and it always supplies `taskset -c $FS_CPU`.
+  `selftest.sh` A1 refuses any other script in this directory that spells
+  `taskset`, and A2 refuses any invocation of an affinity-attesting runner —
+  the list is *derived* by grepping `tools/perf` for `sched_getaffinity`, so a
+  new attesting runner is covered the day it lands — that is not `fs_pinned`;
+* `fs_pinned()` then **verifies the pin from inside the pinned process tree**,
+  reading `/proc/self/status` immediately before `exec`ing the runner. That is
+  a different process and a different mechanism from the runner's own
+  `os.sched_getaffinity`, so agreement between the two is corroboration rather
+  than one source attesting itself twice. Observations are appended to
+  `$FS_AFFINITY_ATTEST`;
 * `fs_preflight_measure()` proves the pin takes effect *before* a long run
   starts, instead of discovering it at the end;
 * `performance.sh` reports `rc=2` as a hard failure and additionally fails when
   a run leaves no artifact, so a refusal cannot become a silent hole;
-* `join_results.py` refuses any artifact whose `effectiveAffinity != [cpu]`, and
-  refuses to join a **missing** artifact at all — a run that did not happen must
-  never be averaged in as a smaller sample.
+* `join_results.py` **requires** the orchestrator's ledger, refuses any artifact
+  whose `effectiveAffinity != [cpu]`, refuses a runner self-report the ledger
+  does not corroborate, and refuses to join a **missing** artifact at all — a
+  run that did not happen must never be averaged in as a smaller sample.
 
-**2. The L3 emission collect must run over a real workload.**
+### B · A TypeScript probe cannot be `zjs -e`
+
+The CLI's `-e` path has no TypeScript handling: there is no filename for the
+source-kind autodetect to work from, and no flag to force it. So
+
+```
+$ zjs -e '<ts source>'
+SyntaxError: UnexpectedToken
+```
+
+for **every** construct — `enum`, `interface`, `namespace`, a plain type
+annotation, all of them — which is indistinguishable from an engine failure and
+reads as a finding. A TypeScript probe must instead route through
+`parseAndCompileV2TestProgram()` with `.source_kind = .typescript`, which is what
+the coverage corpus and the named RULE B test in `src/compiler_v2/tests.zig` do.
+The `.ts` **file** route works too (the engine strips by path), which is why
+`l3_workload.ts` is a file.
+
+`selftest.sh` bans the `-e` formulation statically over `tools/` and `docs/`
+(a plain recursive grep, not `git grep`: an untracked scratch script is exactly
+where this gets written), and grounds the ban dynamically — B2 requires the
+`-e` form to still report `SyntaxError`, and B4 requires the same construct to
+compile when the source kind is known, so the failure is demonstrably a property
+of the probe and not of the construct.
+
+### C · The L3 emission collect must run over a real workload
+
 The first attempt invoked the binary with `--print-config-signature`, which
 compiles nothing. It reported
 
@@ -60,12 +119,66 @@ QCP-1 L3 emission coverage: v2_construct_emitted=0 legacy_construct_emitted=0 \
 ```
 
 — a vacuous zero that reads exactly like a pass. `legacy_in_v2_unallowed == 0`
-is only evidence when something was actually emitted. `migration_gates.sh` now
-runs the collector over `l3_workload.js` and `l3_workload.ts` and **asserts
-`v2_construct_emitted > 0` before believing `legacy_in_v2_unallowed == 0`**;
-an emitted count of zero is reported as `VACUOUS`, not as a pass.
+is a claim about constructs that were emitted; over zero emitted constructs it
+is not a weak pass, it is not a measurement. `migration_gates.sh` runs the
+collector over `l3_workload.js` and `l3_workload.ts` and **asserts
+`v2_construct_emitted > 0` before believing `legacy_in_v2_unallowed == 0`**; an
+emitted count of zero is reported as `VACUOUS`, not as a pass. The assertion is
+`fs_l3_verdict()` in `preflight.sh` — one implementation, shared by the gate and
+by `selftest.sh`, which feeds it the **verbatim** historical vacuous line on
+every run and requires the verdict `VACUOUS`.
 
-**3. A variant gate must prove it ran the variant — with the build, not a grep.**
+### D · The corpus skip set is an allowlist, not a tolerance
+
+`src/compiler_v2/tests.zig` asserted `skipped * 2 <= cases.len` — up to **half**
+the coverage corpus could stop covering anything while the test stayed green.
+A proportional tolerance is not acceptable in any form, so there is now an
+explicit per-case allowlist compared **by identity, in both directions**:
+
+* a snippet that fails to compile and is not allowlisted fails the test, naming
+  the index and the source;
+* an allowlisted snippet that starts compiling also fails, as a stale entry;
+* `.expect_skip = true` requires a `.skip_reason`, enforced at `comptime`.
+
+Exactly one entry is allowlisted: a bare `new.target;` at top level, which is
+genuinely invalid JavaScript in that position and so could never reach emission.
+It is kept **in** the corpus rather than deleted, precisely so that the expected
+skip set is stated by identity and a NEW skip anywhere else fails. The valid
+in-function form is the snippet directly above it.
+
+`selftest.sh` D1 refuses a proportional tolerance reappearing, D2 requires the
+comparison to be both defined and called, D3 requires exactly one allowlisted
+entry inside the corpus array and requires it to be `new.target;`, and D4
+requires the Zig self-test that fault-injects the comparison itself to still
+exist.
+
+### E · A script must fail loudly, never silently
+
+A `set -u` unbound-variable bug killed two separate Gate A measurement scripts.
+Both times the script stopped mid-way, printed one line of bash diagnostic among
+hundreds of lines of build output, and produced **no verdict** — which reads
+like a run still in progress, not like a run that died.
+
+* every script enters strict mode through `fs_strict()`, which installs an
+  `EXIT` trap, and leaves through `fs_finish()`, which is the only sanctioned
+  exit. Any other exit path prints an unmissable `ABORTED <script> rc=N` banner
+  and forces a non-zero status;
+* the scripts are **shellcheck-clean** at `-x -S style`. `selftest.sh` E6 runs
+  shellcheck when it is available and fails on any finding; with
+  `FS_REQUIRE_SHELLCHECK=1` its absence is itself a failure. E1–E5 are the
+  guaranteed floor beneath it: `bash -n` on every script, the strict-mode and
+  `fs_finish` wiring, and a **live fault injection** that runs a script with a
+  genuine unbound variable and requires a loud abort — plus the two
+  no-false-positive directions, that a completed run prints no banner and that a
+  failing *gate* (`fs_finish 1`) is a verdict rather than an abort;
+* `flock` is not reentrant across processes, so a nested acquisition hangs with
+  no output at all — the same silent-death shape. `FS_LOCK_ALREADY_HELD=1`
+  declares that the caller holds the host lock; it is recorded in the provenance
+  block, and E2 refuses any script other than `selftest.sh` that sets it.
+
+## Also fixed here: a variant gate must prove it ran the variant
+
+**With the build, not a grep.**
 `correctness_default.sh` refuses to accept `-Dzjs_compiler` / `-Dzjs_v2_layout`
 in any of its own gate lines, because the predecessor gate was green about a
 configuration it had never run: every line carried an explicit flag, so the
@@ -171,29 +284,29 @@ reports as failing. Either the two tests need a force-GC-aware expectation or
 the gate needs to exclude them explicitly — silently tolerating it would put a
 50%-tolerance-shaped hole back into the matrix.
 
-## Known open item: the dual test262 divergence
+## CLOSED: the dual test262 divergence
 
 The full dual-comparator test262 run — deliberately deferred to the last moment
-both compilers coexisted — **does not match** the single-backend runs at
+both compilers coexisted — did **not** match the single-backend runs at
 `04922a47`:
 
-| run | result |
+| run | result at `04922a47` |
 | --- | --- |
 | `zig build test262-gate` (defaults, v2) | `0/49775 errors, passed 44541, known 25` |
 | `zig build test262-gate -Dzjs_compiler=legacy` | `0/49775 errors, passed 44541, known 25` |
 | `zig build test262-gate -Dzjs_compiler=dual` | **`5/49775 errors, passed 44536, known 25`** |
 
-All five are `DualCompileMismatch`, all at comparator tier 1.5 (CFG),
-field `block_count`, with v2 emitting one block more than legacy. Both backends
-independently pass all five tests, so this is an emission-shape divergence the
-comparator is fail-closed about, not an observable behaviour difference.
-Minimal reproducer:
+All five were `DualCompileMismatch`, all at comparator tier 1.5 (CFG), field
+`block_count`, with v2 emitting one block more than legacy. Minimal reproducer:
 
 ```js
 switch (0) { default: if (false) ; else ; }   // legacy=1 block, v2=2 blocks
 ```
 
-The trigger is a `switch` whose `default:` clause ends in an `if`/`else` whose
-*taken* branch is empty and whose test constant-folds falsy. `case 0:` does not
-trigger it; `if (true) ; else ;` does not; the same `if`/`else` in a plain
-block, label, loop or `try` does not. See the `migration_gates.sh` header.
+**Root-caused and fixed in `a9c13b0a`** — v2 materialised a switch-dispatch
+bridge block that legacy never had. Since that commit the full dual run is
+`0/49775 errors, passed 44541, known 25` with zero mismatch lines at any
+comparator tier, matching both single-backend runs exactly. Kept here because
+the *sequence* is the lesson: the widest corpus either backend ever sees found
+a divergence that no hand-written dual corpus reached, and it was found only
+because the dual run was scheduled while both backends still existed.
