@@ -133,7 +133,20 @@ tasks below include it.
   neither may rot. The step spawns a nested `zig build test` and forwards every
   `-D` option of the outer invocation plus the resolved optimize mode, so
   `zig build test-altrepr -Dzjs_compiler=v2 -Doptimize=ReleaseSafe` genuinely
-  runs that configuration under the alternate representation.)
+  runs that configuration under the alternate representation. The step also
+  passes the child the exact configuration signature it must resolve
+  (`-Dzjs_expect_config`), so a dropped option is a hard build failure rather
+  than a green run of a different configuration.)
+- `zig build config-signature-check --seed 0` (runs the built `zjs`, makes it
+  state its own configuration via `--print-config-signature`, and compares that
+  against what the build graph requested. The binary answers from the
+  declarations the engine consumes — `resolve_labels.default_layout`, the
+  `Parser` backend-dispatch decision, `core.value.nan_boxing`,
+  `core.memory.force_gc_on_allocation_enabled`,
+  `core.atom.ownership_audit_enabled` — so an option that never reached the
+  code fails here. Included in `zig build smoke`. The same string is asserted
+  inside the unified suite, so every green states which configuration it is
+  green about.)
 - `zig build test-oom --seed 0 --summary all` (OOM 注入门禁：
   corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，
   不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus

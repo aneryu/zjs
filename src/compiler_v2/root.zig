@@ -1,7 +1,8 @@
 //! QCP-1 compiler-v2 (`compiler-v2-qjs` branch): the zjs identity-native
-//! compiler, using selected QuickJS production mechanisms while replacing the
-//! legacy absolute-PC Phase 1/2/3 pipeline wholesale once the final
-//! performance gate (code-load >= 0.58 vs pinned qjs) passes.
+//! compiler, using selected QuickJS production mechanisms in place of the
+//! legacy absolute-PC Phase 1/2/3 pipeline. The switch ruling made
+//! `v2` + `short` the production default; the absolute `code-load >= 0.58`
+//! bar it once waited on is SUPERSEDED (docs/qcp1_switch_decision.md §0).
 //!
 //! Production shape (target):
 //!   compact temporary bytecode (no per-instruction object IR)
@@ -11,8 +12,11 @@
 //!   + resolve_labels_v2 + single layout-selectable final emission (jump
 //!     threading, pc2line generated directly at output positions)
 //!
-//! Selection: -Dzjs_compiler=legacy|v2|dual (dual compiles both, compares
-//! via compare.zig, executes the v2 product).
+//! Selection: -Dzjs_compiler=v2 (default) |legacy|dual (dual compiles both,
+//! compares via compare.zig, executes the v2 product). Final layout:
+//! -Dzjs_v2_layout=short (default) |plain (A/B diagnostic instrument).
+//! Both are named in the build's configuration signature; see
+//! src/config_signature.zig and `zig build config-signature-check`.
 //!
 //! Correctness contract is NORMALIZED EQUIVALENCE, not byte identity:
 //! structural tier (flags/counts/pools/stack size/atom balance), normalized

@@ -3524,6 +3524,14 @@ pub const parser_core = struct {
     /// Every runtime v2 gate is spelled `v2_available and <state>.emit_v2` so
     /// legacy builds comptime-fold the entire v2 leg away.
     pub const v2_available = compiler_mode != .legacy;
+    /// THE backend-dispatch decision. `Parser.compile` branches on exactly
+    /// these two declarations, and `config_signature` reports exactly these
+    /// two declarations. There is deliberately no second copy of the decision
+    /// that could drift from the one the engine executes: a signature
+    /// recomputed from `-Dzjs_compiler` would agree with itself even if the
+    /// dispatch ignored the option, and would therefore attest nothing.
+    pub const dual_compare_enabled: bool = compiler_mode == .dual;
+    pub const single_backend_is_v2: bool = compiler_mode == .v2;
 
     const bytecode_function = bytecode;
     const function_def_mod = bytecode.function_def;
@@ -21302,7 +21310,7 @@ pub const compile_entry = struct {
         // comments and source substrings are never a second strictness source.
         const effective_strict = options.strict;
 
-        if (comptime parser_impl.compiler_mode != .dual) {
+        if (comptime !parser_impl.dual_compare_enabled) {
             var function = initCompileCarrier(rt, filename_atom, options, effective_strict);
             var function_owned = true;
             errdefer if (function_owned) function.deinit(rt);
@@ -21335,7 +21343,7 @@ pub const compile_entry = struct {
             }
 
             var features = std.EnumSet(FeatureImpl).initEmpty();
-            const backend: Backend = if (comptime parser_impl.compiler_mode == .v2) .v2 else .legacy;
+            const backend: Backend = if (comptime parser_impl.single_backend_is_v2) .v2 else .legacy;
 
             const canonical_root = compileQjsProgram(backend, rt, filename_atom, source, options, compile_context, &function, &features) catch |err| switch (err) {
                 error.OutOfMemory => return err,

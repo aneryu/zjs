@@ -158,6 +158,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try argsToSlice(arena, init.minimal.args);
 
+    // QCP-1 configuration signature. Answered before any engine construction
+    // so it is readable from every configuration, including instrumented
+    // tiers, and so `zig build config-signature-check` can compare the
+    // shipped binary's own answer against what the build graph requested.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], config_signature_flag)) {
+        try printConfigSignature(io);
+        return;
+    }
+
     const command = parseArgs(args[1..]) catch {
         try printUsage(io);
         std.process.exit(2);
@@ -380,7 +389,19 @@ fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []cons
 }
 
 fn printUsage(io: std.Io) !void {
-    try printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n", .{});
+    try printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+}
+
+/// Standalone query flag: it takes no script and constructs no runtime, so it
+/// deliberately never reaches `parseArgs`.
+const config_signature_flag = "--print-config-signature";
+
+fn printConfigSignature(io: std.Io) !void {
+    var stdout_buf: [256]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    const stdout = &stdout_writer.interface;
+    try stdout.print("{s}\n", .{engine.config_signature.signature});
+    try stdout.flush();
 }
 
 fn commandRuntimeOptions(command: Command) RuntimeOptions {

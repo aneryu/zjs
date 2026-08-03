@@ -20,16 +20,26 @@ pub fn build(b: *std.Build) void {
     // the target default.
     const target_default_nan_boxing = target.result.ptrBitWidth() < 64;
     const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse target_default_nan_boxing;
-    // QCP-1: compiler selection. legacy = the shipping Phase 1/2/3 pipeline;
-    // v2 = the QuickJS-model compiler-v2; dual = compile with both, compare,
-    // execute the v2 product. Default stays legacy until the final gate
-    // (code-load >= 0.58) passes.
-    const zjs_compiler = b.option([]const u8, "zjs_compiler", "Compiler selection: legacy, v2, or dual") orelse "legacy";
+    // QCP-1: compiler selection. v2 = the QuickJS-model compiler-v2 and the
+    // production default since the switch ruling; legacy = the Phase 1/2/3
+    // pipeline, kept as the explicit fallback; dual = compile with both,
+    // compare, execute the v2 product, kept as the differential oracle.
+    // See docs/qcp1_switch_decision.md for the gate the default rests on.
+    const zjs_compiler = b.option([]const u8, "zjs_compiler", "Compiler selection: v2 (default), legacy, or dual") orelse "v2";
     if (!std.mem.eql(u8, zjs_compiler, "legacy") and
         !std.mem.eql(u8, zjs_compiler, "v2") and
         !std.mem.eql(u8, zjs_compiler, "dual"))
     {
         std.debug.print("error: invalid -Dzjs_compiler value '{s}': expected legacy, v2, or dual\n", .{zjs_compiler});
+        std.process.exit(1);
+    }
+    // QCP-1: compiler-v2 final bytecode layout. `short` is part of the release
+    // configuration, not an optimization knob: the switch measurements were
+    // taken against it. `plain` stays reachable as the A/B diagnostic
+    // instrument (it is how C2-B artifact residency was localised).
+    const zjs_v2_layout = b.option([]const u8, "zjs_v2_layout", "compiler-v2 final layout: short (default) or plain (diagnostic)") orelse "short";
+    if (!std.mem.eql(u8, zjs_v2_layout, "plain") and !std.mem.eql(u8, zjs_v2_layout, "short")) {
+        std.debug.print("error: invalid -Dzjs_v2_layout value '{s}': expected plain or short\n", .{zjs_v2_layout});
         std.process.exit(1);
     }
     // OOM-injection coverage instrumentation (v1): records deduplicated
@@ -49,6 +59,48 @@ pub fn build(b: *std.Build) void {
     // `zig build test -Dzjs_ownership_audit=true`; see
     // docs/borrowed_atom_audit.md §6.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine one just-freed atom slot so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
+
+    // ===== QCP-1 configuration signature =====
+    // The defect class this closes is "a gate reports green about a
+    // configuration it never ran". `zig build test-altrepr -Dzjs_compiler=v2`
+    // spawned a child `zig build` that started from the defaults and ran the
+    // *legacy* suite. Forwarding options fixes that one instance; the
+    // signature makes the class unexpressible, because every gate can now
+    // state which configuration its green belongs to.
+    //
+    // This is the build graph's BELIEF about the configuration. The compiled
+    // code computes the same string independently, in src/config_signature.zig,
+    // from the declarations it actually consumes (resolve_labels.default_layout,
+    // Parser.single_backend_is_v2/dual_compare_enabled, core.value.nan_boxing,
+    // core.memory.force_gc_on_allocation_enabled, core.atom.ownership_audit_enabled).
+    // The two are compared by `zig build config-signature-check` against the
+    // shipped binary and by the in-suite attestation test against the test
+    // binary, so a drift between belief and behaviour fails instead of
+    // reporting green.
+    const config_signature = configSignature(b, .{
+        .compiler = zjs_compiler,
+        .layout = zjs_v2_layout,
+        .nan_boxing = zjs_nan_boxing,
+        .force_gc = zjs_force_gc,
+        .ownership_audit = zjs_ownership_audit,
+    });
+    // Internal cross-build assertion. A parent build that spawns a child
+    // `zig build` states the configuration it expects the child to resolve;
+    // the child fails loudly here if it resolved anything else. This is what
+    // turns a dropped/ignored option in a nested gate into a hard build
+    // failure rather than a silent green.
+    if (b.option([]const u8, "zjs_expect_config", "Internal: fail the build unless the resolved configuration signature matches exactly (used by nested gate builds)")) |expected| {
+        if (!std.mem.eql(u8, expected, config_signature)) {
+            std.debug.print(
+                \\error: configuration signature mismatch
+                \\  expected (requested by -Dzjs_expect_config): {s}
+                \\  resolved (this build's own options):         {s}
+                \\
+            , .{ expected, config_signature });
+            std.process.exit(1);
+        }
+    }
+
     const zjs_dossier_simple_ctor = b.option([]const u8, "zjs_dossier_simple_ctor", "Dossier-only simple-constructor variant: a, b, or c") orelse "a";
     if (!std.mem.eql(u8, zjs_dossier_simple_ctor, "a") and
         !std.mem.eql(u8, zjs_dossier_simple_ctor, "b") and
@@ -71,6 +123,8 @@ pub fn build(b: *std.Build) void {
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     engine_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
+    engine_options.addOption([]const u8, "zjs_v2_layout", zjs_v2_layout);
+    engine_options.addOption([]const u8, "zjs_expected_config_signature", config_signature);
     engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     engine_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
@@ -89,6 +143,8 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     plugin_fixture_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
+    plugin_fixture_options.addOption([]const u8, "zjs_v2_layout", zjs_v2_layout);
+    plugin_fixture_options.addOption([]const u8, "zjs_expected_config_signature", config_signature);
     plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     plugin_fixture_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     plugin_fixture_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
@@ -171,6 +227,8 @@ pub fn build(b: *std.Build) void {
     profile_engine_options.addOption(bool, "zjs_enable_opcode_profile", true);
     profile_engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     profile_engine_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
+    profile_engine_options.addOption([]const u8, "zjs_v2_layout", zjs_v2_layout);
+    profile_engine_options.addOption([]const u8, "zjs_expected_config_signature", config_signature);
     profile_engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     profile_engine_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     profile_engine_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
@@ -771,6 +829,8 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption([]const u8, "zjs_compiler", zjs_compiler);
+    test_options.addOption([]const u8, "zjs_v2_layout", zjs_v2_layout);
+    test_options.addOption([]const u8, "zjs_expected_config_signature", config_signature);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
     test_options.addOption(bool, "zjs_ownership_audit", zjs_ownership_audit);
@@ -810,7 +870,20 @@ pub fn build(b: *std.Build) void {
     run_smoke_tests.step.dependOn(&install_zjs_profile.step);
     if (b.args) |args| run_smoke_tests.addArgs(args);
 
+    // Run the SHIPPED artifact and make it state its own configuration, then
+    // compare that against what the build graph requested. The binary answers
+    // from src/config_signature.zig, which reads the declarations the engine
+    // consumes; this build states what it believes it configured. Any drift
+    // between the two -- an option that never reached the code, a hardcoded
+    // constant that outlived its option -- fails here.
+    const run_config_signature = b.addRunArtifact(zjs_exe);
+    run_config_signature.addArg("--print-config-signature");
+    run_config_signature.expectStdOutEqual(b.fmt("{s}\n", .{config_signature}));
+    const config_signature_step = b.step("config-signature-check", "Check the built zjs reports the configuration signature this build requested");
+    config_signature_step.dependOn(&run_config_signature.step);
+
     const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
+    smoke_step.dependOn(&run_config_signature.step);
     smoke_step.dependOn(&run_smoke_tests.step);
 
     // Debug smoke tests are the single engine-bearing artifact in the inner
@@ -960,6 +1033,7 @@ pub fn build(b: *std.Build) void {
         "zjs_nan_boxing", // inverted below; forwarding it too would duplicate
         "zjs_test_seed", // passed explicitly as altrepr_project_seed
         "optimize", // passed explicitly as the resolved optimize mode
+        "zjs_expect_config", // this build's expectation, not the child's
     };
     var altrepr_forwarded: std.ArrayList([]const u8) = .empty;
     var altrepr_user_options = b.user_input_options.iterator();
@@ -992,6 +1066,19 @@ pub fn build(b: *std.Build) void {
             return std.mem.lessThan(u8, lhs, rhs);
         }
     }.lessThan);
+    // Belt and braces over the forwarding above: state the exact configuration
+    // this step intends the child to resolve (this build's settings with the
+    // representation inverted). If any option is dropped, ignored, or defaulted
+    // differently on the way down, the child's own signature differs and the
+    // child build FAILS instead of running a different configuration and
+    // reporting green -- which is precisely the defect this step once had.
+    const altrepr_expect_config = b.fmt("-Dzjs_expect_config={s}", .{configSignature(b, .{
+        .compiler = zjs_compiler,
+        .layout = zjs_v2_layout,
+        .nan_boxing = !zjs_nan_boxing,
+        .force_gc = zjs_force_gc,
+        .ownership_audit = zjs_ownership_audit,
+    })});
     var altrepr_argv: std.ArrayList([]const u8) = .empty;
     altrepr_argv.appendSlice(b.allocator, &.{
         b.graph.zig_exe,
@@ -999,6 +1086,7 @@ pub fn build(b: *std.Build) void {
         "test",
         altrepr_option,
         altrepr_project_seed,
+        altrepr_expect_config,
         b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
     }) catch @panic("OOM");
     altrepr_argv.appendSlice(b.allocator, altrepr_forwarded.items) catch @panic("OOM");
@@ -1100,4 +1188,32 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_perf_direct.addArgs(args);
     const perf_direct_step = b.step("perf-direct", "Run zjs versus pinned QuickJS direct/core benchmarks");
     perf_direct_step.dependOn(&run_perf_direct.step);
+}
+
+/// QCP-1 configuration settings, in the canonical order the ruling names them.
+/// Keep this list, `configSignature` below, and `src/config_signature.zig`
+/// in lockstep: they are two independent computations of the same string and
+/// their disagreement is exactly what the signature gate detects.
+const ConfigSettings = struct {
+    compiler: []const u8,
+    layout: []const u8,
+    nan_boxing: bool,
+    force_gc: bool,
+    ownership_audit: bool,
+};
+
+/// The build graph's belief about the configuration, in the same canonical,
+/// deterministic encoding `src/config_signature.zig` produces from the
+/// declarations the compiled code consumes.
+fn configSignature(b: *std.Build, settings: ConfigSettings) []const u8 {
+    return b.fmt(
+        "zjs-config-v1:compiler={s},layout={s},repr={s},force_gc={s},ownership_audit={s}",
+        .{
+            settings.compiler,
+            settings.layout,
+            if (settings.nan_boxing) "nan_boxed" else "tagged",
+            if (settings.force_gc) "on" else "off",
+            if (settings.ownership_audit) "on" else "off",
+        },
+    );
 }

@@ -9,6 +9,7 @@ const standard_globals = @import("../exec/standard_globals.zig");
 const builder_mod = @import("builder.zig");
 const coverage = @import("coverage.zig");
 const labels = @import("labels.zig");
+const resolve_labels = @import("resolve_labels.zig");
 const resolve_variables = @import("resolve_variables.zig");
 const test_entry = @import("test_entry.zig");
 const P = parser_mod.Parser;
@@ -4350,7 +4351,7 @@ test "compiler_v2.s4: global var machinery executes" {
     try expectV2ExecutionCompletion("var g = 4; g + 1;", 5);
 }
 
-test "compiler_v2.s4: installed for loop uses plain layout" {
+test "compiler_v2.s4: installed for loop matches the configured default layout" {
     var skip = !P.v2_available;
     _ = &skip;
     if (skip) return error.SkipZigTest;
@@ -4361,7 +4362,16 @@ test "compiler_v2.s4: installed for loop uses plain layout" {
     const result = try v2CompileAndRun(&h);
     defer result.free(h.rt);
     try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
-    try std.testing.expect(!h.installed_short_opcode);
+    // The production path lowers with `resolve_labels.default_layout`
+    // (`-Dzjs_v2_layout`), so assert against that declaration rather than
+    // against a hardcoded mode. This test previously pinned `.plain` and was
+    // the one place in the suite that silently depended on the old default:
+    // it is the same defect class as a gate reporting green about a
+    // configuration it never ran, one level down.
+    switch (resolve_labels.default_layout) {
+        .plain => try std.testing.expect(!h.installed_short_opcode),
+        .short => try std.testing.expect(h.installed_short_opcode),
+    }
 }
 
 test "compiler_v2.p5: FunctionDef owners are inert after the FunctionBytecode escape" {

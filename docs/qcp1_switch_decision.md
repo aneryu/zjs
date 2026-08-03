@@ -8,6 +8,15 @@ each of the ruling's three groups, which conditions are MET, which are NOT MET,
 and which need a ruling rather than another measurement. The decision is
 reserved.
 
+> **AMENDED 2026-08-03 — the decision is no longer reserved.** The ruling was
+> issued: **V2 + `.short` is the production default; V2 + `.plain` is
+> REJECTED.** The absolute `code-load ≥ 0.58` bar that §2 measures against is
+> **SUPERSEDED**. Sections 1–7 below are preserved exactly as measured — they
+> are the evidence the ruling was made on, and nothing in them is restated —
+> but every verdict phrased against the absolute bar must be read through
+> **§0.1**, which records the superseded gate, why it was superseded, the gate
+> that replaces it, and the two process rules this phase produced.
+
 ---
 
 ## 0. Headline
@@ -24,6 +33,180 @@ v2/legacy ratio). Measured directly it is 0.5575–0.5597 — the projection was
 accurate — but the full-suite measurement that had never been run under v2
 shows the code-load win is paid for everywhere else, and identifies the payer
 exactly.
+
+---
+
+## 0.1 RULING (2026-08-03): the superseded gate, the new gate, the process defects
+
+### 0.1.1 SUPERSEDED: the absolute bar `code-load ≥ 0.58`
+
+~~**Switch gate: code-load ≥ 0.58 vs pinned qjs.**~~ **SUPERSEDED.** Kept
+visible rather than deleted, because the packet's whole §2 is written against
+it and a reader must be able to see what the numbers were being judged by.
+
+The bar was never an absolute physical target. It was set as a **ratio against
+the then-current legacy baseline**, and that baseline was later found to be
+wrong:
+
+| quantity | value | note |
+| --- | ---: | --- |
+| legacy baseline the bar was set against | **0.4693** | erroneous — inflated by a real `Lexer.freeToken` atom leak that main still carried |
+| the bar as written | 0.58 | |
+| **its actual engineering content** | **0.58 / 0.4693 = 1.2359×** | "beat legacy on code-load by ~+23.6%" |
+| corrected legacy baseline | **0.4458** | measured here, §2.2, reproduced to 0.2% across four independent rounds |
+| **equivalent absolute bar after the correction** | **0.4458 × 1.2359 = 0.5510** | |
+
+Holding the literal 0.58 after the baseline was corrected would have raised the
+requirement from **about +23.6% to about +30.1%** (0.58 / 0.4458 = 1.3010×)
+without anyone deciding to. That was never the ruling. A gate expressed as an
+absolute number against a moving baseline silently re-rates itself every time
+the baseline is corrected; this one did, and it is why the gate is now
+expressed as a ratio.
+
+### 0.1.2 THE GATE IN FORCE
+
+The switch requires **all three**, jointly:
+
+1. **code-load, v2 / corrected-legacy ≥ 1.2359×** — the original engineering
+   content of the bar, restated against the baseline that is actually true.
+2. **full-zoo geomean not regressed** versus the same corrected legacy.
+3. **no non-code-load benchmark negative beyond noise.**
+
+Current `.short` measurement against those three:
+
+| gate | required | measured (`.short`) | state |
+| --- | --- | ---: | --- |
+| code-load ratio | ≥ 1.2359× | **1.2510×** (0.5577 / 0.4458, dedicated 12-sample round; the 4-sample suite run gives 1.2536× and the four 12-sample `.plain` pairings 1.2547×) | **MET** |
+| full-zoo geomean | not regressed | **0.7147 / 0.7029 = 1.0168×** | **MET** |
+| per-benchmark floor | none negative beyond noise | 14 non-code-load benchmarks within 1.3% of legacy; the one outlier is regexp at **+5.1%**, i.e. positive | **MET** |
+
+### 0.1.3 PROCESS DEFECT 1 — the full-zoo blind spot
+
+This is recorded as a defect in its own right, not as a footnote to the
+performance section, because the failure was in the measurement design and not
+in the compiler.
+
+**Code-load alone passed while the configuration actually on the branch was
+16.5% geomean WORSE across 15 benchmarks, with 14 of 15 regressing** (§2.4).
+The campaign had optimized, reported and gated on a single benchmark for an
+entire phase; the suite that would have exposed the cost had never been run
+under v2 at all. The regression was not small, not subtle and not confined to
+an edge case — it was almost every benchmark, by up to 43%.
+
+**The rule this produces:**
+
+> A single-benchmark result can never license a compiler, VM-dispatch or
+> bytecode-layout default change. Any change whose blast radius is the whole
+> emitted-code path must be adjudicated on the full suite, whatever the
+> targeted benchmark says.
+
+The reason the rule is stated at the level of *blast radius* rather than
+*benchmark*: code-load was a perfectly good instrument for the compile path,
+and it stayed honest — it moved by 0.2% between `.plain` and `.short` because
+it is compile-bound. It was never wrong. It was simply blind to the axis the
+change actually moved, and no amount of extra sampling on it would have
+produced the missing information.
+
+### 0.1.4 PROCESS DEFECT 2 — a gate that was green about a configuration it never ran
+
+`zig build test-altrepr` spawned a nested `zig build` that started from the
+option **defaults**, so `zig build test-altrepr -Dzjs_compiler=v2` reported
+green for a run of the **legacy** suite (§3.2). Forwarding the whole `-D`
+option set closed that instance.
+
+**The class is now closed structurally**, not instance by instance: every build
+computes a canonical **configuration signature** over the five settings this
+ruling makes load-bearing — compiler mode, layout mode, value representation,
+force-GC, ownership audit — and every gate states the signature its green
+belongs to.
+
+* the signature is derived from the declarations the code **consumes**
+  (`resolve_labels.default_layout`, the `Parser` backend-dispatch decision,
+  `core.value.nan_boxing`, `core.memory.force_gc_on_allocation_enabled`,
+  `core.atom.ownership_audit_enabled`), never from the `-D` strings, so a
+  signature cannot attest to a decision the code does not make;
+* `zjs --print-config-signature` makes the shipped binary state its own
+  configuration, and `zig build config-signature-check` compares that against
+  what the build graph requested;
+* the unified suite asserts the same string, so a test run carries the
+  configuration it was green about;
+* `-Dzjs_expect_config=<sig>` lets a parent build state what a nested build
+  must resolve; `test-altrepr` uses it with the representation inverted, so a
+  dropped option is a **hard build failure** instead of a silent green.
+
+Verified by forcing the drift: hardcoding `default_layout = .plain` under a
+`short` build, and hardcoding the backend-dispatch decision to legacy under a
+`v2` build, each fail both `config-signature-check` and the in-suite
+attestation.
+
+### 0.1.5 THE TWO MEASUREMENT TIERS
+
+The blind spot above was possible because one kind of measurement was doing two
+different jobs. They are now separated and must be labelled:
+
+**INTERMEDIATE — not a switch gate.** Cheap, fast, run per cut: code-load,
+insn/score, cyc/score, compiler scratch measurements. Every report at this tier
+must carry the literal words **"INTERMEDIATE — not a switch gate"**. It exists
+to steer work between decisions. It may not conclude one.
+
+**FINAL SWITCH.** Run on **candidate true production defaults** — the actual
+shipping configuration, not a scratch probe or a flipped constant — and must
+report, all of them:
+
+* full-suite geomean over all 15 zoo throughput benchmarks;
+* per-benchmark paired ratio;
+* code-load;
+* insn / score;
+* cyc / score;
+* artifact size;
+* the full correctness matrix.
+
+A `.short` number obtained by flipping a constant in a scratch binary (§2.5) is
+INTERMEDIATE by construction, however carefully it was measured — which is
+precisely why `.short` had to become a real, defaulted build option before the
+switch could be gated on it.
+
+### 0.1.6 `.short` IS RELEASE CONFIGURATION, NOT AN OPTIMIZATION
+
+`-Dzjs_v2_layout=short` is part of the release configuration and is defaulted as
+such. It is not a tuning knob that may drift: the switch was gated on it, and
+the `.plain` configuration is REJECTED for production. `.plain` remains
+reachable as the A/B diagnostic instrument — it is how C2-B localised artifact
+residency, and that instrument must not be destroyed.
+
+**Follow-up, not a blocker:** C2-B's artifact-residency finding (+31,640 B,
+**+6.8%**, §1/§2.2 of the scorecard) was measured under `.plain` and was
+attributed *to* `.plain`. It therefore needs **re-accounting under `.short`**,
+where most or all of it is expected to disappear. Until that re-measurement is
+done, the +6.8% figure describes a configuration that is no longer shipped and
+must not be quoted against the shipping one.
+
+### 0.1.7 What landed with the defaults flip
+
+Production default signature, verbatim, as reported by the built binary:
+
+```
+zjs-config-v1:compiler=v2,layout=short,repr=tagged,force_gc=off,ownership_audit=off
+```
+
+| gate | result |
+| --- | --- |
+| `zig fmt --check build.zig src tools` | PASS |
+| `zig build zjs` × {default, `-Dzjs_compiler=legacy`, `-Dzjs_compiler=dual`} | PASS ×3 |
+| `zig build config-signature-check` × {default, legacy, dual, `-Dzjs_v2_layout=plain`} | PASS ×4 |
+| `zig build test` (default = v2 + short) | 2269 passed, 1 skipped, 0 failed |
+| `zig build test -Dzjs_compiler=legacy` | 2121 passed, 149 skipped, 0 failed |
+| `zig build test -Dzjs_compiler=dual` | 2269 passed, 1 skipped, 0 failed |
+| `zig build test -Dzjs_v2_layout=plain` | 2269 passed, 1 skipped, 0 failed — the diagnostic instrument still works |
+| `zig build test-altrepr` (default) | 2269/1/0, child attests `repr=nan_boxed,compiler=v2,layout=short` |
+| `zig build test-altrepr -Dzjs_compiler=legacy` | 2121/149/0, child attests `compiler=legacy` |
+| `zig build test-altrepr -Dzjs_compiler=dual` | 2269/1/0, child attests `compiler=dual` |
+
+One test was found to have silently depended on the old default and was
+corrected rather than pinned: `compiler_v2.s4: installed for loop uses plain
+layout` asserted the production path emits no short opcodes. It now asserts the
+installed artifact against `resolve_labels.default_layout` and is renamed
+accordingly — the same defect class as §0.1.4, one level down.
 
 ---
 
@@ -182,16 +365,24 @@ either layout. The execution-path loss is entirely the `.plain` default and
 disappears under `.short`.** `.short` is frozen as the production default and
 is not changed by this document; what is now known is its price.
 
+> **AMENDED 2026-08-03.** This probe is INTERMEDIATE by construction (§0.1.5):
+> it flips a constant in a scratch binary, which is not a shipped configuration
+> and therefore cannot license a switch on its own. That is exactly why the
+> ruling required `.short` to become a real, defaulted build option
+> (`-Dzjs_v2_layout`, default `short`) and be re-measured as a candidate true
+> production default before the FINAL SWITCH tier could be run on it.
+
 ### 2.6 Performance conditions
 
 | condition | state |
 | --- | --- |
-| code-load ≥ 0.58 vs pinned qjs, measured directly | **NOT MET** — 0.5575–0.5597 |
+| ~~code-load ≥ 0.58 vs pinned qjs, measured directly~~ | ~~**NOT MET** — 0.5575–0.5597~~ **SUPERSEDED** — the bar's engineering content was 0.58/0.4693 = 1.2359×; against the corrected baseline the equivalent absolute bar is 0.5510. See §0.1.1. |
+| **code-load, v2 / corrected-legacy ≥ 1.2359× (the gate in force)** | **MET** — 1.2510× on `.short` (§0.1.2) |
 | v2 improves code-load over the branch's own legacy | **MET** — 0.4458 → 0.5575, +25.1% |
 | v2 improves instructions and cycles per unit of code-load score | **MET** — insn/score 0.825×, cyc/score 0.799× |
-| whole-suite throughput not worse than legacy | **NOT MET as shipped** — 0.5869 vs 0.7029, −16.5% geomean, 14/15 benchmarks regressed |
-| whole-suite throughput not worse than legacy, with the deferred `.short` | MET in the probe — 0.7147 vs 0.7029, +1.7% |
-| **needs a ruling** | whether the switch is assessed on the shipped `.plain` configuration or on a configuration that also lands `.short`. The two answers differ by 21.8% geomean and by nothing at all on code-load. |
+| whole-suite throughput not worse than legacy | **NOT MET as shipped** — 0.5869 vs 0.7029, −16.5% geomean, 14/15 benchmarks regressed. **This is why `.plain` is REJECTED** (§0.1.6). |
+| whole-suite throughput not worse than legacy, with the deferred `.short` | MET in the probe — 0.7147 vs 0.7029, +1.7%. **Now the shipped configuration**, so this row is no longer a probe (§0.1.2, §0.1.6). |
+| ~~**needs a ruling**~~ | ~~whether the switch is assessed on the shipped `.plain` configuration or on a configuration that also lands `.short`. The two answers differ by 21.8% geomean and by nothing at all on code-load.~~ **RULED (2026-08-03):** on the configuration that lands `.short`. `.plain` is REJECTED for production and kept only as the A/B diagnostic instrument. |
 
 ---
 
@@ -621,7 +812,7 @@ largest component.
 
 | item | measured size / price |
 | --- | --- |
-| **`resolve_labels.default_layout = .short`** | removes the +31,640 B (+6.8%) artifact delta **and** the entire −16.5% whole-zoo execution deficit (§2.5), and would make 22 of the comparator's fold statements / 35 of its 54 source-level decisions no-ops (§4.3). Currently frozen. |
+| ~~**`resolve_labels.default_layout = .short`**~~ **LANDED 2026-08-03** | removes the +31,640 B (+6.8%) artifact delta **and** the entire −16.5% whole-zoo execution deficit (§2.5), and would make 22 of the comparator's fold statements / 35 of its 54 source-level decisions no-ops (§4.3). ~~Currently frozen.~~ Now a real build option (`-Dzjs_v2_layout`, default `short`) and part of the release configuration (§0.1.6); `plain` survives as the A/B diagnostic instrument. **The +6.8% artifact-residency figure was measured under `.plain` and needs re-accounting under `.short` — follow-up, not a blocker.** |
 | **lower-on-pop** (lower each function at the end of its body, so the emission census is O(depth) not O(tree)) | removes the whole per-`FunctionDef` producer census from the peak: 896,976 B / 2,819 allocations aggregate = 31.1% of v2's peak |
 | **arena phase-ownership cleanup** (release the parser arena at parse end; compiler-neutral, proven to have no emit-phase reader by the poison test) | removes 488,548 B aggregate (16.9% of peak; 67.0% on the TS family); moves the aggregate peak ratio 1.0756× → 1.0249× |
 | **per-`FunctionDef` footprint** (v2-only `Builder` object, label table, reloc array) | +228,248 B aggregate; the reloc array alone (58,752 B / 343 allocations) is provably dead the moment `resolve_variables.run` returns |
@@ -680,3 +871,17 @@ The `.short` attribution probe of §2.5 flips
 `src/compiler_v2/resolve_labels.zig:21` to `.short`, cold-builds, copies the
 binary out, and reverts the constant **before** measuring. The committed tree
 says `.plain`.
+
+> **AMENDED 2026-08-03.** That constant-flipping recipe is obsolete and must not
+> be used again: it produces an INTERMEDIATE number by construction (§0.1.5).
+> The layout is now a real build option and `short` is the default, so the
+> reproduction is `-Dzjs_v2_layout=short` (or nothing) versus
+> `-Dzjs_v2_layout=plain`, and both binaries state which one they are:
+>
+> ```bash
+> zig build zjs                                   # default: v2 + short
+> zig-out/bin/zjs --print-config-signature
+> zig build zjs -Dzjs_v2_layout=plain             # the A/B diagnostic instrument
+> zig-out/bin/zjs --print-config-signature
+> zig build config-signature-check                # build graph vs shipped binary
+> ```

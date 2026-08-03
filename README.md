@@ -78,7 +78,24 @@ zig build test -Dzjs_force_gc=true --seed 0 --summary all
 zig build test -Dzjs_ownership_audit=true --seed 0 --summary all # atom 所有权审计档（一格槽位隔离区，ASAN 那一档；默认关、不进 ReleaseFast）/ atom-ownership audit tier (one-slot quarantine; ASAN-class, default off, never ReleaseFast) — docs/borrowed_atom_audit.md §7
 zig build perf-self-check --seed 0 --summary all
 zig build engine-production-gate --seed 0 --summary all
+zig build config-signature-check --seed 0 # 构建产物自报配置签名并与构建图请求比对 / the built zjs states its own configuration signature and it is compared against what the build graph requested
 ```
+
+The compiler and its final bytecode layout are build options. The production
+default is the QCP-1 compiler-v2 with the short layout:
+
+```sh
+zig build test -Dzjs_compiler=v2 --seed 0 --summary all      # default
+zig build test -Dzjs_compiler=legacy --seed 0 --summary all  # fallback pipeline
+zig build test -Dzjs_compiler=dual --seed 0 --summary all    # differential oracle
+zig build test -Dzjs_v2_layout=plain --seed 0 --summary all  # A/B diagnostic layout
+```
+
+Those settings, plus the JSValue representation, force-GC and the ownership
+audit, form the build's **configuration signature**
+(`zig-out/bin/zjs --print-config-signature`). It is derived from the
+declarations the engine consumes, so a gate can state which configuration its
+green belongs to; see `docs/qcp1_switch_decision.md` §0.1.4.
 
 Focused subsystem steps are available as `test-core`, `test-parser`,
 `test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`, and
@@ -101,6 +118,7 @@ zig-out/bin/zjs -e "console.log(1 + 2)"
 zig-out/bin/zjs path/to/file.js
 zig-out/bin/zjs --leak-check -e "let x = { ok: true }"
 zig-out/bin/zjs --perf-json path/to/file.js 2> perf.json
+zig-out/bin/zjs --print-config-signature
 ```
 
 Missing or invalid arguments print usage and exit non-zero.

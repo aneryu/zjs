@@ -18,7 +18,20 @@ const SourceLocSlot = bytecode.pipeline_pc2line.SourceLocSlot;
 pub const Error = error{ OutOfMemory, InvalidBytecode, BytecodeOverflow };
 
 pub const LayoutMode = enum { plain, short };
-pub const default_layout: LayoutMode = .plain;
+
+/// The final-layout mode `compileFunctionV2` actually resolves with; the one
+/// value handed to `run` on the production path (root.zig). `-Dzjs_v2_layout`
+/// selects it and QCP-1 ships `short`. `.plain` stays reachable as the A/B
+/// diagnostic instrument (it is how C2-B artifact residency was localised),
+/// which is why this is a real option rather than a deleted branch.
+///
+/// The config signature reads THIS declaration, not the `-D` string, so a
+/// build that believes `short` while the compiler resolves with `plain`
+/// fails the signature gate instead of reporting green.
+pub const default_layout: LayoutMode = std.meta.stringToEnum(
+    LayoutMode,
+    @import("build_options").zjs_v2_layout,
+) orelse @compileError("invalid zjs_v2_layout build option value");
 
 /// Kept private and duplicated from resolve_variables.zig deliberately: both
 /// compiler-v2 passes own independent growable outputs and neither frozen
