@@ -1,4 +1,6 @@
 const std = @import("std");
+const build_options = @import("build_options");
+const config_signature = @import("../config_signature.zig");
 const core = @import("../core/root.zig");
 const parser_mod = @import("../parser.zig");
 const bytecode_mod = @import("../bytecode.zig");
@@ -4368,10 +4370,33 @@ test "compiler_v2.s4: installed for loop matches the configured default layout" 
     // the one place in the suite that silently depended on the old default:
     // it is the same defect class as a gate reporting green about a
     // configuration it never ran, one level down.
+    //
+    // `installed_short_opcode` is read back off the INSTALLED
+    // FunctionBytecode, so it is evidence about emitted bytes rather than
+    // about a mode variable. This fixture emits at least one short-form
+    // opcode under `.short` and none under `.plain`, which makes the
+    // comparison below a statement about which mode actually reached
+    // emission.
+    const observed_layout: []const u8 = if (h.installed_short_opcode) "short" else "plain";
     switch (resolve_labels.default_layout) {
-        .plain => try std.testing.expect(!h.installed_short_opcode),
-        .short => try std.testing.expect(h.installed_short_opcode),
+        .plain => try std.testing.expectEqualStrings("plain", observed_layout),
+        .short => try std.testing.expectEqualStrings("short", observed_layout),
     }
+    // The `.plain` diagnostic's self-proof, in-suite half. `.plain` survives
+    // release only as an A/B instrument, and an instrument that exists in name
+    // while being ignored in fact would silently invalidate every diagnostic
+    // taken with it. So close the whole chain here, from the option string to
+    // the emitted bytes to the string every gate compares:
+    //
+    //   -Dzjs_v2_layout  ->  resolve_labels.default_layout  ->  emitted
+    //   bytecode  ->  config_signature.layout
+    //
+    // Note the direction: the option string is checked AGAINST the observed
+    // emission, not the other way round. A test that asserted `.plain` because
+    // `.plain` was the input parameter would pass on a build where the
+    // resolver ignores the option entirely.
+    try std.testing.expectEqualStrings(build_options.zjs_v2_layout, observed_layout);
+    try std.testing.expectEqualStrings(observed_layout, config_signature.layout);
 }
 
 test "compiler_v2.p5: FunctionDef owners are inert after the FunctionBytecode escape" {

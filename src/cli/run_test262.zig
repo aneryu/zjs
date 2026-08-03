@@ -1,5 +1,16 @@
 const std = @import("std");
 const test262_root = @import("zjs");
+
+// QCP-1: this root is shared by the `run-test262` / `run-test262-dev`
+// executables and by the `test-runner` scoped test artifact, so it proves the
+// effective configuration of all three at compile time
+// (src/config_signature.zig). It is the reason a test262 sweep can now name
+// the backend it ran: before the signature, `test262-gate` without
+// `-Dzjs_compiler` ran LEGACY while reading as a whole-engine result.
+comptime {
+    test262_root.config_signature.attest("run-test262 / test-runner");
+}
+
 const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
 const parser = test262_root.parser;

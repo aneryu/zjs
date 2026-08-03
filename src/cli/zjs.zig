@@ -1,5 +1,15 @@
 const std = @import("std");
 const engine = @import("zjs");
+
+// QCP-1: this root is shared by `zjs` (ReleaseFast), `zjs-profile`
+// (ReleaseFast) and `zjs-dev` (Debug), so it proves the effective
+// configuration of the shipped binary itself at compile time, each reporting
+// its own optimize mode (src/config_signature.zig). `--print-config-signature`
+// below is the runtime half of the same statement.
+comptime {
+    engine.config_signature.attest("zjs CLI");
+}
+
 const public_api = engine.public_api;
 const unicode = engine.libs.unicode;
 const zjs = public_api;

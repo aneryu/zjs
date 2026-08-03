@@ -115,29 +115,40 @@ green for a run of the **legacy** suite (§3.2). Forwarding the whole `-D`
 option set closed that instance.
 
 **The class is now closed structurally**, not instance by instance: every build
-computes a canonical **configuration signature** over the five settings this
+computes a canonical **configuration signature** over the six settings this
 ruling makes load-bearing — compiler mode, layout mode, value representation,
-force-GC, ownership audit — and every gate states the signature its green
-belongs to.
+**optimize mode**, force-GC, ownership audit — and every artifact states the
+signature its green belongs to.
 
 * the signature is derived from the declarations the code **consumes**
   (`resolve_labels.default_layout`, the `Parser` backend-dispatch decision,
-  `core.value.nan_boxing`, `core.memory.force_gc_on_allocation_enabled`,
+  `core.value.nan_boxing`, `builtin.mode`,
+  `core.memory.force_gc_on_allocation_enabled`,
   `core.atom.ownership_audit_enabled`), never from the `-D` strings, so a
   signature cannot attest to a decision the code does not make;
+* **every engine-bearing artifact proves its own configuration at compile
+  time**: `comptime { config_signature.attest("<artifact>"); }` in each root
+  compares `actualEffectiveConfig()` against what the build graph requested and
+  fails the COMPILATION on a mismatch, naming the artifact, the expected
+  string, the actual string and the differing fields. No test artifact borrows
+  the `src/all_tests.zig` root's attestation (§0.1.9);
 * `zjs --print-config-signature` makes the shipped binary state its own
   configuration, and `zig build config-signature-check` compares that against
   what the build graph requested;
-* the unified suite asserts the same string, so a test run carries the
-  configuration it was green about;
 * `-Dzjs_expect_config=<sig>` lets a parent build state what a nested build
   must resolve; `test-altrepr` uses it with the representation inverted, so a
-  dropped option is a **hard build failure** instead of a silent green.
+  dropped option is a **hard build failure** instead of a silent green;
+* `zig build config-drift-gate` — wired into `checkpoint-check` and
+  `engine-production-gate` — requires a wrong `compiler` expectation and a
+  wrong `layout` expectation to FAIL and the correct one to SUCCEED, so the
+  attestation's ability to fail is itself gated rather than attested once.
 
-Verified by forcing the drift: hardcoding `default_layout = .plain` under a
-`short` build, and hardcoding the backend-dispatch decision to legacy under a
-`v2` build, each fail both `config-signature-check` and the in-suite
-attestation.
+Originally verified by forcing the drift by hand: hardcoding `default_layout =
+.plain` under a `short` build, and hardcoding the backend-dispatch decision to
+legacy under a `v2` build, each failed both `config-signature-check` and the
+in-suite attestation. **That evidence decays** — a later refactor can hollow the
+check out and nothing goes red — which is why the forced-drift probe was
+replaced by the permanent machine-executed gate above.
 
 ### 0.1.5 THE TWO MEASUREMENT TIERS
 
@@ -183,11 +194,19 @@ must not be quoted against the shipping one.
 
 ### 0.1.7 What landed with the defaults flip
 
-Production default signature, verbatim, as reported by the built binary:
+Production default signature, verbatim, as reported by the built binary
+(`zig-out/bin/zjs --print-config-signature`):
 
 ```
-zjs-config-v1:compiler=v2,layout=short,repr=tagged,force_gc=off,ownership_audit=off
+zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
 ```
+
+The prefix was `zjs-config-v1` when the defaults flip landed and the string had
+no `optimize` field; it was bumped when `optimize` was added (§0.1.9), so a
+recorded v1 string cannot be read as complete proof of a six-field
+configuration. **Any `zjs-config-v1:...` string in an older report attests to
+five settings and says nothing about the optimize mode the binary was built
+with.**
 
 | gate | result |
 | --- | --- |
@@ -207,6 +226,151 @@ corrected rather than pinned: `compiler_v2.s4: installed for loop uses plain
 layout` asserted the production path emits no short opcodes. It now asserts the
 installed artifact against `resolve_labels.default_layout` and is renamed
 accordingly — the same defect class as §0.1.4, one level down.
+
+### 0.1.8 PROCESS DEFECT 3 — test262 results with no recorded backend
+
+**The correction.** Before the defaults flip, `-Dzjs_compiler` defaulted to
+`legacy`. `zig build test262-gate` and `zig build test262-smoke` build their
+runner from the ordinary engine module, so **both executed the LEGACY compiler
+whenever they were invoked without an explicit `-Dzjs_compiler`.** Every
+historical test262 result recorded in this repository with no backend flag
+beside it is therefore a **legacy** result, and **cannot serve as V2 proof**,
+whatever the surrounding text said it was about.
+
+This is the same defect class as §0.1.4 — a result reading as a statement about
+a configuration it never ran — reaching the largest correctness gate in the
+project. It is disclosed here rather than quietly fixed because the fix
+(defaulting to `v2`) silently changes the meaning of every future invocation of
+the same command, and the reader has to be able to tell the two eras apart.
+
+**This does NOT overturn the campaign's conclusions.** The decisive V2 and dual
+data carried explicit backend flags. P6 recorded the two runs separately:
+
+| run | command | result |
+| --- | --- | --- |
+| legacy | `zig build test262-gate` | `0/49775 errors, passed 44541, known 25` |
+| v2 | `zig build test262-gate -Dzjs_compiler=v2` | `0/49775 errors, passed 44541, known 25` |
+
+The V2 row was obtained under an explicit `-Dzjs_compiler=v2`, so it is a real
+V2 measurement and the "identical in both modes" conclusion in §3.2 stands on
+its own evidence. What the correction removes is the *implicit* reading — that
+an unflagged `test262-gate` line anywhere else in the history was ever a
+statement about V2. It was not.
+
+**What changes going forward.** After the defaults flip an unflagged
+`test262-gate` runs **v2**, and the runner binary now attests its own
+configuration at compile time (`run-test262 / test-runner`, §0.1.9), so a
+test262 sweep can name the backend it ran instead of leaving it to be inferred
+from the absence of a flag. Historical tables in this packet now carry an
+explicit **backend provenance** column (§3) so no row's backend has to be
+inferred at all.
+
+### 0.1.9 What the tightening added
+
+Five additions on top of the defaults flip, all additive to §0.1.4's mechanism.
+
+1. **`optimize` is a signature component, and the version was bumped to
+   `zjs-config-v2`.** The five-field signature could not detect a nested build
+   losing or changing Debug / ReleaseSafe / ReleaseFast / ReleaseSmall: a parent
+   asking for ReleaseSafe while the child actually built Debug produced an
+   identical `compiler`/`layout`/`repr` triple and read as green. The optimize
+   mode is not a performance setting in this context — it decides whether the
+   Debug and ReleaseSafe **oracles exist at all** (whether `std.debug.assert` is
+   live, whether safety checks trap, whether ReleaseFast genuinely strips the
+   validation paths), and therefore whether a release gate measured a production
+   binary or a safety build. It is read from `builtin.mode` at the consumption
+   point, not from build.zig's resolved `-Doptimize`. The version bump is
+   deliberate: a historical `zjs-config-v1` string must not be readable as
+   complete proof once the field set has grown, and it now fails on the version
+   component instead of matching a v2 build on its first five fields.
+2. **Every test artifact proves its own configuration.** `test-core`,
+   `test-parser`, `test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`,
+   `test-runner`, `test-compiler-v2`, `oom-tests`, `unified-tests` and the
+   `zjs` / `zjs-profile` / `zjs-dev` CLI root each run the same shared helper at
+   compile time. **Each reports its OWN mode**: the scoped Debug test artifacts
+   say `optimize=Debug`, the release candidate says `optimize=ReleaseFast`.
+   Nothing borrows the `src/all_tests.zig` root's attestation any more.
+3. **A permanent negative drift gate.** `zig build config-drift-gate`
+   (`tools/architecture/check_config_drift.js`), wired into `checkpoint-check`
+   and `engine-production-gate`. Five halves, each a child build of an
+   engine-bearing artifact: wrong `compiler` → must fail; wrong `layout` → must
+   fail; correct expectation → must succeed; `-Dzjs_v2_layout=plain` with a
+   `layout=plain` expectation → must succeed; wrong `optimize` → must fail.
+   Both directions are mandatory — the negative halves alone would be satisfied
+   by a check that always fails, the positive halves alone by one that never
+   fails. A negative half is only accepted when the child failed **and** its
+   output carries the attestation's own diagnostic naming the drifted
+   component, so a build that fails for an unrelated reason is reported as
+   inconclusive rather than counted as evidence. Each half prints which half it
+   is and, for the negative ones, that the build error below it is the expected
+   result.
+
+   The `optimize` half has to run against an artifact that FOLLOWS
+   `-Doptimize`, because an artifact that PINS its mode legitimately reports
+   the pinned mode and cannot express the drift. That distinction is load
+   bearing in the build too: an explicit `-Dzjs_expect_config` is handed to
+   optimize-following artifacts **verbatim** — which is what makes "parent
+   asked for ReleaseSafe, child built Debug" fail — and only has its `optimize`
+   field substituted for the pinned ones. Substituting everywhere would have
+   rewritten the assertion into whatever the child did and always agreed.
+
+   The half-5 run also proves the attestations are live in files that are not
+   compilation roots: it reports **6 artifact attestations firing** in one
+   child build (`unified-tests`, `test-core`, `test-parser`, `test-bytecode`,
+   `zjs CLI`, `run-test262 / test-runner`).
+4. **The `.plain` diagnostic self-proves.** The failure mode being closed is a
+   `.plain` switch that exists in name while being ignored in fact, which would
+   silently invalidate every A/B diagnostic run with it. Two independent
+   proofs: (a) the *same* `layout=plain` expectation must FAIL against a `short`
+   build (half 2) and SUCCEED against `-Dzjs_v2_layout=plain` (half 4), which is
+   only possible if the value compared is the one the resolver consumes; (b)
+   `compiler_v2.s4: installed for loop matches the configured default layout`
+   reads short-form opcodes back off the **installed FunctionBytecode** and
+   checks `-Dzjs_v2_layout` against that observation — the option string is
+   checked against the emitted bytes, not the other way round.
+5. **The test262 backend provenance correction** (§0.1.8, §3).
+
+Signatures, verbatim, from the artifacts themselves — the same configuration
+seen from three artifacts with three different pinned modes:
+
+```
+zjs             zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+zjs-dev         zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=Debug,force_gc=off,ownership_audit=off
+unified-tests   zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=Debug,force_gc=off,ownership_audit=off
+zjs (plain)     zjs-config-v2:compiler=v2,layout=plain,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+```
+
+| gate | result |
+| --- | --- |
+| `zig fmt --check build.zig src tools` | PASS |
+| `zig build architecture-check` | PASS |
+| `zig build config-drift-gate` | **5/5 halves behaved as required** |
+| `zig build config-signature-check` × {default, legacy, dual, `-Dzjs_v2_layout=plain`} | PASS ×4 |
+| `zig build test` (default = v2 + short) | 2271 passed, 1 skipped, 0 failed — suite attests `compiler=v2,layout=short,optimize=Debug` |
+| `zig build test -Dzjs_compiler=legacy` | 2123 passed, 149 skipped, 0 failed — attests `compiler=legacy` |
+| `zig build test -Dzjs_compiler=dual` | 2271 passed, 1 skipped, 0 failed — attests `compiler=dual` |
+| `zig build test -Dzjs_v2_layout=plain` | 2271 passed, 1 skipped, 0 failed — attests `layout=plain` |
+| `zig build test-altrepr` × {default, legacy, dual} | 2271/1/0, 2123/149/0, 2271/1/0 — children attest `repr=nan_boxed` with `compiler=v2` / `legacy` / `dual` |
+| `zig build test-core` / `test-parser` / `test-bytecode` / `test-exec` | 320/1/0, 477/0/0, 211/0/0, 406/0/0 |
+| `zig build test-builtins` / `test-runtime` / `test-runner` / `test-compiler-v2` | 195/0/0, 77/0/0, 43/0/0, 197/0/0 |
+| `zig build test-compiler-v2 -Dzjs_v2_layout=plain` | 197 passed, 0 skipped, 0 failed |
+| `zig build test-oom` | 21 passed, 0 failed |
+| `zig build perf-same-runtime perf-direct-build` | PASS — both harnesses now attest the production ReleaseFast signature |
+
+**Artifacts that still cannot self-attest, and why.** Three, all for the same
+structural reason: their compilation contains no engine module, so there is no
+"actual" side to read.
+
+* `smoke-tests-releasefast` / `smoke-tests-debug` (`src/tests/smoke_test.zig`)
+  drive the `zjs` binary through the filesystem and receive only executable
+  paths. Covered instead at runtime: `zig build smoke` depends on
+  `config-signature-check`, which runs the very binary under test and compares
+  its self-reported signature.
+* `check-public-api` and the two runtime plugin fixtures root on the PUBLIC
+  engine module (`src/root.zig`), which deliberately does not export
+  `config_signature`. Attesting there would mean adding an internal symbol to
+  the public API surface that the API-snapshot gate exists to police, and the
+  API snapshot is backend-independent by construction.
 
 ---
 
@@ -390,32 +554,42 @@ is not changed by this document; what is now known is its price.
 
 Every gate below was **re-run at this tip**; none is carried forward.
 
-| gate | command | result |
-| --- | --- | --- |
-| formatting | `zig fmt --check src build.zig` | PASS |
-| build ×3 | `zig build zjs` with `legacy` / `v2` / `dual` | PASS / PASS / PASS |
-| S3R+ oracles (legacy) | `zig build test-compiler-v2` | 50 passed, 147 expected skips, 0 failed |
-| S3R+ oracles (v2) | `zig build test-compiler-v2 -Dzjs_compiler=v2` | **197 passed, 0 skipped, 0 failed** |
-| S3R+ oracles (dual) | `zig build test-compiler-v2 -Dzjs_compiler=dual` | **197 passed, 0 skipped, 0 failed** |
-| unified suite (legacy) | `zig build test` | 2119 passed, 149 skipped, 0 failed |
-| unified suite (v2) | `zig build test -Dzjs_compiler=v2` | **2267 passed, 1 skipped, 0 failed** |
-| unified suite (dual) | `zig build test -Dzjs_compiler=dual` | **2267 passed, 1 skipped, 0 failed** |
-| OOM injection | `zig build test-oom -Dzjs_compiler=v2` | 21 passed, 0 failed |
-| force-GC | `zig build test-core -Dzjs_compiler=v2 -Dzjs_force_gc=true` | 320 passed, 1 skipped, 0 failed |
-| altrepr (v2) | `zig build test -Dzjs_compiler=v2 -Dzjs_nan_boxing=true` | **2267 passed, 1 skipped, 0 failed** |
-| altrepr (dual) | `zig build test -Dzjs_compiler=dual -Dzjs_nan_boxing=true` | 2267 passed, 1 skipped, 0 failed |
-| altrepr (legacy) | `zig build test-altrepr` | 2119 passed, 149 skipped, 0 failed |
-| ownership audit (v2) | `zig build test -Dzjs_compiler=v2 -Dzjs_ownership_audit=true` | **2268 passed, 0 skipped, 0 failed** |
-| ownership audit (legacy) | `zig build test -Dzjs_ownership_audit=true` | 2120 passed, 148 skipped, 0 failed |
-| borrowed-atom lint + deps + OOM-panic + API | `zig build architecture-check` | PASS — "34 token-atom reads, 10 in value position, 26 borrowed locals tracked, **14 escapes found, 14/16 allowlisted**"; deps ok; OOM-panic ok; API snapshot ok (153 symbols) |
-| test262 legacy | `zig build test262-gate` | **`0/49775 errors, passed 44541, known 25`** |
-| test262 v2 | `zig build test262-gate -Dzjs_compiler=v2` | **`0/49775 errors, passed 44541, known 25`** |
-| TS L2 probe — enum | `enum E{A,B}; console.log(E.A,E.B,E[0])` | legacy `0 1 A` / v2 `0 1 A` |
-| TS L2 probe — namespace | `namespace N{export const x=41} console.log(N.x)` | legacy `41` / v2 `41` |
-| dual corpus | `mc.js`, `ma.js` under v2 and under dual | 240/240 on all four runs; **0 `ZJS-DUAL-MISMATCH` lines** |
-| L3 emission (v2) | `ZJS_V2_EMISSION_COLLECT=1 zjs-dev` on `mc.js` / `ma.js` | `v2_construct_emitted=4487085/4487162  legacy_construct_emitted=241  legacy_in_v2_scope=0  legacy_in_v2_unallowed=0  sites_dropped=0` |
-| L3 allowlist | `src/compiler_v2/coverage.zig:25` | `pub const legacy_allowlist = [_]AllowlistEntry{};` — **empty**, and `LegacyConstruct` has only `none` |
-| escape audit | `docs/v2_escape_audit.md` | 3 EXPLICIT / 2 IMPLICIT-BUT-SOUND / **0 UNCLEAR**; its three pinned tests run inside the suites above |
+**Backend provenance column.** Added retroactively (§0.1.8). Before the defaults
+flip `-Dzjs_compiler` defaulted to `legacy`, so a command with no backend flag
+ran the legacy compiler no matter what the row was labelled. Every row is
+therefore marked with how its backend was actually determined, and **every
+pre-switch row with no recorded flag is marked `implicit-legacy-default`** —
+including the rows whose label already said "legacy", where the label was
+right by accident of the default rather than by instruction. Two labels beyond
+the three the ruling names were unavoidable: `explicit-legacy` where the flag
+was passed explicitly, and `n/a` where the row builds no engine at all.
+
+| gate | command | result | backend provenance |
+| --- | --- | --- | --- |
+| formatting | `zig fmt --check src build.zig` | PASS | `n/a` — no engine build |
+| build ×3 | `zig build zjs` with `legacy` / `v2` / `dual` | PASS / PASS / PASS | `explicit-legacy` / `explicit-v2` / `explicit-dual` |
+| S3R+ oracles (legacy) | `zig build test-compiler-v2` | 50 passed, 147 expected skips, 0 failed | `implicit-legacy-default` |
+| S3R+ oracles (v2) | `zig build test-compiler-v2 -Dzjs_compiler=v2` | **197 passed, 0 skipped, 0 failed** | `explicit-v2` |
+| S3R+ oracles (dual) | `zig build test-compiler-v2 -Dzjs_compiler=dual` | **197 passed, 0 skipped, 0 failed** | `explicit-dual` |
+| unified suite (legacy) | `zig build test` | 2119 passed, 149 skipped, 0 failed | `implicit-legacy-default` |
+| unified suite (v2) | `zig build test -Dzjs_compiler=v2` | **2267 passed, 1 skipped, 0 failed** | `explicit-v2` |
+| unified suite (dual) | `zig build test -Dzjs_compiler=dual` | **2267 passed, 1 skipped, 0 failed** | `explicit-dual` |
+| OOM injection | `zig build test-oom -Dzjs_compiler=v2` | 21 passed, 0 failed | `explicit-v2` |
+| force-GC | `zig build test-core -Dzjs_compiler=v2 -Dzjs_force_gc=true` | 320 passed, 1 skipped, 0 failed | `explicit-v2` |
+| altrepr (v2) | `zig build test -Dzjs_compiler=v2 -Dzjs_nan_boxing=true` | **2267 passed, 1 skipped, 0 failed** | `explicit-v2` |
+| altrepr (dual) | `zig build test -Dzjs_compiler=dual -Dzjs_nan_boxing=true` | 2267 passed, 1 skipped, 0 failed | `explicit-dual` |
+| altrepr (legacy) | `zig build test-altrepr` | 2119 passed, 149 skipped, 0 failed | `implicit-legacy-default` |
+| ownership audit (v2) | `zig build test -Dzjs_compiler=v2 -Dzjs_ownership_audit=true` | **2268 passed, 0 skipped, 0 failed** | `explicit-v2` |
+| ownership audit (legacy) | `zig build test -Dzjs_ownership_audit=true` | 2120 passed, 148 skipped, 0 failed | `implicit-legacy-default` |
+| borrowed-atom lint + deps + OOM-panic + API | `zig build architecture-check` | PASS — "34 token-atom reads, 10 in value position, 26 borrowed locals tracked, **14 escapes found, 14/16 allowlisted**"; deps ok; OOM-panic ok; API snapshot ok (153 symbols) | `n/a` for the three source-scan lints; `implicit-legacy-default` for the API-snapshot binary (the snapshot is backend-independent) |
+| test262 legacy | `zig build test262-gate` | **`0/49775 errors, passed 44541, known 25`** | `implicit-legacy-default` — and this is the row §0.1.8 is about |
+| test262 v2 | `zig build test262-gate -Dzjs_compiler=v2` | **`0/49775 errors, passed 44541, known 25`** | `explicit-v2` |
+| TS L2 probe — enum | `enum E{A,B}; console.log(E.A,E.B,E[0])` | legacy `0 1 A` / v2 `0 1 A` | `implicit-legacy-default` / `explicit-v2` |
+| TS L2 probe — namespace | `namespace N{export const x=41} console.log(N.x)` | legacy `41` / v2 `41` | `implicit-legacy-default` / `explicit-v2` |
+| dual corpus | `mc.js`, `ma.js` under v2 and under dual | 240/240 on all four runs; **0 `ZJS-DUAL-MISMATCH` lines** | `explicit-v2` / `explicit-dual` |
+| L3 emission (v2) | `ZJS_V2_EMISSION_COLLECT=1 zjs-dev` on `mc.js` / `ma.js` | `v2_construct_emitted=4487085/4487162  legacy_construct_emitted=241  legacy_in_v2_scope=0  legacy_in_v2_unallowed=0  sites_dropped=0` | `explicit-v2` — the `zjs-dev` binary was built with `-Dzjs_compiler=v2`; the counters are meaningless otherwise, which is what makes this row self-checking |
+| L3 allowlist | `src/compiler_v2/coverage.zig:25` | `pub const legacy_allowlist = [_]AllowlistEntry{};` — **empty**, and `LegacyConstruct` has only `none` | `n/a` — source inspection |
+| escape audit | `docs/v2_escape_audit.md` | 3 EXPLICIT / 2 IMPLICIT-BUT-SOUND / **0 UNCLEAR**; its three pinned tests run inside the suites above | `n/a` — document; the pinned tests inherit the provenance of the suite that runs them |
 
 ### 3.1 The divergence closure, and what it proved
 
@@ -463,7 +637,7 @@ The surviving shapes are pinned as a dual-mode regression corpus in
 
 | condition | state |
 | --- | --- |
-| test262 identical in both modes | **MET** — `0/49775 errors, passed 44541, known 25` in both |
+| test262 identical in both modes | **MET** — `0/49775 errors, passed 44541, known 25` in both. Provenance (§0.1.8): the legacy row is `implicit-legacy-default` and the v2 row is `explicit-v2`, so both halves of "in both modes" rest on a run that really used the backend it names |
 | L3 `legacy_in_v2_scope == 0` with an empty allowlist | **MET** — 0, and the allowlist is literally `{}` |
 | dual corpus clean | **MET** — 240/240 ×4, zero mismatches |
 | escape audit has no UNCLEAR boundary | **MET** — 3 / 2 / 0 |
@@ -884,4 +1058,10 @@ says `.plain`.
 > zig build zjs -Dzjs_v2_layout=plain             # the A/B diagnostic instrument
 > zig-out/bin/zjs --print-config-signature
 > zig build config-signature-check                # build graph vs shipped binary
+> zig build config-drift-gate                     # can the attestation still fail?
 > ```
+>
+> A signature printed by a `zjs` binary always reads `optimize=ReleaseFast`,
+> because that artifact pins ReleaseFast regardless of `-Doptimize`; a Debug
+> test artifact reads `optimize=Debug`. Two signatures that differ only in that
+> field are two different artifacts of the same configuration, not a drift.

@@ -141,12 +141,24 @@ tasks below include it.
   state its own configuration via `--print-config-signature`, and compares that
   against what the build graph requested. The binary answers from the
   declarations the engine consumes — `resolve_labels.default_layout`, the
-  `Parser` backend-dispatch decision, `core.value.nan_boxing`,
+  `Parser` backend-dispatch decision, `core.value.nan_boxing`, `builtin.mode`,
   `core.memory.force_gc_on_allocation_enabled`,
   `core.atom.ownership_audit_enabled` — so an option that never reached the
-  code fails here. Included in `zig build smoke`. The same string is asserted
-  inside the unified suite, so every green states which configuration it is
-  green about.)
+  code fails here. Included in `zig build smoke`. Every engine-bearing artifact
+  asserts the same string at COMPILE time
+  (`comptime { config_signature.attest("<artifact>"); }` in each root), each
+  reporting its own optimize mode, so no test artifact borrows another's
+  attestation and a Debug build cannot pass for a ReleaseSafe one.)
+- `zig build config-drift-gate --seed 0` (proves the attestation above can
+  still fail. Five halves: a wrong `compiler`, a wrong `layout` and a wrong
+  `optimize` expectation must FAIL, the correct expectation must SUCCEED, and
+  `-Dzjs_v2_layout=plain` with a `layout=plain` expectation must SUCCEED. That
+  last pair is the `.plain` diagnostic's self-proof: the same expectation
+  string must fail against a `short` build and succeed against a `plain` one.
+  Wired into `checkpoint-check` and `engine-production-gate`; the output names
+  which half is running, so an expected failure is distinguishable from a real
+  one. A negative half that fails for an unrelated reason is reported
+  INCONCLUSIVE, not as a pass.)
 - `zig build test-oom --seed 0 --summary all` (OOM 注入门禁：
   corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，
   不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus

@@ -91,11 +91,14 @@ zig build test -Dzjs_compiler=dual --seed 0 --summary all    # differential orac
 zig build test -Dzjs_v2_layout=plain --seed 0 --summary all  # A/B diagnostic layout
 ```
 
-Those settings, plus the JSValue representation, force-GC and the ownership
-audit, form the build's **configuration signature**
+Those settings, plus the JSValue representation, the optimize mode, force-GC and
+the ownership audit, form the build's **configuration signature**
 (`zig-out/bin/zjs --print-config-signature`). It is derived from the
-declarations the engine consumes, so a gate can state which configuration its
-green belongs to; see `docs/qcp1_switch_decision.md` §0.1.4.
+declarations the engine consumes, and every engine-bearing artifact asserts it
+at compile time, so a gate states which configuration its green belongs to and
+a Debug artifact cannot be mistaken for a ReleaseFast one. `zig build
+config-drift-gate` proves the assertion can still fail. See
+`docs/qcp1_switch_decision.md` §0.1.4 and §0.1.9.
 
 Focused subsystem steps are available as `test-core`, `test-parser`,
 `test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`, and
