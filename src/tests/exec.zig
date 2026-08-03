@@ -20085,3 +20085,71 @@ test "native function toString keeps non-ASCII identifier names (qjs js_function
     defer result.free(js.runtime);
     try std.testing.expectEqual(true, result.asBool().?);
 }
+
+test "switch dispatch trampoline shapes keep legacy identity and semantics" {
+    // QCP-1 dual-mode regression corpus. Under `-Dzjs_compiler=dual` every
+    // source below is compiled by both backends and compared, so this test is
+    // the identity oracle for the switch dispatch bridge; under legacy/v2 it
+    // still pins the observable clause-fallthrough semantics.
+    //
+    // Each shape reproduced a distinct v2/legacy divergence:
+    //   [0] `case a: b(); case c: default: e();` — the branch whose target
+    //       resolves to its own fallthrough only after the bridge folds away.
+    //   [1] `case a: default: e();` — the empty case falling into a trailing
+    //       default (first found through the atom-balance corpus).
+    //   [2]/[5]/[6] empty `default` clause followed by a `case`: the clause
+    //       tail flow predicate has to read the code emitted BEFORE the empty
+    //       body, exactly like `caseCanFallthrough`'s whole-stream summary.
+    //   [3]/[7] a default label bound at the switch epilogue: the dispatch
+    //       bridge must not be emitted at all.
+    //   [4] leading empty `default`.
+    //   [8] nested loops whose inner backedge dies: the for-loop top label is
+    //       a physical `OP_label` in the legacy stream and keeps its
+    //       sequential-match barrier, so `put_loc; get_loc` never fuses.
+    //   [9]/[10] a leading `default` whose switch ends in a break-only clause:
+    //       the dispatch bridge must stay invisible to the branch-inversion
+    //       peephole (pdfjs `CanvasGraphics_showText`).
+    //   [11] `while (..) { if (..) return; }`: the `undefined; return` fold has
+    //       to drop its dead tail or the loop backedge survives.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    function run(f) {
+        \\        var parts = [];
+        \\        var inputs = [1, 2, 3, 9];
+        \\        for (var i = 0; i < inputs.length; i++) parts.push(f(inputs[i]));
+        \\        return parts.join(",");
+        \\    }
+        \\    var out = [];
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; case 2: default: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: default: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; default: case 2: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = "x"; switch (d) { case 1: case 2: default: } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { default: case 1: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; default: case 2: s += "b"; case 3: s += "c"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: case 2: default: case 3: case 9: s += "z"; } return s; }));
+        \\    out.push(run(function (d) { var s = "y"; switch (d) { case 1: s += "a"; break; default: } return s; }));
+        \\    out.push((function () {
+        \\        var n = 0;
+        \\        outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { n += 1; continue outer; } }
+        \\        return "" + n;
+        \\    })());
+        \\    out.push(run(function (d) { var s = "q"; switch (d) { default: s += "d"; break; case 3: break; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { default: case 1: s += "a"; break; case 2: case 9: s += "b"; break; case 3: break; } return s; }));
+        \\    out.push((function () {
+        \\        var n = 0;
+        \\        function loopReturn(a, c) { while (a) { n += 1; if (c) return "r"; } return "w"; }
+        \\        return loopReturn(1, 1) + loopReturn(0, 0);
+        \\    })());
+        \\    return out.join("|");
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(
+        result,
+        "ab,b,b,b|b,b,b,b|ab,b,b,b|x,x,x,x|b,b,b,b|abc,bc,c,bc|z,z,z,z|ya,y,y,y|3" ++
+            "|qd,qd,q,qd|a,b,,b|rw",
+    );
+}

@@ -12437,9 +12437,18 @@ pub const parser_core = struct {
     /// no line_num pseudo-ops, so the last opcode of the case body (bounded
     /// forward scan from the body start) is the flowSummary answer. Terminator
     /// set identical to `caseCanFallthrough`.
-    fn v2CaseTailCanFallthrough(s: *State, body_start: u32) bool {
+    ///
+    /// `caseCanFallthrough` reads `flowSummary().last_non_line_op`, a property
+    /// of the WHOLE stream, so a body that emitted nothing does not answer
+    /// "true" — it answers with whatever preceded the clause. That case is
+    /// reachable: an empty `default` clause emits no dispatch test of its own,
+    /// so the previous clause's tail goto (or the leading-`default` bridge
+    /// goto) is the live last opcode and legacy suppresses the tail jump.
+    /// `scan_start` is the switch's own first emission position; scanning from
+    /// there reproduces the whole-stream answer without an O(code_len) walk.
+    fn v2CaseTailCanFallthrough(s: *State, scan_start: u32, body_start: u32) bool {
         const v2b = s.v2Builder();
-        var pc: usize = body_start;
+        var pc: usize = if (v2b.code_len > body_start) body_start else scan_start;
         var last: ?u8 = null;
         while (pc < v2b.code_len) {
             const op_id = v2b.code[pc];
@@ -13972,7 +13981,12 @@ pub const parser_core = struct {
                         v2_top_label = try v2FNewLabel(s);
                         const source = s.currentSourcePosition();
                         try v2FAddSourceMarker(s, source.line_num, source.col_num);
-                        try v2FBindLabel(s, v2_top_label);
+                        // The legacy twin is a physical `OP_label`, so it keeps
+                        // the Stage-4 sequential-match barrier even once the
+                        // backedge dies (a loop body whose only exit is an outer
+                        // `continue` leaves this label unreferenced, and legacy
+                        // still refuses to fuse `put_loc; get_loc` across it).
+                        try v2FBindParserLabel(s, v2_top_label);
                     } else {
                         // Top of the loop — re-tested each iteration.
                         try s.emitOpU32(opcode.op.label, 0);
@@ -14165,6 +14179,16 @@ pub const parser_core = struct {
                 var default_body_start: ?u32 = null;
                 var v2_default_label: ?compiler_v2.LabelId = null;
                 var default_waiting_for_body = false;
+                // Floor for the v2 clause-tail flow scan: `caseCanFallthrough`
+                // reads the whole emission stream, so an empty clause body has
+                // to fall back to the code emitted before it. Every clause
+                // emits its dispatch test (or, for a leading `default`, the
+                // synthetic bridge goto) after this point, so the widened range
+                // always carries the answer.
+                const v2_clause_scan_start: u32 = if (v2_available and s.emit_v2)
+                    s.v2Builder().code_len
+                else
+                    0;
 
                 while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
                     if (s.peekKind() == tok.TOK_CASE) {
@@ -14241,7 +14265,7 @@ pub const parser_core = struct {
                             try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
                         }
                         const case_tail_can_fallthrough = if (v2_available and s.emit_v2)
-                            v2SwitchBreakRefCount(s) == v2_break_refs_before_body and v2CaseTailCanFallthrough(s, v2_body_start)
+                            v2SwitchBreakRefCount(s) == v2_break_refs_before_body and v2CaseTailCanFallthrough(s, v2_clause_scan_start, v2_body_start)
                         else
                             s.break_fixups.items.len == break_count_before_body and caseCanFallthrough(s);
                         if ((s.peekKind() == tok.TOK_CASE or s.peekKind() == tok.TOK_DEFAULT) and
@@ -14320,7 +14344,7 @@ pub const parser_core = struct {
                             }
                         }
                         const case_tail_can_fallthrough = if (v2_available and s.emit_v2)
-                            v2SwitchBreakRefCount(s) == v2_break_refs_before_body and v2CaseTailCanFallthrough(s, v2_body_start)
+                            v2SwitchBreakRefCount(s) == v2_break_refs_before_body and v2CaseTailCanFallthrough(s, v2_clause_scan_start, v2_body_start)
                         else
                             s.break_fixups.items.len == break_count_before_body and caseCanFallthrough(s);
                         if (s.peekKind() == tok.TOK_CASE and case_tail_can_fallthrough) {
@@ -14344,7 +14368,21 @@ pub const parser_core = struct {
                     // patching, so unmatched dispatch is routed through an epilogue goto,
                     // shielded from straight-line fallthrough of the last clause body.
                     if (no_match_jumps_count != 0) {
-                        if (v2_default_label) |default_label| {
+                        // The bridge only earns its keep when the default body
+                        // lies BEHIND this point. A default label bound exactly
+                        // here is the legacy case where `patchJumpTarget` and
+                        // `patchForwardJump` coincide, so bind the dispatch
+                        // labels straight through: the bridge would otherwise
+                        // leave a goto pair that no syntactic peephole can see
+                        // through, because the trampoline is only provably dead
+                        // after its own binds are consumed.
+                        const v2_default_behind = if (v2_default_label) |label| behind: {
+                            const slot = s.v2Builder().label_slots[label.index()];
+                            std.debug.assert(slot.flags.bound);
+                            break :behind slot.bound_offset != s.v2Builder().code_len;
+                        } else false;
+                        if (v2_default_behind) {
+                            const default_label = v2_default_label.?;
                             const skip_label = try v2FNewLabel(s);
                             try v2FEmitJumpNoSource(s, opcode.op.goto, skip_label);
                             for (v2_no_match_labels[0..no_match_jumps_count]) |label| {

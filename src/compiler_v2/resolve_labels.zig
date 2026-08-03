@@ -858,13 +858,14 @@ const Resolver = struct {
         }
     }
 
-    /// qjs:34911-34939 OP_label, represented by the sorted bind side table.
-    fn processBindsAt(self: *Resolver, position: u32) Error!void {
-        // A peephole may span compact side-table binds that became
-        // unreferenced after its edge was threaded. Legacy absolute-PC joins
-        // have no materialized OP_label byte in that case, so consume those
-        // dead binds just as skipDeadCode does. A live or already-relocated
-        // bind remains a fail-closed interior target.
+    /// A peephole may span compact side-table binds that became unreferenced
+    /// after its edge was threaded. Legacy absolute-PC joins have no
+    /// materialized OP_label byte in that case, so consume those dead binds
+    /// just as skipDeadCode does. A live or already-relocated bind remains a
+    /// fail-closed interior target. Every consumer of a spanned range must
+    /// retire them before handing the range on: `skipDeadCode` fails closed on
+    /// a bind cursor left behind its start.
+    fn retireSpannedDeadBinds(self: *Resolver, position: u32) Error!void {
         while (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].bound_offset < position)
         {
@@ -881,6 +882,11 @@ const Resolver = struct {
             self.binds[self.bind_cursor].dead_skipped = true;
             self.bind_cursor += 1;
         }
+    }
+
+    /// qjs:34911-34939 OP_label, represented by the sorted bind side table.
+    fn processBindsAt(self: *Resolver, position: u32) Error!void {
+        try self.retireSpannedDeadBinds(position);
         while (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].bound_offset == position)
         {
@@ -939,6 +945,68 @@ const Resolver = struct {
         return index;
     }
 
+    /// Two `LabelId`s bound at the same temporary-stream offset denote one
+    /// program point. QuickJS never has to say so: its `code_has_label`
+    /// (qjs:34633) compares label numbers because its switch parser patches
+    /// the dispatch operand backwards onto the single default label. v2's
+    /// label discipline forbids that patch, so the identity-native dispatch
+    /// bridge routes the clause fallthrough and the default body through two
+    /// distinct ids that always bind together. The legacy backend, which the
+    /// dual oracle measures against, compares resolved addresses
+    /// (`targetAppearsAtFollowingBoundary`, bytecode.zig) and therefore sees
+    /// the co-bound pair as one boundary.
+    fn labelsShareBindOffset(self: *const Resolver, left: u32, right: u32) Error!bool {
+        if (left >= self.product.label_len or right >= self.product.label_len)
+            return error.InvalidBytecode;
+        if (left == right) return true;
+        const left_slot = self.product.label_slots[left];
+        const right_slot = self.product.label_slots[right];
+        if (!left_slot.flags.bound or !right_slot.flags.bound) return false;
+        if (left_slot.bound_offset == labels.unbound or
+            right_slot.bound_offset == labels.unbound) return false;
+        return left_slot.bound_offset == right_slot.bound_offset;
+    }
+
+    /// The identity-native switch default bridge, seen from the front: a
+    /// source-less backward `goto DEFAULT_BODY` entered only through no-match
+    /// dispatch binds that this walk has already consumed. It is the exact
+    /// instruction legacy never materializes — legacy patches the dispatch
+    /// operand straight onto the default body — so it must stay invisible to
+    /// the qjs:34968-34982 next-label check. Otherwise
+    /// `if_false NO_MATCH ; goto BREAK ; NO_MATCH: goto DEFAULT` reads as
+    /// qjs's `if_X L1 ; goto L2 ; L1:` inversion and v2 emits
+    /// `if_true BREAK ; goto DEFAULT` where legacy emits a plain
+    /// `if_false DEFAULT` whose fallthrough goto folds away. Reached by a
+    /// leading `default` whose switch ends in a `break`-only or empty clause,
+    /// e.g. `switch (m) { default: a(); break; case 3: break; }`.
+    ///
+    /// The three traits are all load-bearing and deliberately narrow. Dropping
+    /// any of them and asking only "is this boundary unreachable" regresses
+    /// box2d/code-load/crypto/earley-boyer/mandreel/typescript/v8-v7/zlib:
+    /// legacy keeps plenty of other unreachable goto aliases and inverts
+    /// against them. `deadSwitchTrampolineCanReachLabel` reads the same shape
+    /// from behind, for the goto arm.
+    fn isSwitchDispatchBridgeAt(self: *const Resolver, position: u32) Error!bool {
+        if (position >= self.product.code_len) return false;
+        if (self.hasInputSourceAt(position)) return false;
+        const instruction = try decodeInstruction(self.code, position);
+        if (instruction.op_id != op.goto) return false;
+        const target = try readU32At(self.code, position, 1);
+        if (target >= self.product.label_len) return error.InvalidBytecode;
+        const target_slot = self.product.label_slots[target];
+        if (!target_slot.flags.bound or target_slot.bound_offset == labels.unbound or
+            target_slot.bound_offset >= position) return false;
+        var index = self.lowerBoundBind(position);
+        var saw_bind = false;
+        while (index < self.binds.len and self.binds[index].bound_offset == position) : (index += 1) {
+            const label_index = self.binds[index].label_index;
+            if (label_index >= self.product.label_len) return error.InvalidBytecode;
+            if (self.product.label_slots[label_index].ref_count > 0) return false;
+            saw_bind = true;
+        }
+        return saw_bind;
+    }
+
     /// qjs:34633 code_has_label. Side-table binds replace adjacent OP_label
     /// bytes; the immediately following goto case remains bytecode-native.
     fn codeHasLabel(self: *const Resolver, position: u32, label_index: u32) Error!bool {
@@ -949,7 +1017,10 @@ const Resolver = struct {
         if (position < self.product.code_len) {
             const instruction = try decodeInstruction(self.code, position);
             if (instruction.op_id == op.goto)
-                return try readU32At(self.code, position, 1) == label_index;
+                return try self.labelsShareBindOffset(
+                    try readU32At(self.code, position, 1),
+                    label_index,
+                );
         }
         return false;
     }
@@ -1643,7 +1714,9 @@ const Resolver = struct {
                     } else if (try self.matchSeq(position_next, &.{
                         .{ .options = &.{op.goto} },
                     })) |match| {
-                        if (try self.codeHasLabel(match.end, label_index)) {
+                        if (!(try self.isSwitchDispatchBridgeAt(match.end)) and
+                            try self.codeHasLabel(match.end, label_index))
+                        {
                             const goto_label = try readU32At(
                                 self.code,
                                 match.positions[0],
@@ -1933,7 +2006,14 @@ const Resolver = struct {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.return_undef);
-                        position_next = match.end;
+                        // The pair IS a return, so its tail is dead exactly as
+                        // the op.return arm's is (qjs:34352-34378). Without this
+                        // the loop backedge behind `while (..) { if (..) return; }`
+                        // survives in v2 and legacy drops it. The match may have
+                        // spanned a dead compact bind, which skipDeadCode
+                        // requires retired before its start.
+                        try self.retireSpannedDeadBinds(match.end);
+                        position_next = try self.skipDeadCode(match.end);
                     } else if (try self.matchSeq(position_next, &.{
                         .{ .options = &.{ op.if_false, op.if_true } },
                     })) |match| {
