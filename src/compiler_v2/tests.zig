@@ -4549,8 +4549,10 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
         .{ .source = "function tag(strings, value) { return value; } tag`value ${1}`;" },
         .{ .source = "object?.property; object?.[key]; callable?.();" },
         .{ .source = "let a = null; let b = a ?? 1; a ??= 2; b &&= 3; b ||= 4;" },
+        // `new.target` appears here only in its valid position. A bare
+        // `new.target;` at top level is a SyntaxError, so it could never
+        // reach emission and only ever counted as a skip.
         .{ .source = "class Item {} const item = new Item(); function factory() { return new.target; }" },
-        .{ .source = "new.target;" },
         .{ .source = "delete object.value; typeof missing; void value;" },
         .{ .source = "const pattern = /a+b?/gi; const integer = 12345678901234567890n;" },
         .{ .source = "const shorthand = 1; const key = 'dynamic'; const object = { __proto__: null, shorthand, get value() { return 1; }, set value(input) {}, [key]: 2, ...extra };" },
@@ -4577,10 +4579,16 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var skipped: usize = 0;
+    var compiled: usize = 0;
     var all_fallbacks: std.EnumSet(coverage.LegacyConstruct) = .empty;
     var total_unallowed: u64 = 0;
     for (cases, 0..) |case, index| {
+        // Every snippet MUST compile. This corpus exists to prove emission
+        // coverage, and a snippet that never reaches the emitter proves
+        // nothing about it -- so a compile failure is a failure of this test,
+        // not a skip. The previous form counted failures as skips and only
+        // required `skipped * 2 <= cases.len`, i.e. up to HALF the corpus
+        // could quietly stop covering anything while the test stayed green.
         var program = test_entry.parseAndCompileV2TestProgram(
             rt,
             std.testing.allocator,
@@ -4588,15 +4596,16 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
             case.source,
             .{ .source_kind = case.source_kind },
         ) catch |err| {
-            skipped += 1;
             std.debug.print(
-                "compiler_v2.coverage skipped snippet[{d}] ({s}): {s}\n  {s}\n",
+                "compiler_v2.coverage snippet[{d}] ({s}) FAILED TO COMPILE: {s}\n  {s}\n" ++
+                    "  every corpus snippet must compile; add coverage for it or remove it\n",
                 .{ index, @tagName(case.source_kind), @errorName(err), case.source },
             );
-            continue;
+            return err;
         };
         defer program.deinit(rt);
 
+        compiled += 1;
         all_fallbacks.setUnion(program.fallbacks);
         total_unallowed +|= program.unallowed_emissions;
         if (coverage.collectMode()) {
@@ -4617,10 +4626,13 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
     }
 
     std.debug.print(
-        "compiler_v2.coverage corpus skipped={d} total={d}\n",
-        .{ skipped, cases.len },
+        "compiler_v2.coverage corpus compiled={d}/{d}\n",
+        .{ compiled, cases.len },
     );
-    try std.testing.expect(skipped * 2 <= cases.len);
+    // Zero skips, not "at most half". The loop already fails closed on a
+    // compile error; this is the belt-and-braces assertion that the corpus
+    // that proves emission coverage was fully exercised.
+    try std.testing.expectEqual(cases.len, compiled);
     try test_entry.expectNoUnallowedFallback(.{
         .fallbacks = all_fallbacks,
         .unallowed = total_unallowed,
