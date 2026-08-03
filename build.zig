@@ -946,17 +946,69 @@ pub fn build(b: *std.Build) void {
         "-Dzjs_nan_boxing=true";
     const altrepr_seed = b.fmt("{d}", .{zjs_test_seed});
     const altrepr_project_seed = b.fmt("-Dzjs_test_seed={d}", .{zjs_test_seed});
-    const altrepr_tests = b.addSystemCommand(&.{
+    // The nested build is a separate `zig build` process, so it starts from
+    // the *defaults* for every option the outer invocation was given unless
+    // they are forwarded explicitly. Before this was forwarded,
+    // `zig build test-altrepr -Dzjs_compiler=v2` silently ran the legacy
+    // compiler: a gate reporting green about a configuration it never ran.
+    // Forward the whole user option set rather than an enumerated list, so a
+    // newly added -D option cannot silently reopen the same hole. Only the
+    // three settings this step determines for itself are substituted:
+    // the representation (inverted), the project seed, and the optimize mode
+    // (resolved here so both `-Doptimize=` and `--release=` reach the child).
+    const altrepr_forward_skip = [_][]const u8{
+        "zjs_nan_boxing", // inverted below; forwarding it too would duplicate
+        "zjs_test_seed", // passed explicitly as altrepr_project_seed
+        "optimize", // passed explicitly as the resolved optimize mode
+    };
+    var altrepr_forwarded: std.ArrayList([]const u8) = .empty;
+    var altrepr_user_options = b.user_input_options.iterator();
+    while (altrepr_user_options.next()) |entry| {
+        const name = entry.key_ptr.*;
+        for (altrepr_forward_skip) |skip| {
+            if (std.mem.eql(u8, name, skip)) break;
+        } else switch (entry.value_ptr.value) {
+            .flag => altrepr_forwarded.append(b.allocator, b.fmt("-D{s}", .{name})) catch @panic("OOM"),
+            .scalar => |value| altrepr_forwarded.append(b.allocator, b.fmt("-D{s}={s}", .{ name, value })) catch @panic("OOM"),
+            .list => |values| for (values.items) |value| {
+                altrepr_forwarded.append(b.allocator, b.fmt("-D{s}={s}", .{ name, value })) catch @panic("OOM");
+            },
+            // Command-line -D options only ever produce the three forms
+            // above. Fail loudly instead of dropping the option, because a
+            // dropped option is exactly the defect this forwarding fixes.
+            .map, .lazy_path, .lazy_path_list => {
+                std.debug.print(
+                    "error: cannot forward option '{s}' to the test-altrepr child build\n",
+                    .{name},
+                );
+                std.process.exit(1);
+            },
+        }
+    }
+    // Hash-map iteration order is not part of the contract; sort so the child
+    // command line (and therefore this step's cache key) is deterministic.
+    std.mem.sort([]const u8, altrepr_forwarded.items, {}, struct {
+        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.lessThan(u8, lhs, rhs);
+        }
+    }.lessThan);
+    var altrepr_argv: std.ArrayList([]const u8) = .empty;
+    altrepr_argv.appendSlice(b.allocator, &.{
         b.graph.zig_exe,
         "build",
         "test",
         altrepr_option,
         altrepr_project_seed,
+        b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
+    }) catch @panic("OOM");
+    altrepr_argv.appendSlice(b.allocator, altrepr_forwarded.items) catch @panic("OOM");
+    altrepr_argv.appendSlice(b.allocator, &.{
         "--seed",
         altrepr_seed,
         "--summary",
         "all",
-    });
+    }) catch @panic("OOM");
+    const altrepr_tests = b.addSystemCommand(altrepr_argv.items);
     const altrepr_step = b.step("test-altrepr", "Run the unified tests with the representation opposite the target default");
     altrepr_step.dependOn(&altrepr_tests.step);
 

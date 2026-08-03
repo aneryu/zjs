@@ -130,7 +130,10 @@ tasks below include it.
   once with `-Dzjs_nan_boxing=true` at stage close on 64-bit hosts. The 64-bit
   default is the QuickJS-aligned 16-byte payload+tag layout; narrower targets
   default to 8-byte NaN-boxing. The explicit option can select either mode and
-  neither may rot.)
+  neither may rot. The step spawns a nested `zig build test` and forwards every
+  `-D` option of the outer invocation plus the resolved optimize mode, so
+  `zig build test-altrepr -Dzjs_compiler=v2 -Doptimize=ReleaseSafe` genuinely
+  runs that configuration under the alternate representation.)
 - `zig build test-oom --seed 0 --summary all` (OOM 注入门禁：
   corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，
   不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus

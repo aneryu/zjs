@@ -290,6 +290,17 @@ its 2119/149 counts are the legacy counts, not v2's 2267/1. The altrepr rows for
 v2 and dual above were therefore obtained explicitly with
 `zig build test -Dzjs_compiler=<mode> -Dzjs_nan_boxing=true`, and both pass.
 
+**Fixed after this packet was written.** `test-altrepr` now forwards the outer
+invocation's whole `-D` option set plus the resolved optimize mode to the nested
+build, so the step is the gate it claimed to be. Re-run at the fix tip:
+`zig build test-altrepr` 2119/149 (unchanged), `-Dzjs_compiler=v2` 2267 passed /
+1 skipped / 0 failed, `-Dzjs_compiler=dual` 2267/1/0 — the same counts the
+explicit form produced, so no verdict in this packet moves. The forwarding is
+generic rather than an enumerated list, so a newly added `-D` option cannot
+reopen the same hole; `-Doptimize` and `-Dtarget` were dropped by the old code
+too, which meant `zig build test-altrepr -Doptimize=ReleaseSafe` silently ran
+Debug.
+
 ---
 
 ## 4. ARCHITECTURE SCORECARD (final)
@@ -623,10 +634,11 @@ largest component.
   contract, which still records tip `6d0c69dd`.
 * 14 borrowed-atom allowlist entries are outstanding. The lint passes, but
   ownership is machine-*policed*, not machine-*proved*, until they reach zero.
-* `zig build test-altrepr` does not forward `-Dzjs_compiler` (`build.zig:948`),
-  so the alternate-representation gate silently runs legacy whatever backend is
-  requested. Either forward the option or document the explicit
-  `zig build test -Dzjs_compiler=<mode> -Dzjs_nan_boxing=true` form as the gate.
+* ~~`zig build test-altrepr` does not forward `-Dzjs_compiler`
+  (`build.zig:948`), so the alternate-representation gate silently runs legacy
+  whatever backend is requested.~~ **Closed:** the step now forwards the outer
+  invocation's whole `-D` option set plus the resolved optimize mode (§3.2);
+  `zig build test-altrepr -Dzjs_compiler=v2` reports 2267/1/0.
 * C2-A's allocation-count axis (24 vs 15 live temporaries) is unresolved: the
   S3 `ResolvedProduct` carries four independent backings and the S4 resolver
   seven, where legacy mutates a moved-in buffer in place.
