@@ -999,6 +999,14 @@ const Resolver = struct {
     /// legacy keeps plenty of other unreachable goto aliases and inverts
     /// against them. `deadSwitchTrampolineCanReachLabel` reads the same shape
     /// from behind, for the goto arm.
+    ///
+    /// The switch epilogue no longer emits the bridge — it moves the
+    /// unmatched-dispatch references onto the default identity
+    /// (`Builder.retargetLabelRefs`), the same thing legacy's `patchJumpTarget`
+    /// does — so this predicate is retained as the narrow fold suppressor it
+    /// always was, not as a description of code the parser still produces.
+    /// Removing a fold suppressor can only widen folding, which is the exact
+    /// direction that regressed eight benchmarks above.
     fn isSwitchDispatchBridgeAt(self: *const Resolver, position: u32) Error!bool {
         if (position >= self.product.code_len) return false;
         if (self.hasInputSourceAt(position)) return false;
@@ -1044,6 +1052,11 @@ const Resolver = struct {
     /// body, so this shape does not exist in its qjs:34968-34982 next-label
     /// check. Prove the intervening bind set is dead before asking the normal
     /// dead-code consumer to expose the same logical fallthrough.
+    ///
+    /// The switch epilogue no longer emits that trampoline (see
+    /// `isSwitchDispatchBridgeAt`); this stays as the narrowly-shaped consumer
+    /// of any source-less `goto`/dead-bind pair, and its unit test builds the
+    /// shape directly.
     fn deadSwitchTrampolineCanReachLabel(
         self: *const Resolver,
         start: u32,

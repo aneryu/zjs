@@ -11976,6 +11976,14 @@ pub const parser_core = struct {
         s.v2Builder().bindLabelMatchBarrier(label) catch |err| return v2MapBuilderError(err);
     }
 
+    /// v2 mirror of `patchJumpTarget`: redirect a pending jump to a boundary
+    /// that is already bound elsewhere. Like its legacy twin it emits nothing
+    /// and does NOT invalidate the last opcode — no control-flow merge happens
+    /// at the current position.
+    fn v2FRetargetLabel(s: *State, from: compiler_v2.LabelId, to: compiler_v2.LabelId) Error!void {
+        s.v2Builder().retargetLabelRefs(from, to) catch |err| return v2MapBuilderError(err);
+    }
+
     /// Emit a forward-jump opcode with a placeholder absolute target. The
     /// caller passes the offset back to `patchForwardJump` once the target
     /// is known. The parser uses absolute u32 offsets; `resolve_labels`
@@ -12450,8 +12458,9 @@ pub const parser_core = struct {
     /// of the WHOLE stream, so a body that emitted nothing does not answer
     /// "true" — it answers with whatever preceded the clause. That case is
     /// reachable: an empty `default` clause emits no dispatch test of its own,
-    /// so the previous clause's tail goto (or the leading-`default` bridge
-    /// goto) is the live last opcode and legacy suppresses the tail jump.
+    /// so the previous clause's tail goto (or the dispatch-continuation goto a
+    /// leading `default` emits) is the live last opcode and legacy suppresses
+    /// the tail jump.
     /// `scan_start` is the switch's own first emission position; scanning from
     /// there reproduces the whole-stream answer without an O(code_len) walk.
     fn v2CaseTailCanFallthrough(s: *State, scan_start: u32, body_start: u32) bool {
@@ -14191,8 +14200,8 @@ pub const parser_core = struct {
                 // reads the whole emission stream, so an empty clause body has
                 // to fall back to the code emitted before it. Every clause
                 // emits its dispatch test (or, for a leading `default`, the
-                // synthetic bridge goto) after this point, so the widened range
-                // always carries the answer.
+                // dispatch-continuation goto) after this point, so the widened
+                // range always carries the answer.
                 const v2_clause_scan_start: u32 = if (v2_available and s.emit_v2)
                     s.v2Builder().code_len
                 else
@@ -14371,34 +14380,30 @@ pub const parser_core = struct {
                 try s.expectToken('}');
 
                 if (v2_available and s.emit_v2) {
-                    // qjs binds the default label backwards with an in-stream patch (the
-                    // "ugly patch", quickjs.c ~29365); v2 label discipline forbids
-                    // patching, so unmatched dispatch is routed through an epilogue goto,
-                    // shielded from straight-line fallthrough of the last clause body.
+                    // qjs binds the default label backwards with an in-stream patch
+                    // (the "ugly patch", quickjs.c ~29365) and legacy mirrors it with
+                    // `patchJumpTarget`. V2 forbids rewriting a jump's PC, but the
+                    // unmatched-dispatch boundary and the default body are ONE program
+                    // point, so the references move onto the default identity instead
+                    // (`retargetLabelRefs`) — the same arm-for-arm shape as legacy.
+                    //
+                    // The earlier epilogue trampoline (`goto SKIP; NO_MATCH: goto
+                    // DEFAULT; SKIP:`) is gone. It was an instruction pair legacy
+                    // never materializes, and every syntactic probe that legacy runs
+                    // over this stream had to be taught to see through it: its skip
+                    // goto sat exactly where the last clause body's converging labels
+                    // bind, so `findJumpTarget` threaded one hop further than legacy
+                    // and `codeHasLabel` then compared two different boundaries.
+                    // `switch (0) { default: if (false) ; else ; }` kept a `goto` to
+                    // its own fallthrough that legacy folds away.
                     if (no_match_jumps_count != 0) {
-                        // The bridge only earns its keep when the default body
-                        // lies BEHIND this point. A default label bound exactly
-                        // here is the legacy case where `patchJumpTarget` and
-                        // `patchForwardJump` coincide, so bind the dispatch
-                        // labels straight through: the bridge would otherwise
-                        // leave a goto pair that no syntactic peephole can see
-                        // through, because the trampoline is only provably dead
-                        // after its own binds are consumed.
-                        const v2_default_behind = if (v2_default_label) |label| behind: {
-                            const slot = s.v2Builder().label_slots[label.index()];
-                            std.debug.assert(slot.flags.bound);
-                            break :behind slot.bound_offset != s.v2Builder().code_len;
-                        } else false;
-                        if (v2_default_behind) {
-                            const default_label = v2_default_label.?;
-                            const skip_label = try v2FNewLabel(s);
-                            try v2FEmitJumpNoSource(s, opcode.op.goto, skip_label);
+                        if (v2_default_label) |default_label| {
                             for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
-                                try v2FBindLabel(s, label);
+                                try v2FRetargetLabel(s, label, default_label);
                             }
-                            try v2FEmitJumpNoSource(s, opcode.op.goto, default_label);
-                            try v2FBindLabel(s, skip_label);
                         } else {
+                            // No default clause: unmatched dispatch falls through to
+                            // the common discriminant drop (`patchForwardJump`).
                             for (v2_no_match_labels[0..no_match_jumps_count]) |label| {
                                 try v2FBindLabel(s, label);
                             }

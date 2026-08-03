@@ -244,6 +244,101 @@ pub const Builder = struct {
         self.label_slots[label.index()].flags.match_barrier = true;
     }
 
+    /// Move every pending reference from `from` onto `to`. This is the
+    /// identity-native form of the legacy parser's `patchJumpTarget`: QuickJS
+    /// resolves a jump whose destination only becomes known later by writing
+    /// the destination PC back into the already-emitted operand
+    /// (`js_parse_switch`'s dispatch patch, quickjs.c ~29365). V2 never
+    /// materializes a PC in the parser, so the operand keeps holding a
+    /// `LabelId` and the reference moves to the identity that already denotes
+    /// that program point.
+    ///
+    /// This is deliberately NOT `bindLabel`: a bind creates a second identity
+    /// at one boundary and forces the emitter to route through it, and
+    /// `bindLabel` also invalidates the last opcode the way `patchForwardJump`
+    /// does. `patchJumpTarget` does neither, and neither does this.
+    ///
+    /// `from` must still be unbound (retargeting a bound label would abandon a
+    /// boundary other code can already reach) and `to` must already be bound
+    /// (its position is the answer being published).
+    pub fn retargetLabelRefs(self: *Builder, from: LabelId, to: LabelId) Error!void {
+        if (from.index() >= self.label_len or to.index() >= self.label_len)
+            return error.InvalidBytecode;
+        if (from.index() == to.index()) return error.InvalidBytecode;
+        const from_slot = &self.label_slots[from.index()];
+        const to_slot = &self.label_slots[to.index()];
+        if (from_slot.flags.bound or !to_slot.flags.bound) return error.InvalidBytecode;
+
+        // Validate the whole chain before mutating anything: a half-moved
+        // chain is unrecoverable.
+        var moved: u32 = 0;
+        var cursor = from_slot.first_reloc;
+        while (cursor != labels.no_reloc) {
+            if (cursor >= self.reloc_len) return error.InvalidBytecode;
+            const entry = self.relocs[cursor];
+            if (@as(u64, entry.operand_offset) + 4 > self.code_len)
+                return error.InvalidBytecode;
+            const operand: usize = @intCast(entry.operand_offset);
+            if (std.mem.readInt(u32, self.code[operand..][0..4], .little) != from.index())
+                return error.InvalidBytecode;
+            moved += 1;
+            cursor = entry.next;
+        }
+        if (from_slot.ref_count != moved) return error.InvalidBytecode;
+        if (moved > std.math.maxInt(u32) - to_slot.ref_count)
+            return error.BytecodeOverflow;
+
+        cursor = from_slot.first_reloc;
+        while (cursor != labels.no_reloc) {
+            const entry = self.relocs[cursor];
+            const operand: usize = @intCast(entry.operand_offset);
+            std.mem.writeInt(u32, self.code[operand..][0..4], to.index(), .little);
+            // Same predicate spliceSegment uses for a re-chained reference.
+            if (to_slot.bound_offset < entry.operand_offset)
+                to_slot.flags.backward_target = true;
+            cursor = entry.next;
+        }
+
+        // Relocation chains are walked head-first by `rollback`/`detachTail`,
+        // which stop at the first entry below a mark; that only works while a
+        // chain stays strictly descending by reloc index. Merge, do not
+        // concatenate.
+        var merged_head: u32 = labels.no_reloc;
+        var merged_tail: u32 = labels.no_reloc;
+        var left = from_slot.first_reloc;
+        var right = to_slot.first_reloc;
+        while (left != labels.no_reloc or right != labels.no_reloc) {
+            var take: u32 = undefined;
+            if (right == labels.no_reloc or (left != labels.no_reloc and left > right)) {
+                take = left;
+                left = self.relocs[left].next;
+            } else {
+                take = right;
+                right = self.relocs[right].next;
+            }
+            if (merged_head == labels.no_reloc) {
+                merged_head = take;
+            } else {
+                self.relocs[merged_tail].next = take;
+            }
+            merged_tail = take;
+        }
+        if (merged_tail != labels.no_reloc) self.relocs[merged_tail].next = labels.no_reloc;
+
+        to_slot.first_reloc = merged_head;
+        to_slot.ref_count += moved;
+        from_slot.first_reloc = labels.no_reloc;
+        from_slot.ref_count = 0;
+        // Every identity a function creates must end up bound: `labels_unbound`
+        // is a dual-mode L0 ledger invariant. Record the merge for what it is —
+        // `from` now denotes the same program point as `to` — instead of
+        // leaving an orphan or binding it at some unrelated later position. It
+        // carries no reference and no match barrier, so it is transparent to
+        // Stage 4 and joins `to`'s alias group with `to`'s final address.
+        from_slot.bound_offset = to_slot.bound_offset;
+        from_slot.flags.bound = true;
+    }
+
     /// Return the first unbound label in function-local creation order.
     pub fn firstUnboundLabel(self: *const Builder) ?LabelId {
         var label_index: u32 = 0;
@@ -1060,6 +1155,68 @@ test "compiler_v2.builder: jump emission, bind, reloc chains" {
     try std.testing.expect(b.label_slots[label.index()].flags.backward_target);
 
     try std.testing.expectError(error.InvalidBytecode, b.emitJump(0x21, @enumFromInt(99)));
+}
+
+test "compiler_v2.builder: retargetLabelRefs merges a pending identity into a bound one" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    // The switch shape: two pending dispatch jumps, then a bound default body,
+    // then one more pending jump behind it.
+    const pending = try b.newLabel();
+    const target = try b.newLabel();
+    const other = try b.newLabel();
+    try b.emitJump(0x21, pending); // reloc 0, operand 1  (forward)
+    try b.emitJump(0x21, other); // reloc 1, operand 6  (an unrelated chain)
+    try b.emitOp(0x01); // 10
+    try b.bindLabel(target); // 11
+    try b.emitOp(0x02); // 11
+    try b.emitJump(0x21, pending); // reloc 2, operand 13 (backward once merged)
+    try b.bindLabel(other);
+
+    try std.testing.expectEqual(@as(u32, 2), b.label_slots[pending.index()].ref_count);
+    try std.testing.expectEqual(@as(u32, 0), b.label_slots[target.index()].ref_count);
+    try std.testing.expect(!b.label_slots[target.index()].flags.backward_target);
+
+    try b.retargetLabelRefs(pending, target);
+
+    // Both operands now name `target`, and only `target` holds the references.
+    try std.testing.expectEqual(target.index(), std.mem.readInt(u32, b.code[1..5], .little));
+    try std.testing.expectEqual(target.index(), std.mem.readInt(u32, b.code[13..17], .little));
+    try std.testing.expectEqual(other.index(), std.mem.readInt(u32, b.code[6..10], .little));
+    try std.testing.expectEqual(@as(u32, 2), b.label_slots[target.index()].ref_count);
+    try std.testing.expectEqual(@as(u32, 0), b.label_slots[pending.index()].ref_count);
+    try std.testing.expectEqual(labels.no_reloc, b.label_slots[pending.index()].first_reloc);
+    // The jump at 13 sits behind the bind at 11.
+    try std.testing.expect(b.label_slots[target.index()].flags.backward_target);
+    // The merged identity aliases the boundary it moved into; every label a
+    // function creates has to end up bound.
+    try std.testing.expect(b.label_slots[pending.index()].flags.bound);
+    try std.testing.expectEqual(
+        b.label_slots[target.index()].bound_offset,
+        b.label_slots[pending.index()].bound_offset,
+    );
+    // Chains stay strictly descending by reloc index, which rollback/detach
+    // both depend on.
+    try expectRelocChain(&b, target, &.{ 13, 1 }, &.{ .jump32, .jump32 });
+    // `other`'s chain is untouched.
+    try expectRelocChain(&b, other, &.{6}, &.{.jump32});
+
+    // Fail-closed: a bound source, an unbound destination, self-merge and a
+    // foreign id are all rejected.
+    try std.testing.expectError(error.InvalidBytecode, b.retargetLabelRefs(pending, target));
+    try std.testing.expectError(error.InvalidBytecode, b.retargetLabelRefs(target, target));
+    const unbound_dest = try b.newLabel();
+    const fresh = try b.newLabel();
+    try std.testing.expectError(error.InvalidBytecode, b.retargetLabelRefs(fresh, unbound_dest));
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        b.retargetLabelRefs(fresh, @as(LabelId, @enumFromInt(99))),
+    );
 }
 
 test "compiler_v2.builder: s2g4 scope ref owns atom and chains aux relocation" {

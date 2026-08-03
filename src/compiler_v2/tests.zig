@@ -2399,22 +2399,24 @@ test "compiler_v2.s2g2: switch break default" {
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.strict_eq, .size = 1 },
-        .{ .op = qop.if_false, .size = 5, .label = 1 },
+        // The unmatched-case dispatch operand names the DEFAULT identity: the
+        // epilogue moved its reference there (`retargetLabelRefs`), exactly as
+        // legacy's `patchJumpTarget` writes the default body's PC into it.
+        .{ .op = qop.if_false, .size = 5, .label = 2 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
-        .{ .op = qop.goto, .size = 5, .label = 3 },
-        .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 27), b.code_len);
-    try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 1, 26);
-    try expectLabel(b, 1, 1, 21);
+    try std.testing.expectEqual(@as(u32, 17), b.code_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try expectLabel(b, 0, 1, 16);
+    // The retargeted no-match identity keeps no reference and aliases the
+    // default body it merged into.
+    try expectLabel(b, 1, 0, 14);
     try expectLabel(b, 2, 1, 14);
-    try expectLabel(b, 3, 1, 26);
-    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 14, 26 });
+    try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 14, 16 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -2476,21 +2478,22 @@ test "compiler_v2.s2g2: switch default only" {
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
-        .{ .op = qop.goto, .size = 5, .label = 1 },
+        // A leading `default` still emits the dispatch continuation goto; the
+        // epilogue then retargets it onto the default body, so it becomes the
+        // jump-to-next-instruction that legacy's `patchJumpTarget` produces and
+        // `resolve_labels` folds away.
+        .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
-        .{ .op = qop.goto, .size = 5, .label = 3 },
-        .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 19), b.code_len);
-    try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 0, 18);
-    try expectLabel(b, 1, 1, 13);
+    try std.testing.expectEqual(@as(u32, 9), b.code_len);
+    try std.testing.expectEqual(@as(u32, 3), b.label_len);
+    try expectLabel(b, 0, 0, 8);
+    try expectLabel(b, 1, 0, 6);
     try expectLabel(b, 2, 1, 6);
-    try expectLabel(b, 3, 1, 18);
-    try std.testing.expectEqual(@as(i64, 18), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6, 18 });
+    try std.testing.expectEqual(@as(i64, 8), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 6, 8 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }

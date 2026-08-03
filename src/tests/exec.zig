@@ -20089,8 +20089,13 @@ test "native function toString keeps non-ASCII identifier names (qjs js_function
 test "switch dispatch trampoline shapes keep legacy identity and semantics" {
     // QCP-1 dual-mode regression corpus. Under `-Dzjs_compiler=dual` every
     // source below is compiled by both backends and compared, so this test is
-    // the identity oracle for the switch dispatch bridge; under legacy/v2 it
+    // the identity oracle for switch dispatch lowering; under legacy/v2 it
     // still pins the observable clause-fallthrough semantics.
+    //
+    // The epilogue dispatch bridge several of these shapes were written
+    // against no longer exists: the unmatched-dispatch references now move onto
+    // the default identity (`Builder.retargetLabelRefs`), which is what legacy
+    // `patchJumpTarget` does. The shapes stay as the corpus that proves it.
     //
     // Each shape reproduced a distinct v2/legacy divergence:
     //   [0] `case a: b(); case c: default: e();` — the branch whose target
@@ -20111,6 +20116,13 @@ test "switch dispatch trampoline shapes keep legacy identity and semantics" {
     //       peephole (pdfjs `CanvasGraphics_showText`).
     //   [11] `while (..) { if (..) return; }`: the `undefined; return` fold has
     //       to drop its dead tail or the loop backedge survives.
+    //   [12]-[15] a clause body ending in an if/else whose test folds falsy and
+    //       whose taken arm is empty. Its two converging labels bind exactly
+    //       where the epilogue starts, so while the dispatch bridge existed
+    //       they bound on the bridge's skip goto instead of the epilogue:
+    //       `findJumpTarget` threaded one hop further than legacy and the
+    //       jump-to-own-fallthrough legacy folds survived in v2 (test262
+    //       annexB `*if-stmt-else-decl-*-skip-early-err-switch`, 5 files).
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -20143,6 +20155,10 @@ test "switch dispatch trampoline shapes keep legacy identity and semantics" {
         \\        function loopReturn(a, c) { while (a) { n += 1; if (c) return "r"; } return "w"; }
         \\        return loopReturn(1, 1) + loopReturn(0, 0);
         \\    })());
+        \\    out.push(run(function (d) { var s = "e"; switch (d) { default: if (false) ; else ; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; default: if (false) { } else { } } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { default: let f = "L"; s += f; if (false) ; else ; } return s; }));
+        \\    out.push(run(function (d) { var s = "n"; switch (d) { case 1: s += "a"; break; default: switch (d) { default: if (false) ; else ; } } return s; }));
         \\    return out.join("|");
         \\})()
     , .{ .filename = "<repl>" });
@@ -20150,6 +20166,7 @@ test "switch dispatch trampoline shapes keep legacy identity and semantics" {
     try helpers.expectStringValueBytes(
         result,
         "ab,b,b,b|b,b,b,b|ab,b,b,b|x,x,x,x|b,b,b,b|abc,bc,c,bc|z,z,z,z|ya,y,y,y|3" ++
-            "|qd,qd,q,qd|a,b,,b|rw",
+            "|qd,qd,q,qd|a,b,,b|rw" ++
+            "|e,e,e,e|a,,,|L,L,L,L|na,n,n,n",
     );
 }
