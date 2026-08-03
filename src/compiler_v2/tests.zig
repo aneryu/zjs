@@ -966,6 +966,67 @@ fn v2CompileAndRun(h: *V2Exec) !core.JSValue {
     });
 }
 
+fn expectFunctionDefInertAfterEscape(
+    fd: *const bytecode_mod.function_def.FunctionDef,
+) !void {
+    try std.testing.expect(fd.v2_builder == null);
+    try std.testing.expectEqual(core.atom.null_atom, fd.func_name);
+    try std.testing.expectEqual(core.atom.null_atom, fd.filename);
+    try std.testing.expectEqual(core.atom.null_atom, fd.script_or_module);
+    try std.testing.expect(fd.source_text == null);
+    for (fd.args) |arg| try std.testing.expectEqual(core.atom.null_atom, arg.var_name);
+    for (fd.vars) |local| try std.testing.expectEqual(core.atom.null_atom, local.var_name);
+    for (fd.closure_var) |closure| try std.testing.expectEqual(core.atom.null_atom, closure.var_name);
+    for (fd.cpool) |value| try std.testing.expect(value.isUndefined());
+    try std.testing.expectEqual(@as(i32, 0), fd.cpool_count);
+
+    for (fd.child_list) |child| try expectFunctionDefInertAfterEscape(child);
+}
+
+const PublishedEscapeOwners = struct {
+    named_args: usize = 0,
+    named_vars: usize = 0,
+    named_closure_vars: usize = 0,
+    child_functions: usize = 0,
+};
+
+fn expectPublishedAtomResolves(rt: *const core.JSRuntime, atom_id: core.atom.Atom) !void {
+    try std.testing.expect(atom_id != core.atom.null_atom);
+    try std.testing.expect(rt.atoms.name(atom_id) != null);
+}
+
+fn expectPublishedFunctionBytecodeOwnersResolve(
+    rt: *const core.JSRuntime,
+    fb: *const bytecode_mod.FunctionBytecode,
+    owners: *PublishedEscapeOwners,
+) !void {
+    try expectPublishedAtomResolves(rt, fb.funcName());
+    try expectPublishedAtomResolves(rt, fb.filenameAtom());
+
+    for (fb.argVarDefs()) |arg| {
+        if (arg.var_name == core.atom.null_atom) continue;
+        owners.named_args += 1;
+        try std.testing.expect(rt.atoms.name(arg.var_name) != null);
+    }
+    for (fb.varDefs()) |local| {
+        if (local.var_name == core.atom.null_atom) continue;
+        owners.named_vars += 1;
+        try std.testing.expect(rt.atoms.name(local.var_name) != null);
+    }
+    for (fb.closureVar()) |closure| {
+        if (closure.var_name == core.atom.null_atom) continue;
+        owners.named_closure_vars += 1;
+        try std.testing.expect(rt.atoms.name(closure.var_name) != null);
+    }
+    for (fb.cpoolSlice()) |value| {
+        if (!value.isFunctionBytecode()) continue;
+        const header = value.objectHeader() orelse return error.TestUnexpectedResult;
+        const child: *const bytecode_mod.FunctionBytecode = @fieldParentPtr("header", header);
+        owners.child_functions += 1;
+        try expectPublishedFunctionBytecodeOwnersResolve(rt, child, owners);
+    }
+}
+
 fn expectFdTopologyEqual(
     legacy_fd: *const bytecode_mod.function_def.FunctionDef,
     v2_fd: *const bytecode_mod.function_def.FunctionDef,
@@ -4301,6 +4362,125 @@ test "compiler_v2.s4: installed for loop uses plain layout" {
     defer result.free(h.rt);
     try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
     try std.testing.expect(!h.installed_short_opcode);
+}
+
+test "compiler_v2.p5: FunctionDef owners are inert after the FunctionBytecode escape" {
+    var h: V2Exec = undefined;
+    try h.init(
+        \\var escapeAuditOuter = 1;
+        \\function escapeAuditChild(escapeAuditArg) {
+        \\    var escapeAuditLocal = escapeAuditArg + escapeAuditOuter;
+        \\    return { escapeAuditKey: escapeAuditLocal };
+        \\}
+        \\escapeAuditChild(2);
+    );
+    defer h.deinit();
+
+    try h.state.enableReturnCompletion();
+    try P.parseProgramStatements(
+        &h.state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try h.state.finalizeEvalReturn();
+    try std.testing.expect(h.state.function_def.child_list.len >= 1);
+
+    if (P.v2_available) try attachTranslatedBuilderTree(&h.state.function_def);
+
+    const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+        &h.state.function_def,
+        .{ .realm = h.ctx },
+    );
+    const fb = &fb_slice[0];
+    var fb_value = core.JSValue.functionBytecode(&fb.header);
+    defer fb_value.free(h.rt);
+
+    try expectFunctionDefInertAfterEscape(&h.state.function_def);
+
+    var owners: PublishedEscapeOwners = .{};
+    try expectPublishedFunctionBytecodeOwnersResolve(h.rt, fb, &owners);
+    try std.testing.expect(owners.named_args >= 1);
+    try std.testing.expect(owners.named_vars >= 1);
+    try std.testing.expect(owners.named_closure_vars >= 1);
+    // A recursive child count can only become non-zero after the root cpool
+    // exposes a FunctionBytecode value.
+    try std.testing.expect(owners.child_functions >= 1);
+}
+
+test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
+    const source =
+        \\var o = {};
+        \\o.escapeAuditProbeName = 7;
+        \\o.escapeAuditProbeName;
+    ;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    standard_globals.configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    const name_atom = try rt.atoms.internString("compiler_v2-p5-atom-escape");
+    var function = bytecode_mod.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
+    var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
+    var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
+    state.function_def.is_global_var = true;
+    state.top_level_functions_as_children = true;
+
+    {
+        const probe = try rt.atoms.internString("escapeAuditProbeName");
+        defer rt.atoms.free(probe);
+        const baseline = rt.atoms.refCount(probe).?;
+
+        try state.enableReturnCompletion();
+        try P.parseProgramStatements(
+            &state,
+            P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+        );
+        try std.testing.expectEqual(parser_mod.token.TOK_EOF, state.token.val);
+        try state.finalizeEvalReturn();
+
+        var phase1_probe_refs: usize = 0;
+        for (state.function_def.atom_operands) |owner| {
+            phase1_probe_refs += @intFromBool(owner == probe);
+        }
+        try std.testing.expectEqual(@as(usize, 2), phase1_probe_refs);
+        if (P.v2_available) try attachTranslatedBuilderTree(&state.function_def);
+
+        const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+            &state.function_def,
+            .{ .realm = ctx },
+        );
+        var fb_value = core.JSValue.functionBytecode(&fb_slice[0].header);
+        const after_compile = rt.atoms.refCount(probe).?;
+        try std.testing.expect(after_compile > baseline);
+
+        // The v2/dual test adapter duplicates every legacy phase-1 atom into
+        // its translated builder. v2 publication consumes the builder copy
+        // but intentionally leaves the original FunctionDef.atom_operands
+        // scratch ledger for state.deinit; legacy lowerLegacyPhase1 instead
+        // moves that original ledger into the FB. Account for those two
+        // compiler-only refs exactly rather than weakening the FB-owner check.
+        const retained_phase1_probe_refs = if (P.v2_available) phase1_probe_refs else 0;
+        try std.testing.expectEqual(
+            baseline + phase1_probe_refs + retained_phase1_probe_refs,
+            after_compile,
+        );
+
+        state.deinit(rt);
+        lex.deinit();
+        function.deinit(rt);
+
+        try std.testing.expectEqual(
+            baseline + phase1_probe_refs,
+            rt.atoms.refCount(probe).?,
+        );
+        try std.testing.expect(rt.atoms.name(probe) != null);
+
+        fb_value.free(rt);
+        try std.testing.expectEqual(baseline, rt.atoms.refCount(probe).?);
+    }
+
+    rt.atoms.free(name_atom);
+    ctx.destroy();
+    rt.destroy();
 }
 
 test "compiler_v2.coverage: production constructs never fall back to legacy emission" {

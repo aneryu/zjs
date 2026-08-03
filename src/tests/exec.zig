@@ -6818,6 +6818,38 @@ test "generator object uses the prototype selected after parameter initializatio
     try std.testing.expect(result.isUndefined());
 }
 
+test "generator continuation keeps its FunctionBytecode alive after every source binding is dropped" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\function* escapeAuditGen() { var a = 10; yield a; yield a + 1; }
+        \\async function escapeAuditAsync(x) { return (await x) + 5; }
+        \\var it = escapeAuditGen();
+        \\var first = it.next().value;
+        \\var p = escapeAuditAsync(100);
+        \\var escapeAuditAsyncResult;
+        \\p.then(function (value) { escapeAuditAsyncResult = value; });
+        \\escapeAuditGen = undefined;
+        \\escapeAuditAsync = undefined;
+        \\$262.gc();
+        \\var second = it.next().value;
+        \\first * 100 + second;
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1011), result.asInt32());
+
+    // The async frame was also suspended across the forced collection after
+    // its only source-level function binding was cleared. Drain through the
+    // existing harness API, then verify its continuation in a second eval.
+    try js.runJobs();
+    const async_check = try js.eval(
+        \\assert.sameValue(escapeAuditAsyncResult, 105);
+    );
+    defer async_check.free(js.runtime);
+    try std.testing.expect(async_check.isUndefined());
+}
+
 test "initial_yield keeps sync generators in suspended-start after parameter initialization" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
