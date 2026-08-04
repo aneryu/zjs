@@ -8710,7 +8710,8 @@ pub const pipeline_resolve_variables = struct {
                         const ref_idx = local_ref_tail_indices[tail_pc];
                         if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                         if (make_ref_reads_value[i]) {
-                            pc_map[i + 11] = out_idx;
+                            if (comptime relocation_oracle_enabled) oracle_pc_map[i + 11] = out_idx;
+                            try reloc.publishPoint(i + 11, out_idx);
                             writeSelectedLocForm(
                                 output,
                                 &out_idx,

@@ -5593,10 +5593,12 @@ pub const parser_core = struct {
             const saved_mark_pos = s.lex.mark_pos;
             const saved_mark_line = s.lex.mark_line;
             const saved_mark_col = s.lex.mark_col;
-            const saved_token = s.token;
-            var advanced = false;
+            // The scan advances past the current token and releases its atom.
+            // Keep an independent owner for the token restored at the end;
+            // copying the token struct would restore a dead identifier atom.
+            const saved_token = s.lex.dupToken(s.token) catch return false;
             defer {
-                if (advanced) s.lex.freeToken(&s.token);
+                s.lex.freeToken(&s.token);
                 s.lex.pos = saved_pos;
                 s.lex.line = saved_line;
                 s.lex.col = saved_col;
@@ -5608,11 +5610,10 @@ pub const parser_core = struct {
             }
 
             const advanceLocal = struct {
-                fn call(state: *State, did_advance: *bool) bool {
+                fn call(state: *State) bool {
                     const next = state.lex.next() catch return false;
                     state.lex.freeToken(&state.token);
                     state.token = next;
-                    did_advance.* = true;
                     return true;
                 }
             }.call;
@@ -5636,14 +5637,14 @@ pub const parser_core = struct {
                     if (templateContainsDirectEval(s, s.token)) return true;
                     eval_candidate = false;
                     previous_token_kind = tok.TOK_TEMPLATE;
-                    if (!advanceLocal(s, &advanced)) return false;
+                    if (!advanceLocal(s)) return false;
                     continue;
                 }
                 if (kind == tok.TOK_FUNCTION) {
                     skipFunctionInPredeclareScan(s) catch return false;
                     eval_candidate = false;
                     previous_token_kind = tok.TOK_FUNCTION;
-                    if (!advanceLocal(s, &advanced)) return false;
+                    if (!advanceLocal(s)) return false;
                     continue;
                 }
                 if ((kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) and
@@ -5651,7 +5652,7 @@ pub const parser_core = struct {
                 {
                     eval_candidate = false;
                     previous_token_kind = tok.TOK_REGEXP;
-                    if (!advanceLocal(s, &advanced)) return false;
+                    if (!advanceLocal(s)) return false;
                     continue;
                 }
 
@@ -5663,7 +5664,7 @@ pub const parser_core = struct {
                 {
                     paren_depth -= 1;
                     previous_token_kind = kind;
-                    if (!advanceLocal(s, &advanced)) return false;
+                    if (!advanceLocal(s)) return false;
                     continue;
                 }
                 if (kind == tok.TOK_IDENT and
@@ -5698,7 +5699,7 @@ pub const parser_core = struct {
                     else => {},
                 }
                 previous_token_kind = kind;
-                if (!advanceLocal(s, &advanced)) return false;
+                if (!advanceLocal(s)) return false;
             }
         }
 
@@ -7637,9 +7638,6 @@ pub const parser_core = struct {
                 // resolve_variables folds static references back to direct
                 // local/closure/global stores when no dynamic environment is
                 // present. Strict code has no dynamic var environment.
-                const strict_unresolved = (s.is_strict or fd.is_strict_mode) and
-                    !keep and
-                    shouldSnapshotStrictUnresolvedAssignment(s, name);
                 var has_current_binding = State.hasVisibleCurrentBinding(fd, name, @intCast(scope));
                 if (!has_current_binding) {
                     for (fd.global_vars) |global_var| {
@@ -7651,7 +7649,6 @@ pub const parser_core = struct {
                 }
                 const with_scope = hasWithScopeFrom(fd, @intCast(scope));
                 const needs_reference = with_scope or
-                    strict_unresolved or
                     (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
                         !has_current_binding and State.rhsContainsDirectEval(s));
                 replacement_size = if (needs_reference)
@@ -7875,75 +7872,6 @@ pub const parser_core = struct {
             if (a.var_name == atom_id) return true;
         }
         return false;
-    }
-
-    fn evalDeleteBindingIsConfigurable(is_lexical: bool, var_kind: function_def_mod.VarKind) bool {
-        return !is_lexical or var_kind == .function_decl;
-    }
-
-    fn evalClosureBindingIsConfigurable(s: *State, owner_index: usize, cv: function_def_mod.ClosureVar) bool {
-        const owner = s.funcAtVirtualIndex(owner_index);
-        switch (cv.closureType()) {
-            .local => {
-                if (owner_index == 0) return s.eval_delete_bindings and evalDeleteBindingIsConfigurable(cv.isLexical(), cv.varKind());
-                const parent = s.funcAtVirtualIndex(owner_index - 1);
-                if (cv.var_idx >= parent.vars.len) return false;
-                const v = parent.vars[cv.var_idx];
-                return parent.is_eval and evalDeleteBindingIsConfigurable(v.is_lexical, v.var_kind);
-            },
-            .ref => {
-                if (owner_index == 0) return false;
-                const parent = s.funcAtVirtualIndex(owner_index - 1);
-                if (cv.var_idx >= parent.closure_var.len) return false;
-                return evalClosureBindingIsConfigurable(s, owner_index - 1, parent.closure_var[cv.var_idx]);
-            },
-            // `.module_decl` belongs in the configurable group: an eval top-level
-            // function declaration is recorded as a `.module_decl` (is_lexical,
-            // var_kind=.function_decl), and `delete x` on it must return true
-            // (configurable) per non-strict eval semantics. Genuine ES-module
-            // top-level decls never reach here (modules are always strict, and
-            // owner.is_eval is false). Matches ours/322af2f.
-            .global_decl, .global, .global_ref, .module_decl => {
-                return (owner.is_eval or s.eval_delete_bindings) and evalDeleteBindingIsConfigurable(cv.isLexical(), cv.varKind());
-            },
-            .arg, .module_import => return false,
-        }
-    }
-
-    fn hasEvalNonLexicalBinding(s: *State, atom_id: Atom) bool {
-        if (!s.eval_delete_bindings) return false;
-        if (s.is_eval) {
-            for (s.cur_func().vars) |v| {
-                if (v.var_name == atom_id) return evalDeleteBindingIsConfigurable(v.is_lexical, v.var_kind);
-            }
-            // Top-level eval declarations live in GlobalVar until
-            // add_global_variables/finalization. Deletion is parsed before
-            // that carrier exists, so consult the declaration record itself
-            // instead of depending on the retired parser closure placeholder.
-            for (s.cur_func().global_vars) |gv| {
-                if (gv.var_name == atom_id) return !gv.is_lexical;
-            }
-            for (s.cur_func().closure_var) |cv| {
-                if (cv.var_name == atom_id) return evalClosureBindingIsConfigurable(s, s.cur_func_stack.len, cv);
-            }
-            return false;
-        }
-        if (hasCurrentFunctionBinding(s, atom_id)) return false;
-        for (s.cur_func().closure_var) |cv| {
-            if (cv.var_name == atom_id) return evalClosureBindingIsConfigurable(s, s.cur_func_stack.len, cv);
-        }
-        return false;
-    }
-
-    fn shouldSnapshotStrictUnresolvedAssignment(s: *State, atom_id: Atom) bool {
-        if (!(s.is_strict or s.cur_func().is_strict_mode)) return false;
-        if (hasKnownBinding(s, atom_id)) return false;
-        if (hasEvalNonLexicalBinding(s, atom_id)) return false;
-        return true;
-    }
-
-    fn hasCurrentFunctionBinding(s: *State, atom_id: Atom) bool {
-        return s.cur_func().findVar(atom_id) >= 0 or s.cur_func().findArg(atom_id) >= 0;
     }
 
     fn argumentsIdentifierIsForbidden(s: *State) bool {
