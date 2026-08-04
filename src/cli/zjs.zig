@@ -1,5 +1,15 @@
 const std = @import("std");
 const engine = @import("zjs");
+
+// QCP-1: this root is shared by `zjs` (ReleaseFast), `zjs-profile`
+// (ReleaseFast) and `zjs-dev` (Debug), so it proves the effective
+// configuration of the shipped binary itself at compile time, each reporting
+// its own optimize mode (src/config_signature.zig). `--print-config-signature`
+// below is the runtime half of the same statement.
+comptime {
+    engine.config_signature.attest("zjs CLI");
+}
+
 const public_api = engine.public_api;
 const unicode = engine.libs.unicode;
 const zjs = public_api;
@@ -151,10 +161,21 @@ fn runFileModule(
 pub fn main(init: std.process.Init) !void {
     const total_start = monotonicNanos();
     setupHostDispatchStatsExitDump(init.environ_map);
+    setupV2OracleReportExitDump(init.environ_map);
+    setupV2EmissionCoverageExitDump();
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try argsToSlice(arena, init.minimal.args);
+
+    // QCP-1 configuration signature. Answered before any engine construction
+    // so it is readable from every configuration, including instrumented
+    // tiers, and so `zig build config-signature-check` can compare the
+    // shipped binary's own answer against what the build graph requested.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], config_signature_flag)) {
+        try printConfigSignature(io);
+        return;
+    }
 
     const command = parseArgs(args[1..]) catch {
         try printUsage(io);
@@ -378,7 +399,19 @@ fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []cons
 }
 
 fn printUsage(io: std.Io) !void {
-    try printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n", .{});
+    try printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+}
+
+/// Standalone query flag: it takes no script and constructs no runtime, so it
+/// deliberately never reaches `parseArgs`.
+const config_signature_flag = "--print-config-signature";
+
+fn printConfigSignature(io: std.Io) !void {
+    var stdout_buf: [256]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    const stdout = &stdout_writer.interface;
+    try stdout.print("{s}\n", .{engine.config_signature.signature});
+    try stdout.flush();
 }
 
 fn commandRuntimeOptions(command: Command) RuntimeOptions {
@@ -841,6 +874,32 @@ fn writeHostDispatchStatsAtExit() callconv(.c) void {
     if (comptime !host_dispatch_stats.enabled) return;
     if (host_dispatch_stats_path_len == 0) return;
     host_dispatch_stats.appendToFile(&host_dispatch_stats_path_buf);
+}
+
+fn setupV2OracleReportExitDump(environ_map: *std.process.Environ.Map) void {
+    if (comptime !engine.compiler_v2.oracle_report_enabled) return;
+    const flag = environ_map.get("ZJS_V2_ORACLE_REPORT") orelse return;
+    if (flag.len == 0 or std.mem.eql(u8, flag, "0")) return;
+    _ = atexit(writeV2OracleReportAtExit);
+}
+
+fn writeV2OracleReportAtExit() callconv(.c) void {
+    if (comptime !engine.compiler_v2.oracle_report_enabled) return;
+    var buffer: [1024]u8 = undefined;
+    const text = engine.compiler_v2.formatOracleReport(&buffer);
+    if (text.len == 0) return;
+    std.debug.print("{s}\n", .{text});
+}
+
+fn setupV2EmissionCoverageExitDump() void {
+    if (comptime !engine.compiler_v2.coverage.enabled) return;
+    if (!engine.compiler_v2.coverage.collectMode()) return;
+    _ = atexit(writeV2EmissionCoverageAtExit);
+}
+
+fn writeV2EmissionCoverageAtExit() callconv(.c) void {
+    if (comptime !engine.compiler_v2.coverage.enabled) return;
+    engine.compiler_v2.coverage.dumpReport();
 }
 
 fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {

@@ -50,6 +50,35 @@ Prior phase plans, percentage-gate plans, snapshot ledgers, one-off analyses,
 and detailed error catalogs were removed from the active tree and remain
 available only through git history.
 
+## Production Configuration
+
+The shipped configuration, and the build defaults:
+
+```
+zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+```
+
+- **`compiler=v2` is the production default and the only supported production
+  compiler.** `-Dzjs_compiler=legacy` selects the Phase 1/2/3 pipeline and is an
+  **experimental fallback only** — it builds and passes its suite, but it is not
+  a supported production configuration and must not be reported as a default.
+  `-Dzjs_compiler=dual` is the differential oracle.
+- **`layout=short` is release configuration, not a tuning knob.** The switch was
+  gated on it. `-Dzjs_v2_layout=plain` survives only as the A/B diagnostic
+  instrument.
+- Any measurement, gate result or report must name the configuration it ran. The
+  binary states its own (`zig-out/bin/zjs --print-config-signature`) and every
+  engine-bearing artifact asserts it at compile time.
+
+**Legacy source is still in the tree on purpose.** QCP-1 closed as two verdicts
+(`docs/qcp1_switch_decision.md` §8): **QCP-1A — make V2 the production compiler:
+ACCEPT**; **QCP-1B — physically delete the legacy pipelines: NO-GO, deferred**,
+because deletion produced a stable runtime benchmark regression (crypto about
+−4% versus the pre-delete V2 tip, full-suite geomean about −0.7%) whose
+mechanism was never identified. That is neither a correctness failure nor an
+architecture failure, and it is re-filed as a separate runtime-layout-stability
+project. Do not re-open legacy deletion as a cleanup task without answering it.
+
 ## Agent skills
 
 ### Issue tracker
@@ -130,7 +159,35 @@ tasks below include it.
   once with `-Dzjs_nan_boxing=true` at stage close on 64-bit hosts. The 64-bit
   default is the QuickJS-aligned 16-byte payload+tag layout; narrower targets
   default to 8-byte NaN-boxing. The explicit option can select either mode and
-  neither may rot.)
+  neither may rot. The step spawns a nested `zig build test` and forwards every
+  `-D` option of the outer invocation plus the resolved optimize mode, so
+  `zig build test-altrepr -Dzjs_compiler=v2 -Doptimize=ReleaseSafe` genuinely
+  runs that configuration under the alternate representation. The step also
+  passes the child the exact configuration signature it must resolve
+  (`-Dzjs_expect_config`), so a dropped option is a hard build failure rather
+  than a green run of a different configuration.)
+- `zig build config-signature-check --seed 0` (runs the built `zjs`, makes it
+  state its own configuration via `--print-config-signature`, and compares that
+  against what the build graph requested. The binary answers from the
+  declarations the engine consumes — `resolve_labels.default_layout`, the
+  `Parser` backend-dispatch decision, `core.value.nan_boxing`, `builtin.mode`,
+  `core.memory.force_gc_on_allocation_enabled`,
+  `core.atom.ownership_audit_enabled` — so an option that never reached the
+  code fails here. Included in `zig build smoke`. Every engine-bearing artifact
+  asserts the same string at COMPILE time
+  (`comptime { config_signature.attest("<artifact>"); }` in each root), each
+  reporting its own optimize mode, so no test artifact borrows another's
+  attestation and a Debug build cannot pass for a ReleaseSafe one.)
+- `zig build config-drift-gate --seed 0` (proves the attestation above can
+  still fail. Five halves: a wrong `compiler`, a wrong `layout` and a wrong
+  `optimize` expectation must FAIL, the correct expectation must SUCCEED, and
+  `-Dzjs_v2_layout=plain` with a `layout=plain` expectation must SUCCEED. That
+  last pair is the `.plain` diagnostic's self-proof: the same expectation
+  string must fail against a `short` build and succeed against a `plain` one.
+  Wired into `checkpoint-check` and `engine-production-gate`; the output names
+  which half is running, so an expected failure is distinguishable from a real
+  one. A negative half that fails for an unrelated reason is reported
+  INCONCLUSIVE, not as a pass.)
 - `zig build test-oom --seed 0 --summary all` (OOM 注入门禁：
   corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，
   不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus

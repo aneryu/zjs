@@ -3,6 +3,13 @@ const builtin = @import("builtin");
 const zjs = @import("zjs");
 const engine = zjs;
 
+// QCP-1: this artifact proves its OWN effective configuration at compile time
+// (src/config_signature.zig). Every test artifact attests separately; none
+// borrows the `src/all_tests.zig` root's attestation.
+comptime {
+    zjs.config_signature.attest("test-core");
+}
+
 const core = zjs.core;
 
 extern "c" fn tmpfile() ?*std.c.FILE;
@@ -1267,6 +1274,34 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     const sym = try atoms.newSymbol("", .symbol);
     try std.testing.expectEqual(core.atom.AtomKind.symbol, atoms.kind(sym).?);
     try std.testing.expectEqualStrings("", atoms.name(sym).?);
+
+    atoms.deinit();
+    try std.testing.expect(!account.hasOutstandingAllocations());
+}
+
+test "ownership audit quarantines the most recently freed atom slot" {
+    // Liveness check for `-Dzjs_ownership_audit` (docs/borrowed_atom_audit.md
+    // §7). Without it the audit build could stop quarantining and every audit
+    // run would stay green while detecting nothing — the same silent masking
+    // the option exists to break.
+    if (!core.atom.ownership_audit_enabled) return error.SkipZigTest;
+
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    var atoms = core.atom.AtomTable.init(&account);
+
+    const first = try atoms.internString("zjs-ownership-audit-first");
+    atoms.free(first);
+    // The next intern must not be handed the slot that just died: that reuse
+    // is exactly what makes a borrowed-atom use-after-free look alive.
+    const second = try atoms.internString("zjs-ownership-audit-second");
+    try std.testing.expect(second != first);
+
+    // Recycling is delayed, not disabled: the quarantined slot is released as
+    // soon as another slot dies, so the table does not grow without bound.
+    atoms.free(second);
+    const third = try atoms.internString("zjs-ownership-audit-third");
+    try std.testing.expectEqual(first, third);
+    atoms.free(third);
 
     atoms.deinit();
     try std.testing.expect(!account.hasOutstandingAllocations());
@@ -10922,4 +10957,3 @@ test "fused multiply-subtract matches the reference limb for limb" {
         try std.testing.expectEqualSlices(Limb, reference, under_test);
     }
 }
-

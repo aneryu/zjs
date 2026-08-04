@@ -14,6 +14,7 @@ const object_ops = zjs.exec.object_ops;
 const array_ops = zjs.exec.array_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
+const test_entry = zjs.compiler_v2.test_entry;
 
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
@@ -3173,6 +3174,33 @@ fn finalOpcodeCount(code: []const u8, wanted: u8) !usize {
     return count;
 }
 
+const SetVarRefStats = struct {
+    count: usize = 0,
+    first_idx: ?u16 = null,
+};
+
+fn finalSetVarRefStats(code: []const u8) !SetVarRefStats {
+    var stats: SetVarRefStats = .{};
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size = bytecode.opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return error.InvalidFunctionBytecode;
+        const idx: ?u16 = if (op_id == op.set_var_ref)
+            std.mem.readInt(u16, code[pc + 1 ..][0..2], .little)
+        else if (op_id >= op.set_var_ref0 and op_id <= op.set_var_ref3)
+            op_id - op.set_var_ref0
+        else
+            null;
+        if (idx) |ref_idx| {
+            stats.count += 1;
+            if (stats.first_idx == null) stats.first_idx = ref_idx;
+        }
+        pc += size;
+    }
+    return stats;
+}
+
 fn hasTailEvalReturn(function: *const bytecode.FunctionBytecode) bool {
     const code = function.byteCode();
     var pc: usize = 0;
@@ -3658,6 +3686,24 @@ test "strict generator resident frame supports qjs argument counts beyond u16 st
 }
 
 pub const helpers = struct {
+    /// Every TypeScript execution test goes through here. Besides evaluating,
+    /// it asserts the compile took no un-allowlisted legacy emission — that is
+    /// the half of the L3 gate that only a real compile can observe.
+    pub fn evalTypeScriptChecked(engine_instance: *TestEngine, source: []const u8, options: EvalOptions) RuntimeError!core.JSValue {
+        const observation_start = test_entry.beginObservation();
+        const result = engine_instance.evalWithOptions(source, options) catch |eval_err| {
+            const observation = test_entry.endObservation(observation_start);
+            try test_entry.expectNoUnallowedFallback(observation);
+            return eval_err;
+        };
+        const observation = test_entry.endObservation(observation_start);
+        test_entry.expectNoUnallowedFallback(observation) catch |err| {
+            result.free(engine_instance.runtime);
+            return err;
+        };
+        return result;
+    }
+
     /// Install the standard + host globals on a bare `core.JSRuntime` global for
     /// tests that build a runtime directly (bypassing the binding-layer context
     /// create that wires the installer). The deep setup interface keeps the
@@ -5433,11 +5479,14 @@ test "resident set_var_ref preserves assignment results and refcounted self-assi
     try std.testing.expect(result.isUndefined());
 
     const short = try globalFunctionBytecode(&js, "__residentSetVarRefShort");
-    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(short.byteCode(), op.set_var_ref0));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(short.byteCode(), op.set_var_ref));
+    const short_set = try finalSetVarRefStats(short.byteCode());
+    try std.testing.expectEqual(@as(usize, 1), short_set.count);
+    try std.testing.expectEqual(@as(?u16, 0), short_set.first_idx);
 
     const self_assign = try globalFunctionBytecode(&js, "__residentSetVarRefSelf");
-    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(self_assign.byteCode(), op.set_var_ref0));
+    const self_set = try finalSetVarRefStats(self_assign.byteCode());
+    try std.testing.expectEqual(@as(usize, 1), self_set.count);
+    try std.testing.expectEqual(@as(?u16, 0), self_set.first_idx);
 
     const generic = try globalFunctionBytecode(&js, "__residentSetVarRefGeneric");
     var generic_set_idx: ?u16 = null;
@@ -6767,6 +6816,38 @@ test "generator object uses the prototype selected after parameter initializatio
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
+}
+
+test "generator continuation keeps its FunctionBytecode alive after every source binding is dropped" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\function* escapeAuditGen() { var a = 10; yield a; yield a + 1; }
+        \\async function escapeAuditAsync(x) { return (await x) + 5; }
+        \\var it = escapeAuditGen();
+        \\var first = it.next().value;
+        \\var p = escapeAuditAsync(100);
+        \\var escapeAuditAsyncResult;
+        \\p.then(function (value) { escapeAuditAsyncResult = value; });
+        \\escapeAuditGen = undefined;
+        \\escapeAuditAsync = undefined;
+        \\$262.gc();
+        \\var second = it.next().value;
+        \\first * 100 + second;
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1011), result.asInt32());
+
+    // The async frame was also suspended across the forced collection after
+    // its only source-level function binding was cleared. Drain through the
+    // existing harness API, then verify its continuation in a second eval.
+    try js.runJobs();
+    const async_check = try js.eval(
+        \\assert.sameValue(escapeAuditAsyncResult, 105);
+    );
+    defer async_check.free(js.runtime);
+    try std.testing.expect(async_check.isUndefined());
 }
 
 test "initial_yield keeps sync generators in suspended-start after parameter initialization" {
@@ -9144,7 +9225,7 @@ test "Engine eval strips TypeScript source kind before execution" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\type Label = string;
         \\interface Box { value: number }
         \\const value: number = 41;
@@ -9159,7 +9240,7 @@ test "Engine eval strips TypeScript method annotations" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\class C { m(x: number): number { return x; } }
         \\const object = { m(x: number): number { return x + 1; } };
         \\assert.sameValue(new C().m(41), 41);
@@ -9173,7 +9254,7 @@ test "Engine eval preserves as and satisfies runtime property names in TypeScrip
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\const obj = { as: 1, satisfies: 2 };
         \\assert.sameValue(obj.as + obj.satisfies, 3);
     , .{ .source_kind = .typescript });
@@ -9185,7 +9266,7 @@ test "Engine eval supports TypeScript parameter properties" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    var result = try js.evalWithOptions(
+    var result = try helpers.evalTypeScriptChecked(js,
         \\class Box {
         \\    constructor(public value: number) {}
         \\}
@@ -9200,7 +9281,7 @@ test "Engine eval strips TypeScript automatically for ts filenames" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.evalWithOptions(
+    const result = try helpers.evalTypeScriptChecked(js,
         \\const value: number = 42;
         \\assert.sameValue(value, 42);
     , .{ .filename = "sample.ts" });
@@ -11188,7 +11269,7 @@ test "Engine with destructuring assignment reaches const fallback at runtime" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "Engine eval assignments follow QuickJS dynamic var-object resolution" {
+test "Engine eval assignments capture the target before dynamic var insertion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -11236,12 +11317,12 @@ test "Engine eval assignments follow QuickJS dynamic var-object resolution" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
-        "1 0\n12 3\n1 1 0\n3undefined 3\n",
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
         stream.buffered(),
     );
 }
 
-test "Engine arrow eval assignments follow QuickJS dynamic var-object resolution" {
+test "Engine arrow eval assignments capture the target before dynamic var insertion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -11282,7 +11363,7 @@ test "Engine arrow eval assignments follow QuickJS dynamic var-object resolution
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
-        "1 0\n12 3\n1 1 0\n3undefined 3\n",
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
         stream.buffered(),
     );
 }
@@ -11339,14 +11420,12 @@ test "Engine direct eval captures the caller arguments binding" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // QuickJS add_eval_variables appends a body `arguments` pseudo local even
-    // when a simple formal parameter has the same spelling. Its reverse
-    // scope-zero lookup therefore makes parameterShadow observe the mapped
-    // Arguments object, whose index 0 is updated by the eval assignment. The
-    // final row also pins QuickJS's separate parameter/body environment
-    // topology; it must not depend on a source pre-scan of the function body.
+    // The direct eval assignment observes the function's mapped Arguments
+    // binding. Parameter initializers use the parameter-environment binding
+    // when the body declares its own `arguments` variable, and otherwise
+    // share the function binding with the body.
     try std.testing.expectEqualStrings(
-        "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\ntrue false true true\n",
+        "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\nfalse false true false\n",
         stream.buffered(),
     );
 }
@@ -11434,11 +11513,10 @@ test "Engine direct eval shares top-level lexical cells across nested closures" 
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // Pinned QuickJS stops eval declaration resolution at the first same-name
-    // catch binding, so no second caller-variable target is created and the
-    // post-catch write reaches the global. A later plain `var saved` eval
-    // force-initializes the variable-object property to undefined.
-    try std.testing.expectEqualStrings("500 500\n501 511\nlocal 42local\nundefined\n", stream.buffered());
+    // A direct eval var declaration must skip the temporary catch binding and
+    // keep the caller's dynamic var object available after the catch exits.
+    // Repeating a plain `var saved` declaration preserves the existing value.
+    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\n1\n", stream.buffered());
 }
 
 test "Engine constructor parameter defaults use the initialized this binding" {
@@ -20003,4 +20081,132 @@ test "native function toString keeps non-ASCII identifier names (qjs js_function
     , .{ .filename = "<repl>" });
     defer result.free(js.runtime);
     try std.testing.expectEqual(true, result.asBool().?);
+}
+
+test "switch dispatch trampoline shapes keep legacy identity and semantics" {
+    // QCP-1 dual-mode regression corpus. Under `-Dzjs_compiler=dual` every
+    // source below is compiled by both backends and compared, so this test is
+    // the identity oracle for switch dispatch lowering; under legacy/v2 it
+    // still pins the observable clause-fallthrough semantics.
+    //
+    // The epilogue dispatch bridge several of these shapes were written
+    // against no longer exists: the unmatched-dispatch references now move onto
+    // the default identity (`Builder.retargetLabelRefs`), which is what legacy
+    // `patchJumpTarget` does. The shapes stay as the corpus that proves it.
+    //
+    // Each shape reproduced a distinct v2/legacy divergence:
+    //   [0] `case a: b(); case c: default: e();` — the branch whose target
+    //       resolves to its own fallthrough only after the bridge folds away.
+    //   [1] `case a: default: e();` — the empty case falling into a trailing
+    //       default (first found through the atom-balance corpus).
+    //   [2]/[5]/[6] empty `default` clause followed by a `case`: the clause
+    //       tail flow predicate has to read the code emitted BEFORE the empty
+    //       body, exactly like `caseCanFallthrough`'s whole-stream summary.
+    //   [3]/[7] a default label bound at the switch epilogue: the dispatch
+    //       bridge must not be emitted at all.
+    //   [4] leading empty `default`.
+    //   [8] nested loops whose inner backedge dies: the for-loop top label is
+    //       a physical `OP_label` in the legacy stream and keeps its
+    //       sequential-match barrier, so `put_loc; get_loc` never fuses.
+    //   [9]/[10] a leading `default` whose switch ends in a break-only clause:
+    //       the dispatch bridge must stay invisible to the branch-inversion
+    //       peephole (pdfjs `CanvasGraphics_showText`).
+    //   [11] `while (..) { if (..) return; }`: the `undefined; return` fold has
+    //       to drop its dead tail or the loop backedge survives.
+    //   [12]-[15] a clause body ending in an if/else whose test folds falsy and
+    //       whose taken arm is empty. Its two converging labels bind exactly
+    //       where the epilogue starts, so while the dispatch bridge existed
+    //       they bound on the bridge's skip goto instead of the epilogue:
+    //       `findJumpTarget` threaded one hop further than legacy and the
+    //       jump-to-own-fallthrough legacy folds survived in v2 (test262
+    //       annexB `*if-stmt-else-decl-*-skip-early-err-switch`, 5 files).
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    function run(f) {
+        \\        var parts = [];
+        \\        var inputs = [1, 2, 3, 9];
+        \\        for (var i = 0; i < inputs.length; i++) parts.push(f(inputs[i]));
+        \\        return parts.join(",");
+        \\    }
+        \\    var out = [];
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; case 2: default: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: default: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; default: case 2: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = "x"; switch (d) { case 1: case 2: default: } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { default: case 1: s += "b"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; default: case 2: s += "b"; case 3: s += "c"; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: case 2: default: case 3: case 9: s += "z"; } return s; }));
+        \\    out.push(run(function (d) { var s = "y"; switch (d) { case 1: s += "a"; break; default: } return s; }));
+        \\    out.push((function () {
+        \\        var n = 0;
+        \\        outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { n += 1; continue outer; } }
+        \\        return "" + n;
+        \\    })());
+        \\    out.push(run(function (d) { var s = "q"; switch (d) { default: s += "d"; break; case 3: break; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { default: case 1: s += "a"; break; case 2: case 9: s += "b"; break; case 3: break; } return s; }));
+        \\    out.push((function () {
+        \\        var n = 0;
+        \\        function loopReturn(a, c) { while (a) { n += 1; if (c) return "r"; } return "w"; }
+        \\        return loopReturn(1, 1) + loopReturn(0, 0);
+        \\    })());
+        \\    out.push(run(function (d) { var s = "e"; switch (d) { default: if (false) ; else ; } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { case 1: s += "a"; default: if (false) { } else { } } return s; }));
+        \\    out.push(run(function (d) { var s = ""; switch (d) { default: let f = "L"; s += f; if (false) ; else ; } return s; }));
+        \\    out.push(run(function (d) { var s = "n"; switch (d) { case 1: s += "a"; break; default: switch (d) { default: if (false) ; else ; } } return s; }));
+        \\    return out.join("|");
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(
+        result,
+        "ab,b,b,b|b,b,b,b|ab,b,b,b|x,x,x,x|b,b,b,b|abc,bc,c,bc|z,z,z,z|ya,y,y,y|3" ++
+            "|qd,qd,q,qd|a,b,,b|rw" ++
+            "|e,e,e,e|a,,,|L,L,L,L|na,n,n,n",
+    );
+}
+
+test "Annex B if/else function declarations update the shared function binding" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function f(x) {
+        \\  if (x) function g() { return "g0"; }
+        \\  else function g() { return "g1"; }
+        \\  return typeof g + ":" + (typeof g === "function" ? g() : "missing");
+        \\}
+    );
+    result.free(js.runtime);
+    const observed = try js.evalWithOptions("f(true) + ',' + f(false)", .{ .filename = "<repl>" });
+    defer observed.free(js.runtime);
+    try helpers.expectStringValueBytes(observed, "function:g0,function:g1");
+}
+
+test "sloppy CallExpression assignment targets throw after evaluating only the call" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    var calls = 0;
+        \\    var rhs = 0;
+        \\    var coercions = 0;
+        \\    function f() {
+        \\        calls += 1;
+        \\        return { valueOf: function () { coercions += 1; return 1; } };
+        \\    }
+        \\    function g() { rhs += 1; return 2; }
+        \\    var out = [];
+        \\    try { f() = g(); } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { f() += g(); } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { f()++; } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { ++f(); } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { for (f() in [1]) {} } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { for (f() of [1]) {} } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    return out.join(",") + "|" + calls + "," + rhs + "," + coercions;
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(result, "true,true,true,true,true,true|6,0,0");
 }

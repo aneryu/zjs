@@ -1,8 +1,14 @@
+const build_options = @import("build_options");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 const string = @import("string.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
+
+/// `-Dzjs_ownership_audit`. Audit tier (ASAN / leak-checker class): CI,
+/// fuzzing and regression builds only, never ReleaseFast or the production
+/// path. See `AtomTable.OwnershipAuditState` for what it turns on.
+pub const ownership_audit_enabled: bool = build_options.zjs_ownership_audit;
 
 pub const Atom = u32;
 
@@ -874,6 +880,35 @@ const InternContext = struct {
 const InternMap = std.HashMapUnmanaged(InternKey, EntryIndex, InternContext, std.hash_map.default_max_load_percentage);
 
 pub const AtomTable = struct {
+    /// Extra table state carried only by `-Dzjs_ownership_audit` builds.
+    ///
+    /// The audit's one and only job is to break the *slot-reuse coincidence*
+    /// that masks borrowed-atom use-after-free. `finalizeDeadEntry` pushes a
+    /// dead slot on a LIFO free list keeping its id, and `internDynamic` pops
+    /// that head first, so "free an atom, immediately re-intern the identical
+    /// string" hands the same id straight back and a stale borrow looks alive.
+    /// Quarantining exactly one slot means the next intern can never reclaim
+    /// the slot that just died: a stale id then names either an empty slot
+    /// (`dup` trips `hasLiveValue`) or, one intern later, a different string
+    /// (the wrong-value outcome, which the caller's own checks surface).
+    ///
+    /// One slot rather than "stop recycling entirely" is deliberate. Recycling
+    /// still happens, only delayed by one death, so the table's steady-state
+    /// size grows by at most the single quarantined slot instead of growing
+    /// monotonically with intern/free churn; entry count, `next_id` growth and
+    /// the `deinit` teardown invariants therefore stay the ones the default
+    /// build has, and the audit cannot itself turn a churn-heavy test into an
+    /// out-of-memory or a different-table-geometry failure.
+    ///
+    /// When the option is off this is an empty struct: the field, the
+    /// quarantine code and even the names are absent from the binary.
+    pub const OwnershipAuditState = if (ownership_audit_enabled) struct {
+        /// Slot released by the most recent `finalizeDeadEntry`, held back
+        /// from the free list until the next slot dies. `no_free_slot` while
+        /// nothing is quarantined.
+        quarantined_slot: EntryIndex = no_free_slot,
+    } else struct {};
+
     memory: *memory.MemoryAccount,
     /// Owning runtime, set right after init. Needed to release cached
     /// strings (`DynamicAtom.str`) when an atom dies. Tables created
@@ -895,6 +930,8 @@ pub const AtomTable = struct {
     /// retargeted. Predefined atom ids live below `first_dynamic_atom`
     /// and never enter `entries`, so they are never recycled.
     free_slot_head: EntryIndex = no_free_slot,
+    /// Zero-sized in default builds; see `OwnershipAuditState`.
+    ownership_audit: OwnershipAuditState = .{},
     /// Conservative lower bound for dynamic private atoms. Dynamic slots are
     /// recycled across atom kinds, so this is intentionally a "might be
     /// private" range for hot-path rejection, not an exact kind predicate.
@@ -1439,6 +1476,11 @@ pub const AtomTable = struct {
             entry.weakref_count = 0;
             entry.no_symbol_description = no_symbol_description;
             errdefer {
+                // Exact inverse of the pop above: the slot goes back on the
+                // free-list head it came from. It deliberately does not enter
+                // the ownership-audit quarantine — this slot already served
+                // its quarantine round before it was popped, and a failed
+                // intern must leave the free list exactly as it found it.
                 entry.bytes = &.{};
                 entry.ref_count = 0;
                 entry.weakref_count = 0;
@@ -1537,6 +1579,22 @@ pub const AtomTable = struct {
         entry.gc_managed_symbol = false;
         // Recycle the slot: nobody holds the id anymore, so the next
         // intern may rebind it. See `internDynamic` for the pop side.
+        //
+        // Audit builds hold this slot back one death (see
+        // `OwnershipAuditState`) so the next intern cannot hand its id
+        // straight back and mask a borrowed-atom use-after-free. The branch
+        // is written inline, and the default arm below is left exactly as it
+        // was, so the default build's codegen is untouched: a `self`+`idx`
+        // helper made LLVM reload `self.entries.ptr` here and cost +0.03%
+        // instructions on the code-load compile micro.
+        if (comptime ownership_audit_enabled) {
+            const released = self.ownership_audit.quarantined_slot;
+            self.ownership_audit.quarantined_slot = idx;
+            if (released == no_free_slot) return;
+            self.entries[released].next_free = self.free_slot_head;
+            self.free_slot_head = released;
+            return;
+        }
         entry.next_free = self.free_slot_head;
         self.free_slot_head = idx;
     }

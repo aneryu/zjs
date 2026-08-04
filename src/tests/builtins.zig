@@ -1584,7 +1584,7 @@ test "Engine parenthesized eval preserves only grouping directness" {
     try std.testing.expectEqualStrings("local\nglobal\nglobal\nglobal\nglobal\nglobal\nglobal\n", stream.buffered());
 }
 
-test "Engine direct eval assignment reference timing matches QuickJS" {
+test "Engine direct eval assignment reference timing follows ECMAScript" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -1622,12 +1622,38 @@ test "Engine direct eval assignment reference timing matches QuickJS" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // Pinned QuickJS resolves these dynamic references to the binding created
-    // by the direct eval: `1 0`, `12 3`, and `1 0`, respectively.
-    try std.testing.expectEqualStrings("1 0\n12 3\n1 0\n", stream.buffered());
+    // The assignment target is resolved before the RHS direct eval can add a
+    // same-named var binding. The eval binding remains undefined/2, while the
+    // captured outer binding receives the assignment.
+    try std.testing.expectEqualStrings("undefined 1\n2 12\nundefined 1\n", stream.buffered());
 }
 
-test "Engine assignment RHS regexp and division follow eval reference timing" {
+test "Engine grouped direct eval preserves assignment reference timing" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function testGroupedAssignment() {
+        \\  var x = "outer";
+        \\  var innerX = (function() {
+        \\    x = ((eval)("var x = 1; 0"), 2);
+        \\    return x;
+        \\  })();
+        \\  print(innerX, x);
+        \\}
+        \\testGroupedAssignment();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    // Grouping around the intrinsic eval callee is still direct eval. The
+    // assignment target must therefore be captured before eval inserts x.
+    try std.testing.expectEqualStrings("1 2\n", stream.buffered());
+}
+
+test "Engine assignment RHS regexp and division preserve eval reference timing" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -1656,9 +1682,8 @@ test "Engine assignment RHS regexp and division follow eval reference timing" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // Pinned QuickJS prints `10 10`: the assignment updates eval's local `x`,
-    // while the outer function binding remains unchanged.
-    try std.testing.expectEqualStrings("true\ntest262\nabc\n10 10\n", stream.buffered());
+    // The assignment target is captured before eval introduces its local `x`.
+    try std.testing.expectEqualStrings("true\ntest262\nabc\n2 10\n", stream.buffered());
 }
 
 test "Engine eval inherits caller scope through nested direct eval" {
@@ -2495,7 +2520,7 @@ test "Engine direct eval catch var stops at the first same-name catch binding" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("g 42g\n", stream.buffered());
+    try std.testing.expectEqualStrings("global-x 42g\n", stream.buffered());
 }
 
 test "Engine direct eval catch var creation is idempotent and checks outer lexicals" {
@@ -2526,7 +2551,7 @@ test "Engine direct eval catch var creation is idempotent and checks outer lexic
     try std.testing.expectEqualStrings("7 SyntaxError\n", stream.buffered());
 }
 
-test "Engine direct eval var-object force initialization mirrors QuickJS" {
+test "Engine direct eval var-object initialization preserves existing bindings" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -2544,7 +2569,7 @@ test "Engine direct eval var-object force initialization mirrors QuickJS" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("1\nundefined\n", stream.buffered());
+    try std.testing.expectEqualStrings("1\n1\n", stream.buffered());
 }
 
 test "Engine Annex B var copy does not use global function declaration validation" {

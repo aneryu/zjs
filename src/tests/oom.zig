@@ -25,6 +25,13 @@
 const std = @import("std");
 const zjs = @import("zjs");
 
+// QCP-1: this artifact proves its OWN effective configuration at compile time
+// (src/config_signature.zig). Every test artifact attests separately; none
+// borrows the `src/all_tests.zig` root's attestation.
+comptime {
+    zjs.config_signature.attest("oom-tests");
+}
+
 const core = zjs.core;
 const BindingContext = zjs.binding_root.JSContext;
 const module_graph = zjs.exec.module_graph;
@@ -1276,6 +1283,98 @@ test "oom recovery canary: promise jobs snippet" {
 
 test "oom recovery canary: generator return through shared finalizer" {
     try recoveryCanarySweep(corpusSnippetNamed("generator-return-shared-finalizer"));
+}
+
+// ---------------------------------------------------------------------------
+// Parser lookahead transactional contract (lexer position restore)
+// ---------------------------------------------------------------------------
+
+/// Export forms whose declaration name is discovered by a one-token
+/// lookahead: `export function` and `export async function` route through
+/// `exportDefaultFunctionNameOwned`, `export default class` through
+/// `exportDefaultClassNameOwned`. Each helper snapshots the lexer position,
+/// peeks one token and restores the snapshot from a `defer`. `next()` moves
+/// `pos` past the peeked identifier before interning its atom, so an
+/// allocation failure inside the peek leaves the lexer mid-token unless the
+/// restore was armed *before* the peek; the caller then resumes on `(` / `{`
+/// and rejects a perfectly valid module. The identifiers are deliberately
+/// unique so their intern is a fresh (injectable) allocation instead of an
+/// atom-table hit.
+const lookahead_restore_source =
+    \\export function oomLookaheadRestoreNamedFunction() { return 1; }
+    \\export async function oomLookaheadRestoreAsyncFunction() { return 2; }
+    \\export default class OomLookaheadRestoreClassName {}
+;
+
+/// One module compile with a single allocation failure injected `fail_index`
+/// allocations into the parse. Runtime and realm bootstrap run disarmed on
+/// purpose: they dominate the index space and are already swept by the
+/// corpus tests, while the window that matters here is the compile itself.
+///
+/// Contract: a valid module under one injected failure either compiles or
+/// reports `error.OutOfMemory` (`compile` propagates OOM instead of routing
+/// it into the syntax-error guard). A `syntax_error` result therefore means
+/// some lookahead helper returned with the lexer left mid-token.
+fn runLookaheadRestoreAttempt(injector: *OneShotFailingAllocator, fail_index: usize) !void {
+    injector.disarmed = true;
+    const rt = try core.JSRuntime.create(injector.allocator());
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    injector.attempts = 0;
+    injector.fail_index = fail_index;
+    injector.disarmed = false;
+    const compiled = parser.compile(.{ .realm = realm }, lookahead_restore_source, .{
+        .mode = .module,
+        .filename = corpus_filename,
+    });
+    injector.disarmed = true;
+
+    if (compiled) |produced| {
+        var result = produced;
+        defer result.deinit();
+        if (result.syntax_error != null) {
+            std.debug.print(
+                "[oom-lookahead] injected failure at compile allocation {d} turned a valid module into a syntax error\n",
+                .{fail_index},
+            );
+            return error.TestUnexpectedResult;
+        }
+    } else |err| {
+        if (err != error.OutOfMemory) return err;
+    }
+}
+
+test "oom parser canary: export name lookahead restores the lexer position" {
+    // Warm-up pass outside the counted window (process-global lazy state),
+    // which also asserts the module parses cleanly with reliable memory.
+    {
+        var warm_up = OneShotFailingAllocator{
+            .backing = std.testing.allocator,
+            .fail_index = std.math.maxInt(usize),
+        };
+        try runLookaheadRestoreAttempt(&warm_up, std.math.maxInt(usize));
+        try warm_up.expectBalanced();
+        try std.testing.expect(!warm_up.induced);
+    }
+
+    // Dense sweep: every allocation the compile performs is an injection
+    // point, and the sweep ends at the first index the parse never reaches.
+    var fail_index: usize = 0;
+    while (true) {
+        var injector = OneShotFailingAllocator{
+            .backing = std.testing.allocator,
+            .fail_index = fail_index,
+        };
+        try runLookaheadRestoreAttempt(&injector, fail_index);
+        try injector.expectBalanced();
+        if (!injector.induced) break;
+        fail_index += 1;
+    }
+    // Guard against the window silently collapsing to nothing (e.g. if the
+    // parse ever stopped allocating through the injected allocator).
+    try std.testing.expect(fail_index > 8);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,10 @@
+affinity: [19]
+r1 b1(frozen) score=3289 instructions=966040439449 cycles=181300306656
+r1 c1(fix)    score=3245 instructions=966045938196 cycles=183705244655
+r1 c1(fix)    score=3238 instructions=966047768716 cycles=184118948570
+r1 b1(frozen) score=3285 instructions=966041186184 cycles=181452081704
+r2 c1(fix)    score=3255 instructions=966044453491 cycles=183169778012
+r2 b1(frozen) score=3265 instructions=966045275289 cycles=182574158883
+r2 b1(frozen) score=3276 instructions=966042413427 cycles=181979915067
+r2 c1(fix)    score=3247 instructions=966045943398 cycles=183598097131
+ZLIB-ATTR DONE 2026-08-04T01:25:09+08:00

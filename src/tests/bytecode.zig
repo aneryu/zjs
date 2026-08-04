@@ -2,10 +2,18 @@ const std = @import("std");
 const zjs = @import("zjs");
 const engine = zjs;
 
+// QCP-1: this artifact proves its OWN effective configuration at compile time
+// (src/config_signature.zig). Every test artifact attests separately; none
+// borrows the `src/all_tests.zig` root's attestation.
+comptime {
+    zjs.config_signature.attest("test-bytecode");
+}
+
 const bytecode = zjs.bytecode;
 const core = zjs.core;
 const frame_mod = zjs.exec.frame;
 const parser = zjs.parser;
+const parser_tests = @import("parser.zig");
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -1263,7 +1271,7 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
     }
 }
 
-test "resolve_variables: catch var is the sole first-match eval declaration target" {
+test "resolve_variables: catch var skips to the eval var object but function declarations keep first match" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1278,11 +1286,12 @@ test "resolve_variables: catch var is the sole first-match eval declaration targ
     };
     const var_plan = try resolveEvalDeclarationPlan(rt, name, x_atom, true, -1, &catch_then_var_object);
     switch (var_plan.eval_target) {
-        .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
+        .var_object => |idx| try std.testing.expectEqual(@as(u16, 1), idx),
         else => try std.testing.expect(false),
     }
 
-    // Function declarations use the same pinned-QuickJS first-match walk.
+    // Function declarations are not Annex B var declarations, so they still
+    // use the first same-name closure binding.
     const function_plan = try resolveEvalDeclarationPlan(rt, name, x_atom, true, 0, &catch_then_var_object);
     switch (function_plan.eval_target) {
         .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
@@ -10493,4 +10502,141 @@ test "P2-S1: line_num-only input shrinks to a zero-used capacity-carried backing
     bc_live = false;
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+}
+
+test "four-ledger phase-boundary ownership accounting compile-only" {
+    const ownership = parser_tests.phase_ownership;
+
+    for (&ownership.shapes) |*shape| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+
+        try ownership.warmRuntime(rt, shape);
+
+        // A realm is only needed to materialise child FunctionBytecodes. Create
+        // it before the window so its own allocations and atoms sit outside the
+        // measured baseline.
+        const realm = try core.RealmContext.create(rt);
+        defer realm.destroy();
+
+        var window: ownership.Window = undefined;
+        try window.init(rt, shape);
+        defer window.deinit();
+
+        var b1 = try window.sampleB1();
+        // Parsing never publishes a FunctionBytecode; finalization is the only
+        // producer. Tier 2 therefore still starts at an exact census.
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            ownership.publishedFunctionBytecodeCount(&window.function),
+        );
+        try std.testing.expectEqual(@as(usize, 0), try ownership.atomResidual(b1));
+
+        var b2: ownership.Snapshot = undefined;
+        var b3: ownership.Snapshot = undefined;
+        var emit_residual: usize = 0;
+        if (shape.tier == .nested_function_bytecode) {
+            // Child FunctionDefs make per-phase driving illegal: the child
+            // FunctionBytecodes must be installed into the constant pool before
+            // resolve_variables, and the installer plus
+            // prepareCurrentBeforeChildren are private to pipeline_finalize.
+            // Driving resolve_variables directly here instead produces an
+            // invalid product (measured: 8 of 24 source events land past
+            // code.len). So B2 is not separately observable for this tier and
+            // collapses into the composite emit; tier 1 carries the isolated
+            // resolve_variables boundary.
+            try std.testing.expect(window.state.function_def.child_list.len > 0);
+            try pipeline.finalize.runWithFunctionDefRuntime(
+                &window.function,
+                &window.state.function_def,
+                .{ .realm = realm },
+            );
+            b3 = try window.sampleNext(.final, &b1);
+            b2 = b3;
+            // Finalization moved ownership under published FunctionBytecodes,
+            // which the census does not descend into. That residual is what the
+            // remaining boundaries must carry unchanged.
+            try std.testing.expect(ownership.publishedFunctionBytecodeCount(&window.function) > 0);
+            emit_residual = try ownership.atomResidual(b3);
+            try std.testing.expect(emit_residual > 0);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), window.state.function_def.child_list.len);
+            var variables_ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(
+                &window.function,
+                &window.state.function_def,
+            );
+            try pipeline.resolve_variables.run(&variables_ctx);
+            b2 = try window.sampleNext(.phase1, &b1);
+
+            // pipeline.finalize.runPhases flips this public phase-contract bit
+            // between resolve_variables and resolve_labels. The private prepare
+            // and metadata-sync helpers remain intentionally bypassed here.
+            window.state.function_def.use_short_opcodes = true;
+            var labels_ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(
+                &window.function,
+                &window.state.function_def,
+            );
+            try pipeline.resolve_labels.run(&labels_ctx);
+
+            var encoded = try pipeline.pc2line.encode(
+                &rt.memory,
+                window.function.source_loc_slots,
+                window.function.line_num,
+                window.function.col_num,
+            );
+            defer encoded.deinit();
+            window.function.installPc2Line(encoded.bytes);
+            encoded.bytes = &.{};
+            window.function.stack_size = try pipeline.stack_size.compute(window.function.code, .{
+                .scratch_allocator = rt.memory.allocator,
+            });
+            b3 = try window.sampleNext(.final, &b2);
+        }
+
+        window.discardTemporaries();
+        var b4 = try window.sampleNext(.final, &b3);
+        const committed = b4.builder.owned;
+        ownership.setBuilderCommitted(&b1, committed);
+        ownership.setBuilderCommitted(&b2, committed);
+        ownership.setBuilderCommitted(&b3, committed);
+        ownership.setBuilderCommitted(&b4, committed);
+
+        try ownership.expectAtomAccount(b1, 0);
+        try ownership.expectAtomAccount(b2, emit_residual);
+        try ownership.expectAtomAccount(b3, emit_residual);
+        // The published-FB residual is a constant of the compile: it appears at
+        // the emit boundary and must survive the temporaries discard untouched.
+        try ownership.expectAtomAccount(b4, emit_residual);
+        if (shape.tier == .nested_function_bytecode) {
+            try std.testing.expect(std.meta.eql(b2, b3));
+            try ownership.expectAtomTransition(b1, b3, true);
+        } else {
+            try ownership.expectAtomTransition(b1, b2, false);
+            try ownership.expectAtomTransition(b2, b3, true);
+        }
+        try ownership.expectAtomTransition(b3, b4, false);
+        try ownership.expectB1(b1);
+        if (shape.tier == .exact_leaf) try ownership.expectB2(b1, b2);
+        try ownership.expectB3(b1, b3);
+        try ownership.expectB4(b1, b3, b4);
+
+        ownership.dump(shape.*, "compile-only", "B1-after-parse", b1);
+        ownership.dump(
+            shape.*,
+            "compile-only",
+            if (shape.tier == .nested_function_bytecode)
+                "B2-collapsed-into-B3"
+            else
+                "B2-after-resolve-variables",
+            b2,
+        );
+        ownership.dump(shape.*, "compile-only", "B3-after-final-emit", b3);
+        ownership.dump(shape.*, "compile-only", "B4-artifact-only", b4);
+
+        window.releaseArtifact();
+        var terminal = try window.sampleNext(.final, &b4);
+        ownership.setBuilderCommitted(&terminal, 0);
+        try ownership.expectTerminal(terminal);
+        ownership.dump(shape.*, "compile-only", "terminal", terminal);
+    }
 }

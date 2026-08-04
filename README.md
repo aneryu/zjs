@@ -75,9 +75,51 @@ zig build smoke --seed 0 --summary all
 zig build test262-smoke --seed 0 --summary all
 zig build test-oom --seed 0 --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
 zig build test -Dzjs_force_gc=true --seed 0 --summary all
+zig build test -Dzjs_ownership_audit=true --seed 0 --summary all # atom 所有权审计档（一格槽位隔离区，ASAN 那一档；默认关、不进 ReleaseFast）/ atom-ownership audit tier (one-slot quarantine; ASAN-class, default off, never ReleaseFast) — docs/borrowed_atom_audit.md §7
 zig build perf-self-check --seed 0 --summary all
 zig build engine-production-gate --seed 0 --summary all
+zig build config-signature-check --seed 0 # 构建产物自报配置签名并与构建图请求比对 / the built zjs states its own configuration signature and it is compared against what the build graph requested
 ```
+
+### Compiler configuration
+
+The compiler and its final bytecode layout are build options. **The production
+configuration is compiler-v2 with the short layout, and it is the default:**
+
+```
+zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+```
+
+```sh
+zig build test --seed 0 --summary all                        # production default: v2 + short
+zig build test -Dzjs_compiler=legacy --seed 0 --summary all  # EXPERIMENTAL FALLBACK ONLY — not a supported production configuration
+zig build test -Dzjs_compiler=dual --seed 0 --summary all    # differential oracle
+zig build test -Dzjs_v2_layout=plain --seed 0 --summary all  # A/B diagnostic layout
+```
+
+The legacy pipeline is **retained as a fallback only**. It still builds and
+still passes its suite, but it is not a supported production configuration and
+`-Dzjs_compiler=legacy` must not be read as a second default.
+
+**Legacy's physical removal is deferred, and that is deliberate.** QCP-1 closed
+as two verdicts (`docs/qcp1_switch_decision.md` §8):
+
+- **QCP-1A — make V2 the production compiler: ACCEPT.** Shipped as the default.
+- **QCP-1B — physically delete the legacy pipelines: NO-GO, deferred.** Deleting
+  them produced a stable runtime benchmark regression — crypto about **−4%**
+  against the pre-delete V2 tip, full-suite geomean about **−0.7%** — whose
+  mechanism was never identified. It is not a correctness failure and not an
+  architecture failure. It is re-filed as a separate **runtime layout
+  stability** project; legacy source stays until that question is answered.
+
+Those settings, plus the JSValue representation, the optimize mode, force-GC and
+the ownership audit, form the build's **configuration signature**
+(`zig-out/bin/zjs --print-config-signature`). It is derived from the
+declarations the engine consumes, and every engine-bearing artifact asserts it
+at compile time, so a gate states which configuration its green belongs to and
+a Debug artifact cannot be mistaken for a ReleaseFast one. `zig build
+config-drift-gate` proves the assertion can still fail. See
+`docs/qcp1_switch_decision.md` §0.1.4 and §0.1.9.
 
 Focused subsystem steps are available as `test-core`, `test-parser`,
 `test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`, and
@@ -100,6 +142,7 @@ zig-out/bin/zjs -e "console.log(1 + 2)"
 zig-out/bin/zjs path/to/file.js
 zig-out/bin/zjs --leak-check -e "let x = { ok: true }"
 zig-out/bin/zjs --perf-json path/to/file.js 2> perf.json
+zig-out/bin/zjs --print-config-signature
 ```
 
 Missing or invalid arguments print usage and exit non-zero.

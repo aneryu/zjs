@@ -10,6 +10,16 @@ pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
 pub const runtime = @import("runtime/root.zig");
+pub const compiler_v2 = @import("compiler_v2/root.zig");
+pub const config_signature = @import("config_signature.zig");
+
+// QCP-1: the unified suite proves its OWN effective configuration at compile
+// time. It follows -Doptimize, so `zig build test` reports `optimize=Debug`
+// and `zig build test -Doptimize=ReleaseSafe` reports `optimize=ReleaseSafe` --
+// the distinction that decides whether the run had the assert oracle at all.
+comptime {
+    config_signature.attest("unified-tests (src/all_tests.zig)");
+}
 pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;
 pub const JSRuntime = kernel_api.JSRuntime;

@@ -14,6 +14,15 @@ const dossier_memo = std.mem.eql(u8, dossier_variant, "a");
 const zjs = @import("zjs");
 const builtin = @import("builtin");
 
+// QCP-1: a perf harness built for a configuration nobody asked for is the same
+// defect as a gate green about a configuration it never ran, with the damage
+// pointed at the numbers instead of the correctness claim. This harness shares
+// the production ReleaseFast engine module, so it attests the same signature
+// the shipped `zjs` does.
+comptime {
+    zjs.config_signature.attest("zjs-same-runtime");
+}
+
 const max_source_size = 4 * 1024 * 1024;
 const max_iterations = 1_000_000;
 

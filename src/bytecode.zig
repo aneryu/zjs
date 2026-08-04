@@ -53,6 +53,11 @@ pub const opcode = struct {
         label_u16,
     };
 
+    /// Phase-1 scope operand flag: the LHS reference has already selected its
+    /// environment, so the fallback put must resolve only the static chain.
+    pub const scope_no_dynamic_env_flag: u16 = 0x8000;
+    pub const scope_no_dynamic_env_max_level: u16 = 0x7ffe;
+
     /// One row of opcode metadata (QuickJS `JSOpCode`).
     pub const Info = struct {
         name: []const u8,
@@ -62,16 +67,15 @@ pub const opcode = struct {
         fmt: Format,
     };
 
-    /// Phase-1 scope operand flag: the LHS reference has already selected its
-    /// environment, so the fallback put must resolve only the static chain.
-    pub const scope_no_dynamic_env_flag: u16 = 0x8000;
-    pub const scope_no_dynamic_env_max_level: u16 = 0x7ffe;
-
     pub const WithPutMode = enum(u8) {
         var_object_probe = 0,
         selected_reference = 1,
         with_probe = 2,
     };
+
+    /// zjs extension carried by the existing `throw_error` opcode for
+    /// Annex-B runtime errors on CallExpression assignment targets.
+    pub const throw_error_invalid_assignment_target: u8 = 5;
 
     pub const op = struct {
         pub const invalid: u8 = 0;
@@ -1250,6 +1254,9 @@ pub const CompileContext = struct {
     realm: *core_context.RealmContext,
     policy: CompilePolicy = .{},
     timing: ?*CompileTiming = null,
+    /// Borrowed per-root dual-compile diagnostics. Published artifacts never
+    /// retain this pointer; ordinary legacy/v2 production leaves it null.
+    v2_ledger: ?*@import("compiler_v2/compare.zig").Ledger = null,
 
     pub inline fn artifactAllocator(self: CompileContext) @import("std").mem.Allocator {
         return self.realm.runtime.memory.persistent_allocator;
@@ -2721,6 +2728,12 @@ pub const function_def = struct {
     const function_bytecode_mod = function_bytecode;
     const memory = @import("core/memory.zig");
     const JSValue = @import("core/value.zig").JSValue;
+    const compiler_v2 = @import("compiler_v2/root.zig");
+    /// QCP-1: legacy builds can never attach a v2 builder (the only
+    /// producers are comptime-gated on the parser's `v2_available`), so the
+    /// release check in `deinit` folds away with the rest of the v2 leg.
+    const compiler_v2_available =
+        !std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
 
     fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
         _ = atoms;
@@ -2989,6 +3002,12 @@ pub const function_def = struct {
         atom_operands: []atom.Atom = &.{},
         atom_operands_capacity: usize = 0,
         last_opcode_pos: i32 = -1,
+        /// QCP-1 stage 2P: compiler-v2 emission backend for this function's
+        /// parse. Heap-allocated when a v2 parse begins for this function
+        /// (stage 5 wires production; for now only the parser test hook does);
+        /// released in `deinit`. One optional pointer keeps @sizeOf impact
+        /// minimal.
+        v2_builder: ?*compiler_v2.Builder = null,
         /// See `FlowTailSummary`. Born valid-empty; the class machinery's
         /// direct byte injections invalidate at their sites and the next
         /// query rebuilds from whatever is present.
@@ -3289,6 +3308,21 @@ pub const function_def = struct {
             self.arguments_arg_idx = idx;
         }
 
+        /// `arguments_var_idx` is also used for the lazy pseudo binding that
+        /// represents the function's body arguments object. A source-level
+        /// `var arguments` replaces that pseudo row with a real function var;
+        /// its parser origin is retained in `scope_next` (the synthetic row
+        /// has the zero origin used by `add_var`). Parameter-initializer
+        /// closures need this distinction: without a body declaration they
+        /// share the function arguments binding, while `var arguments`
+        /// deliberately shadows it with a separate body binding.
+        pub fn hasExplicitArgumentsVar(self: *const FunctionDefImpl) bool {
+            if (self.arguments_var_idx < 0) return false;
+            const idx: usize = @intCast(self.arguments_var_idx);
+            if (idx >= self.vars.len) return false;
+            return self.vars[idx].scope_next != 0;
+        }
+
         /// Append a `VarDef` to `vars`. Mirrors `add_var`
         /// (`quickjs.c:23554`). The caller is responsible for setting
         /// `scope_level`, `var_kind`, `is_lexical`, `is_const`. The atom
@@ -3556,6 +3590,18 @@ pub const function_def = struct {
             self.atoms.free(func_name);
             self.atoms.free(filename);
             self.atoms.free(script_or_module);
+
+            if (comptime compiler_v2_available) {
+                // Parse-time/error-path backstop; successful v2 lowering
+                // releases the builder at its consumption point.
+                if (self.v2_builder) |v2b| {
+                    self.v2_builder = null;
+                    v2b.deinit();
+                    self.memory.destroy(compiler_v2.Builder, v2b);
+                }
+            } else {
+                std.debug.assert(self.v2_builder == null);
+            }
 
             freeGrowableNamedSlice(VarDef, self.atoms, self.memory, &self.vars, &self.vars_capacity);
             if (self.vars_htab.len != 0) self.memory.free(u32, self.vars_htab);
@@ -4885,11 +4931,22 @@ pub const pipeline_resolve_variables = struct {
     const throw_error_instr_size: usize = 6;
     const JS_THROW_VAR_RO: u8 = 0; // quickjs.c:18334
     const JS_THROW_VAR_REDECL: u8 = 1; // quickjs.c:18335
-
     fn writeThrowVarReadOnly(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: u32) void {
+        writeThrowVarError(func, output, out_idx, output_atoms, out_atom_idx, atom_id, JS_THROW_VAR_RO);
+    }
+
+    fn writeThrowVarError(
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: u32,
+        error_type: u8,
+    ) void {
         output[out_idx.*] = opcode.op.throw_error;
         std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output[out_idx.* + 5] = JS_THROW_VAR_RO;
+        output[out_idx.* + 5] = error_type;
         output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
         out_idx.* += throw_error_instr_size;
         out_atom_idx.* += 1;
@@ -5502,7 +5559,16 @@ pub const pipeline_resolve_variables = struct {
             };
             var stop_idx = fd.closure_var.len;
             for (fd.closure_var, 0..) |cv, idx| {
-                if (!isDynamicEnvObjectAtom(cv.var_name) and cv.var_name == atom_id) {
+                // A catch binding is only visible while its catch block is
+                // active, and global-family rows are the fallback after the
+                // dynamic environment objects. Neither row terminates the
+                // var-object probe chain for a reference outside that static
+                // binding. Lexical/local/argument rows still stop it.
+                const stops_probe = !isDynamicEnvObjectAtom(cv.var_name) and
+                    cv.var_name == atom_id and
+                    cv.varKind() != .catch_ and
+                    !closureVarIsGlobalFamily(cv);
+                if (stops_probe) {
                     stop_idx = idx;
                     break;
                 }
@@ -5564,11 +5630,44 @@ pub const pipeline_resolve_variables = struct {
 
     fn staticBindingStopsDynamicEnvProbes(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) bool {
         if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return true;
+        // Direct eval receives a visible catch parameter as a closure row.
+        // That row is the active lexical environment for the eval itself and
+        // must win over the eval var object. Ordinary local/argument closure
+        // rows remain dynamically probeable: a direct eval can insert a
+        // same-named var binding that subsequent caller code observes.
+        if (bytecodeFunctionIsEval(ctx)) {
+            if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                if (closureVarKind(ctx, ref_idx) == .catch_) return true;
+            }
+        }
         const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return false;
         return switch (binding) {
             .arg => true,
-            .local => |loc_idx| !isEvalNonLexicalLocal(ctx, loc_idx),
+            .local => |loc_idx| blk: {
+                const fd = ctx.function_def orelse break :blk false;
+                if (loc_idx >= fd.vars.len) break :blk false;
+                const vd = fd.vars[loc_idx];
+                if (vd.var_kind == .catch_ and !scopeContainsBinding(fd, scope_level, vd.scope_level)) {
+                    break :blk false;
+                }
+                break :blk !isEvalNonLexicalLocal(ctx, loc_idx);
+            },
         };
+    }
+
+    fn scopeContainsBinding(
+        fd: *const function_def_mod.FunctionDef,
+        reference_scope: i32,
+        binding_scope: i32,
+    ) bool {
+        if (reference_scope < 0 or binding_scope < 0) return false;
+        var scope = reference_scope;
+        var visited: usize = 0;
+        while (scope >= 0 and @as(usize, @intCast(scope)) < fd.scopes.len and visited <= fd.scopes.len) : (visited += 1) {
+            if (scope == binding_scope) return true;
+            scope = fd.scopes[@intCast(scope)].parent;
+        }
+        return false;
     }
 
     const EvalVarObjectProbeKind = enum {
@@ -6584,6 +6683,8 @@ pub const pipeline_resolve_variables = struct {
     const GLOBAL_REF_TAIL_DUP_PUT: u8 = 2;
     const LOCAL_REF_TAIL_PUT: u8 = 3;
     const LOCAL_REF_TAIL_DUP_PUT: u8 = 4;
+    const CLOSURE_REF_TAIL_PUT: u8 = 5;
+    const CLOSURE_REF_TAIL_DUP_PUT: u8 = 6;
 
     const GlobalRefPutTail = struct {
         pc: usize,
@@ -6635,6 +6736,15 @@ pub const pipeline_resolve_variables = struct {
 
     fn localRefPutTailReplacementSize(ctx: *const JSContext, kind: u8, loc_idx: u16) usize {
         return localRefPutForm(ctx, loc_idx).size + @intFromBool(kind == LOCAL_REF_TAIL_DUP_PUT);
+    }
+
+    fn closureRefPutTailKind(kind: u8) u8 {
+        return if (kind == GLOBAL_REF_TAIL_DUP_PUT) CLOSURE_REF_TAIL_DUP_PUT else CLOSURE_REF_TAIL_PUT;
+    }
+
+    fn closureRefPutTailReplacementSize(ctx: *const JSContext, kind: u8, ref_idx: u16) usize {
+        return selectVarRefForm(ctx, opcode.op.put_var_ref, ref_idx).size +
+            @intFromBool(kind == CLOSURE_REF_TAIL_DUP_PUT);
     }
 
     fn writeSelectedLocForm(output: []u8, out_idx: *usize, form: ShortLocForm, loc_idx: u16) void {
@@ -6752,8 +6862,14 @@ pub const pipeline_resolve_variables = struct {
             gv.eval_target = .global;
             for (fd.closure_var, 0..) |cv, idx| {
                 if (cv.var_name == gv.var_name) {
-                    // instantiate_hoisted_definitions stops at the first
-                    // same-name closure, including a simple catch binding.
+                    // Annex B.3.4's same-name simple catch binding is not the
+                    // VariableDeclarationEnvironment used for a direct-eval
+                    // `var`. Skip it so the dynamic var object can receive
+                    // the hoisted binding; the eval initializer still uses
+                    // the catch reference for the assignment itself.
+                    if (gv.cpool_idx < 0 and cv.varKind() == .catch_) continue;
+                    // For every other closure, instantiate_hoisted_definitions
+                    // stops at the first same-name binding.
                     if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
                     gv.eval_target = .{ .closure = @intCast(idx) };
                     break;
@@ -6798,8 +6914,15 @@ pub const pipeline_resolve_variables = struct {
             else
                 0,
             .var_object => |idx| selectVarRefForm(ctx, opcode.op.get_var_ref, idx).size +
-                (if (gv.cpool_idx >= 0) try fclosureEncodingSize(gv.cpool_idx) else 1) +
-                opcode.sizeOf(opcode.op.define_field) + 1,
+                if (gv.cpool_idx >= 0)
+                    (try fclosureEncodingSize(gv.cpool_idx) + opcode.sizeOf(opcode.op.define_field) + 1)
+                else
+                    (opcode.sizeOf(opcode.op.get_field2) +
+                        opcode.sizeOf(opcode.op.is_undefined) +
+                        opcode.sizeOf(opcode.op.if_false) +
+                        opcode.sizeOf(opcode.op.undefined) +
+                        opcode.sizeOf(opcode.op.define_field) +
+                        opcode.sizeOf(opcode.op.drop)),
             .global, .unresolved => 0,
         };
         return target_size;
@@ -6807,7 +6930,7 @@ pub const pipeline_resolve_variables = struct {
 
     fn globalHoistAtomCount(gv: function_def_mod.GlobalVar) usize {
         return switch (gv.eval_target) {
-            .var_object => 1,
+            .var_object => if (gv.cpool_idx >= 0) 1 else 2,
             .closure, .global, .unresolved => 0,
         };
     }
@@ -6901,15 +7024,43 @@ pub const pipeline_resolve_variables = struct {
                     writeVarRefForm(output, out_idx, selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx), ref_idx);
                     if (gv.cpool_idx >= 0) {
                         try emitFClosure(output, out_idx, gv.cpool_idx);
+                        output[out_idx.*] = opcode.op.define_field;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
+                        output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
+                        out_idx.* += opcode.sizeOf(opcode.op.define_field);
+                        out_atom_idx.* += 1;
                     } else {
+                        // EvalDeclarationInstantiation creates a new var
+                        // object property only when the name is absent. A
+                        // repeated direct-eval `var x` must preserve an
+                        // existing value (and, importantly, the binding cell
+                        // observed by later evals). The internal var object is
+                        // plain and cannot expose an accessor, so an existing
+                        // undefined value is the only indistinguishable case;
+                        // redefining that value is harmless while all other
+                        // values take the no-op branch.
+                        output[out_idx.*] = opcode.op.get_field2;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
+                        output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
+                        out_idx.* += opcode.sizeOf(opcode.op.get_field2);
+                        out_atom_idx.* += 1;
+                        output[out_idx.*] = opcode.op.is_undefined;
+                        out_idx.* += opcode.sizeOf(opcode.op.is_undefined);
+                        const branch_pc = out_idx.*;
+                        output[out_idx.*] = opcode.op.if_false;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], @intCast(branch_pc +
+                            opcode.sizeOf(opcode.op.if_false) +
+                            opcode.sizeOf(opcode.op.undefined) +
+                            opcode.sizeOf(opcode.op.define_field)), .little);
+                        out_idx.* += opcode.sizeOf(opcode.op.if_false);
                         output[out_idx.*] = opcode.op.undefined;
-                        out_idx.* += 1;
+                        out_idx.* += opcode.sizeOf(opcode.op.undefined);
+                        output[out_idx.*] = opcode.op.define_field;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
+                        output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
+                        out_idx.* += opcode.sizeOf(opcode.op.define_field);
+                        out_atom_idx.* += 1;
                     }
-                    output[out_idx.*] = opcode.op.define_field;
-                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
-                    output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
-                    out_idx.* += opcode.sizeOf(opcode.op.define_field);
-                    out_atom_idx.* += 1;
                     output[out_idx.*] = opcode.op.drop;
                     out_idx.* += 1;
                 },
@@ -7075,6 +7226,34 @@ pub const pipeline_resolve_variables = struct {
             if (try discoverParentScopedSource(fd, parent, atom_id, visible_scope_level)) |local_idx| {
                 try threadParentLocalSource(fd, parent, local_idx);
                 return;
+            }
+
+            // An arrow created while a parameter initializer is evaluated is
+            // linked to the parameter environment, not to the function-body
+            // var environment.  The synthetic `arguments` cell is normally
+            // created by add_eval_variables, but this capture is also valid
+            // without a direct eval in the parent, so materialize the same
+            // scope-1 cell on demand before the body-var/arguments fallback.
+            if (atom_id == atom.ids.arguments and
+                argument_environment_only and
+                parent.has_arguments_binding and
+                parent.has_parameter_expressions and
+                parent.func_type != .arrow and
+                parent.func_type != .class_static_init)
+            {
+                _ = parent.ensureArgumentsBinding() catch return error.OutOfMemory;
+                parent.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidScope => error.InvalidBytecode,
+                };
+                const parameter_arguments_idx = if (parent.hasExplicitArgumentsVar())
+                    parent.arguments_arg_idx
+                else
+                    parent.arguments_var_idx;
+                if (parameter_arguments_idx >= 0) {
+                    try threadParentLocalSource(fd, parent, @intCast(parameter_arguments_idx));
+                    return;
+                }
             }
 
             if (!argument_environment_only) {
@@ -7814,6 +7993,37 @@ pub const pipeline_resolve_variables = struct {
                         folded = true;
                     }
                 }
+                if (!folded and !needs_eval_probe) {
+                    if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                        // Keep read-only closure writes on the generic
+                        // make-ref path so it can lower to the compile-time
+                        // throw. The compact var-ref tail is only valid for
+                        // mutable cells.
+                        if (closureVarKind(ctx, ref_idx) != .function_name and
+                            !closureVarWriteThrowsReadOnly(ctx, ref_idx))
+                        {
+                            if (refPutTailAtMakeRefLabel(code, pc)) |tail| {
+                                if (tail.pc < tail_kinds.len and tail_kinds[tail.pc] == GLOBAL_REF_TAIL_NONE) {
+                                    const value_pc = pc + 11;
+                                    const reads_value = value_pc < code.len and
+                                        code[value_pc] == opcode.op.get_ref_value;
+                                    // A post-update/compound target keeps a
+                                    // pre-write value on the stack. The
+                                    // generic reference tail consumes the
+                                    // updated value; this fold handles only
+                                    // the plain assignment shape.
+                                    if (!reads_value) {
+                                        tail_kinds[tail.pc] = closureRefPutTailKind(tail.kind);
+                                        tail_local_indices[tail.pc] = ref_idx;
+                                        make_ref_tail_pc[pc] = tail.pc;
+                                        make_ref_reads_value[pc] = false;
+                                        folded = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if (!folded and !needs_eval_probe and canOptimizeGlobalRefPutTail(ctx, atom_id) and
                     makeRefBindingIsGlobal(ctx, atom_id, scope))
                 {
@@ -8038,6 +8248,10 @@ pub const pipeline_resolve_variables = struct {
                     const loc_idx = local_ref_tail_indices[i];
                     if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                     output_size += localRefPutTailReplacementSize(ctx, kind, loc_idx);
+                } else if (kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) {
+                    const ref_idx = local_ref_tail_indices[i];
+                    if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                    output_size += closureRefPutTailReplacementSize(ctx, kind, ref_idx);
                 } else {
                     output_size += globalRefPutTailReplacementSize(kind);
                 }
@@ -8157,6 +8371,10 @@ pub const pipeline_resolve_variables = struct {
                         const loc_idx = local_ref_tail_indices[tail_pc];
                         if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                         output_size += localRefGetForm(ctx, loc_idx).size;
+                    } else if ((kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) and make_ref_reads_value[i]) {
+                        const ref_idx = local_ref_tail_indices[tail_pc];
+                        if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                        output_size += selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size;
                     } else if ((kind == GLOBAL_REF_TAIL_PUT or kind == GLOBAL_REF_TAIL_DUP_PUT) and make_ref_reads_value[i]) {
                         output_size += 3;
                     }
@@ -8322,7 +8540,9 @@ pub const pipeline_resolve_variables = struct {
             }
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
                 const kind = global_ref_tail_kinds[i];
-                if (kind == GLOBAL_REF_TAIL_DUP_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
+                if (kind == GLOBAL_REF_TAIL_DUP_PUT or kind == LOCAL_REF_TAIL_DUP_PUT or
+                    kind == CLOSURE_REF_TAIL_DUP_PUT)
+                {
                     output[out_idx] = opcode.op.dup;
                     out_idx += 1;
                 }
@@ -8330,6 +8550,15 @@ pub const pipeline_resolve_variables = struct {
                     const loc_idx = local_ref_tail_indices[i];
                     if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                     writeSelectedLocForm(output, &out_idx, localRefPutForm(ctx, loc_idx), loc_idx);
+                } else if (kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) {
+                    const ref_idx = local_ref_tail_indices[i];
+                    if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                    writeSelectedLocForm(
+                        output,
+                        &out_idx,
+                        selectVarRefForm(ctx, opcode.op.put_var_ref, ref_idx),
+                        ref_idx,
+                    );
                 } else {
                     try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.put_var, global_ref_tail_atoms[i]);
                 }
@@ -8503,6 +8732,19 @@ pub const pipeline_resolve_variables = struct {
                             if (comptime relocation_oracle_enabled) oracle_pc_map[i + 11] = out_idx;
                             try reloc.publishPoint(i + 11, out_idx);
                             writeSelectedLocForm(output, &out_idx, localRefGetForm(ctx, loc_idx), loc_idx);
+                        }
+                    } else if (kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) {
+                        const ref_idx = local_ref_tail_indices[tail_pc];
+                        if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                        if (make_ref_reads_value[i]) {
+                            if (comptime relocation_oracle_enabled) oracle_pc_map[i + 11] = out_idx;
+                            try reloc.publishPoint(i + 11, out_idx);
+                            writeSelectedLocForm(
+                                output,
+                                &out_idx,
+                                selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx),
+                                ref_idx,
+                            );
                         }
                     } else if (kind == GLOBAL_REF_TAIL_PUT or kind == GLOBAL_REF_TAIL_DUP_PUT) {
                         if (make_ref_reads_value[i]) {
@@ -9235,6 +9477,69 @@ pub const pipeline_resolve_variables = struct {
         defer product.deinit();
         commitProduct(ctx, &product);
     }
+
+    /// QCP-1 S3: curated reuse surface for compiler_v2/resolve_variables.zig.
+    /// v2 replaces the PASS STRUCTURE (linear qjs walk, growable output, LabelId
+    /// operands) but calls these for every binding decision so the two pipelines
+    /// cannot drift semantically. Keep this list minimal.
+    pub const v2 = struct {
+        pub const ScopeOperandAlias = ScopeOperand;
+        pub const ScopeVarActionAlias = ScopeVarAction;
+        pub const EvalVarObjectProbeAlias = EvalVarObjectProbe;
+        pub const PrivateFieldResolutionAlias = PrivateFieldResolution;
+
+        pub const decodeScopeOperand = pipeline_resolve_variables.decodeScopeOperand;
+        pub const markEvalCapturedVariables = pipeline_resolve_variables.markEvalCapturedVariables;
+        pub const encodeEvalScopeHead = pipeline_resolve_variables.encodeEvalScopeHead;
+        pub const resolveBindingTopology = pipeline_resolve_variables.resolveBindingTopology;
+        pub const planScopeVarLowering = pipeline_resolve_variables.planScopeVarLowering;
+        pub const scopeVarActionSize = ScopeVarAction.size;
+        pub const scopeVarActionAtomCount = ScopeVarAction.atomCount;
+        pub const writeScopeVarAction = pipeline_resolve_variables.writeScopeVarAction;
+        pub const functionHasDynamicEnvObjects = pipeline_resolve_variables.functionHasDynamicEnvObjects;
+
+        pub const scopeVarProbeKind = pipeline_resolve_variables.scopeVarProbeKind;
+        pub const scopeVarProbeOpcode = EvalVarObjectProbeKind.probeOpcode;
+        pub const evalVarObjectProbePlan = pipeline_resolve_variables.evalVarObjectProbePlan;
+        pub const evalVarObjectProbeAccessorSize = pipeline_resolve_variables.evalVarObjectProbeAccessorSize;
+        pub const writeEvalVarObjectProbeAccessor = pipeline_resolve_variables.writeEvalVarObjectProbeAccessor;
+        pub const localWithProbeIteratorInit = LocalWithProbeIterator.init;
+        pub const localWithProbeIteratorNext = LocalWithProbeIterator.next;
+        pub const closureDynamicEnvProbeIteratorInit = ClosureDynamicEnvProbeIterator.init;
+        pub const closureDynamicEnvProbeIteratorNext = ClosureDynamicEnvProbeIterator.next;
+        pub const staticBindingStopsDynamicEnvProbes = pipeline_resolve_variables.staticBindingStopsDynamicEnvProbes;
+        pub const scopeUsesArgumentEnvironmentOnly = pipeline_resolve_variables.scopeUsesArgumentEnvironmentOnly;
+        pub const evalVarObjectClosureProbe = pipeline_resolve_variables.evalVarObjectClosureProbe;
+        pub const evalVarObjectPutProbeMode = pipeline_resolve_variables.evalVarObjectPutProbeMode;
+        pub const evalVarObjectProbeIsWith = pipeline_resolve_variables.evalVarObjectProbeIsWith;
+
+        pub const loweredScopeDeleteVarSize = pipeline_resolve_variables.loweredScopeDeleteVarSize;
+        pub const writeLoweredScopeDeleteVar = pipeline_resolve_variables.writeLoweredScopeDeleteVar;
+        pub const loweredScopeGetRefSize = pipeline_resolve_variables.loweredScopeGetRefSize;
+        pub const writeLoweredScopeGetRef = pipeline_resolve_variables.writeLoweredScopeGetRef;
+        pub const loweredScopeMakeRefSize = pipeline_resolve_variables.loweredScopeMakeRefSize;
+        pub const loweredScopeMakeRefAtomCount = pipeline_resolve_variables.loweredScopeMakeRefAtomCount;
+        pub const writeLoweredScopeMakeRef = pipeline_resolve_variables.writeLoweredScopeMakeRef;
+        pub const markReferenceTakenBinding = pipeline_resolve_variables.markReferenceTakenBinding;
+        pub const makeRefBindingIsGlobal = pipeline_resolve_variables.makeRefBindingIsGlobal;
+        pub const canOptimizeGlobalRefPutTail = pipeline_resolve_variables.canOptimizeGlobalRefPutTail;
+
+        pub const resolvePrivateBindingTopology = pipeline_resolve_variables.resolvePrivateBindingTopology;
+        pub const resolvePrivateField = pipeline_resolve_variables.resolvePrivateField;
+        pub const loweredPrivateFieldSize = pipeline_resolve_variables.loweredPrivateFieldSize;
+        pub const loweredPrivateFieldAtomCount = pipeline_resolve_variables.loweredPrivateFieldAtomCount;
+        pub const writeLoweredPrivateField = pipeline_resolve_variables.writeLoweredPrivateField;
+
+        pub const enterScopeRefreshSize = pipeline_resolve_variables.enterScopeRefreshSize;
+        pub const writeEnterScopeRefresh = pipeline_resolve_variables.writeEnterScopeRefresh;
+        pub const leaveScopeCloseSize = pipeline_resolve_variables.leaveScopeCloseSize;
+        pub const writeLeaveScopeClose = pipeline_resolve_variables.writeLeaveScopeClose;
+
+        pub const resolveEvalGlobalVarTargets = pipeline_resolve_variables.resolveEvalGlobalVarTargets;
+        pub const hasDirectEvalLexicalRedeclaration = pipeline_resolve_variables.hasDirectEvalLexicalRedeclaration;
+        pub const throw_error_instr_size = pipeline_resolve_variables.throw_error_instr_size;
+        pub const writeThrowVarRedeclaration = pipeline_resolve_variables.writeThrowVarRedeclaration;
+    };
 };
 
 pub const pipeline_resolve_labels = struct {
@@ -12067,6 +12372,9 @@ pub const pipeline_finalize = struct {
     const pc2line = pipeline_pc2line;
     const stack_size = pipeline_stack_size;
     const JSValue = @import("core/value.zig").JSValue;
+    const compiler_v2 = @import("compiler_v2/root.zig");
+    const compiler_v2_available =
+        !std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
 
     pub const FinalizeError = error{
         OutOfMemory,
@@ -12371,7 +12679,12 @@ pub const pipeline_finalize = struct {
             if (parent.finalization_state != .prepared) return error.InvalidBytecode;
         }
 
-        try validatePhase1View(fd, phase1_view);
+        if (!(comptime compiler_v2_available) or fd.v2_builder == null) {
+            try validatePhase1View(fd, phase1_view);
+        }
+        // QCP-1 v2: resolve_variables_v2 validates its own compact input
+        // (validateInput + fail-closed walk) when compileFunctionV2 consumes
+        // the attached builder; the phase-1 view is not the lowering input.
         fd.var_ref_count = 0;
         for (fd.vars) |*vd| {
             vd.is_captured = false;
@@ -12584,23 +12897,10 @@ pub const pipeline_finalize = struct {
         if (owner_index != owners.len) return error.InvalidBytecode;
     }
 
-    fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, compile_context: CompileContext) FinalizeError![]fb_mod.FunctionBytecode {
-        const rt = compile_context.realm.runtime;
-        // runPhases publishes arg/var counts to u16 fields, so malformed or
-        // oversized FunctionDefs must be rejected before it can cast them.
-        try validatePreLoweringArtifactShape(fd);
-        // The canonical lowering carrier has no diagnostic/name owners of its
-        // own. FunctionDef remains the source of those owners until commit.
-        var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, atom.null_atom);
-        defer lowered.deinit(rt);
-        lowered.line_num = fd.line_num;
-        lowered.col_num = fd.col_num;
-        // Finalization policy is fixed on FunctionDef before parsing and is
-        // visible to every lowering phase, not patched onto the published FB
-        // afterwards. This matters for strict-only frame geometry such as
-        // mapped-arguments capture decisions.
-        lowered.flags.is_strict = fd.is_strict_mode;
-        lowered.flags.runtime_strict = compile_context.policy.runtime_strict;
+    fn lowerLegacyPhase1(
+        lowered: *bytecode_function.Bytecode,
+        fd: *function_def_mod.FunctionDef,
+    ) FinalizeError!void {
         // Move the parser-built buffers instead of copying them. QuickJS runs
         // its passes directly on `fd->byte_code` and performs a single copy
         // into the packed JSFunctionBytecode (quickjs.c:36188/36226); moving
@@ -12623,7 +12923,52 @@ pub const pipeline_finalize = struct {
         fd.source_loc_slots = &.{};
         fd.source_loc_capacity = 0;
         fd.source_loc_count = 0;
-        try runPhases(&lowered, fd, fd, false);
+        try runPhases(lowered, fd, fd, false);
+    }
+
+    fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, compile_context: CompileContext) FinalizeError![]fb_mod.FunctionBytecode {
+        const rt = compile_context.realm.runtime;
+        // runPhases publishes arg/var counts to u16 fields, so malformed or
+        // oversized FunctionDefs must be rejected before it can cast them.
+        try validatePreLoweringArtifactShape(fd);
+        // The canonical lowering carrier has no diagnostic/name owners of its
+        // own. FunctionDef remains the source of those owners until commit.
+        var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, atom.null_atom);
+        defer lowered.deinit(rt);
+        lowered.line_num = fd.line_num;
+        lowered.col_num = fd.col_num;
+        // Finalization policy is fixed on FunctionDef before parsing and is
+        // visible to every lowering phase, not patched onto the published FB
+        // afterwards. This matters for strict-only frame geometry such as
+        // mapped-arguments capture decisions.
+        lowered.flags.is_strict = fd.is_strict_mode;
+        lowered.flags.runtime_strict = compile_context.policy.runtime_strict;
+        if (comptime compiler_v2_available) {
+            if (fd.v2_builder != null) {
+                // QCP-1 v2 lowering releases its compact producer at the
+                // consumption point and transfers final buffers to `lowered`.
+                if (fd.finalization_state != .prepared) return error.InvalidBytecode;
+                compiler_v2.compileFunctionV2(&lowered, fd, compile_context.v2_ledger) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
+                    error.BytecodeOverflow => return error.BytecodeOverflow,
+                    error.ClosureVarNotFound => return error.ClosureVarNotFound,
+                };
+                // Single-owner invariant: compileFunctionV2 released the builder at its
+                // consumption point, so the FunctionDef no longer owns compiler input here.
+                std.debug.assert(fd.v2_builder == null);
+                // Same bookkeeping runPhases performs between the two resolve
+                // passes.
+                fd.consumeGlobalVars();
+                fd.finalization_state = .resolved;
+                fd.use_short_opcodes = true;
+                try publishLoweredMetadata(&lowered, fd, fd, false);
+            } else {
+                try lowerLegacyPhase1(&lowered, fd);
+            }
+        } else {
+            try lowerLegacyPhase1(&lowered, fd);
+        }
 
         _ = try validateFinalArtifactShape(fd, &lowered);
         try validateFinalAtomOwners(lowered.code, lowered.atom_operands);
@@ -12864,6 +13209,16 @@ pub const pipeline_finalize = struct {
         else
             resolve_labels.JSContext.init(function);
         try resolve_labels.run(&labels_ctx);
+
+        try publishLoweredMetadata(function, fd, fd_mut, publish_mutable_metadata);
+    }
+
+    fn publishLoweredMetadata(
+        function: *bytecode_function.Bytecode,
+        fd: ?*const function_def_mod.FunctionDef,
+        fd_mut: ?*function_def_mod.FunctionDef,
+        publish_mutable_metadata: bool,
+    ) !void {
 
         // qjs captures every formal parameter before creating a mapped
         // arguments object. Do the same here, then assign one exact, stable
