@@ -24,6 +24,11 @@ the active tree; recover them from git history when needed.
   compatibility rules.
 - [Stack Bytecode VM](stack_bytecode_vm_design.md): current stack-VM status and
   evolution boundary.
+- [QCP-1 Switch Decision](qcp1_switch_decision.md): the compiler configuration
+  that ships and the evidence it rests on. §8 is the terminal record —
+  **QCP-1A (make V2 the production compiler) ACCEPT**, **QCP-1B (physically
+  delete the legacy pipelines) NO-GO, deferred** — and is where the answer to
+  "why is there still a legacy compiler?" lives.
 
 ## Embedding And Extension
 

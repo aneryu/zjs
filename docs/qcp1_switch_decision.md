@@ -17,6 +17,13 @@ reserved.
 > **§0.1**, which records the superseded gate, why it was superseded, the gate
 > that replaces it, and the two process rules this phase produced.
 
+> **CLOSED 2026-08-04 — read §8 first.** QCP-1 is terminated in **§8. FINAL
+> VERDICTS**, as **two** separately adjudicated outcomes:
+> **QCP-1A — V2 compiler migration: ACCEPT** (V2 + `.short` is the shipped
+> production default), and **QCP-1B — legacy physical removal: NO-GO,
+> deferred**. §8 is the release record; §0–§7 are the evidence it was decided
+> on. Nothing in §0–§7 is rewritten by §8.
+
 ---
 
 ## 0. Headline
@@ -1065,3 +1072,261 @@ says `.plain`.
 > because that artifact pins ReleaseFast regardless of `-Doptimize`; a Debug
 > test artifact reads `optimize=Debug`. Two signatures that differ only in that
 > field are two different artifacts of the same configuration, not a drift.
+
+---
+
+## 8. FINAL VERDICTS (2026-08-04)
+
+QCP-1 closes here, as **two** verdicts rather than one. They were adjudicated
+separately because they are separate questions, and the second one's answer
+does not qualify the first one's. Reading §8.2 as a caveat on §8.1 is a
+misreading of both.
+
+| | question | verdict |
+| --- | --- | --- |
+| **QCP-1A** | make V2 the production compiler | **ACCEPT** |
+| **QCP-1B** | physically remove the legacy pipelines from the tree | **NO-GO — deferred** |
+
+**Production configuration, shipped:**
+
+```
+zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+```
+
+Legacy is **retained as a fallback only**. `-Dzjs_compiler=legacy` still builds
+and still passes its suite; it is not a supported production configuration and
+must not be read as one. `-Dzjs_compiler=dual` is retained as the differential
+oracle, and `-Dzjs_v2_layout=plain` as the A/B diagnostic instrument.
+
+### 8.1 QCP-1A — V2 compiler migration: **ACCEPT**
+
+**V2 + `.short` is the production default.** The goal was never "delete all the
+old code"; it was **make V2 the production compiler**, and that is done.
+
+The gate in force (§0.1.2) is three conditions, jointly. Gate A (`04922a47`)
+adjudicated them on **true production defaults** — the actual shipping
+configuration, not a scratch probe — with four cold binaries and four pairings
+under ABBA sampling. Manifest and per-pairing values: `tools/final-switch/README.md`
+§"Gate A manifest".
+
+| gate | required | measured | state |
+| --- | --- | ---: | --- |
+| code-load vs corrected legacy | ≥ 1.2359× | **1.2517×** (1.2544 / 1.2488 / 1.2546 / 1.2490) | **MET** |
+| full-zoo geomean vs corrected legacy | not regressed | **1.0164×** (1.0150 / 1.0189 / 1.0140 / 1.0178) | **MET** |
+| per-benchmark floor | none below the 0.975 floor | recorded **MET** (the per-benchmark table is in the branch record, not in main — §8.3) | **MET** |
+| candidate runtime noise floor (b1/b2) | — | geomean 1.0010, max per-bench deviation 2.18% | control |
+| legacy build-layout lottery (a1/a2) | — | geomean 1.0038, max per-bench deviation 2.05% | control |
+
+Correctness and architecture at the same defaults:
+
+| item | state |
+| --- | --- |
+| test262 | `0/49775 errors, passed 44541, known 25` — identical to legacy's, and to the dual run at the divergence-closure tip |
+| L3 legacy emission inside V2 scope | **0**, with `coverage.legacy_allowlist` literally `[_]AllowlistEntry{}` — the gate cannot be satisfied by an allowance |
+| dual comparator | zero mismatch lines at any tier after `a9c13b0a`; the four-defect divergence closure is §3.1 |
+| ownership | borrowed-atom lint (rules A–D) + `-Dzjs_ownership_audit` one-slot quarantine, both active; **14 allowlisted borrows outstanding** — machine-*policed*, not machine-*proved* |
+| configuration attestation | every engine-bearing artifact asserts its own effective configuration at compile time; `config-drift-gate` proves the assertion can still fail (§0.1.4, §0.1.9) |
+
+The honest debits are **not** withdrawn by the ACCEPT and are stated where they
+were measured: C1 is 1.564× and worse than at S6 (§4.1); C4 is +1 concept on
+the four-rule reading (§4.4); STOP-E passes on the published ruler and still
+triggers on the oracle-reclassified one (§4.5); C2-A's allocation-count axis is
+1.60× (§4.2). The verdict is that the migration is accepted **with** those
+open, not that they closed.
+
+### 8.2 QCP-1B — legacy physical removal: **NO-GO, deferred**
+
+**This is not a correctness failure and it is not an architecture failure.**
+The post-deletion tree was green on correctness — `0/49775 errors, passed
+44541, known 25`, the full unit matrix, ReleaseSafe, altrepr, OOM, the
+ownership-audit tier — and the deletion did exactly what it was designed to do
+structurally. It is blocked on one thing only.
+
+**Reason: a stable runtime benchmark regression appeared after deletion and its
+mechanism was never identified.** Against the pre-deletion V2 tip `a9c13b0a`,
+measured in one session, directly paired:
+
+| quantity | value |
+| --- | ---: |
+| crypto | **−3.9%** |
+| regexp | −2.8% |
+| raytrace | −2.6% |
+| code-load | **+1.6%** |
+| zlib | +1.3% |
+| **full-zoo geomean** | **−0.73%** |
+
+Against the frozen legacy baselines the deletion tree still clears two of the
+three switch gates and fails the third: full-zoo geomean worst pairing 1.0103,
+code-load worst pairing 1.2683 (both **MET**), per-benchmark floor 0.975 with
+crypto at **0.9628** and raytrace at **0.9739** (**NOT MET**). The deletion's
+gains were concentrated in code-load while the runtime suite paid.
+
+The regression is **stable**, not a build-layout draw: it reproduces across two
+independent candidate builds that agree to 0.00% on the geomean, is consistent
+to 0.34% across all four pairings, and is roughly three times the larger
+measured noise floor. Its *signature* is a code-placement effect rather than
+extra work — the deletion tip retires **1.7% fewer instructions per unit of
+score** and still burns **2.2% more cycles per unit of score**, because IPC
+falls **3.8%**. That names the shape of the cost, not its mechanism: every
+specific placement mechanism proposed for it was tested and refuted (§8.4).
+
+**Why deferral is the right shape, rather than blocking QCP-1A on it:**
+retaining the legacy source does not impede the V2 default. Legacy is unreached
+by the production path (L3 emission inside V2 scope is 0), and its presence
+costs source lines and a build option, not runtime behaviour. The two goals
+therefore **decouple**, and coupling them would have held a delivered,
+measured, green compiler migration hostage to an unexplained −0.7% on a
+deletion whose purpose was structural.
+
+**Re-filed as a separate project: runtime layout stability.** Its question is
+not "should legacy be deleted" — it is "why does removing unreached code from
+this binary cost 3.9% on crypto". Legacy removal becomes a consequence of
+answering that, not a prerequisite for it.
+
+### 8.3 The QCP-1B diagnosis — archived by reference, deliberately not imported
+
+The full layout-diagnosis corpus is **not** copied into main. That is a
+decision, not an omission: it is a large body of measurement about one
+unshipped tree, and importing it would put a diagnosis of a rejected change
+into the record of an accepted one. What main carries is the **verdict, the
+reason, and the coordinates**. In six months the question "why is there still
+legacy?" has an answer in this file, and the evidence behind it is one
+`git show` away.
+
+Branch **`compiler-v2-qjs`** (not merged to main; none of these commits is an
+ancestor of main):
+
+| commit | what it is |
+| --- | --- |
+| `ff530a29` | `refactor(compiler): delete the legacy compiler production path` — **the commit that carries the cost**; the 2×2 factorial's D factor |
+| `46362e0e` | `refactor(compiler): eradicate the legacy pipelines from the production binary` |
+| `4a32ed74` | `docs(compiler_v2): Gate B2 record against corrected legacy and pre-delete V2` — the full Gate B/B2 dossier, from which §8.2's numbers are taken |
+| `cd7ca4f5` | `docs(perf): crypto layout regression diagnosis` |
+| `c0a033a0` | `docs(perf): hot-symbol identity classes and non-text geometry for the crypto step` — branch tip |
+
+Diagnostic branches (each a single measurement record, none merged):
+
+| branch | commit | record |
+| --- | --- | --- |
+| `diag/2x2-deletion-vs-behaviour` | `178ba556` | `docs/perf/DELETION-VS-BEHAVIOUR-2X2-2026-08-04.md` — the 2×2 factorial |
+| `diag/native-mechanism-d` | `396c2a63` | `docs/perf/CRYPTO-DELETION-MECHANISM-2026-08-04.md` — line-straddling 16-byte loads |
+| `diag/ldalign-locate` | `6c4ee0b2` | `docs/perf/CRYPTO-DELETION-ALLOCATION-SITE-2026-08-04.md` — the allocation site behind the mod-64 data shift |
+| `diag/ldalign-control` | `2b28df92` | `docs/perf/CRYPTO-DELETION-ALIGNMENT-CONTROL-2026-08-04.md` — the 64-byte control, **rejected** |
+
+`4e49c9f9` (branch `qcp1-v2-default`) is the same alignment-control record on a
+second lineage. That branch name predates this ruling and is **not** the
+release; the release is the annotated tag `qcp1-v2-default` on main. The two are
+unrelated refs that unfortunately share a name.
+
+### 8.4 What the diagnosis refuted and what it established
+
+Stated as findings, because the value that survives QCP-1B is the eliminated
+hypothesis space, not the unshipped deletion.
+
+**REFUTED — each tested and each failed:**
+
+* a simple `.text` layout shift;
+* address-restoring padding;
+* tail padding;
+* heap padding;
+* compile-time allocation padding;
+* the dispatch-table page split;
+* the `ld_align_lat` alignment mechanism **and** its 64-byte control — rejected
+  on the mechanism condition, not on effect size: a within-cell test showed
+  **44.5M** of its events cost approximately **zero**, so the mechanism could
+  not be the carrier however well the correlation read;
+* section isolation — **never entered**, and recorded as not-entered rather
+  than as untested.
+
+**ESTABLISHED:**
+
+* the cost is **real**, and reproduces on independent layouts and on
+  independent build lineages;
+* it is carried by **`ff530a29` specifically**, not by the deletion programme
+  in general;
+* it is **NOT** the declared behavioural change. The 2×2 factorial separates
+  them: `effect_H` = **−0.88%** against `effect_D` = **−3.41%**, and only D
+  reproduces the backend-stall signature;
+* the **executed program is unchanged to 6 parts in 100,000** — this is not
+  different work;
+* the allocation site and the causal chain are **named**.
+
+**UNEXPLAINED — said plainly rather than left implied:** the residual
+**+744M cycles** has no identified mechanism. Nothing above accounts for it.
+The absence of an explanation is the finding, and it is the reason QCP-1B is
+deferred rather than argued to a pass.
+
+### 8.5 Process corrections carried forward
+
+These outlast QCP-1 and bind future work regardless of subject.
+
+1. **A single benchmark can never license a compiler, VM-dispatch or
+   bytecode-layout default change.** Stated at the level of *blast radius*, not
+   of benchmark: code-load was never wrong, it was blind to the axis the change
+   moved, and no amount of extra sampling on it would have produced the missing
+   information (§0.1.3).
+2. **A gate must attest the configuration it actually ran.** Green about a
+   configuration that was never executed is the defect class, and it is closed
+   structurally by the configuration signature plus per-artifact compile-time
+   attestation plus the negative drift gate — not instance by instance
+   (§0.1.4, §0.1.9).
+3. **Performance comparisons must be paired within a session.** Identical
+   frozen bytes drifted **0.31%–0.56%** between sessions — the same size as the
+   effects being judged. A number quoted across sessions is not a comparison.
+4. **A disclosure about the measurement protocol is a statement about a tree,
+   not a standing fact.** "Candidate builds are byte-identical, so there is no
+   layout lottery to sample" was true at Gate A and **false** at the deletion
+   tip, where two cold builds produced two distinct binaries. Protocol
+   disclosures must be re-derived per tree and must be retracted by name when
+   they stop holding.
+5. **Zig codegen bistability is a global mode**, and it aliases with any
+   cross-mode comparison. Any A/B that straddles it is measuring the mode.
+6. **On a throughput fixture, raw cycles is the honest per-fixed-work
+   quantity.** `cycles/score` is proportional to time *squared*, and
+   `instructions/score` moves even when the instruction count is identical.
+   Both normalized forms mislead on a fixture whose score is itself a rate.
+
+### 8.6 Release verification
+
+Gates at the release tree. The merge-stage rows were run at
+`abe8746878517ea8438cfdf0f653310f9a209500`. The release commit touches
+documentation plus one `build.zig` comment block and option-description string,
+and **no engine source**.
+
+That claim is checked rather than asserted: `zig build zjs` at the release
+commit produces sha256
+`ad757c33f84e0ce68eec8a5ca40a4d681bc50813dcd0733cfa6fbd2e23db86a1`, **byte-identical
+to the binary the merge-stage rows below were measured on**, printing
+`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`.
+The merge-stage results therefore transfer to the release commit as
+measurements of the same bytes, not by inference from "only docs changed".
+
+| gate | result |
+| --- | --- |
+| `zig build zjs` (defaults) | PASS |
+| `zig build config-signature-check` | PASS |
+| `zig build config-drift-gate` | PASS |
+| `zig build architecture-check` | PASS |
+| `zig build smoke` | 3 passed, 0 failed |
+| `zig build test` (defaults) | **2274 passed, 1 skipped, 0 failed** |
+| `zig build test -Dzjs_ownership_audit=true` | **2275 passed, 0 skipped, 0 failed** |
+| `zig build test262-gate` (defaults ⇒ v2) | **`0/49775 errors, passed 44541, known 25`** |
+| full zoo vs pinned qjs, core 19, 4 ABBA samples | **throughput geomean 0.7123** (binary sha256 `ad757c33…`, affinity `{19}` verified) |
+
+Re-run on the release tree itself, after the edits this commit makes:
+`zig fmt --check build.zig src tools` PASS; `zig build zjs` PASS;
+`zig build architecture-check` PASS (34 token-atom reads, 10 in value position,
+26 borrowed locals, 14 escapes, 14/16 allowlisted; deps ok; OOM-panic ok; API
+snapshot ok, 153 symbols); `zig build test` **2274 passed, 1 skipped, 0
+failed**.
+
+The zoo run above is a **standalone** measurement of the release tree against
+pinned qjs. Set beside the frozen reference
+`reports/perf/qjs-align/2026-08-04/dual-closure/zoo/zoo-c1-qjs.json` (candidate
+C1 at `a9c13b0a`, geomean 0.7126) it reads −0.04% on the geomean, with 13 of 15
+benchmarks inside ±1.7% and **regexp at −2.79%**. That comparison is
+**cross-session** — 2026-08-03T16:16Z against 2026-08-04T14:23Z — so by process
+correction 3 (§8.5) it is a sanity check and **not** a paired result, and
+regexp's −2.79% is inside the range cross-session drift plus the suite's
+noisiest benchmark can produce. It is reported rather than dropped; it is not
+evidence of a regression, and it would not be evidence of parity either.
