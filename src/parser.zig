@@ -7973,6 +7973,7 @@ pub const parser_core = struct {
                 // resolve_variables folds static references back to direct
                 // local/closure/global stores when no dynamic environment is
                 // present. Strict code has no dynamic var environment.
+                const strict_unresolved = strictUnresolvedAssignmentNeedsReference(s, name, keep);
                 var has_current_binding = State.hasVisibleCurrentBinding(fd, name, @intCast(scope));
                 if (!has_current_binding) {
                     for (fd.global_vars) |global_var| {
@@ -7984,6 +7985,7 @@ pub const parser_core = struct {
                 }
                 const with_scope = hasWithScopeFrom(fd, @intCast(scope));
                 const needs_reference = with_scope or
+                    strict_unresolved or
                     (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
                         !has_current_binding and State.rhsContainsDirectEval(s));
                 replacement_size = if (needs_reference)
@@ -8156,6 +8158,12 @@ pub const parser_core = struct {
                 // eval may insert a same-named var before the store happens.
                 // `resolve_variables` folds the reference back to a direct
                 // store when no dynamic environment is present.
+                //
+                // The strict-unresolved snapshot is the same decision the
+                // legacy twin makes: an unresolvable Reference in strict code
+                // must be decided when the LHS is evaluated, before the RHS
+                // can create the global property.
+                const strict_unresolved = strictUnresolvedAssignmentNeedsReference(s, name, keep);
                 var has_current_binding = State.hasVisibleCurrentBinding(fd, name, @intCast(scope));
                 if (!has_current_binding) {
                     for (fd.global_vars) |global_var| {
@@ -8167,6 +8175,7 @@ pub const parser_core = struct {
                 }
                 const with_scope = hasWithScopeFrom(fd, scope);
                 const needs_reference = with_scope or
+                    strict_unresolved or
                     (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
                         !has_current_binding and State.rhsContainsDirectEval(s));
                 const owned_name = try v2FTakeLastAtomOwned(s);
@@ -8488,6 +8497,35 @@ pub const parser_core = struct {
             if (a.var_name == atom_id) return true;
         }
         return false;
+    }
+
+    /// A strict assignment whose target is an unresolvable Reference must
+    /// throw a ReferenceError decided when the LeftHandSideExpression is
+    /// evaluated, not when the store happens (sec-putvalue: PutValue inspects
+    /// the Reference Record produced by ResolveBinding, which ran before the
+    /// RHS). The RHS can create the global property in between —
+    /// `undeclared = (this.undeclared = 5)` — and a plain `scope_put_var`,
+    /// whose global lookup runs after the RHS, then stores silently. Emitting
+    /// the reference form snapshots the unresolved binding before the RHS
+    /// runs; `resolve_variables` folds it back to a direct store wherever the
+    /// binding turns out to be statically known.
+    ///
+    /// Deliberately restricted to the outermost FunctionDef of a plain
+    /// script. `ensureClosureVar` is a no-op while the parser emits phase-1
+    /// name+scope bytecode (binding discovery belongs to the topology pass),
+    /// so `hasKnownBinding` only sees THIS FunctionDef's own tables: inside a
+    /// nested function it reports "no binding" for every parent-function
+    /// capture, and in a module or a direct eval the binding can live in the
+    /// module record or the caller's environment. Only at script top level is
+    /// "absent from this FunctionDef" the same statement as "unresolvable".
+    fn strictUnresolvedAssignmentNeedsReference(s: *State, atom_id: Atom, keep: bool) bool {
+        // A compound assignment or an update operator reads the target first,
+        // and that read already throws for an unresolvable strict reference.
+        if (keep) return false;
+        if (!(s.is_strict or s.cur_func().is_strict_mode)) return false;
+        if (s.is_eval or s.lex.is_module or s.cur_func().is_module) return false;
+        if (s.cur_func_stack.len != 0) return false;
+        return !hasKnownBinding(s, atom_id);
     }
 
     fn argumentsIdentifierIsForbidden(s: *State) bool {

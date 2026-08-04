@@ -1628,6 +1628,30 @@ test "Engine direct eval assignment reference timing follows ECMAScript" {
     try std.testing.expectEqualStrings("undefined 1\n2 12\nundefined 1\n", stream.buffered());
 }
 
+test "Engine strict unresolved assignment captures the reference before the RHS" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\"use strict";
+        \\try {
+        \\  strictUnresolvedTarget = (this.strictUnresolvedTarget = 5);
+        \\  print("stored", strictUnresolvedTarget);
+        \\} catch (e) {
+        \\  print(e.name, this.strictUnresolvedTarget);
+        \\}
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    // sec-putvalue: ResolveBinding runs before the RHS, so the Reference is
+    // already unresolvable when PutValue inspects it. The RHS creating the
+    // global property in between does not rescue the strict store.
+    try std.testing.expectEqualStrings("ReferenceError 5\n", stream.buffered());
+}
+
 test "Engine grouped direct eval preserves assignment reference timing" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
