@@ -53,6 +53,11 @@ pub const opcode = struct {
         label_u16,
     };
 
+    /// Phase-1 scope operand flag: the LHS reference has already selected its
+    /// environment, so the fallback put must resolve only the static chain.
+    pub const scope_no_dynamic_env_flag: u16 = 0x8000;
+    pub const scope_no_dynamic_env_max_level: u16 = 0x7ffe;
+
     /// One row of opcode metadata (QuickJS `JSOpCode`).
     pub const Info = struct {
         name: []const u8,
@@ -62,16 +67,15 @@ pub const opcode = struct {
         fmt: Format,
     };
 
-    /// Phase-1 scope operand flag: the LHS reference has already selected its
-    /// environment, so the fallback put must resolve only the static chain.
-    pub const scope_no_dynamic_env_flag: u16 = 0x8000;
-    pub const scope_no_dynamic_env_max_level: u16 = 0x7ffe;
-
     pub const WithPutMode = enum(u8) {
         var_object_probe = 0,
         selected_reference = 1,
         with_probe = 2,
     };
+
+    /// zjs extension carried by the existing `throw_error` opcode for
+    /// Annex-B runtime errors on CallExpression assignment targets.
+    pub const throw_error_invalid_assignment_target: u8 = 5;
 
     pub const op = struct {
         pub const invalid: u8 = 0;
@@ -3289,6 +3293,21 @@ pub const function_def = struct {
             self.arguments_arg_idx = idx;
         }
 
+        /// `arguments_var_idx` is also used for the lazy pseudo binding that
+        /// represents the function's body arguments object. A source-level
+        /// `var arguments` replaces that pseudo row with a real function var;
+        /// its parser origin is retained in `scope_next` (the synthetic row
+        /// has the zero origin used by `add_var`). Parameter-initializer
+        /// closures need this distinction: without a body declaration they
+        /// share the function arguments binding, while `var arguments`
+        /// deliberately shadows it with a separate body binding.
+        pub fn hasExplicitArgumentsVar(self: *const FunctionDefImpl) bool {
+            if (self.arguments_var_idx < 0) return false;
+            const idx: usize = @intCast(self.arguments_var_idx);
+            if (idx >= self.vars.len) return false;
+            return self.vars[idx].scope_next != 0;
+        }
+
         /// Append a `VarDef` to `vars`. Mirrors `add_var`
         /// (`quickjs.c:23554`). The caller is responsible for setting
         /// `scope_level`, `var_kind`, `is_lexical`, `is_const`. The atom
@@ -4881,11 +4900,22 @@ pub const pipeline_resolve_variables = struct {
     const throw_error_instr_size: usize = 6;
     const JS_THROW_VAR_RO: u8 = 0; // quickjs.c:18334
     const JS_THROW_VAR_REDECL: u8 = 1; // quickjs.c:18335
-
     fn writeThrowVarReadOnly(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: u32) void {
+        writeThrowVarError(func, output, out_idx, output_atoms, out_atom_idx, atom_id, JS_THROW_VAR_RO);
+    }
+
+    fn writeThrowVarError(
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: u32,
+        error_type: u8,
+    ) void {
         output[out_idx.*] = opcode.op.throw_error;
         std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output[out_idx.* + 5] = JS_THROW_VAR_RO;
+        output[out_idx.* + 5] = error_type;
         output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
         out_idx.* += throw_error_instr_size;
         out_atom_idx.* += 1;
@@ -5498,7 +5528,16 @@ pub const pipeline_resolve_variables = struct {
             };
             var stop_idx = fd.closure_var.len;
             for (fd.closure_var, 0..) |cv, idx| {
-                if (!isDynamicEnvObjectAtom(cv.var_name) and cv.var_name == atom_id) {
+                // A catch binding is only visible while its catch block is
+                // active, and global-family rows are the fallback after the
+                // dynamic environment objects. Neither row terminates the
+                // var-object probe chain for a reference outside that static
+                // binding. Lexical/local/argument rows still stop it.
+                const stops_probe = !isDynamicEnvObjectAtom(cv.var_name) and
+                    cv.var_name == atom_id and
+                    cv.varKind() != .catch_ and
+                    !closureVarIsGlobalFamily(cv);
+                if (stops_probe) {
                     stop_idx = idx;
                     break;
                 }
@@ -5560,11 +5599,44 @@ pub const pipeline_resolve_variables = struct {
 
     fn staticBindingStopsDynamicEnvProbes(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) bool {
         if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return true;
+        // Direct eval receives a visible catch parameter as a closure row.
+        // That row is the active lexical environment for the eval itself and
+        // must win over the eval var object. Ordinary local/argument closure
+        // rows remain dynamically probeable: a direct eval can insert a
+        // same-named var binding that subsequent caller code observes.
+        if (bytecodeFunctionIsEval(ctx)) {
+            if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                if (closureVarKind(ctx, ref_idx) == .catch_) return true;
+            }
+        }
         const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return false;
         return switch (binding) {
             .arg => true,
-            .local => |loc_idx| !isEvalNonLexicalLocal(ctx, loc_idx),
+            .local => |loc_idx| blk: {
+                const fd = ctx.function_def orelse break :blk false;
+                if (loc_idx >= fd.vars.len) break :blk false;
+                const vd = fd.vars[loc_idx];
+                if (vd.var_kind == .catch_ and !scopeContainsBinding(fd, scope_level, vd.scope_level)) {
+                    break :blk false;
+                }
+                break :blk !isEvalNonLexicalLocal(ctx, loc_idx);
+            },
         };
+    }
+
+    fn scopeContainsBinding(
+        fd: *const function_def_mod.FunctionDef,
+        reference_scope: i32,
+        binding_scope: i32,
+    ) bool {
+        if (reference_scope < 0 or binding_scope < 0) return false;
+        var scope = reference_scope;
+        var visited: usize = 0;
+        while (scope >= 0 and @as(usize, @intCast(scope)) < fd.scopes.len and visited <= fd.scopes.len) : (visited += 1) {
+            if (scope == binding_scope) return true;
+            scope = fd.scopes[@intCast(scope)].parent;
+        }
+        return false;
     }
 
     const EvalVarObjectProbeKind = enum {
@@ -6333,6 +6405,8 @@ pub const pipeline_resolve_variables = struct {
     const GLOBAL_REF_TAIL_DUP_PUT: u8 = 2;
     const LOCAL_REF_TAIL_PUT: u8 = 3;
     const LOCAL_REF_TAIL_DUP_PUT: u8 = 4;
+    const CLOSURE_REF_TAIL_PUT: u8 = 5;
+    const CLOSURE_REF_TAIL_DUP_PUT: u8 = 6;
 
     const GlobalRefPutTail = struct {
         pc: usize,
@@ -6384,6 +6458,15 @@ pub const pipeline_resolve_variables = struct {
 
     fn localRefPutTailReplacementSize(ctx: *const JSContext, kind: u8, loc_idx: u16) usize {
         return localRefPutForm(ctx, loc_idx).size + @intFromBool(kind == LOCAL_REF_TAIL_DUP_PUT);
+    }
+
+    fn closureRefPutTailKind(kind: u8) u8 {
+        return if (kind == GLOBAL_REF_TAIL_DUP_PUT) CLOSURE_REF_TAIL_DUP_PUT else CLOSURE_REF_TAIL_PUT;
+    }
+
+    fn closureRefPutTailReplacementSize(ctx: *const JSContext, kind: u8, ref_idx: u16) usize {
+        return selectVarRefForm(ctx, opcode.op.put_var_ref, ref_idx).size +
+            @intFromBool(kind == CLOSURE_REF_TAIL_DUP_PUT);
     }
 
     fn writeSelectedLocForm(output: []u8, out_idx: *usize, form: ShortLocForm, loc_idx: u16) void {
@@ -6501,8 +6584,14 @@ pub const pipeline_resolve_variables = struct {
             gv.eval_target = .global;
             for (fd.closure_var, 0..) |cv, idx| {
                 if (cv.var_name == gv.var_name) {
-                    // instantiate_hoisted_definitions stops at the first
-                    // same-name closure, including a simple catch binding.
+                    // Annex B.3.4's same-name simple catch binding is not the
+                    // VariableDeclarationEnvironment used for a direct-eval
+                    // `var`. Skip it so the dynamic var object can receive
+                    // the hoisted binding; the eval initializer still uses
+                    // the catch reference for the assignment itself.
+                    if (gv.cpool_idx < 0 and cv.varKind() == .catch_) continue;
+                    // For every other closure, instantiate_hoisted_definitions
+                    // stops at the first same-name binding.
                     if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
                     gv.eval_target = .{ .closure = @intCast(idx) };
                     break;
@@ -6547,8 +6636,15 @@ pub const pipeline_resolve_variables = struct {
             else
                 0,
             .var_object => |idx| selectVarRefForm(ctx, opcode.op.get_var_ref, idx).size +
-                (if (gv.cpool_idx >= 0) try fclosureEncodingSize(gv.cpool_idx) else 1) +
-                opcode.sizeOf(opcode.op.define_field) + 1,
+                if (gv.cpool_idx >= 0)
+                    (try fclosureEncodingSize(gv.cpool_idx) + opcode.sizeOf(opcode.op.define_field) + 1)
+                else
+                    (opcode.sizeOf(opcode.op.get_field2) +
+                        opcode.sizeOf(opcode.op.is_undefined) +
+                        opcode.sizeOf(opcode.op.if_false) +
+                        opcode.sizeOf(opcode.op.undefined) +
+                        opcode.sizeOf(opcode.op.define_field) +
+                        opcode.sizeOf(opcode.op.drop)),
             .global, .unresolved => 0,
         };
         return target_size;
@@ -6556,7 +6652,7 @@ pub const pipeline_resolve_variables = struct {
 
     fn globalHoistAtomCount(gv: function_def_mod.GlobalVar) usize {
         return switch (gv.eval_target) {
-            .var_object => 1,
+            .var_object => if (gv.cpool_idx >= 0) 1 else 2,
             .closure, .global, .unresolved => 0,
         };
     }
@@ -6650,15 +6746,43 @@ pub const pipeline_resolve_variables = struct {
                     writeVarRefForm(output, out_idx, selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx), ref_idx);
                     if (gv.cpool_idx >= 0) {
                         try emitFClosure(output, out_idx, gv.cpool_idx);
+                        output[out_idx.*] = opcode.op.define_field;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
+                        output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
+                        out_idx.* += opcode.sizeOf(opcode.op.define_field);
+                        out_atom_idx.* += 1;
                     } else {
+                        // EvalDeclarationInstantiation creates a new var
+                        // object property only when the name is absent. A
+                        // repeated direct-eval `var x` must preserve an
+                        // existing value (and, importantly, the binding cell
+                        // observed by later evals). The internal var object is
+                        // plain and cannot expose an accessor, so an existing
+                        // undefined value is the only indistinguishable case;
+                        // redefining that value is harmless while all other
+                        // values take the no-op branch.
+                        output[out_idx.*] = opcode.op.get_field2;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
+                        output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
+                        out_idx.* += opcode.sizeOf(opcode.op.get_field2);
+                        out_atom_idx.* += 1;
+                        output[out_idx.*] = opcode.op.is_undefined;
+                        out_idx.* += opcode.sizeOf(opcode.op.is_undefined);
+                        const branch_pc = out_idx.*;
+                        output[out_idx.*] = opcode.op.if_false;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], @intCast(branch_pc +
+                            opcode.sizeOf(opcode.op.if_false) +
+                            opcode.sizeOf(opcode.op.undefined) +
+                            opcode.sizeOf(opcode.op.define_field)), .little);
+                        out_idx.* += opcode.sizeOf(opcode.op.if_false);
                         output[out_idx.*] = opcode.op.undefined;
-                        out_idx.* += 1;
+                        out_idx.* += opcode.sizeOf(opcode.op.undefined);
+                        output[out_idx.*] = opcode.op.define_field;
+                        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
+                        output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
+                        out_idx.* += opcode.sizeOf(opcode.op.define_field);
+                        out_atom_idx.* += 1;
                     }
-                    output[out_idx.*] = opcode.op.define_field;
-                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], gv.var_name, .little);
-                    output_atoms[out_atom_idx.*] = func.atoms.dup(gv.var_name);
-                    out_idx.* += opcode.sizeOf(opcode.op.define_field);
-                    out_atom_idx.* += 1;
                     output[out_idx.*] = opcode.op.drop;
                     out_idx.* += 1;
                 },
@@ -6824,6 +6948,34 @@ pub const pipeline_resolve_variables = struct {
             if (try discoverParentScopedSource(fd, parent, atom_id, visible_scope_level)) |local_idx| {
                 try threadParentLocalSource(fd, parent, local_idx);
                 return;
+            }
+
+            // An arrow created while a parameter initializer is evaluated is
+            // linked to the parameter environment, not to the function-body
+            // var environment.  The synthetic `arguments` cell is normally
+            // created by add_eval_variables, but this capture is also valid
+            // without a direct eval in the parent, so materialize the same
+            // scope-1 cell on demand before the body-var/arguments fallback.
+            if (atom_id == atom.ids.arguments and
+                argument_environment_only and
+                parent.has_arguments_binding and
+                parent.has_parameter_expressions and
+                parent.func_type != .arrow and
+                parent.func_type != .class_static_init)
+            {
+                _ = parent.ensureArgumentsBinding() catch return error.OutOfMemory;
+                parent.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.InvalidScope => error.InvalidBytecode,
+                };
+                const parameter_arguments_idx = if (parent.hasExplicitArgumentsVar())
+                    parent.arguments_arg_idx
+                else
+                    parent.arguments_var_idx;
+                if (parameter_arguments_idx >= 0) {
+                    try threadParentLocalSource(fd, parent, @intCast(parameter_arguments_idx));
+                    return;
+                }
             }
 
             if (!argument_environment_only) {
@@ -7549,6 +7701,37 @@ pub const pipeline_resolve_variables = struct {
                         folded = true;
                     }
                 }
+                if (!folded and !needs_eval_probe) {
+                    if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                        // Keep read-only closure writes on the generic
+                        // make-ref path so it can lower to the compile-time
+                        // throw. The compact var-ref tail is only valid for
+                        // mutable cells.
+                        if (closureVarKind(ctx, ref_idx) != .function_name and
+                            !closureVarWriteThrowsReadOnly(ctx, ref_idx))
+                        {
+                            if (refPutTailAtMakeRefLabel(code, pc)) |tail| {
+                                if (tail.pc < tail_kinds.len and tail_kinds[tail.pc] == GLOBAL_REF_TAIL_NONE) {
+                                    const value_pc = pc + 11;
+                                    const reads_value = value_pc < code.len and
+                                        code[value_pc] == opcode.op.get_ref_value;
+                                    // A post-update/compound target keeps a
+                                    // pre-write value on the stack. The
+                                    // generic reference tail consumes the
+                                    // updated value; this fold handles only
+                                    // the plain assignment shape.
+                                    if (!reads_value) {
+                                        tail_kinds[tail.pc] = closureRefPutTailKind(tail.kind);
+                                        tail_local_indices[tail.pc] = ref_idx;
+                                        make_ref_tail_pc[pc] = tail.pc;
+                                        make_ref_reads_value[pc] = false;
+                                        folded = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if (!folded and !needs_eval_probe and canOptimizeGlobalRefPutTail(ctx, atom_id) and
                     makeRefBindingIsGlobal(ctx, atom_id, scope))
                 {
@@ -7676,6 +7859,10 @@ pub const pipeline_resolve_variables = struct {
                     const loc_idx = local_ref_tail_indices[i];
                     if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                     output_size += localRefPutTailReplacementSize(ctx, kind, loc_idx);
+                } else if (kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) {
+                    const ref_idx = local_ref_tail_indices[i];
+                    if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                    output_size += closureRefPutTailReplacementSize(ctx, kind, ref_idx);
                 } else {
                     output_size += globalRefPutTailReplacementSize(kind);
                 }
@@ -7795,6 +7982,10 @@ pub const pipeline_resolve_variables = struct {
                         const loc_idx = local_ref_tail_indices[tail_pc];
                         if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                         output_size += localRefGetForm(ctx, loc_idx).size;
+                    } else if ((kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) and make_ref_reads_value[i]) {
+                        const ref_idx = local_ref_tail_indices[tail_pc];
+                        if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                        output_size += selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size;
                     } else if ((kind == GLOBAL_REF_TAIL_PUT or kind == GLOBAL_REF_TAIL_DUP_PUT) and make_ref_reads_value[i]) {
                         output_size += 3;
                     }
@@ -7937,7 +8128,9 @@ pub const pipeline_resolve_variables = struct {
             }
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
                 const kind = global_ref_tail_kinds[i];
-                if (kind == GLOBAL_REF_TAIL_DUP_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
+                if (kind == GLOBAL_REF_TAIL_DUP_PUT or kind == LOCAL_REF_TAIL_DUP_PUT or
+                    kind == CLOSURE_REF_TAIL_DUP_PUT)
+                {
                     output[out_idx] = opcode.op.dup;
                     out_idx += 1;
                 }
@@ -7945,6 +8138,15 @@ pub const pipeline_resolve_variables = struct {
                     const loc_idx = local_ref_tail_indices[i];
                     if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                     writeSelectedLocForm(output, &out_idx, localRefPutForm(ctx, loc_idx), loc_idx);
+                } else if (kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) {
+                    const ref_idx = local_ref_tail_indices[i];
+                    if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                    writeSelectedLocForm(
+                        output,
+                        &out_idx,
+                        selectVarRefForm(ctx, opcode.op.put_var_ref, ref_idx),
+                        ref_idx,
+                    );
                 } else {
                     try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.put_var, global_ref_tail_atoms[i]);
                 }
@@ -8112,6 +8314,18 @@ pub const pipeline_resolve_variables = struct {
                         if (make_ref_reads_value[i]) {
                             pc_map[i + 11] = out_idx;
                             writeSelectedLocForm(output, &out_idx, localRefGetForm(ctx, loc_idx), loc_idx);
+                        }
+                    } else if (kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) {
+                        const ref_idx = local_ref_tail_indices[tail_pc];
+                        if (ref_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                        if (make_ref_reads_value[i]) {
+                            pc_map[i + 11] = out_idx;
+                            writeSelectedLocForm(
+                                output,
+                                &out_idx,
+                                selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx),
+                                ref_idx,
+                            );
                         }
                     } else if (kind == GLOBAL_REF_TAIL_PUT or kind == GLOBAL_REF_TAIL_DUP_PUT) {
                         if (make_ref_reads_value[i]) {

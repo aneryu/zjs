@@ -9542,12 +9542,19 @@ test "for statement dispatch only scans top-level semicolons" {
     }
 }
 
-test "for-in-of rejects call and optional-chain assignment targets" {
+test "for-in-of keeps Annex B call targets and rejects other invalid assignment targets" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const cases = [_][]const u8{
+    var annex_b_call = try compileForTest(
+        rt,
         "function f(){}; for (f() of []) {}",
+        .{ .mode = .script, .filename = "annex-b-for-lvalue.js" },
+    );
+    defer annex_b_call.deinit();
+    try std.testing.expect(annex_b_call.syntax_error == null);
+
+    const cases = [_][]const u8{
         "let value = {}; for (value?.x in {}) {}",
         "let a, source = {}; for ([a] = 1 in source) {}",
     };

@@ -11188,7 +11188,7 @@ test "Engine with destructuring assignment reaches const fallback at runtime" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "Engine eval assignments follow QuickJS dynamic var-object resolution" {
+test "Engine eval assignments capture the target before dynamic var insertion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -11236,12 +11236,12 @@ test "Engine eval assignments follow QuickJS dynamic var-object resolution" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
-        "1 0\n12 3\n1 1 0\n3undefined 3\n",
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
         stream.buffered(),
     );
 }
 
-test "Engine arrow eval assignments follow QuickJS dynamic var-object resolution" {
+test "Engine arrow eval assignments capture the target before dynamic var insertion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -11282,7 +11282,7 @@ test "Engine arrow eval assignments follow QuickJS dynamic var-object resolution
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
-        "1 0\n12 3\n1 1 0\n3undefined 3\n",
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
         stream.buffered(),
     );
 }
@@ -11339,14 +11339,12 @@ test "Engine direct eval captures the caller arguments binding" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // QuickJS add_eval_variables appends a body `arguments` pseudo local even
-    // when a simple formal parameter has the same spelling. Its reverse
-    // scope-zero lookup therefore makes parameterShadow observe the mapped
-    // Arguments object, whose index 0 is updated by the eval assignment. The
-    // final row also pins QuickJS's separate parameter/body environment
-    // topology; it must not depend on a source pre-scan of the function body.
+    // The direct eval assignment observes the function's mapped Arguments
+    // binding. Parameter initializers use the parameter-environment binding
+    // when the body declares its own `arguments` variable, and otherwise
+    // share the function binding with the body.
     try std.testing.expectEqualStrings(
-        "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\ntrue false true true\n",
+        "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\nfalse false true false\n",
         stream.buffered(),
     );
 }
@@ -11434,11 +11432,10 @@ test "Engine direct eval shares top-level lexical cells across nested closures" 
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // Pinned QuickJS stops eval declaration resolution at the first same-name
-    // catch binding, so no second caller-variable target is created and the
-    // post-catch write reaches the global. A later plain `var saved` eval
-    // force-initializes the variable-object property to undefined.
-    try std.testing.expectEqualStrings("500 500\n501 511\nlocal 42local\nundefined\n", stream.buffered());
+    // A direct eval var declaration must skip the temporary catch binding and
+    // keep the caller's dynamic var object available after the catch exits.
+    // Repeating a plain `var saved` declaration preserves the existing value.
+    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\n1\n", stream.buffered());
 }
 
 test "Engine constructor parameter defaults use the initialized this binding" {
@@ -20003,4 +20000,47 @@ test "native function toString keeps non-ASCII identifier names (qjs js_function
     , .{ .filename = "<repl>" });
     defer result.free(js.runtime);
     try std.testing.expectEqual(true, result.asBool().?);
+}
+
+test "Annex B if/else function declarations update the shared function binding" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function f(x) {
+        \\  if (x) function g() { return "g0"; }
+        \\  else function g() { return "g1"; }
+        \\  return typeof g + ":" + (typeof g === "function" ? g() : "missing");
+        \\}
+    );
+    result.free(js.runtime);
+    const observed = try js.evalWithOptions("f(true) + ',' + f(false)", .{ .filename = "<repl>" });
+    defer observed.free(js.runtime);
+    try helpers.expectStringValueBytes(observed, "function:g0,function:g1");
+}
+
+test "sloppy CallExpression assignment targets throw after evaluating only the call" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    var calls = 0;
+        \\    var rhs = 0;
+        \\    var coercions = 0;
+        \\    function f() {
+        \\        calls += 1;
+        \\        return { valueOf: function () { coercions += 1; return 1; } };
+        \\    }
+        \\    function g() { rhs += 1; return 2; }
+        \\    var out = [];
+        \\    try { f() = g(); } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { f() += g(); } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { f()++; } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { ++f(); } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { for (f() in [1]) {} } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    try { for (f() of [1]) {} } catch (e) { out.push(e instanceof ReferenceError); }
+        \\    return out.join(",") + "|" + calls + "," + rhs + "," + coercions;
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(result, "true,true,true,true,true,true|6,0,0");
 }

@@ -1263,7 +1263,7 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
     }
 }
 
-test "resolve_variables: catch var is the sole first-match eval declaration target" {
+test "resolve_variables: catch var skips to the eval var object but function declarations keep first match" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1278,11 +1278,12 @@ test "resolve_variables: catch var is the sole first-match eval declaration targ
     };
     const var_plan = try resolveEvalDeclarationPlan(rt, name, x_atom, true, -1, &catch_then_var_object);
     switch (var_plan.eval_target) {
-        .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
+        .var_object => |idx| try std.testing.expectEqual(@as(u16, 1), idx),
         else => try std.testing.expect(false),
     }
 
-    // Function declarations use the same pinned-QuickJS first-match walk.
+    // Function declarations are not Annex B var declarations, so they still
+    // use the first same-name closure binding.
     const function_plan = try resolveEvalDeclarationPlan(rt, name, x_atom, true, 0, &catch_then_var_object);
     switch (function_plan.eval_target) {
         .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),

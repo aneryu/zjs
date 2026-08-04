@@ -132,7 +132,7 @@ pub fn throwError(function: *const bytecode.FunctionBytecode, frame: *frame_mod.
     frame.pc += 5;
     return switch (error_type) {
         1 => error.SyntaxError,
-        2, 3 => error.ReferenceError,
+        2, 3, 5 => error.ReferenceError,
         else => error.TypeError,
     };
 }
@@ -163,6 +163,7 @@ fn createThrowErrorValue(ctx: *core.JSContext, global: *core.Object, atom_id: u3
         2 => createAtomError(ctx, global, "ReferenceError", atom_id, "", " is not initialized"),
         3 => exception_ops.createNamedError(ctx, global, "ReferenceError", "unsupported reference to 'super'"),
         4 => exception_ops.createNamedError(ctx, global, "TypeError", "iterator does not have a throw method"),
+        5 => exception_ops.createNamedError(ctx, global, "ReferenceError", "invalid assignment target"),
         else => blk: {
             var message_buffer: [64]u8 = undefined;
             const message = try std.fmt.bufPrint(&message_buffer, "invalid throw var type {d}", .{error_type});
@@ -204,7 +205,7 @@ pub noinline fn throwErrorVm(
     return switch (error_type) {
         0, 4 => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.TypeError),
         1 => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.SyntaxError),
-        2, 3 => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.ReferenceError),
+        2, 3, 5 => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.ReferenceError),
         else => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.JSException),
     };
 }
