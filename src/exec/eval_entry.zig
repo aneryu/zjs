@@ -234,9 +234,7 @@ fn runEvalModule(
     defer module_state_value.free(rt);
     const module_state = try property_ops.expectObject(module_state_value);
     var resume_value: ?core.JSValue = null;
-    var resume_value_symbol_rooted = false;
     defer if (resume_value) |value| {
-        if (resume_value_symbol_rooted) rt.unregisterExternalValueSymbolRoot(value);
         value.free(rt);
     };
 
@@ -251,10 +249,6 @@ fn runEvalModule(
         ) catch |err| return moduleResolutionError(err);
         if (timing) |item| item.vm_run_ns += elapsedNanosSince(vm_start);
         if (resume_value) |value| {
-            if (resume_value_symbol_rooted) {
-                rt.unregisterExternalValueSymbolRoot(value);
-                resume_value_symbol_rooted = false;
-            }
             value.free(rt);
             resume_value = null;
         }
@@ -267,9 +261,6 @@ fn runEvalModule(
                 timing,
             );
             resume_value = await_resume.value;
-            resume_value_symbol_rooted = try rt.registerExternalValueSymbolRoot(
-                await_resume.value,
-            );
             try call_runtime.setGeneratorResumeCompletionType(
                 rt,
                 module_state,

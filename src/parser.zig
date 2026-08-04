@@ -397,9 +397,38 @@ pub const lexer = struct {
                     if (s.bytes.len > 0 and !self.isSourceSlice(s.bytes)) self.allocator.free(s.bytes);
                     if (s.raw_bytes.len > 0 and !self.isSourceSlice(s.raw_bytes)) self.allocator.free(s.raw_bytes);
                 },
+                // qjs free_token releases every identifier/private-name atom
+                // (keywords are predefined and therefore no-op on free),
+                // quickjs.c:22190-22208.
+                .ident => |ident| self.atoms.free(ident.atom),
                 else => {},
             }
             tok.payload = .none;
+        }
+
+        /// Retain every owned token payload for a speculative parser snapshot.
+        /// The returned token is an independent owner and must eventually be
+        /// passed to `freeToken` or transferred back into parser state.
+        pub fn dupToken(self: *LexerImpl, tok: t.Token) Error!t.Token {
+            var copy = tok;
+            switch (tok.payload) {
+                .ident => |ident| {
+                    var retained = ident;
+                    retained.atom = self.atoms.dup(ident.atom);
+                    copy.payload = .{ .ident = retained };
+                },
+                .str => |str| {
+                    var retained = str;
+                    const owns_bytes = str.bytes.len > 0 and !self.isSourceSlice(str.bytes);
+                    const owns_raw = str.raw_bytes.len > 0 and !self.isSourceSlice(str.raw_bytes);
+                    if (owns_bytes) retained.bytes = try self.allocator.dupe(u8, str.bytes);
+                    errdefer if (owns_bytes) self.allocator.free(retained.bytes);
+                    if (owns_raw) retained.raw_bytes = try self.allocator.dupe(u8, str.raw_bytes);
+                    copy.payload = .{ .str = retained };
+                },
+                else => {},
+            }
+            return copy;
         }
 
         fn isSourceSlice(self: *const LexerImpl, bytes: []const u8) bool {
@@ -5473,10 +5502,13 @@ pub const parser_core = struct {
             const saved_mark_pos = s.lex.mark_pos;
             const saved_mark_line = s.lex.mark_line;
             const saved_mark_col = s.lex.mark_col;
-            const saved_token = s.token;
-            var advanced = false;
+            // The scan consumes `s.token` while advancing.  Keep an
+            // independent owner for the token restored at the end; copying
+            // the token struct alone would make the restored identifier share
+            // the atom retain that the scan has already released.
+            const saved_token = s.lex.dupToken(s.token) catch return false;
             defer {
-                if (advanced) s.lex.freeToken(&s.token);
+                s.lex.freeToken(&s.token);
                 s.lex.pos = saved_pos;
                 s.lex.line = saved_line;
                 s.lex.col = saved_col;
@@ -5488,11 +5520,10 @@ pub const parser_core = struct {
             }
 
             const advanceLocal = struct {
-                fn call(state: *State, did_advance: *bool) bool {
+                fn call(state: *State) bool {
                     const next = state.lex.next() catch return false;
                     state.lex.freeToken(&state.token);
                     state.token = next;
-                    did_advance.* = true;
                     return true;
                 }
             }.call;
@@ -5506,14 +5537,14 @@ pub const parser_core = struct {
                 if (kind == tok.TOK_EOF) return false;
                 if (kind == tok.TOK_TEMPLATE) {
                     skipTemplateInPredeclareScan(s, s.token) catch return false;
-                    if (!advanceLocal(s, &advanced)) return false;
+                    if (!advanceLocal(s)) return false;
                     previous_token_kind = tok.TOK_TEMPLATE;
                     continue;
                 }
                 if (tokenCanStartSlashRegexp(kind) and
                     (skipRegexpInPredeclareScan(s, previous_token_kind) catch return false))
                 {
-                    if (!advanceLocal(s, &advanced)) return false;
+                    if (!advanceLocal(s)) return false;
                     previous_token_kind = tok.TOK_REGEXP;
                     continue;
                 }
@@ -5539,7 +5570,7 @@ pub const parser_core = struct {
                     else => {},
                 }
                 previous_token_kind = kind;
-                if (!advanceLocal(s, &advanced)) return false;
+                if (!advanceLocal(s)) return false;
             }
         }
 
@@ -7000,6 +7031,21 @@ pub const parser_core = struct {
             {
                 self.invalidateLastOpcode();
             }
+            // Markers describing the truncated region are garbage once its
+            // bytes are gone — and were silently remapped to whatever code
+            // later occupied those pcs. Mirror rollbackEmission's slot
+            // truncation on the direct-truncate paths (the phase-2 streaming
+            // source remap also relies on slot pcs staying non-decreasing).
+            if (self.emit_to_function_def) {
+                const fd_slots = self.cur_func();
+                var keep = fd_slots.source_loc_slots.len;
+                while (keep > 0 and fd_slots.source_loc_slots[keep - 1].pc >= target_len) keep -= 1;
+                fd_slots.truncateSourceLocs(keep);
+            } else {
+                var keep = self.function.source_loc_slots.len;
+                while (keep > 0 and self.function.source_loc_slots[keep - 1].pc >= target_len) keep -= 1;
+                self.function.truncateSourceLocs(keep);
+            }
             const ft = self.flowTail();
             if (ft.valid) {
                 if (ft.has_prev and !ft.last_note_had_label and ft.prev_op_pos == target_len) {
@@ -8447,10 +8493,15 @@ pub const parser_core = struct {
                 @as(Atom, 25)
             else
                 return Error.UnexpectedToken;
+            // Retain before `advance()` releases the token, exactly as the
+            // live member-access paths do (`parseMemberChain`,
+            // `parseNewCalleeMemberAccess`).
+            const retained_name = s.function.atoms.dup(name);
+            defer s.function.atoms.free(retained_name);
             try s.advance();
             if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
                 try s.emitOp(opcode.op.get_super);
-                try s.emitOpAtom(opcode.op.push_atom_value, name);
+                try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
                 try s.emitOp(opcode.op.get_super_value);
                 const shape = try parseCallArgs(s, flags);
                 switch (shape) {
@@ -10079,9 +10130,14 @@ pub const parser_core = struct {
         var retained = false;
         var allow_shorthand = false;
         var has_escape = false;
+        errdefer if (retained) s.function.atoms.free(atom_id);
 
         if (k == tok.TOK_IDENT or (k == tok.TOK_AWAIT and canUseAwaitAsIdentifier(s))) {
-            atom_id = if (k == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(k);
+            atom_id = if (k == tok.TOK_IDENT)
+                s.function.atoms.dup(s.token.payload.ident.atom)
+            else
+                tok.keywordAtom(k);
+            retained = k == tok.TOK_IDENT;
             has_escape = k == tok.TOK_IDENT and s.token.payload.ident.has_escape;
             allow_shorthand = k == tok.TOK_AWAIT or !escapedIdentifierIsReservedWordForShorthandBinding(s, atom_id, has_escape);
             try s.advance();
@@ -11335,8 +11391,8 @@ pub const parser_core = struct {
         }
     }
 
-    fn usingDeclarationBindingIsOf(s: *State, kind: DisposalHint) bool {
-        const snapshot = takeParserSnapshot(s);
+    fn usingDeclarationBindingIsOf(s: *State, kind: DisposalHint) Error!bool {
+        const snapshot = try takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
         if (!advanceUsingDeclarationPrefixForLookahead(s, kind)) return false;
         return s.isOfToken();
@@ -11628,13 +11684,14 @@ pub const parser_core = struct {
         try s.expectToken(tok.TOK_ENUM);
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
         const enum_atom = s.token.payload.ident.atom;
-        try s.advance();
 
-        // Register variable in current scope if not exists
+        // Acquire the declaration owner before advance releases the token's
+        // identifier retain (qjs next_token/free_token ownership order).
         const existing_var = s.cur_func().findVar(enum_atom);
         if (existing_var < 0) {
             _ = try s.addScopeVar(enum_atom, .normal, false, false);
         }
+        try s.advance();
 
         // Emit Enum = Enum || {}
         try s.emitScopeGetVarUndef(enum_atom);
@@ -11650,7 +11707,11 @@ pub const parser_core = struct {
         var counter: i32 = 0;
         while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
             if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
-            const member_atom = identifierLikeAtom(s);
+            // Member names are not declaration rows, so retain them explicitly
+            // across advance until every atom-bearing emission has duplicated
+            // its own owner.
+            const member_atom = s.function.atoms.dup(identifierLikeAtom(s));
+            defer s.function.atoms.free(member_atom);
             try s.advance();
 
             const member_name = s.lex.atoms.name(member_atom) orelse "";
@@ -11736,13 +11797,14 @@ pub const parser_core = struct {
     fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
         if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
         const ns_atom = s.token.payload.ident.atom;
-        try s.advance();
 
-        // Register variable in current scope if not exists
+        // FunctionDef must own the name before advance releases the token.
+        // Existing declarations already provide that owner.
         const existing_var = s.cur_func().findVar(ns_atom);
         if (existing_var < 0) {
             _ = try s.addScopeVar(ns_atom, .normal, false, false);
         }
+        try s.advance();
 
         // Emit Namespace = Namespace || {}
         try s.emitScopeGetVarUndef(ns_atom);
@@ -11859,7 +11921,12 @@ pub const parser_core = struct {
     fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         const tok_kind = s.peekKind();
 
-        if (s.labelStartAtom()) |label_atom| {
+        if (s.labelStartAtom()) |token_label_atom| {
+            // labelStartAtom borrows the current token payload. Keep the label
+            // identity live across `advance()` and the complete labelled
+            // statement; LabelFrame itself deliberately does not own atoms.
+            const label_atom = s.function.atoms.dup(token_label_atom);
+            defer s.function.atoms.free(label_atom);
             if (s.isReservedLabelIdentifier(label_atom)) return Error.UnexpectedToken;
             if (s.hasActiveLabel(label_atom)) return Error.UnexpectedToken;
 
@@ -12336,10 +12403,13 @@ pub const parser_core = struct {
                 const is_break = s.peekKind() == tok.TOK_BREAK;
                 try s.advance();
                 var label_atom: ?Atom = null;
+                defer if (label_atom) |atom_id| s.function.atoms.free(atom_id);
                 if (!s.gotLineTerminator() and isIdentifierLikeToken(s)) {
-                    const atom_id = identifierLikeAtom(s);
-                    if (s.peekKind() == tok.TOK_IDENT and escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return Error.UnexpectedToken;
+                    // The identifier token is released by advance; retain the
+                    // lookup key until the labelled jump has been emitted.
+                    const atom_id = s.function.atoms.dup(identifierLikeAtom(s));
                     label_atom = atom_id;
+                    if (s.peekKind() == tok.TOK_IDENT and escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return Error.UnexpectedToken;
                     try s.advance(); // consume the label name
                 }
                 _ = try s.expectSemicolon();
@@ -12741,9 +12811,11 @@ pub const parser_core = struct {
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
         const current_line = s.token.line_num;
-        const peek_token = s.lex.next() catch return false;
+        // The lexer restore must be armed before the fallible scan: `next()`
+        // moves `pos` past the peeked token before it can fail (the identifier
+        // atom is interned last), so a failure that escaped this frame with the
+        // restore still unarmed would leave the parser mid-token.
         defer {
-            s.lex.freeToken(@constCast(&peek_token));
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
@@ -12752,6 +12824,8 @@ pub const parser_core = struct {
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
+        const peek_token = s.lex.next() catch return false;
+        defer s.lex.freeToken(@constCast(&peek_token));
         const val = peek_token.val;
         if (val == @as(tok.TokenKind, @intCast('['))) {
             // `let [` is a syntax restriction: it never introduces an
@@ -13311,7 +13385,12 @@ pub const parser_core = struct {
             const binding_identifier = isIdentifierLikeToken(s);
             if (binding_identifier or sloppy_keyword_var) {
                 // Simple identifier binding
-                const atom_id = if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
+                const token_atom = if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
+                // qjs js_parse_var takes its own `name` reference before
+                // next_token frees the identifier token (quickjs.c:
+                // 28163-28189). Keep that owner through this declarator.
+                const atom_id = s.function.atoms.dup(token_atom);
+                defer s.function.atoms.free(atom_id);
                 if (binding_identifier and s.peekKind() == tok.TOK_IDENT and
                     escapedIdentifierIsReservedWordForBinding(s, atom_id, s.token.payload.ident.has_escape))
                 {
@@ -13539,7 +13618,7 @@ pub const parser_core = struct {
             s.peekNextKind() == tok.TOK_IN;
         const direct_using_kind = directUsingDeclarationKind(s);
         const parse_using_decl = if (direct_using_kind) |using_kind|
-            using_kind == .async or !usingDeclarationBindingIsOf(s, using_kind)
+            using_kind == .async or !(try usingDeclarationBindingIsOf(s, using_kind))
         else
             false;
 
@@ -13824,7 +13903,7 @@ pub const parser_core = struct {
         }
     }
     fn arrayPatternContainsNestedBindingPattern(s: *State) Error!bool {
-        const snapshot = takeParserSnapshot(s);
+        const snapshot = try takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
         try s.expectToken('[');
         var depth: usize = 0;
@@ -13849,7 +13928,7 @@ pub const parser_core = struct {
     }
 
     fn arrayPatternContainsNestedAssignmentPattern(s: *State) Error!bool {
-        const snapshot = takeParserSnapshot(s);
+        const snapshot = try takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
         try s.expectToken('[');
         while (s.peekKind() != ']' and s.peekKind() != tok.TOK_EOF) {
@@ -13927,7 +14006,7 @@ pub const parser_core = struct {
         defer {
             if (func_kind == .class_constructor or func_kind == .derived_class_constructor) {
                 if (s.current_parameter_properties) |*props| {
-                    props.deinit(s.function.memory.allocator);
+                    deinitOwnedParserAtoms(s, props);
                 }
             }
             s.current_parameter_properties = saved_parameter_properties;
@@ -13948,7 +14027,10 @@ pub const parser_core = struct {
         if (!has_decl_name) {
             return Error.UnexpectedToken;
         }
-        const name_atom = identifierLikeAtom(s);
+        // qjs js_parse_function_decl2 retains the identifier before
+        // next_token releases the token (quickjs.c:36551-36556).
+        const name_atom = s.function.atoms.dup(identifierLikeAtom(s));
+        defer s.function.atoms.free(name_atom);
         s.last_declared_atom = name_atom;
         if (s.lex.is_module and s.atProgramBodyScope() and hasKnownBinding(s, name_atom)) {
             return Error.UnexpectedToken;
@@ -13997,11 +14079,16 @@ pub const parser_core = struct {
         // Parse function name (optional for expressions)
         const saved_pending_name = s.pending_function_name;
         s.pending_function_name = null;
+        var owned_name: ?Atom = null;
+        defer if (owned_name) |name_atom| s.function.atoms.free(name_atom);
         const has_name = s.peekKind() == tok.TOK_IDENT or
             (s.peekKind() == tok.TOK_AWAIT and !s.in_async and !s.lex.is_module) or
             (s.peekKind() == tok.TOK_YIELD and !(s.is_strict or s.cur_func().is_strict_mode));
         if (has_name) {
-            const name_atom = identifierLikeAtom(s);
+            // qjs js_parse_function_decl2 retains a named-expression atom
+            // across next_token (quickjs.c:36551-36556).
+            const name_atom = s.function.atoms.dup(identifierLikeAtom(s));
+            owned_name = name_atom;
             if (is_generator and atomNameEquals(s, name_atom, "yield")) return Error.UnexpectedToken;
             if (func_kind == .async and is_generator and atomNameEquals(s, name_atom, "await")) return Error.UnexpectedToken;
             if ((s.is_strict or s.cur_func().is_strict_mode) and
@@ -14085,13 +14172,23 @@ pub const parser_core = struct {
         list.deinit(s.function.memory.allocator);
     }
 
+    fn appendOwnedParserAtom(s: *State, list: *std.ArrayList(Atom), atom_id: Atom) Error!void {
+        try list.ensureUnusedCapacity(s.function.memory.allocator, 1);
+        list.appendAssumeCapacity(s.function.atoms.dup(atom_id));
+    }
+
+    fn deinitOwnedParserAtoms(s: *State, list: *std.ArrayList(Atom)) void {
+        for (list.items) |atom_id| s.function.atoms.free(atom_id);
+        list.deinit(s.function.memory.allocator);
+    }
+
     const FunctionParameters = struct {
         simple_names: std.ArrayList(Atom) = .empty,
         has_duplicate_simple: bool = false,
         has_simple_list: bool = true,
 
         fn deinit(self: *FunctionParameters, s: *State) void {
-            deinitParserList(Atom, s, &self.simple_names);
+            deinitOwnedParserAtoms(s, &self.simple_names);
         }
     };
 
@@ -14156,7 +14253,7 @@ pub const parser_core = struct {
                     const param_atom = identifierLikeAtom(s);
                     if (has_modifier) {
                         if (s.current_parameter_properties) |*props| {
-                            try props.append(s.function.memory.allocator, param_atom);
+                            try appendOwnedParserAtom(s, props, param_atom);
                         }
                     }
                     const arg_index = param_count;
@@ -14176,7 +14273,7 @@ pub const parser_core = struct {
                     for (s.cur_func().vars) |existing| {
                         if (existing.var_name == param_atom) return Error.UnexpectedToken;
                     }
-                    try parameters.simple_names.append(s.function.memory.allocator, param_atom);
+                    try appendOwnedParserAtom(s, &parameters.simple_names, param_atom);
                     if (capture_child) {
                         if (parameter_scope != null) {
                             try appendParameterExpressionBinding(s, param_atom);
@@ -14258,7 +14355,7 @@ pub const parser_core = struct {
                         for (s.cur_func().vars) |existing| {
                             if (existing.var_name == rest_atom) return Error.UnexpectedToken;
                         }
-                        try parameters.simple_names.append(s.function.memory.allocator, rest_atom);
+                        try appendOwnedParserAtom(s, &parameters.simple_names, rest_atom);
                         if (capture_child) {
                             if (parameter_scope != null) {
                                 try appendParameterExpressionBinding(s, rest_atom);
@@ -15072,7 +15169,7 @@ pub const parser_core = struct {
             else
                 null;
             var param_names: std.ArrayList(Atom) = .empty;
-            defer param_names.deinit(s.function.memory.allocator);
+            defer deinitOwnedParserAtoms(s, &param_names);
             while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
                 if (isIdentifierLikeToken(s)) {
                     if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
@@ -15392,7 +15489,7 @@ pub const parser_core = struct {
             return Error.UnexpectedToken;
         }
 
-        const snapshot = takeParserSnapshot(s);
+        const snapshot = try takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
 
         var depth: usize = 0;
@@ -15977,7 +16074,7 @@ pub const parser_core = struct {
         for (names.items) |existing| {
             if (existing == atom_id) return Error.UnexpectedToken;
         }
-        try names.append(s.function.memory.allocator, atom_id);
+        try appendOwnedParserAtom(s, names, atom_id);
     }
 
     const ParserSnapshot = struct {
@@ -16001,7 +16098,7 @@ pub const parser_core = struct {
         features: std.EnumSet(FeatureImpl),
     };
 
-    fn takeParserSnapshot(s: *State) ParserSnapshot {
+    fn takeParserSnapshot(s: *State) Error!ParserSnapshot {
         return .{
             .pos = s.lex.pos,
             .line = s.lex.line,
@@ -16010,7 +16107,9 @@ pub const parser_core = struct {
             .mark_pos = s.lex.mark_pos,
             .mark_line = s.lex.mark_line,
             .mark_col = s.lex.mark_col,
-            .token = s.token,
+            // qjs speculative scans restore via reparse_ident_token; retain
+            // the complete token payload while the scan consumes its owner.
+            .token = try s.lex.dupToken(s.token),
             .last_token_end_offset = s.last_token_end_offset,
             .last_token_line_num = s.last_token_line_num,
             .last_token_col_num = s.last_token_col_num,
@@ -16134,7 +16233,7 @@ pub const parser_core = struct {
     }
 
     fn scanParameterList(s: *State) Error!ParameterListScan {
-        const snapshot = takeParserSnapshot(s);
+        const snapshot = try takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
 
         var scan = ParameterListScan{};
@@ -16984,7 +17083,7 @@ pub const parser_core = struct {
         defer {
             if (kind == .class_constructor or kind == .derived_class_constructor) {
                 if (s.current_parameter_properties) |*props| {
-                    props.deinit(s.function.memory.allocator);
+                    deinitOwnedParserAtoms(s, props);
                 }
             }
             s.current_parameter_properties = saved_parameter_properties;
@@ -17400,14 +17499,17 @@ pub const parser_core = struct {
 
         // Parse class name (required for declarations, optional for expressions)
         var class_name: ?Atom = null;
+        defer if (class_name) |name_atom| s.function.atoms.free(name_atom);
         if (is_decl) {
             const name_atom = classNameAtom(s) orelse return Error.UnexpectedToken;
-            class_name = name_atom;
+            // qjs js_parse_class duplicates the class name before consuming
+            // its token (quickjs.c:25295-25304).
+            class_name = s.function.atoms.dup(name_atom);
             s.last_class_decl_atom = name_atom;
             try s.advance();
         } else {
             if (classNameAtom(s)) |name_atom| {
-                class_name = name_atom;
+                class_name = s.function.atoms.dup(name_atom);
                 try s.advance();
             }
         }
@@ -17760,6 +17862,7 @@ pub const parser_core = struct {
     fn parseImport(s: *State) Error!void {
         try s.advance();
         var default_local_name: ?Atom = null;
+        defer if (default_local_name) |name| s.function.atoms.free(name);
 
         // Side-effect import: import 'module'
         if (s.peekKind() == tok.TOK_STRING) {
@@ -17774,9 +17877,9 @@ pub const parser_core = struct {
 
         // Default import: import x from 'module'
         if (s.peekKind() == tok.TOK_IDENT) {
-            const local_name = s.token.payload.ident.atom;
-            try validateModuleImportBindingName(s, local_name);
+            const local_name = s.function.atoms.dup(s.token.payload.ident.atom);
             default_local_name = local_name;
+            try validateModuleImportBindingName(s, local_name);
             try s.advance();
 
             if (s.peekKind() != ',') {
@@ -17801,7 +17904,8 @@ pub const parser_core = struct {
             if (s.peekKind() != tok.TOK_IDENT) {
                 return Error.UnexpectedToken;
             }
-            const local_name = s.token.payload.ident.atom;
+            const local_name = s.function.atoms.dup(s.token.payload.ident.atom);
+            defer s.function.atoms.free(local_name);
             try validateModuleImportBindingName(s, local_name);
             try s.advance();
             const request_index = try parseFromClause(s);
@@ -17824,37 +17928,38 @@ pub const parser_core = struct {
                     return Error.UnexpectedToken;
                 }
                 const import_name_was_string = s.peekKind() == tok.TOK_STRING;
-                const import_name_atom = try moduleImportNameAtom(s);
-                const import_name_owned = s.function.atoms.dup(import_name_atom);
-                if (import_name_was_string) s.function.atoms.free(import_name_atom);
+                const import_name_owned = try moduleImportNameAtomOwned(s);
+                var import_name_live = true;
+                errdefer if (import_name_live) s.function.atoms.free(import_name_owned);
                 try s.advance();
 
                 // Optional 'as' for renaming
-                var local_name_atom: Atom = undefined;
+                var local_name_owned: Atom = undefined;
+                var local_name_live = false;
+                errdefer if (local_name_live) s.function.atoms.free(local_name_owned);
                 if (s.isIdent("as")) {
                     try s.advance();
                     if (s.peekKind() != tok.TOK_IDENT) {
-                        s.function.atoms.free(import_name_owned);
                         return Error.UnexpectedToken;
                     }
-                    local_name_atom = s.token.payload.ident.atom;
-                    try validateModuleImportBindingName(s, local_name_atom);
+                    local_name_owned = s.function.atoms.dup(s.token.payload.ident.atom);
+                    local_name_live = true;
+                    try validateModuleImportBindingName(s, local_name_owned);
                     try s.advance();
                 } else if (import_name_was_string) {
-                    s.function.atoms.free(import_name_owned);
                     return Error.UnexpectedToken;
                 } else {
-                    local_name_atom = import_name_atom;
-                    try validateModuleImportBindingName(s, local_name_atom);
+                    local_name_owned = s.function.atoms.dup(import_name_owned);
+                    local_name_live = true;
+                    try validateModuleImportBindingName(s, local_name_owned);
                 }
 
                 imports.append(s.function.memory.allocator, .{
                     .import_name = import_name_owned,
-                    .local_name = s.function.atoms.dup(local_name_atom),
-                }) catch {
-                    s.function.atoms.free(import_name_owned);
-                    return Error.OutOfMemory;
-                };
+                    .local_name = local_name_owned,
+                }) catch return Error.OutOfMemory;
+                import_name_live = false;
+                local_name_live = false;
 
                 if (s.peekKind() != ',') break;
                 try s.advance();
@@ -17986,10 +18091,13 @@ pub const parser_core = struct {
         return kind == tok.TOK_IDENT or kind == tok.TOK_STRING or tok.isKeyword(kind);
     }
 
-    fn moduleImportNameAtom(s: *State) Error!Atom {
+    /// Return one owned retain for the current module import/export name.
+    /// Identifier tokens own their atom only until `advance()` frees the
+    /// token; string names are newly interned and already owned here.
+    fn moduleImportNameAtomOwned(s: *State) Error!Atom {
         return switch (s.peekKind()) {
-            tok.TOK_IDENT => s.token.payload.ident.atom,
-            tok.TOK_NULL...tok.TOK_AWAIT => tok.keywordAtom(s.peekKind()),
+            tok.TOK_IDENT => s.function.atoms.dup(s.token.payload.ident.atom),
+            tok.TOK_NULL...tok.TOK_AWAIT => s.function.atoms.dup(tok.keywordAtom(s.peekKind())),
             else => try moduleStringAtom(s),
         };
     }
@@ -18038,7 +18146,8 @@ pub const parser_core = struct {
         if (next_tok == tok.TOK_DEFAULT) {
             try s.advance();
             if (s.peekKind() == tok.TOK_CLASS) {
-                if (exportDefaultClassName(s)) |name_atom| {
+                if (exportDefaultClassNameOwned(s)) |name_atom| {
+                    defer s.function.atoms.free(name_atom);
                     try parseClass(s, true);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
@@ -18057,7 +18166,8 @@ pub const parser_core = struct {
                 }
                 return;
             } else if (s.peekKind() == tok.TOK_FUNCTION) {
-                if (exportDefaultFunctionName(s)) |name_atom| {
+                if (exportDefaultFunctionNameOwned(s)) |name_atom| {
+                    defer s.function.atoms.free(name_atom);
                     const source_start = s.currentTokenStartOffset();
                     try parseFunctionDecl(s, .normal, source_start);
                     try addModuleExportName(s, atom_default, name_atom);
@@ -18070,7 +18180,8 @@ pub const parser_core = struct {
             } else if (s.peekKind() == tok.TOK_IDENT and s.isIdent("async") and s.peekNextKind() == tok.TOK_FUNCTION) {
                 const source_start = s.currentTokenStartOffset();
                 try s.advance();
-                if (exportDefaultFunctionName(s)) |name_atom| {
+                if (exportDefaultFunctionNameOwned(s)) |name_atom| {
+                    defer s.function.atoms.free(name_atom);
                     try parseFunctionDecl(s, .async, source_start);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
@@ -18099,43 +18210,41 @@ pub const parser_core = struct {
                 if (!isModuleNameToken(s.peekKind())) {
                     return Error.UnexpectedToken;
                 }
-                const local_name_atom = try moduleImportNameAtom(s);
                 const local_name_was_string = s.peekKind() == tok.TOK_STRING;
                 if (local_name_was_string and !isWellFormedModuleString(s.token.payload.str.bytes)) {
-                    s.function.atoms.free(local_name_atom);
                     return Error.UnexpectedToken;
                 }
-                var export_name_atom = local_name_atom;
-                var export_name_was_string = local_name_was_string;
+                const local_name_owned = try moduleImportNameAtomOwned(s);
+                var local_name_live = true;
+                errdefer if (local_name_live) s.function.atoms.free(local_name_owned);
+                var export_name_owned = s.function.atoms.dup(local_name_owned);
+                var export_name_live = true;
+                errdefer if (export_name_live) s.function.atoms.free(export_name_owned);
                 try s.advance();
 
                 // Optional 'as' for renaming
                 if (s.isIdent("as")) {
                     try s.advance();
                     if (!isModuleNameToken(s.peekKind())) {
-                        if (local_name_was_string) s.function.atoms.free(local_name_atom);
                         return Error.UnexpectedToken;
                     }
-                    export_name_was_string = s.peekKind() == tok.TOK_STRING;
-                    if (export_name_was_string and !isWellFormedModuleString(s.token.payload.str.bytes)) {
-                        if (local_name_was_string) s.function.atoms.free(local_name_atom);
+                    if (s.peekKind() == tok.TOK_STRING and !isWellFormedModuleString(s.token.payload.str.bytes)) {
                         return Error.UnexpectedToken;
                     }
-                    export_name_atom = try moduleImportNameAtom(s);
+                    s.function.atoms.free(export_name_owned);
+                    export_name_live = false;
+                    export_name_owned = try moduleImportNameAtomOwned(s);
+                    export_name_live = true;
                     try s.advance();
                 }
 
                 export_specs.append(s.function.memory.allocator, .{
-                    .export_name = s.function.atoms.dup(export_name_atom),
-                    .import_name = s.function.atoms.dup(local_name_atom),
+                    .export_name = export_name_owned,
+                    .import_name = local_name_owned,
                     .import_name_is_string = local_name_was_string,
-                }) catch {
-                    if (local_name_was_string) s.function.atoms.free(local_name_atom);
-                    if (export_name_was_string and export_name_atom != local_name_atom) s.function.atoms.free(export_name_atom);
-                    return Error.OutOfMemory;
-                };
-                if (local_name_was_string) s.function.atoms.free(local_name_atom);
-                if (export_name_was_string and export_name_atom != local_name_atom) s.function.atoms.free(export_name_atom);
+                }) catch return Error.OutOfMemory;
+                local_name_live = false;
+                export_name_live = false;
 
                 if (s.peekKind() != ',') break;
                 try s.advance();
@@ -18163,7 +18272,7 @@ pub const parser_core = struct {
             try s.advance();
             // Optional 'as' for namespace re-export
             var export_name = atom_star;
-            var export_name_was_string = false;
+            var export_name_owned = false;
             var is_namespace = false;
             if (s.isIdent("as")) {
                 is_namespace = true;
@@ -18171,12 +18280,12 @@ pub const parser_core = struct {
                 if (!isModuleNameToken(s.peekKind())) {
                     return Error.UnexpectedToken;
                 }
-                export_name_was_string = s.peekKind() == tok.TOK_STRING;
-                if (export_name_was_string and !isWellFormedModuleString(s.token.payload.str.bytes)) return Error.UnexpectedToken;
-                export_name = try moduleImportNameAtom(s);
+                if (s.peekKind() == tok.TOK_STRING and !isWellFormedModuleString(s.token.payload.str.bytes)) return Error.UnexpectedToken;
+                export_name = try moduleImportNameAtomOwned(s);
+                export_name_owned = true;
                 try s.advance();
             }
-            defer if (export_name_was_string) s.function.atoms.free(export_name);
+            defer if (export_name_owned) s.function.atoms.free(export_name);
             const request_index = try parseFromClause(s);
             if (is_namespace) {
                 try addModuleIndirectExport(s, request_index, export_name, atom_star, true);
@@ -18205,7 +18314,8 @@ pub const parser_core = struct {
                 try s.advance();
             }
             const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
-            const name_atom = exportDefaultFunctionName(s);
+            const name_atom = exportDefaultFunctionNameOwned(s);
+            defer if (name_atom) |name| s.function.atoms.free(name);
             try parseFunctionDecl(s, func_kind, source_start);
             if (name_atom) |name| try addModuleExportName(s, name, name);
             return;
@@ -18225,7 +18335,8 @@ pub const parser_core = struct {
                 const source_start = s.currentTokenStartOffset();
                 try s.advance(); // consume async
                 const func_kind: ParseFunctionKind = .async;
-                const name_atom = exportDefaultFunctionName(s);
+                const name_atom = exportDefaultFunctionNameOwned(s);
+                defer if (name_atom) |name| s.function.atoms.free(name);
                 try parseFunctionDecl(s, func_kind, source_start);
                 if (name_atom) |name| try addModuleExportName(s, name, name);
                 return;
@@ -18235,16 +18346,28 @@ pub const parser_core = struct {
         return Error.UnexpectedToken;
     }
 
-    fn exportDefaultFunctionName(s: *State) ?Atom {
+    /// Return one owned retain for the declaration name that follows the
+    /// `function` keyword, or null when the declaration is anonymous. The scan
+    /// token that interned the name is released by this function's own `defer`,
+    /// so the retain must be taken here: a borrowed id survives only while the
+    /// re-parse happens to reclaim the freed atom-table slot (`internDynamic`
+    /// pops the LIFO free list), which is luck, not ownership. Same contract as
+    /// `moduleImportNameAtomOwned`; the caller frees.
+    fn exportDefaultFunctionNameOwned(s: *State) ?Atom {
         const saved_pos = s.lex.pos;
         const saved_line = s.lex.line;
         const saved_col = s.lex.col;
         const saved_mark_pos = s.lex.mark_pos;
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
-        var first = s.lex.next() catch return null;
+        // The position restore must be armed before the fallible scan: `next()`
+        // moves `pos` past the peeked token before it can fail (the identifier
+        // atom is interned last, quickjs.c mirror at parser.zig lexIdentifier),
+        // so a failure that escaped this frame with the restore still unarmed
+        // would leave the caller parsing from mid-token - `export function f()`
+        // would resume on `(` and report a spurious SyntaxError instead of
+        // letting the allocation failure propagate.
         defer {
-            s.lex.freeToken(&first);
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
@@ -18252,26 +18375,30 @@ pub const parser_core = struct {
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
+        var first = s.lex.next() catch return null;
+        defer s.lex.freeToken(&first);
         if (first.val == @as(tok.TokenKind, @intCast('*'))) {
             var second = s.lex.next() catch return null;
             defer s.lex.freeToken(&second);
-            if (second.val == tok.TOK_IDENT) return second.payload.ident.atom;
+            if (second.val == tok.TOK_IDENT) return s.function.atoms.dup(second.payload.ident.atom);
             return null;
         }
-        if (first.val == tok.TOK_IDENT) return first.payload.ident.atom;
+        if (first.val == tok.TOK_IDENT) return s.function.atoms.dup(first.payload.ident.atom);
         return null;
     }
 
-    fn exportDefaultClassName(s: *State) ?Atom {
+    /// Owned counterpart of `exportDefaultFunctionNameOwned` for `class`.
+    /// The caller frees.
+    fn exportDefaultClassNameOwned(s: *State) ?Atom {
         const saved_pos = s.lex.pos;
         const saved_line = s.lex.line;
         const saved_col = s.lex.col;
         const saved_mark_pos = s.lex.mark_pos;
         const saved_mark_line = s.lex.mark_line;
         const saved_mark_col = s.lex.mark_col;
-        var name = s.lex.next() catch return null;
+        // Same ordering contract as `exportDefaultFunctionNameOwned`: arm the
+        // position restore before the fallible peek.
         defer {
-            s.lex.freeToken(&name);
             s.lex.pos = saved_pos;
             s.lex.line = saved_line;
             s.lex.col = saved_col;
@@ -18279,7 +18406,9 @@ pub const parser_core = struct {
             s.lex.mark_line = saved_mark_line;
             s.lex.mark_col = saved_mark_col;
         }
-        return if (name.val == tok.TOK_IDENT) name.payload.ident.atom else null;
+        var name = s.lex.next() catch return null;
+        defer s.lex.freeToken(&name);
+        return if (name.val == tok.TOK_IDENT) s.function.atoms.dup(name.payload.ident.atom) else null;
     }
 
     /// Parse from clause: from 'module'
@@ -18317,11 +18446,10 @@ pub const parser_core = struct {
                 return Error.UnexpectedToken;
             }
             const key_atom = if (s.peekKind() == tok.TOK_IDENT)
-                s.token.payload.ident.atom
+                s.function.atoms.dup(s.token.payload.ident.atom)
             else
                 try moduleStringAtom(s);
-            const key_is_string = s.peekKind() == tok.TOK_STRING;
-            defer if (key_is_string) s.function.atoms.free(key_atom);
+            defer s.function.atoms.free(key_atom);
             try s.advance();
 
             try s.expectToken(':');

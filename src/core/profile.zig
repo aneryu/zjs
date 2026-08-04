@@ -22,10 +22,36 @@ pub const OpcodeProfile = struct {
     global_lookup_count: u64 = 0,
     alloc_count: u64 = 0,
     call_frame_count: u64 = 0,
+    /// Delta-attribution state for the tail-call threaded dispatcher (see
+    /// exec/vm_profile.zig): the currently-open opcode interval, closed by
+    /// the next table dispatch or by `flushPendingDispatch`.
+    pending_op: u16 = no_pending_op,
+    pending_start_ns: u64 = 0,
+
+    pub const no_pending_op: u16 = 0xffff;
 
     pub fn recordOpcode(self: *OpcodeProfile, opcode: u8, elapsed_nanos: u64) void {
         self.count[opcode] +|= 1;
         self.nanos[opcode] +|= elapsed_nanos;
+    }
+
+    /// One hot-table dispatch in a profiling build: close the previous
+    /// opcode's wall interval (a scope cannot span an `always_tail` chain)
+    /// and open this one.
+    pub fn noteDispatch(self: *OpcodeProfile, opcode: u8) void {
+        const now = nowNanos();
+        if (self.pending_op != no_pending_op) {
+            self.recordOpcode(@intCast(self.pending_op), now -| self.pending_start_ns);
+        }
+        self.pending_op = opcode;
+        self.pending_start_ns = now;
+    }
+
+    /// Close the final open interval; must run before any dump or detach.
+    pub fn flushPendingDispatch(self: *OpcodeProfile) void {
+        if (self.pending_op == no_pending_op) return;
+        self.recordOpcode(@intCast(self.pending_op), nowNanos() -| self.pending_start_ns);
+        self.pending_op = no_pending_op;
     }
 
     pub fn recordAlloc(self: *OpcodeProfile) void {

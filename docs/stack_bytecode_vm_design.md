@@ -113,11 +113,16 @@ QuickJS-faithful policy 的审计对象，不能继续以 microbenchmark 结果�
 - catch/finally and pending JS exception propagation；
 - four zjs-only explicit-resource-management opcodes。
 
-临时不可用：
+opcode profiling（D0 修复后）：
 
-- `-Dzjs_enable_opcode_profile=true` 和 CLI `--profile-opcodes` 仍有入口，但
-  dispatcher 当前未接入 `vm_profile.zig`，所以逐 opcode count/time 保持为零。
-  修复并加入真实脚本端到端测试前，不得把该输出用于性能归因。
+- profiling 构建（`zig build zjs-profile` / `-Dzjs_enable_opcode_profile=true`）
+  在 comptime 包装整张热 dispatch 表：每次表分发经 `vm_profile.noteDispatch`
+  计数并做 delta 归时（scope 无法跨 `always_tail` 链，前一 opcode 的区间由
+  下一次分发关闭，最后一个由 dump 前的 `flushPendingDispatch` 关闭）。
+  cold_table 与 property tail 表不包装——它们重分发同一 pc，包装会重计。
+- 默认构建的表逐项等于未包装表；`--profile-opcodes` 在非 profiling 二进制上
+  fail-closed（exit 2），`--perf-json` 显式输出 `opcode_profile_enabled`。
+  `perf-runtime-profiles` 门禁要求最小计数（非仅上限），全零档案无法通过。
 
 未实现：
 

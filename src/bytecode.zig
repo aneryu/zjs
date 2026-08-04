@@ -3470,6 +3470,10 @@ pub const function_def = struct {
 
         pub fn appendSourceLoc(self: *FunctionDefImpl, pc: u32, line_num: i32, col_num: i32) !void {
             if (line_num <= 0 or col_num <= 0) return;
+            // The phase-2 streaming source remap (P2-R1T) requires
+            // non-decreasing slot pcs; producers append at the emission end.
+            std.debug.assert(self.source_loc_slots.len == 0 or
+                self.source_loc_slots[self.source_loc_slots.len - 1].pc <= pc);
             const tail = try growSliceBy(pipeline_pc2line.SourceLocSlot, self.memory, &self.source_loc_slots, &self.source_loc_capacity, 1);
             tail[0] = .{ .pc = pc, .line_num = line_num, .col_num = col_num };
             self.source_loc_count = @intCast(self.source_loc_slots.len);
@@ -6394,10 +6398,257 @@ pub const pipeline_resolve_variables = struct {
     /// targets, the stored absolute values go stale. We collect each
     /// jump's operand position here during the main walk, then rewrite
     /// the targets at the end using the old→new pc map.
+    /// P2-R1T (2026-07-31): consumer-proportional relocation replacing the
+    /// dense usize[code.len+1] pc map (253MB/run alloc+memset with 10.9% of
+    /// slots ever queried — reports/perf/qjs-align/2026-07-31/code-load/
+    /// p2-00-survey.md). Source-loc remaps stream into a u32 transactional
+    /// scratch committed only at the no-fail install boundary; jump-target
+    /// relocations append to a strictly increasing (old,new) table whose
+    /// capacity is the phase-1 `is_target` census. Debug/ReleaseSafe keeps
+    /// the dense map alive as a per-item oracle; ReleaseFast carries no
+    /// dense allocation, memset, store, or branch.
+    const SparseRelocation = struct {
+        nodes: []const Phase1CfgNode,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        source_new_pcs: []u32,
+        target_old_pcs: []u32,
+        target_new_pcs: []u32,
+        target_len: usize = 0,
+        source_cursor: usize = 0,
+
+        /// Mirror one dense-map store for `old_pc`. Slots at pcs the write
+        /// pass never publishes keep the dense map's memset default (0),
+        /// exactly like the old remap read them.
+        fn publishPoint(self: *SparseRelocation, old_pc: usize, new_pc: usize) Error!void {
+            self.consumeSourceBelow(old_pc);
+            while (self.source_cursor < self.source_locs.len and
+                self.source_locs[self.source_cursor].pc == old_pc)
+            {
+                self.source_new_pcs[self.source_cursor] = @intCast(new_pc);
+                self.source_cursor += 1;
+            }
+            if (old_pc < self.nodes.len and self.nodes[old_pc].is_target) {
+                try self.appendTarget(old_pc, new_pc);
+            }
+        }
+
+        /// Mirror the dense per-byte fills over a consumed/dead range.
+        fn publishRange(self: *SparseRelocation, old_start: usize, old_end: usize, new_pc: usize) Error!void {
+            self.consumeSourceBelow(old_start);
+            while (self.source_cursor < self.source_locs.len and
+                self.source_locs[self.source_cursor].pc < old_end)
+            {
+                self.source_new_pcs[self.source_cursor] = @intCast(new_pc);
+                self.source_cursor += 1;
+            }
+            var pc = old_start;
+            while (pc < old_end) : (pc += 1) {
+                if (pc < self.nodes.len and self.nodes[pc].is_target) {
+                    try self.appendTarget(pc, new_pc);
+                }
+            }
+        }
+
+        /// Terminal `code.len -> new_pc` entry: published unconditionally
+        /// (never dependent on is_target). Remaining slots at exactly
+        /// code.len take the terminal pc; a slot beyond it keeps its old pc,
+        /// mirroring the dense remap's bounds-checked skip.
+        fn publishTerminal(self: *SparseRelocation, code_len: usize, new_pc: usize) Error!void {
+            self.consumeSourceBelow(code_len);
+            while (self.source_cursor < self.source_locs.len) : (self.source_cursor += 1) {
+                const slot_pc = self.source_locs[self.source_cursor].pc;
+                self.source_new_pcs[self.source_cursor] =
+                    if (slot_pc == code_len) @intCast(new_pc) else slot_pc;
+            }
+            try self.appendTarget(code_len, new_pc);
+        }
+
+        /// Slots at pcs below the next publication were never stored by the
+        /// dense map either: they read its memset default.
+        fn consumeSourceBelow(self: *SparseRelocation, old_pc: usize) void {
+            while (self.source_cursor < self.source_locs.len and
+                self.source_locs[self.source_cursor].pc < old_pc)
+            {
+                self.source_new_pcs[self.source_cursor] = 0;
+                self.source_cursor += 1;
+            }
+        }
+
+        fn appendTarget(self: *SparseRelocation, old_pc: usize, new_pc: usize) Error!void {
+            if (self.target_len >= self.target_old_pcs.len) return error.InvalidBytecode;
+            std.debug.assert(self.target_len == 0 or self.target_old_pcs[self.target_len - 1] < old_pc);
+            self.target_old_pcs[self.target_len] = @intCast(old_pc);
+            self.target_new_pcs[self.target_len] = @intCast(new_pc);
+            self.target_len += 1;
+        }
+
+        fn lookupTarget(self: *const SparseRelocation, old_pc: usize) ?u32 {
+            // Typical functions have few jump targets: scan small tables
+            // linearly, early-exiting once a key passes `old_pc` (the table
+            // is strictly increasing, see the appendTarget assert).
+            if (self.target_len <= 8) {
+                for (self.target_old_pcs[0..self.target_len], 0..) |key, i| {
+                    if (key == old_pc) return self.target_new_pcs[i];
+                    if (key > old_pc) return null;
+                }
+                return null;
+            }
+            var lo: usize = 0;
+            var hi: usize = self.target_len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                const key = self.target_old_pcs[mid];
+                if (key == old_pc) return self.target_new_pcs[mid];
+                if (key < old_pc) lo = mid + 1 else hi = mid;
+            }
+            return null;
+        }
+    };
+
+    /// The dense relocation map survives only as the R1 oracle.
+    const relocation_oracle_enabled =
+        @import("builtin").mode == .Debug or @import("builtin").mode == .ReleaseSafe;
+
+    /// The next pass compares the single-pass phase-2 producer against the
+    /// two-pass shadow producer in safety-enabled builds.
+    const phase2_oracle_enabled =
+        @import("builtin").mode == .Debug or @import("builtin").mode == .ReleaseSafe;
+
     const JumpSite = struct {
         /// Byte offset within the *output* buffer where the u32 target
         /// operand begins. Always points to a 4-byte little-endian field.
         operand_pos: usize,
+    };
+
+    /// Phase-2 output builder. Its arrays grow geometrically during the write
+    /// loop. On success, the code and atom backings will be transferred to the
+    /// function via the WithCapacity installers; on failure,
+    /// `deinitUncommitted` releases all owned storage and atom references.
+    pub const Phase2Builder = struct {
+        memory: *memory.MemoryAccount,
+        atoms: *atom.AtomTable,
+        code: []u8,
+        code_capacity: usize,
+        code_len: usize,
+        atom_operands: []atom.Atom,
+        atom_capacity: usize,
+        atom_len: usize,
+        jump_sites: []JumpSite,
+        jump_capacity: usize,
+        jump_len: usize,
+
+        pub fn init(
+            mem: *memory.MemoryAccount,
+            atoms_table: *atom.AtomTable,
+            initial_code_capacity: usize,
+            initial_atom_capacity: usize,
+            initial_jump_capacity: usize,
+        ) !Phase2Builder {
+            var builder: Phase2Builder = .{
+                .memory = mem,
+                .atoms = atoms_table,
+                .code = &.{},
+                .code_capacity = 0,
+                .code_len = 0,
+                .atom_operands = &.{},
+                .atom_capacity = 0,
+                .atom_len = 0,
+                .jump_sites = &.{},
+                .jump_capacity = 0,
+                .jump_len = 0,
+            };
+
+            if (initial_code_capacity != 0) {
+                builder.code = try mem.alloc(u8, initial_code_capacity);
+                builder.code_capacity = initial_code_capacity;
+            }
+            errdefer if (builder.code_capacity != 0) mem.free(u8, builder.code);
+
+            if (initial_atom_capacity != 0) {
+                builder.atom_operands = try mem.alloc(atom.Atom, initial_atom_capacity);
+                builder.atom_capacity = initial_atom_capacity;
+            }
+            errdefer if (builder.atom_capacity != 0) mem.free(atom.Atom, builder.atom_operands);
+
+            if (initial_jump_capacity != 0) {
+                builder.jump_sites = try mem.alloc(JumpSite, initial_jump_capacity);
+                builder.jump_capacity = initial_jump_capacity;
+            }
+
+            return builder;
+        }
+
+        pub fn deinitUncommitted(self: *Phase2Builder) void {
+            for (self.atom_operands[0..self.atom_len]) |atom_id| self.atoms.free(atom_id);
+            if (self.code_capacity != 0) self.memory.free(u8, self.code);
+            if (self.atom_capacity != 0) self.memory.free(atom.Atom, self.atom_operands);
+            if (self.jump_capacity != 0) self.memory.free(JumpSite, self.jump_sites);
+
+            self.code = &.{};
+            self.code_capacity = 0;
+            self.code_len = 0;
+            self.atom_operands = &.{};
+            self.atom_capacity = 0;
+            self.atom_len = 0;
+            self.jump_sites = &.{};
+            self.jump_capacity = 0;
+            self.jump_len = 0;
+        }
+
+        pub fn ensureAdditional(
+            self: *Phase2Builder,
+            code_need: usize,
+            atom_need: usize,
+            jump_need: usize,
+        ) !void {
+            const required_code = self.code_len + code_need;
+            if (required_code > self.code_capacity) {
+                const new_capacity = @max(required_code, self.code_capacity * 2);
+                const new_backing = try self.memory.alloc(u8, new_capacity);
+                @memcpy(new_backing[0..self.code_len], self.code[0..self.code_len]);
+                if (self.code_capacity != 0) self.memory.free(u8, self.code);
+                self.code = new_backing;
+                self.code_capacity = new_capacity;
+            }
+
+            const required_atoms = self.atom_len + atom_need;
+            if (required_atoms > self.atom_capacity) {
+                const new_capacity = @max(required_atoms, self.atom_capacity * 2);
+                const new_backing = try self.memory.alloc(atom.Atom, new_capacity);
+                @memcpy(new_backing[0..self.atom_len], self.atom_operands[0..self.atom_len]);
+                if (self.atom_capacity != 0) self.memory.free(atom.Atom, self.atom_operands);
+                self.atom_operands = new_backing;
+                self.atom_capacity = new_capacity;
+            }
+
+            const required_jumps = self.jump_len + jump_need;
+            if (required_jumps > self.jump_capacity) {
+                const new_capacity = @max(required_jumps, self.jump_capacity * 2);
+                const new_backing = try self.memory.alloc(JumpSite, new_capacity);
+                @memcpy(new_backing[0..self.jump_len], self.jump_sites[0..self.jump_len]);
+                if (self.jump_capacity != 0) self.memory.free(JumpSite, self.jump_sites);
+                self.jump_sites = new_backing;
+                self.jump_capacity = new_capacity;
+            }
+        }
+
+        pub fn appendCodeAssumeCapacity(self: *Phase2Builder, bytes: []const u8) void {
+            std.debug.assert(self.code_len + bytes.len <= self.code_capacity);
+            @memcpy(self.code[self.code_len..][0..bytes.len], bytes);
+            self.code_len += bytes.len;
+        }
+
+        pub fn appendAtomAssumeCapacity(self: *Phase2Builder, owned_id: atom.Atom) void {
+            std.debug.assert(self.atom_len < self.atom_capacity);
+            self.atom_operands[self.atom_len] = owned_id;
+            self.atom_len += 1;
+        }
+
+        pub fn appendJumpAssumeCapacity(self: *Phase2Builder, site: JumpSite) void {
+            std.debug.assert(self.jump_len < self.jump_capacity);
+            self.jump_sites[self.jump_len] = site;
+            self.jump_len += 1;
+        }
     };
 
     const GLOBAL_REF_TAIL_NONE: u8 = 0;
@@ -7224,6 +7475,12 @@ pub const pipeline_resolve_variables = struct {
         nodes: []Phase1CfgNode,
         has_make_ref: bool,
         scope_var_count: usize,
+        input_jump_site_count: usize,
+        /// Number of distinct pcs carrying `is_target` — a safe capacity
+        /// upper bound for the sparse relocation table (it may include
+        /// references from unreachable code and later-folded targets, so the
+        /// final table length is allowed to be smaller; never assert equal).
+        target_count: usize,
     };
 
     /// QuickJS `resolve_variables` phase-2 dead-code boundary
@@ -7304,15 +7561,21 @@ pub const pipeline_resolve_variables = struct {
         var pc: usize = 0;
         var atom_index: usize = 0;
         var has_make_ref = false;
+        var input_jump_site_count: usize = 0;
+        var target_count: usize = 0;
         while (pc < func.code.len) {
             const op_id = func.code[pc];
             const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
             const size: usize = instr.size;
             if (size == 0 or pc + size > func.code.len) return error.InvalidBytecode;
             if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
+                input_jump_site_count += 1;
                 if (offset + 4 > size) return error.InvalidBytecode;
                 const target = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
-                if (target <= func.code.len) nodes[target].is_target = true;
+                if (target <= func.code.len and !nodes[target].is_target) {
+                    nodes[target].is_target = true;
+                    target_count += 1;
+                }
             }
             nodes[pc].size = instr.size;
             nodes[pc].is_temp = instr.is_temp;
@@ -7364,6 +7627,8 @@ pub const pipeline_resolve_variables = struct {
             .nodes = nodes,
             .has_make_ref = has_make_ref,
             .scope_var_count = scope_var_count,
+            .input_jump_site_count = input_jump_site_count,
+            .target_count = target_count,
         };
     }
 
@@ -7766,12 +8031,146 @@ pub const pipeline_resolve_variables = struct {
         if (atom_index != atoms.len) return error.InvalidBytecode;
     }
 
-    pub fn run(ctx: *JSContext) !void {
+    /// P2-R1T entry contract for the streaming source remap: slot pcs must be
+    /// in bounds, non-decreasing, and (except the code.len terminal) sit on a
+    /// phase-1 instruction boundary. Producers append at the emission end, so
+    /// a violation is a producer bug; fail closed rather than repairing.
+    fn validateSourceLocOrder(
+        slots: []const pipeline_pc2line.SourceLocSlot,
+        code_len: usize,
+        nodes: []const Phase1CfgNode,
+    ) Error!void {
+        var previous_pc: u32 = 0;
+        for (slots) |slot| {
+            if (slot.pc > code_len) return error.InvalidBytecode;
+            if (slot.pc < previous_pc) return error.InvalidBytecode;
+            if (slot.pc != code_len and nodes[slot.pc].size == 0) return error.InvalidBytecode;
+            previous_pc = slot.pc;
+        }
+    }
+
+    const Phase2Analysis = struct {
+        topology: Phase1Topology,
+        global_ref_tail_atoms: []atom.Atom,
+        global_ref_tail_kinds: []u8,
+        local_ref_tail_indices: []u16,
+        make_ref_tail_pc: []usize,
+        make_ref_reads_value: []bool,
+        has_dynamic_env_objects: bool,
+
+        fn init(ctx: *JSContext) Error!Phase2Analysis {
+            const func = ctx.function;
+            // P2-R1T: relocation and the source commit run in u32 pc space.
+            if (func.code.len >= std.math.maxInt(u32)) return error.BytecodeOverflow;
+            try bindParserLabels(ctx);
+            const topology = try computePhase1Topology(ctx);
+            errdefer ctx.memory.free(Phase1CfgNode, topology.nodes);
+            try validateSourceLocOrder(func.source_loc_slots, func.code.len, topology.nodes);
+
+            // QuickJS creates no auxiliary tail state for functions without
+            // scope_make_ref. These ledgers are zjs's transactional representation
+            // of the same fold plan, so allocate them only when that feature is
+            // present in the already-validated phase-1 topology.
+            const global_ref_tail_atoms: []atom.Atom = if (!topology.has_make_ref) &.{} else try ctx.memory.alloc(atom.Atom, func.code.len);
+            errdefer if (global_ref_tail_atoms.len != 0) ctx.memory.free(atom.Atom, global_ref_tail_atoms);
+            const global_ref_tail_kinds: []u8 = if (!topology.has_make_ref) &.{} else try ctx.memory.alloc(u8, func.code.len);
+            errdefer if (global_ref_tail_kinds.len != 0) ctx.memory.free(u8, global_ref_tail_kinds);
+            const local_ref_tail_indices: []u16 = if (!topology.has_make_ref) &.{} else try ctx.memory.alloc(u16, func.code.len);
+            errdefer if (local_ref_tail_indices.len != 0) ctx.memory.free(u16, local_ref_tail_indices);
+            const make_ref_tail_pc: []usize = if (!topology.has_make_ref) &.{} else try ctx.memory.alloc(usize, func.code.len);
+            errdefer if (make_ref_tail_pc.len != 0) ctx.memory.free(usize, make_ref_tail_pc);
+            const make_ref_reads_value: []bool = if (!topology.has_make_ref) &.{} else try ctx.memory.alloc(bool, func.code.len);
+            errdefer if (make_ref_reads_value.len != 0) ctx.memory.free(bool, make_ref_reads_value);
+            if (global_ref_tail_atoms.len != 0) @memset(global_ref_tail_atoms, atom.null_atom);
+            if (global_ref_tail_kinds.len != 0) @memset(global_ref_tail_kinds, GLOBAL_REF_TAIL_NONE);
+            if (local_ref_tail_indices.len != 0) @memset(local_ref_tail_indices, std.math.maxInt(u16));
+            if (make_ref_tail_pc.len != 0) @memset(make_ref_tail_pc, std.math.maxInt(usize));
+            if (make_ref_reads_value.len != 0) @memset(make_ref_reads_value, false);
+
+            try analyzeResolutionEvents(
+                ctx,
+                topology.nodes,
+                global_ref_tail_atoms,
+                global_ref_tail_kinds,
+                local_ref_tail_indices,
+                make_ref_tail_pc,
+                make_ref_reads_value,
+            );
+            if (ctx.function_def) |fd| try resolveEvalGlobalVarTargets(fd);
+            // Topology discovery above is the only part of this pass allowed to
+            // append demand-created locals. Build an immutable exact-scope index
+            // now, before the first sizing lookup, and reject any later growth.
+            try ctx.prepareExactScopeBindingIndex();
+            errdefer ctx.deinitExactScopeBindingIndex();
+            const has_dynamic_env_objects = functionHasDynamicEnvObjects(ctx);
+
+            return .{
+                .topology = topology,
+                .global_ref_tail_atoms = global_ref_tail_atoms,
+                .global_ref_tail_kinds = global_ref_tail_kinds,
+                .local_ref_tail_indices = local_ref_tail_indices,
+                .make_ref_tail_pc = make_ref_tail_pc,
+                .make_ref_reads_value = make_ref_reads_value,
+                .has_dynamic_env_objects = has_dynamic_env_objects,
+            };
+        }
+
+        fn deinit(self: *Phase2Analysis, ctx: *JSContext) void {
+            if (self.topology.nodes.len != 0) ctx.memory.free(Phase1CfgNode, self.topology.nodes);
+            if (self.global_ref_tail_atoms.len != 0) ctx.memory.free(atom.Atom, self.global_ref_tail_atoms);
+            if (self.global_ref_tail_kinds.len != 0) ctx.memory.free(u8, self.global_ref_tail_kinds);
+            if (self.local_ref_tail_indices.len != 0) ctx.memory.free(u16, self.local_ref_tail_indices);
+            if (self.make_ref_tail_pc.len != 0) ctx.memory.free(usize, self.make_ref_tail_pc);
+            if (self.make_ref_reads_value.len != 0) ctx.memory.free(bool, self.make_ref_reads_value);
+            ctx.deinitExactScopeBindingIndex();
+
+            self.topology = .{
+                .nodes = &.{},
+                .has_make_ref = false,
+                .scope_var_count = 0,
+                .input_jump_site_count = 0,
+                .target_count = 0,
+            };
+            self.global_ref_tail_atoms = &.{};
+            self.global_ref_tail_kinds = &.{};
+            self.local_ref_tail_indices = &.{};
+            self.make_ref_tail_pc = &.{};
+            self.make_ref_reads_value = &.{};
+            self.has_dynamic_env_objects = false;
+        }
+    };
+
+    const Phase2Product = struct {
+        builder: Phase2Builder,
+        reloc_words: []u32,
+        reloc: SparseRelocation,
+        scratch_allocator: std.mem.Allocator,
+
+        fn deinit(self: *Phase2Product) void {
+            self.builder.deinitUncommitted();
+            if (self.reloc_words.len != 0) self.scratch_allocator.free(self.reloc_words);
+            self.reloc_words = &.{};
+            self.reloc = .{
+                .nodes = &.{},
+                .source_locs = &.{},
+                .source_new_pcs = &.{},
+                .target_old_pcs = &.{},
+                .target_new_pcs = &.{},
+            };
+        }
+    };
+
+    fn produceTwoPassShadow(ctx: *JSContext, analysis: *const Phase2Analysis) Error!Phase2Product {
         const func = ctx.function;
-        try bindParserLabels(ctx);
-        const phase1_topology = try computePhase1Topology(ctx);
+        const phase1_topology = analysis.topology;
         const phase1_reachability = phase1_topology.nodes;
-        defer ctx.memory.free(Phase1CfgNode, phase1_reachability);
+        const global_ref_tail_atoms = analysis.global_ref_tail_atoms;
+        const global_ref_tail_kinds = analysis.global_ref_tail_kinds;
+        const local_ref_tail_indices = analysis.local_ref_tail_indices;
+        const make_ref_tail_pc = analysis.make_ref_tail_pc;
+        const make_ref_reads_value = analysis.make_ref_reads_value;
+        const has_dynamic_env_objects = analysis.has_dynamic_env_objects;
+
         var inline_scope_var_plans: [inline_scope_var_plan_capacity]ScopeVarLoweringPlan = undefined;
         const scope_var_plans: []ScopeVarLoweringPlan = if (phase1_topology.scope_var_count <= inline_scope_var_plans.len)
             inline_scope_var_plans[0..phase1_topology.scope_var_count]
@@ -7779,43 +8178,6 @@ pub const pipeline_resolve_variables = struct {
             try ctx.memory.alloc(ScopeVarLoweringPlan, phase1_topology.scope_var_count);
         defer if (scope_var_plans.ptr != inline_scope_var_plans[0..].ptr)
             ctx.memory.free(ScopeVarLoweringPlan, scope_var_plans);
-
-        // QuickJS creates no auxiliary tail state for functions without
-        // scope_make_ref. These ledgers are zjs's transactional representation
-        // of the same fold plan, so allocate them only when that feature is
-        // present in the already-validated phase-1 topology.
-        const global_ref_tail_atoms: []atom.Atom = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(atom.Atom, func.code.len);
-        defer if (global_ref_tail_atoms.len != 0) ctx.memory.free(atom.Atom, global_ref_tail_atoms);
-        const global_ref_tail_kinds: []u8 = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(u8, func.code.len);
-        defer if (global_ref_tail_kinds.len != 0) ctx.memory.free(u8, global_ref_tail_kinds);
-        const local_ref_tail_indices: []u16 = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(u16, func.code.len);
-        defer if (local_ref_tail_indices.len != 0) ctx.memory.free(u16, local_ref_tail_indices);
-        const make_ref_tail_pc: []usize = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(usize, func.code.len);
-        defer if (make_ref_tail_pc.len != 0) ctx.memory.free(usize, make_ref_tail_pc);
-        const make_ref_reads_value: []bool = if (!phase1_topology.has_make_ref) &.{} else try ctx.memory.alloc(bool, func.code.len);
-        defer if (make_ref_reads_value.len != 0) ctx.memory.free(bool, make_ref_reads_value);
-        if (global_ref_tail_atoms.len != 0) @memset(global_ref_tail_atoms, atom.null_atom);
-        if (global_ref_tail_kinds.len != 0) @memset(global_ref_tail_kinds, GLOBAL_REF_TAIL_NONE);
-        if (local_ref_tail_indices.len != 0) @memset(local_ref_tail_indices, std.math.maxInt(u16));
-        if (make_ref_tail_pc.len != 0) @memset(make_ref_tail_pc, std.math.maxInt(usize));
-        if (make_ref_reads_value.len != 0) @memset(make_ref_reads_value, false);
-
-        try analyzeResolutionEvents(
-            ctx,
-            phase1_reachability,
-            global_ref_tail_atoms,
-            global_ref_tail_kinds,
-            local_ref_tail_indices,
-            make_ref_tail_pc,
-            make_ref_reads_value,
-        );
-        if (ctx.function_def) |fd| try resolveEvalGlobalVarTargets(fd);
-        // Topology discovery above is the only part of this pass allowed to
-        // append demand-created locals. Build an immutable exact-scope index
-        // now, before the first sizing lookup, and reject any later growth.
-        try ctx.prepareExactScopeBindingIndex();
-        defer ctx.deinitExactScopeBindingIndex();
-        const has_dynamic_env_objects = functionHasDynamicEnvObjects(ctx);
 
         // First pass: compute output size (in bytes) and atom count.
         // Temporary scope-var opcodes shrink from 7 bytes to 5 bytes. The
@@ -8056,33 +8418,49 @@ pub const pipeline_resolve_variables = struct {
             &.{}
         else
             try ctx.memory.alloc(u8, output_size);
-        var output_owned = output.len != 0;
+        const output_owned = output.len != 0;
         errdefer if (output_owned) ctx.memory.free(u8, output);
         const output_atoms: []atom.Atom = if (output_atom_count == 0)
             &.{}
         else
             try ctx.memory.alloc(atom.Atom, output_atom_count);
-        var output_atoms_owned = output_atoms.len != 0;
+        const output_atoms_owned = output_atoms.len != 0;
         var out_atom_idx: usize = 0;
         errdefer if (output_atoms_owned) {
             for (output_atoms[0..out_atom_idx]) |atom_id| ctx.atoms.free(atom_id);
             ctx.memory.free(atom.Atom, output_atoms);
         };
 
-        // Scratch arrays for pc-map and jump sites (use raw allocator so
-        // we don't pollute the MemoryAccount counters; these are freed
-        // before `run` returns).
+        // Relocation words and the dense oracle use raw scratch allocation.
+        // Jump sites are builder-owned and therefore use MemoryAccount.
         const allocator = ctx.memory.allocator;
         // `pc_map[old_pc]` holds the new pc that the instruction previously at
         // `old_pc` now starts at. Dropped instructions (the
         // enter/leave scope pair) map their old pc to the new pc of the
         // *next* kept instruction, so a jump that targets them still
         // lands on a valid instruction boundary.
-        const pc_map = try allocator.alloc(usize, func.code.len + 1);
-        defer allocator.free(pc_map);
-        @memset(pc_map, 0);
-        const jump_sites = try allocator.alloc(JumpSite, jump_count);
-        defer allocator.free(jump_sites);
+        const target_capacity = phase1_topology.target_count + 1; // +1: unconditional terminal entry
+        const source_slot_count = func.source_loc_slots.len;
+        const reloc_words = try allocator.alloc(u32, source_slot_count + 2 * target_capacity);
+        errdefer allocator.free(reloc_words);
+        var reloc = SparseRelocation{
+            .nodes = phase1_reachability,
+            .source_locs = func.source_loc_slots,
+            .source_new_pcs = reloc_words[0..source_slot_count],
+            .target_old_pcs = reloc_words[source_slot_count..][0..target_capacity],
+            .target_new_pcs = reloc_words[source_slot_count + target_capacity ..][0..target_capacity],
+        };
+        const oracle_pc_map: []usize = if (comptime relocation_oracle_enabled)
+            try allocator.alloc(usize, func.code.len + 1)
+        else
+            &.{};
+        defer if (comptime relocation_oracle_enabled) allocator.free(oracle_pc_map);
+        if (comptime relocation_oracle_enabled) @memset(oracle_pc_map, 0);
+        const jump_sites: []JumpSite = if (jump_count == 0)
+            &.{}
+        else
+            try ctx.memory.alloc(JumpSite, jump_count);
+        errdefer if (jump_sites.len != 0) ctx.memory.free(JumpSite, jump_sites);
 
         // Second pass: walk input + atom_operands in lockstep. Every
         // opcode with an atom format consumes one entry from the input
@@ -8110,19 +8488,26 @@ pub const pipeline_resolve_variables = struct {
             // pc_map for input pc i maps to output pc out_idx after declaration
             // instantiation and body-scope preparation, so jumps that reference
             // the lowered body resolve correctly.
-            pc_map[i] = out_idx;
+            if (comptime relocation_oracle_enabled) oracle_pc_map[i] = out_idx;
+            try reloc.publishPoint(i, out_idx);
             const op = func.code[i];
             const node = phase1_reachability[i];
             const input_size: usize = node.size;
             if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
             if (!isPhase1Reachable(phase1_reachability, i)) {
-                for (i + 1..i + input_size) |dead_pc| pc_map[dead_pc] = out_idx;
+                if (comptime relocation_oracle_enabled) {
+                    for (i + 1..i + input_size) |dead_pc| oracle_pc_map[dead_pc] = out_idx;
+                }
+                try reloc.publishRange(i + 1, i + input_size, out_idx);
                 if (topologyInstructionHasAtom(op, node.is_temp)) in_atom_idx += 1;
                 i += input_size;
                 continue;
             }
             if (isPhase2EmptyGosub(func.code, phase1_reachability, i)) {
-                for (i + 1..i + input_size) |consumed_pc| pc_map[consumed_pc] = out_idx;
+                if (comptime relocation_oracle_enabled) {
+                    for (i + 1..i + input_size) |consumed_pc| oracle_pc_map[consumed_pc] = out_idx;
+                }
+                try reloc.publishRange(i + 1, i + input_size, out_idx);
                 i += input_size;
                 continue;
             }
@@ -8154,10 +8539,12 @@ pub const pipeline_resolve_variables = struct {
                 continue;
             }
             if (discardedIndexedStoreOp(func.code, phase1_reachability, i)) |put_op| {
-                pc_map[i + 1] = out_idx;
+                if (comptime relocation_oracle_enabled) oracle_pc_map[i + 1] = out_idx;
+                try reloc.publishPoint(i + 1, out_idx);
                 output[out_idx] = put_op;
                 out_idx += 1;
-                pc_map[i + 2] = out_idx;
+                if (comptime relocation_oracle_enabled) oracle_pc_map[i + 2] = out_idx;
+                try reloc.publishPoint(i + 2, out_idx);
                 i += 3;
                 continue;
             }
@@ -8167,7 +8554,10 @@ pub const pipeline_resolve_variables = struct {
                 jump_sites[out_jump_idx] = .{ .operand_pos = out_idx + 1 };
                 out_jump_idx += 1;
                 out_idx += 5;
-                for (i + 1..logical.end_pc) |consumed_pc| pc_map[consumed_pc] = out_idx;
+                if (comptime relocation_oracle_enabled) {
+                    for (i + 1..logical.end_pc) |consumed_pc| oracle_pc_map[consumed_pc] = out_idx;
+                }
+                try reloc.publishRange(i + 1, logical.end_pc, out_idx);
                 i = logical.end_pc;
                 continue;
             }
@@ -8312,7 +8702,8 @@ pub const pipeline_resolve_variables = struct {
                         const loc_idx = local_ref_tail_indices[tail_pc];
                         if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
                         if (make_ref_reads_value[i]) {
-                            pc_map[i + 11] = out_idx;
+                            if (comptime relocation_oracle_enabled) oracle_pc_map[i + 11] = out_idx;
+                            try reloc.publishPoint(i + 11, out_idx);
                             writeSelectedLocForm(output, &out_idx, localRefGetForm(ctx, loc_idx), loc_idx);
                         }
                     } else if (kind == CLOSURE_REF_TAIL_PUT or kind == CLOSURE_REF_TAIL_DUP_PUT) {
@@ -8329,7 +8720,8 @@ pub const pipeline_resolve_variables = struct {
                         }
                     } else if (kind == GLOBAL_REF_TAIL_PUT or kind == GLOBAL_REF_TAIL_DUP_PUT) {
                         if (make_ref_reads_value[i]) {
-                            pc_map[i + 11] = out_idx;
+                            if (comptime relocation_oracle_enabled) oracle_pc_map[i + 11] = out_idx;
+                            try reloc.publishPoint(i + 11, out_idx);
                             try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.get_var, atom_id);
                         }
                     }
@@ -8420,10 +8812,12 @@ pub const pipeline_resolve_variables = struct {
             return error.InvalidBytecode;
         }
         try ctx.validateExactScopeBindingVersion();
-        // Terminal entry: pc_map[old_len] == out_idx handles jumps that
-        // target exactly one-past-the-end (e.g. loop exit to the next
-        // instruction after the final byte).
-        pc_map[func.code.len] = out_idx;
+        // Terminal entry: `old_len -> out_idx` handles jumps that target
+        // exactly one-past-the-end (e.g. loop exit to the next instruction
+        // after the final byte). Published unconditionally, never gated on
+        // is_target.
+        if (comptime relocation_oracle_enabled) oracle_pc_map[func.code.len] = out_idx;
+        try reloc.publishTerminal(func.code.len, out_idx);
 
         // Patch jump targets using the pc map. Each site stored an
         // absolute u32 target that was valid against the *input* code
@@ -8432,59 +8826,628 @@ pub const pipeline_resolve_variables = struct {
             const old_target = std.mem.readInt(u32, output[site.operand_pos..][0..4], .little);
             // Targets outside `[0, func.code.len]` indicate a parser bug,
             // but we treat them as identity rather than panicking so the
-            // pipeline stays robust to unfamiliar inputs.
-            const new_target: u32 = if (old_target <= func.code.len)
-                @intCast(pc_map[old_target])
-            else
-                old_target;
+            // pipeline stays robust to unfamiliar inputs. An IN-range target
+            // with no relocation row is different: it means a publisher
+            // missed a semantic boundary, and silently mapping it to 0 (the
+            // old dense default) would emit a jump to the entry — fail
+            // closed instead.
+            const new_target: u32 = if (old_target <= func.code.len) blk: {
+                const mapped = reloc.lookupTarget(old_target) orelse return error.InvalidBytecode;
+                if (comptime relocation_oracle_enabled) {
+                    std.debug.assert(mapped == oracle_pc_map[old_target]);
+                }
+                break :blk mapped;
+            } else old_target;
             std.mem.writeInt(u32, output[site.operand_pos..][0..4], new_target, .little);
         }
 
-        // Build exact-fit buffers before mutating the function. Either trim
-        // allocation may fail, and the original temporary buffers must remain
-        // owned by the local errdefer path until every fallible step is complete.
-        const code_to_install: []u8 = if (out_idx < output.len) blk: {
-            if (out_idx == 0) break :blk &.{};
-            const trimmed = try ctx.memory.alloc(u8, out_idx);
-            @memcpy(trimmed, output[0..out_idx]);
-            break :blk trimmed;
-        } else output;
-        var code_to_install_owned = code_to_install.len != 0 and code_to_install.ptr != output.ptr;
-        errdefer if (code_to_install_owned) ctx.memory.free(u8, code_to_install);
-
-        const atoms_to_install: []atom.Atom = if (out_atom_idx < output_atoms.len) blk: {
-            if (out_atom_idx == 0) break :blk &.{};
-            const trimmed = try ctx.memory.alloc(atom.Atom, out_atom_idx);
-            @memcpy(trimmed, output_atoms[0..out_atom_idx]);
-            break :blk trimmed;
-        } else output_atoms;
-        var atoms_to_install_owned = atoms_to_install.len != 0 and atoms_to_install.ptr != output_atoms.ptr;
-        errdefer if (atoms_to_install_owned) ctx.memory.free(atom.Atom, atoms_to_install);
-
-        // Replace the old code buffer. `installCode` frees any prior buffer,
-        // including capacity allocated by the parser via geometric growth.
-        func.remapSourceLocs(pc_map);
-        if (code_to_install.ptr != output.ptr and output_owned) {
-            ctx.memory.free(u8, output);
-            output_owned = false;
+        if (comptime relocation_oracle_enabled) {
+            std.debug.assert(reloc.source_cursor == func.source_loc_slots.len);
+            for (func.source_loc_slots, reloc.source_new_pcs) |slot, new_pc| {
+                const dense: u32 = if (slot.pc < oracle_pc_map.len) @intCast(oracle_pc_map[slot.pc]) else slot.pc;
+                std.debug.assert(new_pc == dense);
+            }
+            for (reloc.target_old_pcs[0..reloc.target_len], reloc.target_new_pcs[0..reloc.target_len]) |old_pc, new_pc| {
+                std.debug.assert(new_pc == oracle_pc_map[old_pc]);
+            }
         }
-        func.installCode(code_to_install);
-        if (code_to_install_owned) code_to_install_owned = false;
-        if (code_to_install.ptr == output.ptr) output_owned = false;
+
+        return .{
+            .builder = .{
+                .memory = ctx.memory,
+                .atoms = ctx.atoms,
+                .code = output,
+                .code_capacity = output_size,
+                .code_len = out_idx,
+                .atom_operands = output_atoms,
+                .atom_capacity = output_atom_count,
+                .atom_len = out_atom_idx,
+                .jump_sites = jump_sites,
+                .jump_capacity = jump_count,
+                .jump_len = out_jump_idx,
+            },
+            .reloc_words = reloc_words,
+            .reloc = reloc,
+            .scratch_allocator = allocator,
+        };
+    }
+
+    fn produceSinglePass(ctx: *JSContext, analysis: *const Phase2Analysis) Error!Phase2Product {
+        const func = ctx.function;
+        const phase1_topology = analysis.topology;
+        const phase1_reachability = phase1_topology.nodes;
+        const global_ref_tail_atoms = analysis.global_ref_tail_atoms;
+        const global_ref_tail_kinds = analysis.global_ref_tail_kinds;
+        const local_ref_tail_indices = analysis.local_ref_tail_indices;
+        const make_ref_tail_pc = analysis.make_ref_tail_pc;
+        const make_ref_reads_value = analysis.make_ref_reads_value;
+        const has_dynamic_env_objects = analysis.has_dynamic_env_objects;
+
+        var builder = try Phase2Builder.init(
+            ctx.memory,
+            ctx.atoms,
+            func.code.len,
+            func.atom_operands.len,
+            phase1_topology.input_jump_site_count,
+        );
+        errdefer builder.deinitUncommitted();
+
+        const allocator = ctx.memory.allocator;
+        const target_capacity = phase1_topology.target_count + 1;
+        const source_slot_count = func.source_loc_slots.len;
+        const reloc_words = try allocator.alloc(u32, source_slot_count + 2 * target_capacity);
+        errdefer allocator.free(reloc_words);
+        var reloc = SparseRelocation{
+            .nodes = phase1_reachability,
+            .source_locs = func.source_loc_slots,
+            .source_new_pcs = reloc_words[0..source_slot_count],
+            .target_old_pcs = reloc_words[source_slot_count..][0..target_capacity],
+            .target_new_pcs = reloc_words[source_slot_count + target_capacity ..][0..target_capacity],
+        };
+
+        // Direct-eval lexical redeclaration checks precede every binding
+        // initializer. resolve_labels' normal dead-code pass removes the
+        // following hoists after the terminal throw, matching QuickJS.
+        if (ctx.function_def) |fd| {
+            for (fd.global_vars) |gv| {
+                if (hasDirectEvalLexicalRedeclaration(fd, gv)) {
+                    try builder.ensureAdditional(throw_error_instr_size, 1, 0);
+                    writeThrowVarRedeclaration(
+                        func,
+                        builder.code,
+                        &builder.code_len,
+                        builder.atom_operands,
+                        &builder.atom_len,
+                        gv.var_name,
+                    );
+                }
+            }
+        }
+
+        var i: usize = 0;
+        var in_atom_idx: usize = 0;
+        while (i < func.code.len) {
+            try reloc.publishPoint(i, builder.code_len);
+            const op = func.code[i];
+            const node = phase1_reachability[i];
+            const input_size: usize = node.size;
+            if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
+            if (!isPhase1Reachable(phase1_reachability, i)) {
+                try reloc.publishRange(i + 1, i + input_size, builder.code_len);
+                if (topologyInstructionHasAtom(op, node.is_temp)) in_atom_idx += 1;
+                i += input_size;
+                continue;
+            }
+            if (isPhase2EmptyGosub(func.code, phase1_reachability, i)) {
+                try reloc.publishRange(i + 1, i + input_size, builder.code_len);
+                i += input_size;
+                continue;
+            }
+            if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
+                const kind = global_ref_tail_kinds[i];
+                if (kind == LOCAL_REF_TAIL_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
+                    const loc_idx = local_ref_tail_indices[i];
+                    if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                    try builder.ensureAdditional(localRefPutTailReplacementSize(ctx, kind, loc_idx), 0, 0);
+                    if (kind == LOCAL_REF_TAIL_DUP_PUT) {
+                        builder.code[builder.code_len] = opcode.op.dup;
+                        builder.code_len += 1;
+                    }
+                    writeSelectedLocForm(builder.code, &builder.code_len, localRefPutForm(ctx, loc_idx), loc_idx);
+                } else {
+                    try builder.ensureAdditional(globalRefPutTailReplacementSize(kind), 0, 0);
+                    if (kind == GLOBAL_REF_TAIL_DUP_PUT) {
+                        builder.code[builder.code_len] = opcode.op.dup;
+                        builder.code_len += 1;
+                    }
+                    try emitGlobalVarOp(ctx, builder.code, &builder.code_len, opcode.op.put_var, global_ref_tail_atoms[i]);
+                }
+                i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
+                continue;
+            }
+            if (discardedIndexedStoreOp(func.code, phase1_reachability, i)) |put_op| {
+                try builder.ensureAdditional(1, 0, 0);
+                try reloc.publishPoint(i + 1, builder.code_len);
+                builder.code[builder.code_len] = put_op;
+                builder.code_len += 1;
+                try reloc.publishPoint(i + 2, builder.code_len);
+                i += 3;
+                continue;
+            }
+            if (matchPhase1LogicalChain(func.code, phase1_reachability, i)) |logical| {
+                try builder.ensureAdditional(5, 0, 1);
+                builder.code[builder.code_len] = logical.branch_op;
+                std.mem.writeInt(u32, builder.code[builder.code_len + 1 ..][0..4], @intCast(logical.target), .little);
+                builder.appendJumpAssumeCapacity(.{ .operand_pos = builder.code_len + 1 });
+                builder.code_len += 5;
+                try reloc.publishRange(i + 1, logical.end_pc, builder.code_len);
+                i = logical.end_pc;
+                continue;
+            }
+            // Convert OP_eval / OP_apply_eval's parser scope index to QuickJS's
+            // adjusted finalized vardef-chain head. Runtime adds ARG_SCOPE_END
+            // (-2), then follows scope_next without consulting parser scopes.
+            if (op == opcode.op.eval) {
+                if (i + 5 > func.code.len) return error.InvalidBytecode;
+                const call_argc = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+                const scope_idx = std.mem.readInt(u16, func.code[i + 3 ..][0..2], .little);
+                try builder.ensureAdditional(5, 0, 0);
+
+                const fd = ctx.function_def orelse {
+                    // If no FunctionDef, copy through as-is
+                    builder.appendCodeAssumeCapacity(func.code[i .. i + 5]);
+                    i += 5;
+                    continue;
+                };
+                if (@as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+                    const encoded_head = try encodeEvalScopeHead(fd, scope_idx);
+                    builder.code[builder.code_len] = opcode.op.eval;
+                    std.mem.writeInt(u16, builder.code[builder.code_len + 1 ..][0..2], call_argc, .little);
+                    std.mem.writeInt(u16, builder.code[builder.code_len + 3 ..][0..2], encoded_head, .little);
+                    builder.code_len += 5;
+                    i += 5;
+                    continue;
+                } else {
+                    // Invalid scope_idx, copy through as-is
+                    builder.appendCodeAssumeCapacity(func.code[i .. i + 5]);
+                    i += 5;
+                    continue;
+                }
+            } else if (op == opcode.op.apply_eval) {
+                if (i + APPLY_EVAL_SIZE > func.code.len) return error.InvalidBytecode;
+                const scope_idx = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+                try builder.ensureAdditional(APPLY_EVAL_SIZE, 0, 0);
+
+                const fd = ctx.function_def orelse {
+                    // If no FunctionDef, copy through as-is
+                    builder.appendCodeAssumeCapacity(func.code[i .. i + APPLY_EVAL_SIZE]);
+                    i += APPLY_EVAL_SIZE;
+                    continue;
+                };
+                if (@as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+                    const encoded_head = try encodeEvalScopeHead(fd, scope_idx);
+                    builder.code[builder.code_len] = opcode.op.apply_eval;
+                    std.mem.writeInt(u16, builder.code[builder.code_len + 1 ..][0..2], encoded_head, .little);
+                    builder.code_len += APPLY_EVAL_SIZE;
+                    i += APPLY_EVAL_SIZE;
+                    continue;
+                } else {
+                    // Invalid scope_idx, copy through as-is
+                    builder.appendCodeAssumeCapacity(func.code[i .. i + APPLY_EVAL_SIZE]);
+                    i += APPLY_EVAL_SIZE;
+                    continue;
+                }
+            } else if (op == opcode.op.label) {
+                if (i + 5 > func.code.len) return error.InvalidBytecode;
+                try builder.ensureAdditional(5, 0, 0);
+                builder.appendCodeAssumeCapacity(func.code[i .. i + 5]);
+                i += 5;
+            } else if (op == opcode.op.line_num) {
+                if (i + 5 > func.code.len) return error.InvalidBytecode;
+                i += 5;
+                continue;
+            } else if (isGetFieldOptChainAt(func, i, in_atom_idx)) {
+                try builder.ensureAdditional(5, 1, 0);
+                builder.code[builder.code_len] = opcode.op.get_field;
+                @memcpy(builder.code[builder.code_len + 1 ..][0..4], func.code[i + 1 .. i + 5]);
+                builder.atom_operands[builder.atom_len] = func.atoms.dup(func.atom_operands[in_atom_idx]);
+                builder.code_len += 5;
+                builder.atom_len += 1;
+                in_atom_idx += 1;
+                i += 5;
+            } else if (op == opcode.op.get_array_el_opt_chain) {
+                try builder.ensureAdditional(1, 0, 0);
+                builder.code[builder.code_len] = opcode.op.get_array_el;
+                builder.code_len += 1;
+                i += 1;
+            } else if (isScopeVarOp(op)) {
+                if (i + 7 > func.code.len) return error.InvalidBytecode;
+                const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
+                const scope_operand = decodeScopeOperand(func.code[i + 5 ..][0..2]);
+                const scope_level = scope_operand.level;
+                const plan = try planScopeVarLowering(
+                    ctx,
+                    atom_id,
+                    scope_operand,
+                    op,
+                    has_dynamic_env_objects,
+                );
+                try builder.ensureAdditional(
+                    @as(usize, plan.probe.prefix_size) + plan.action.size(),
+                    @as(usize, plan.probe.count) + plan.action.atomCount(),
+                    0,
+                );
+                if (plan.probe.count != 0) {
+                    const kind = scopeVarProbeKind(op, scope_operand.no_dynamic_env) orelse
+                        return error.InvalidBytecode;
+                    const done_pc = builder.code_len + @as(usize, plan.probe.prefix_size) + plan.action.size();
+                    try writeDynamicEnvProbes(
+                        ctx,
+                        func,
+                        builder.code,
+                        &builder.code_len,
+                        builder.atom_operands,
+                        &builder.atom_len,
+                        atom_id,
+                        scope_level,
+                        kind.probeOpcode(),
+                        done_pc,
+                    );
+                }
+                try writeScopeVarAction(
+                    func,
+                    builder.code,
+                    &builder.code_len,
+                    builder.atom_operands,
+                    &builder.atom_len,
+                    atom_id,
+                    plan.action,
+                );
+                in_atom_idx += 1;
+                i += 7;
+            } else if (isScopePrivateFieldAt(func, i, in_atom_idx)) {
+                const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
+                const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+                const res = resolvePrivateField(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
+                try builder.ensureAdditional(
+                    try loweredPrivateFieldSize(ctx, op, atom_id, scope_level, res),
+                    loweredPrivateFieldAtomCount(op, res),
+                    0,
+                );
+                try writeLoweredPrivateField(
+                    ctx,
+                    builder.code,
+                    &builder.code_len,
+                    builder.atom_operands,
+                    &builder.atom_len,
+                    op,
+                    atom_id,
+                    scope_level,
+                    res,
+                );
+                in_atom_idx += 1;
+                i += 7;
+            } else if (op == opcode.op.scope_make_ref) {
+                if (i + 11 > func.code.len) return error.InvalidBytecode;
+                const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
+                const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
+                if (make_ref_tail_pc[i] != std.math.maxInt(usize)) {
+                    const tail_pc = make_ref_tail_pc[i];
+                    if (tail_pc >= global_ref_tail_kinds.len) return error.InvalidBytecode;
+                    const kind = global_ref_tail_kinds[tail_pc];
+                    if (kind == LOCAL_REF_TAIL_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
+                        const loc_idx = local_ref_tail_indices[tail_pc];
+                        if (loc_idx == std.math.maxInt(u16)) return error.InvalidBytecode;
+                        if (make_ref_reads_value[i]) {
+                            try builder.ensureAdditional(localRefGetForm(ctx, loc_idx).size, 0, 0);
+                            try reloc.publishPoint(i + 11, builder.code_len);
+                            writeSelectedLocForm(builder.code, &builder.code_len, localRefGetForm(ctx, loc_idx), loc_idx);
+                        }
+                    } else if (kind == GLOBAL_REF_TAIL_PUT or kind == GLOBAL_REF_TAIL_DUP_PUT) {
+                        if (make_ref_reads_value[i]) {
+                            try builder.ensureAdditional(3, 0, 0);
+                            try reloc.publishPoint(i + 11, builder.code_len);
+                            try emitGlobalVarOp(ctx, builder.code, &builder.code_len, opcode.op.get_var, atom_id);
+                        }
+                    }
+                    in_atom_idx += 1;
+                    i += 11 + @as(usize, @intFromBool(make_ref_reads_value[i]));
+                    continue;
+                }
+                const eval_probe = evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .make_ref);
+                const make_ref_size = loweredScopeMakeRefSize(ctx, atom_id, scope_level);
+                try builder.ensureAdditional(
+                    (if (eval_probe) |probe| @as(usize, probe.prefix_size) else 0) + make_ref_size,
+                    (if (eval_probe) |probe| @as(usize, probe.count) else 0) +
+                        loweredScopeMakeRefAtomCount(ctx, atom_id, scope_level),
+                    0,
+                );
+                if (eval_probe) |probe| {
+                    const done_pc = builder.code_len + @as(usize, probe.prefix_size) + make_ref_size;
+                    try writeDynamicEnvProbes(
+                        ctx,
+                        func,
+                        builder.code,
+                        &builder.code_len,
+                        builder.atom_operands,
+                        &builder.atom_len,
+                        atom_id,
+                        scope_level,
+                        opcode.op.with_make_ref,
+                        done_pc,
+                    );
+                }
+                try writeLoweredScopeMakeRef(
+                    ctx,
+                    func,
+                    builder.code,
+                    &builder.code_len,
+                    builder.atom_operands,
+                    &builder.atom_len,
+                    atom_id,
+                    scope_level,
+                );
+                in_atom_idx += 1;
+                i += 11;
+            } else if (isScopeRefOp(op)) {
+                if (i + 7 > func.code.len) return error.InvalidBytecode;
+                const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
+                const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+                if (op == opcode.op.scope_delete_var) {
+                    const eval_probe = evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .delete);
+                    const delete_size = loweredScopeDeleteVarSize(ctx, atom_id, scope_level);
+                    try builder.ensureAdditional(
+                        (if (eval_probe) |probe| @as(usize, probe.prefix_size) else 0) + delete_size,
+                        (if (eval_probe) |probe| @as(usize, probe.count) else 0) + @intFromBool(delete_size == 5),
+                        0,
+                    );
+                    if (eval_probe) |probe| {
+                        const done_pc = builder.code_len + @as(usize, probe.prefix_size) + delete_size;
+                        try writeDynamicEnvProbes(
+                            ctx,
+                            func,
+                            builder.code,
+                            &builder.code_len,
+                            builder.atom_operands,
+                            &builder.atom_len,
+                            atom_id,
+                            scope_level,
+                            opcode.op.with_delete_var,
+                            done_pc,
+                        );
+                    }
+                    try writeLoweredScopeDeleteVar(
+                        ctx,
+                        func,
+                        builder.code,
+                        &builder.code_len,
+                        builder.atom_operands,
+                        &builder.atom_len,
+                        atom_id,
+                        scope_level,
+                    );
+                    in_atom_idx += 1;
+                } else {
+                    const eval_probe = evalVarObjectProbePlan(ctx, atom_id, scope_level, op, .get_ref);
+                    const get_ref_size = loweredScopeGetRefSize(ctx, atom_id, scope_level);
+                    try builder.ensureAdditional(
+                        (if (eval_probe) |probe| @as(usize, probe.prefix_size) else 0) + get_ref_size,
+                        if (eval_probe) |probe| @as(usize, probe.count) else 0,
+                        0,
+                    );
+                    if (eval_probe) |probe| {
+                        const done_pc = builder.code_len + @as(usize, probe.prefix_size) + get_ref_size;
+                        try writeDynamicEnvProbes(
+                            ctx,
+                            func,
+                            builder.code,
+                            &builder.code_len,
+                            builder.atom_operands,
+                            &builder.atom_len,
+                            atom_id,
+                            scope_level,
+                            opcode.op.with_get_ref,
+                            done_pc,
+                        );
+                    }
+                    try writeLoweredScopeGetRef(ctx, builder.code, &builder.code_len, atom_id, scope_level);
+                    in_atom_idx += 1;
+                }
+                i += 7;
+            } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
+                if (i + 3 > func.code.len) return error.InvalidBytecode;
+                const scope = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+                if (op == opcode.op.enter_scope) {
+                    if (ctx.function_def != null and scope == ctx.function_def.?.body_scope) {
+                        const hoists = try bodyHoistMetrics(ctx);
+                        try builder.ensureAdditional(
+                            hoists.size + try enterScopeRefreshSize(ctx, scope),
+                            hoists.atom_count,
+                            0,
+                        );
+                        try writeBodyHoists(
+                            ctx,
+                            func,
+                            builder.code,
+                            &builder.code_len,
+                            builder.atom_operands,
+                            &builder.atom_len,
+                        );
+                        try writeEnterScopeRefresh(ctx, builder.code, &builder.code_len, scope);
+                    } else {
+                        try builder.ensureAdditional(try enterScopeRefreshSize(ctx, scope), 0, 0);
+                        try writeEnterScopeRefresh(ctx, builder.code, &builder.code_len, scope);
+                    }
+                } else {
+                    try builder.ensureAdditional(leaveScopeCloseSize(ctx, scope), 0, 0);
+                    writeLeaveScopeClose(ctx, builder.code, &builder.code_len, scope);
+                }
+                i += 3;
+            } else {
+                const size = instrSize(op);
+                if (i + size > func.code.len) return error.InvalidBytecode;
+                const has_atom_operand = hasAtomOperand(op);
+                const label_operand_offset = labelOperandOffset(op);
+                try builder.ensureAdditional(
+                    size,
+                    @intFromBool(has_atom_operand),
+                    @intFromBool(label_operand_offset != null),
+                );
+                const base = builder.code_len;
+                @memcpy(builder.code[base..][0..size], func.code[i .. i + size]);
+                if (has_atom_operand) {
+                    if (in_atom_idx >= func.atom_operands.len) return error.InvalidBytecode;
+                    const atom_id = if (size >= 5) blk: {
+                        const encoded_atom = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
+                        if (encoded_atom != atom.null_atom and func.atoms.kind(encoded_atom) == null) {
+                            // The atom operand list owns the retain. If an older
+                            // rewrite left a stale wide immediate, resynchronise it
+                            // before the final FunctionBytecode takes ownership.
+                            const retained_atom = func.atom_operands[in_atom_idx];
+                            std.mem.writeInt(u32, builder.code[base + 1 ..][0..4], retained_atom, .little);
+                            break :blk retained_atom;
+                        }
+                        break :blk encoded_atom;
+                    } else func.atom_operands[in_atom_idx];
+                    if (size >= 5) std.mem.writeInt(u32, builder.code[base + 1 ..][0..4], atom_id, .little);
+                    builder.appendAtomAssumeCapacity(func.atoms.dup(atom_id));
+                    in_atom_idx += 1;
+                }
+                if (label_operand_offset) |offset| {
+                    builder.appendJumpAssumeCapacity(.{ .operand_pos = base + offset });
+                }
+                builder.code_len = base + size;
+                i += size;
+            }
+        }
+        if (in_atom_idx != func.atom_operands.len) return error.InvalidBytecode;
+        try ctx.validateExactScopeBindingVersion();
+
+        // Terminal entry: `old_len -> code_len` handles jumps that target
+        // exactly one-past-the-end. It is published unconditionally.
+        try reloc.publishTerminal(func.code.len, builder.code_len);
+
+        for (builder.jump_sites[0..builder.jump_len]) |site| {
+            const old_target = std.mem.readInt(u32, builder.code[site.operand_pos..][0..4], .little);
+            const new_target: u32 = if (old_target <= func.code.len)
+                reloc.lookupTarget(old_target) orelse return error.InvalidBytecode
+            else
+                old_target;
+            std.mem.writeInt(u32, builder.code[site.operand_pos..][0..4], new_target, .little);
+        }
+
+        return .{
+            .builder = builder,
+            .reloc_words = reloc_words,
+            .reloc = reloc,
+            .scratch_allocator = allocator,
+        };
+    }
+
+    fn compareProducts(shadow: *const Phase2Product, fresh: *const Phase2Product) void {
+        std.debug.assert(shadow.builder.code_len == fresh.builder.code_len);
+        std.debug.assert(shadow.builder.code_capacity == fresh.builder.code_len);
+        std.debug.assert(std.mem.eql(
+            u8,
+            shadow.builder.code[0..shadow.builder.code_len],
+            fresh.builder.code[0..fresh.builder.code_len],
+        ));
+
+        std.debug.assert(shadow.builder.atom_len == fresh.builder.atom_len);
+        std.debug.assert(shadow.builder.atom_capacity == fresh.builder.atom_len);
+        for (
+            shadow.builder.atom_operands[0..shadow.builder.atom_len],
+            fresh.builder.atom_operands[0..fresh.builder.atom_len],
+        ) |shadow_atom, fresh_atom| {
+            std.debug.assert(shadow_atom == fresh_atom);
+        }
+
+        std.debug.assert(shadow.builder.jump_len == fresh.builder.jump_len);
+        std.debug.assert(shadow.builder.jump_capacity == fresh.builder.jump_len);
+        for (
+            shadow.builder.jump_sites[0..shadow.builder.jump_len],
+            fresh.builder.jump_sites[0..fresh.builder.jump_len],
+        ) |shadow_site, fresh_site| {
+            std.debug.assert(shadow_site.operand_pos == fresh_site.operand_pos);
+            const shadow_target = std.mem.readInt(u32, shadow.builder.code[shadow_site.operand_pos..][0..4], .little);
+            const fresh_target = std.mem.readInt(u32, fresh.builder.code[fresh_site.operand_pos..][0..4], .little);
+            std.debug.assert(shadow_target == fresh_target);
+        }
+
+        std.debug.assert(shadow.reloc.source_new_pcs.len == fresh.reloc.source_new_pcs.len);
+        for (shadow.reloc.source_new_pcs, fresh.reloc.source_new_pcs) |shadow_pc, fresh_pc| {
+            std.debug.assert(shadow_pc == fresh_pc);
+        }
+
+        std.debug.assert(shadow.reloc.target_len == fresh.reloc.target_len);
+        for (
+            shadow.reloc.target_old_pcs[0..shadow.reloc.target_len],
+            shadow.reloc.target_new_pcs[0..shadow.reloc.target_len],
+            fresh.reloc.target_old_pcs[0..fresh.reloc.target_len],
+            fresh.reloc.target_new_pcs[0..fresh.reloc.target_len],
+        ) |shadow_old_pc, shadow_new_pc, fresh_old_pc, fresh_new_pc| {
+            std.debug.assert(shadow_old_pc == fresh_old_pc);
+            std.debug.assert(shadow_new_pc == fresh_new_pc);
+        }
+    }
+
+    fn commitProduct(ctx: *JSContext, product: *Phase2Product) void {
+        const func = ctx.function;
+
+        // P2-R1T no-fail commit boundary: every fallible write, validation,
+        // exact-scope version check, and jump patch has succeeded. Only now may
+        // the transactional source remap and owned output buffers touch the
+        // function; on any earlier error the original artifacts are untouched.
+        for (func.source_loc_slots, product.reloc.source_new_pcs) |*slot, new_pc| {
+            slot.pc = new_pc;
+        }
+        func.installCodeWithCapacity(
+            product.builder.code.ptr[0..product.builder.code_len],
+            product.builder.code_capacity,
+        );
 
         // Replace atom_operands: release old entries, install new ones.
         for (func.atom_operands) |old_atom| func.atoms.free(old_atom);
-        if (atoms_to_install.ptr != output_atoms.ptr and output_atoms_owned) {
-            ctx.memory.free(atom.Atom, output_atoms);
-            output_atoms_owned = false;
-        }
-        func.installAtomOperands(atoms_to_install);
-        if (atoms_to_install_owned) atoms_to_install_owned = false;
-        if (atoms_to_install.ptr == output_atoms.ptr) output_atoms_owned = false;
+        func.installAtomOperandsWithCapacity(
+            product.builder.atom_operands.ptr[0..product.builder.atom_len],
+            product.builder.atom_capacity,
+        );
+
+        product.builder.code = &.{};
+        product.builder.code_capacity = 0;
+        product.builder.code_len = 0;
+        product.builder.atom_operands = &.{};
+        product.builder.atom_capacity = 0;
+        product.builder.atom_len = 0;
 
         // The body marker has now consumed every GlobalVar row and both code
         // and atom buffers are installed. Keep the whole ledger intact on all
         // earlier OOM paths; release it atomically only after this commit.
+    }
+
+    pub fn run(ctx: *JSContext) !void {
+        if (comptime phase2_oracle_enabled) return runChecked(ctx);
+        return runSinglePass(ctx);
+    }
+
+    fn runChecked(ctx: *JSContext) !void {
+        var analysis = try Phase2Analysis.init(ctx);
+        defer analysis.deinit(ctx);
+        var shadow = try produceTwoPassShadow(ctx, &analysis);
+        defer shadow.deinit();
+        var product = try produceSinglePass(ctx, &analysis);
+        defer product.deinit();
+        compareProducts(&shadow, &product);
+        shadow.deinit();
+        commitProduct(ctx, &product);
+    }
+
+    fn runSinglePass(ctx: *JSContext) !void {
+        var analysis = try Phase2Analysis.init(ctx);
+        defer analysis.deinit(ctx);
+        var product = try produceSinglePass(ctx, &analysis);
+        defer product.deinit();
+        commitProduct(ctx, &product);
     }
 };
 
@@ -12832,16 +13795,12 @@ const function_mod = struct {
 
         pub fn appendSourceLoc(self: *BytecodeImpl, pc: u32, line_num: i32, col_num: i32) !void {
             if (line_num <= 0 or col_num <= 0) return;
+            // See FunctionDefImpl.appendSourceLoc: P2-R1T streaming remap
+            // requires non-decreasing slot pcs.
+            std.debug.assert(self.source_loc_slots.len == 0 or
+                self.source_loc_slots[self.source_loc_slots.len - 1].pc <= pc);
             const tail = try growSliceBy(pipeline_pc2line.SourceLocSlot, self.memory, &self.source_loc_slots, &self.source_loc_capacity, 1);
             tail[0] = .{ .pc = pc, .line_num = line_num, .col_num = col_num };
-        }
-
-        pub fn remapSourceLocs(self: *BytecodeImpl, old_to_new_pc: []const usize) void {
-            if (self.source_loc_slots.len == 0) return;
-            for (self.source_loc_slots) |*slot| {
-                if (slot.pc >= old_to_new_pc.len) continue;
-                slot.pc = @intCast(old_to_new_pc[slot.pc]);
-            }
         }
 
         /// Remap source slots after final layout and discard entries that no
@@ -12891,6 +13850,21 @@ const function_mod = struct {
             self.code_capacity = owned.len;
         }
 
+        /// Transfer variant of `installCode`: take ownership of a backing
+        /// allocation of `owned_capacity` elements while exposing only the
+        /// used prefix `owned_used`. `deinit`, `setCode`, `installCode`, and
+        /// the growable append helpers all free `code.ptr[0..code_capacity]`,
+        /// so the full backing is released on every later path — including
+        /// `owned_used.len == 0` with `owned_capacity > 0`, where the caller
+        /// passes `backing.ptr[0..0]` so the pointer still names the backing.
+        pub fn installCodeWithCapacity(self: *BytecodeImpl, owned_used: []u8, owned_capacity: usize) void {
+            std.debug.assert(owned_used.len <= owned_capacity);
+            std.debug.assert(owned_capacity != 0 or owned_used.len == 0);
+            freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
+            self.code = owned_used;
+            self.code_capacity = owned_capacity;
+        }
+
         pub fn installPc2Line(self: *BytecodeImpl, owned: []u8) void {
             const old = self.pc2line_buf;
             const old_owned = self.owns_pc2line_buf;
@@ -12907,6 +13881,19 @@ const function_mod = struct {
             freeGrowableSlice(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity);
             self.atom_operands = owned;
             self.atom_operands_capacity = owned.len;
+        }
+
+        /// Transfer variant of `installAtomOperands`. As with
+        /// `installAtomOperands`, atom refcounts held by the previous
+        /// `atom_operands` entries are NOT released here; callers release
+        /// them explicitly before installing. When `owned_capacity` is
+        /// nonzero, `owned_used.ptr` must name the head of the backing.
+        pub fn installAtomOperandsWithCapacity(self: *BytecodeImpl, owned_used: []atom.Atom, owned_capacity: usize) void {
+            std.debug.assert(owned_used.len <= owned_capacity);
+            std.debug.assert(owned_capacity != 0 or owned_used.len == 0);
+            freeGrowableSlice(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity);
+            self.atom_operands = owned_used;
+            self.atom_operands_capacity = owned_capacity;
         }
 
         pub fn addConstant(self: *BytecodeImpl, value: JSValue) !u32 {

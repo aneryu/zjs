@@ -1,161 +1,250 @@
 {
   "tool": "zjs-runtime-profile",
-  "timestamp": "2026-06-02T02:59:52.625Z",
-  "zjs": "/home/aneryu/zjs/zig-out/bin/zjs-test262",
+  "timestamp": "2026-07-31T07:24:59.437Z",
+  "zjs": "/home/aneryu/zjs/zig-out/bin/zjs-profile",
   "script": "reports/perf/current/scripts/prop_read_poly3_global.js",
   "scriptArgs": [],
   "stdoutPath": "reports/perf/current/runtime/prop_read_poly3_global.stdout",
   "profile": {
     "file": "reports/perf/current/scripts/prop_read_poly3_global.js",
-    "total_ns": 1151304,
-    "read_source_ns": 23136,
-    "runtime_create_ns": 33248,
-    "setup_ns": 667589,
-    "include_ns": 1280,
-    "eval_ns": 370274,
-    "parse_ns": 119840,
+    "total_ns": 520233814,
+    "read_source_ns": 25888,
+    "runtime_create_ns": 250289,
+    "setup_ns": 3104,
+    "include_ns": 384,
+    "eval_ns": 519895237,
+    "parse_ns": 118241,
     "finalize_ns": null,
     "parse_ns_includes_finalize": true,
-    "vm_run_ns": 245762,
-    "promise_jobs_ns": 624,
-    "jobs_ns": 240,
+    "vm_run_ns": 519756660,
+    "promise_jobs_ns": 1856,
+    "jobs_ns": 560,
     "memory": {
-      "allocated_bytes": 451832,
-      "allocation_count": 1512,
-      "allocated_bytes_peak": 456704,
-      "allocation_count_peak": 1521,
-      "alloc_calls": 1159,
-      "free_calls": 427,
-      "create_calls": 893,
-      "destroy_calls": 113
+      "allocated_bytes": 114036,
+      "allocation_count": 0,
+      "allocated_bytes_peak": 0,
+      "allocation_count_peak": 0,
+      "alloc_calls": 0,
+      "free_calls": 0,
+      "create_calls": 0,
+      "destroy_calls": 0
     },
+    "opcode_profile_enabled": true,
     "opcode_profile": {
-      "opcodes_executed": 36,
-      "measured_ns": 128593,
+      "opcodes_executed": 20000036,
+      "measured_ns": 519782020,
       "value_dups": 0,
-      "value_frees": 463,
+      "value_frees": 2000021,
       "prop_lookups": 0,
-      "global_lookups": 7,
-      "allocations": 2047,
+      "global_lookups": 0,
+      "allocations": 0,
       "call_frames": 1,
       "opcodes": [
         {
-          "opcode": 38,
-          "name": "array_from",
-          "count": 1,
-          "nanos": 50192,
-          "avg_ns": 50192,
-          "slow": 0
-        },
-        {
-          "opcode": 75,
-          "name": "define_field",
-          "count": 7,
-          "nanos": 45585,
-          "avg_ns": 6512,
-          "slow": 0
-        },
-        {
           "opcode": 56,
           "name": "get_var",
-          "count": 4,
-          "nanos": 14656,
-          "avg_ns": 3664,
-          "slow": 0
-        },
-        {
-          "opcode": 62,
-          "name": "check_define_var",
-          "count": 3,
-          "nanos": 4256,
-          "avg_ns": 1418,
-          "slow": 0
-        },
-        {
-          "opcode": 239,
-          "name": "call1",
-          "count": 1,
-          "nanos": 3472,
-          "avg_ns": 3472,
+          "count": 5000003,
+          "nanos": 129857277,
+          "avg_ns": 25,
           "slow": 0
         },
         {
           "opcode": 57,
           "name": "put_var",
-          "count": 3,
-          "nanos": 3120,
-          "avg_ns": 1040,
+          "count": 2000003,
+          "nanos": 52572720,
+          "avg_ns": 26,
+          "slow": 0
+        },
+        {
+          "opcode": 61,
+          "name": "get_field",
+          "count": 1000000,
+          "nanos": 26998201,
+          "avg_ns": 26,
+          "slow": 0
+        },
+        {
+          "opcode": 17,
+          "name": "dup",
+          "count": 1000000,
+          "nanos": 26801146,
+          "avg_ns": 26,
+          "slow": 0
+        },
+        {
+          "opcode": 67,
+          "name": "get_array_el",
+          "count": 1000000,
+          "nanos": 26268145,
+          "avg_ns": 26,
+          "slow": 0
+        },
+        {
+          "opcode": 155,
+          "name": "add",
+          "count": 1000000,
+          "nanos": 26121362,
+          "avg_ns": 26,
+          "slow": 0
+        },
+        {
+          "opcode": 143,
+          "name": "post_inc",
+          "count": 1000000,
+          "nanos": 25919550,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 161,
+          "name": "lt",
+          "count": 1000001,
+          "nanos": 25826339,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 232,
+          "name": "if_false8",
+          "count": 1000001,
+          "nanos": 25719252,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 199,
+          "name": "put_loc0",
+          "count": 1000002,
+          "nanos": 25706001,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 14,
+          "name": "drop",
+          "count": 1000000,
+          "nanos": 25699591,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 182,
+          "name": "push_3",
+          "count": 1000001,
+          "nanos": 25672462,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 154,
+          "name": "mod",
+          "count": 1000000,
+          "nanos": 25638506,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 1,
+          "name": "push_i32",
+          "count": 1000001,
+          "nanos": 25489100,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 234,
+          "name": "goto8",
+          "count": 1000000,
+          "nanos": 25435840,
+          "avg_ns": 25,
+          "slow": 0
+        },
+        {
+          "opcode": 40,
+          "name": "return",
+          "count": 1,
+          "nanos": 34768,
+          "avg_ns": 34768,
+          "slow": 0
+        },
+        {
+          "opcode": 237,
+          "name": "call1",
+          "count": 1,
+          "nanos": 16896,
+          "avg_ns": 16896,
+          "slow": 0
+        },
+        {
+          "opcode": 38,
+          "name": "array_from",
+          "count": 1,
+          "nanos": 1168,
+          "avg_ns": 1168,
+          "slow": 0
+        },
+        {
+          "opcode": 6,
+          "name": "undefined",
+          "count": 2,
+          "nanos": 1136,
+          "avg_ns": 568,
+          "slow": 0
+        },
+        {
+          "opcode": 73,
+          "name": "define_field",
+          "count": 7,
+          "nanos": 1040,
+          "avg_ns": 148,
           "slow": 0
         },
         {
           "opcode": 11,
           "name": "object",
           "count": 3,
-          "nanos": 3040,
-          "avg_ns": 1013,
-          "slow": 0
-        },
-        {
-          "opcode": 41,
-          "name": "return_undef",
-          "count": 1,
-          "nanos": 1680,
-          "avg_ns": 1680,
-          "slow": 0
-        },
-        {
-          "opcode": 61,
-          "name": "define_var",
-          "count": 3,
-          "nanos": 1008,
-          "avg_ns": 336,
-          "slow": 0
-        },
-        {
-          "opcode": 181,
-          "name": "push_1",
-          "count": 3,
-          "nanos": 784,
-          "avg_ns": 261,
+          "nanos": 624,
+          "avg_ns": 208,
           "slow": 0
         },
         {
           "opcode": 180,
-          "name": "push_0",
-          "count": 2,
-          "nanos": 272,
-          "avg_ns": 136,
+          "name": "push_1",
+          "count": 3,
+          "nanos": 384,
+          "avg_ns": 128,
           "slow": 0
         },
         {
-          "opcode": 14,
-          "name": "drop",
+          "opcode": 203,
+          "name": "set_loc0",
           "count": 1,
-          "nanos": 224,
-          "avg_ns": 224,
+          "nanos": 272,
+          "avg_ns": 272,
           "slow": 0
         },
         {
-          "opcode": 182,
+          "opcode": 181,
           "name": "push_2",
           "count": 3,
-          "nanos": 176,
-          "avg_ns": 58,
+          "nanos": 144,
+          "avg_ns": 48,
           "slow": 0
         },
         {
-          "opcode": 183,
-          "name": "push_3",
-          "count": 1,
-          "nanos": 128,
-          "avg_ns": 128,
+          "opcode": 179,
+          "name": "push_0",
+          "count": 2,
+          "nanos": 96,
+          "avg_ns": 48,
           "slow": 0
         }
       ]
     },
     "ic": {
-      "hit": 1,
-      "miss": 14,
+      "hit": 0,
+      "miss": 0,
       "invalidate": 0,
       "promote_poly": 0,
       "promote_mega": 0
@@ -217,7 +306,7 @@
       0,
       0,
       0,
-      1,
+      0,
       0,
       0,
       0,
@@ -475,8 +564,8 @@
       0,
       0,
       0,
-      11,
-      3,
+      0,
+      0,
       0,
       0,
       0,

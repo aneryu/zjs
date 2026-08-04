@@ -6,6 +6,7 @@ const bytecode = zjs.bytecode;
 const core = zjs.core;
 const frame_mod = zjs.exec.frame;
 const parser = zjs.parser;
+const parser_tests = @import("parser.zig");
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -2377,7 +2378,9 @@ test "resolve_variables empty finalizer removal is transactional across every al
     // No scope_make_ref appears in this topology, so the five tail ledgers are
     // deliberately absent. Keep the remaining transactional allocation
     // surface exact: every one was failed, checked unchanged, and retried.
-    try std.testing.expectEqual(@as(usize, 7), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 12), fail_offset);
 }
 
 test "resolve_variables: scope_put_var → put_var" {
@@ -6962,7 +6965,9 @@ test "resolve_variables logical fold is transactional across every post-bind all
     }
     // The no-make-ref topology has six transactional allocations after
     // folding jump-target state into the CFG.
-    try std.testing.expectEqual(@as(usize, 6), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 11), fail_offset);
 }
 
 fn runTaggedLogicalPhaseOwnerAllocationFailure(
@@ -7068,7 +7073,9 @@ test "resolve_variables tagged logical labels are leak-free and retryable across
     }
     // Tagged-label binding contributes one allocation before the same six
     // no-make-ref phase-owner allocations.
-    try std.testing.expectEqual(@as(usize, 7), fail_offset);
+    // P2-S1 checked builds keep the two-pass shadow producer live while the
+    // single-pass builder adds code/atom/jump backings plus sparse relocation.
+    try std.testing.expectEqual(@as(usize, 12), fail_offset);
 }
 
 test "resolve_labels null comparison strict_eq folds both constants with QuickJS source mapping" {
@@ -8286,7 +8293,9 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     body[10] = op.drop;
     body[11] = op.return_undef;
     try fd.appendByteCode(&body);
-    try fd.appendSourceLoc(2, 8, 5);
+    // pc 5 is an instruction boundary (just past the 5-byte push_atom_value):
+    // the P2-R1T source-loc entry contract rejects mid-instruction pcs.
+    try fd.appendSourceLoc(5, 8, 5);
     try fd.appendAtomOperand(name);
     _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{
@@ -9623,7 +9632,9 @@ fn populateFunctionDefForFinalizeFailure(
     body[9] = op.drop;
     body[10] = op.return_undef;
     try fd.appendByteCode(&body);
-    try fd.appendSourceLoc(2, 8, 5);
+    // pc 5 is an instruction boundary (just past the 5-byte push_atom_value):
+    // the P2-R1T source-loc entry contract rejects mid-instruction pcs.
+    try fd.appendSourceLoc(5, 8, 5);
     try fd.appendAtomOperand(name);
     _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{ .var_name = arg_name, .scope_level = 0, .is_lexical = false });
@@ -9706,4 +9717,919 @@ test "createFunctionBytecode exhaustively rolls back every precommit allocation 
         runFunctionBytecodeFinalizeOomLifecycle,
         .{},
     );
+}
+
+// P2-R1T: an injected OOM anywhere inside phase finalization (including the
+// code/atom trim allocations) must leave the transactional source-loc slots
+// untouched — the streaming remap commits them only at the no-fail install
+// boundary. checkAllAllocationFailures sweeps every allocation index, which
+// is strictly stronger than injecting at the trims alone.
+fn phase2SourceSlotInvariantRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    // push_i32@0 (5) | line_num@5 (5, dropped by the write pass -> forces the
+    // exact-fit trim allocation) | goto@10 -> 16 (terminal one-past-the-end
+    // relocation) | return_undef@15 (unreachable -> dead-range publish).
+    var code = [_]u8{
+        op.push_i32,     1,  0, 0, 0,
+        op.line_num,     7,  0, 0, 0,
+        op.goto,         16, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    try function.appendSourceLoc(10, 3, 1);
+    try function.appendSourceLoc(16, 4, 1);
+    const original_pcs = [_]u32{ 0, 5, 10, 16 };
+
+    // Phase 2 only: later phases commit their own slot rewrites on success,
+    // so the untouched-on-failure invariant is a phase-2 contract.
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    bytecode.pipeline.resolve_variables.run(&resolve_ctx) catch |err| {
+        try std.testing.expectEqual(original_pcs.len, function.source_loc_slots.len);
+        for (function.source_loc_slots, original_pcs) |slot, expected_pc| {
+            try std.testing.expectEqual(expected_pc, slot.pc);
+        }
+        return err;
+    };
+    // Success: the commit remapped every slot exactly once (push@0 -> 0;
+    // the dropped line_num@5 and the goto@10 both land at output pc 5; the
+    // one-past-the-end marker takes the terminal pc 10).
+    const remapped_pcs = [_]u32{ 0, 5, 5, 10 };
+    try std.testing.expectEqual(remapped_pcs.len, function.source_loc_slots.len);
+    for (function.source_loc_slots, remapped_pcs) |slot, expected_pc| {
+        try std.testing.expectEqual(expected_pc, slot.pc);
+    }
+}
+
+test "phase-2 trim OOM leaves transactional source-loc slots untouched (P2-R1T)" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2SourceSlotInvariantRun, .{});
+}
+
+test "P2-R1T relocation: shared goto target maps once for both sites" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     1,  0, 0, 0,
+        op.if_true,      20, 0, 0, 0,
+        op.line_num,     7,  0, 0, 0,
+        op.goto,         25, 0, 0, 0,
+        op.goto,         25, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 21), function.code.len);
+    try std.testing.expectEqual(op.if_true, function.code[5]);
+    try std.testing.expectEqual(@as(u32, 15), std.mem.readInt(u32, function.code[6..][0..4], .little));
+    try std.testing.expectEqual(op.goto, function.code[10]);
+    try std.testing.expectEqual(@as(u32, 20), std.mem.readInt(u32, function.code[11..][0..4], .little));
+    try std.testing.expectEqual(op.goto, function.code[15]);
+    try std.testing.expectEqual(@as(u32, 20), std.mem.readInt(u32, function.code[16..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[20]);
+}
+
+test "P2-R1T relocation: goto onto a dropped line_num lands on the next kept instruction" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.line_num,     3,  0, 0, 0,
+        op.goto,         10, 0, 0, 0,
+        op.line_num,     4,  0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), function.code.len);
+    try std.testing.expectEqual(op.goto, function.code[0]);
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, function.code[1..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[5]);
+}
+
+test "P2-R1T relocation: goto over a dead range maps to the reachable landing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.goto,         6,               0, 0, 0,
+        op.return_undef, op.return_undef,
+    };
+    try function.appendCode(&code);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 6), function.code.len);
+    try std.testing.expectEqual(op.goto, function.code[0]);
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, function.code[1..][0..4], .little));
+    try std.testing.expectEqual(op.return_undef, function.code[5]);
+}
+
+test "P2-R1T relocation: multiple source slots on one pc all remap and survive" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.line_num,     9,  0, 0, 0,
+        op.push_i32,     42, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(5, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    try function.appendSourceLoc(5, 3, 1);
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try bytecode.pipeline.resolve_variables.run(&resolve_ctx);
+
+    try std.testing.expectEqual(@as(usize, 3), function.source_loc_slots.len);
+    const expected_lines = [_]i32{ 1, 2, 3 };
+    for (function.source_loc_slots, expected_lines) |slot, expected_line| {
+        try std.testing.expectEqual(@as(u32, 0), slot.pc);
+        try std.testing.expectEqual(expected_line, slot.line_num);
+    }
+}
+
+test "P2-R1T relocation: descending source slot pcs fail closed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     7, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    try function.appendSourceLoc(5, 2, 1);
+    function.source_loc_slots[0].pc = 5;
+    function.source_loc_slots[1].pc = 0;
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try std.testing.expectError(error.InvalidBytecode, bytecode.pipeline.resolve_variables.run(&resolve_ctx));
+
+    try std.testing.expectEqual(@as(u32, 5), function.source_loc_slots[0].pc);
+    try std.testing.expectEqual(@as(u32, 0), function.source_loc_slots[1].pc);
+}
+
+test "P2-R1T relocation: mid-instruction source slot pc fails closed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{
+        op.push_i32,     7, 0, 0, 0,
+        op.return_undef,
+    };
+    try function.appendCode(&code);
+    try function.appendSourceLoc(0, 1, 1);
+    function.source_loc_slots[0].pc = 2;
+
+    var resolve_ctx = bytecode.pipeline.resolve_variables.JSContext.init(&function);
+    try std.testing.expectError(error.InvalidBytecode, bytecode.pipeline.resolve_variables.run(&resolve_ctx));
+
+    try std.testing.expectEqual(@as(u32, 2), function.source_loc_slots[0].pc);
+}
+
+test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full backing across replacement and deinit" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-replacement");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const pre_install_refs = rt.atoms.refCount(name).?;
+
+    const first_code = [_]u8{ 1, 2, 3, 4, 5 };
+    const first_code_backing = try rt.memory.alloc(u8, 16);
+    @memcpy(first_code_backing[0..first_code.len], &first_code);
+    bc.installCodeWithCapacity(first_code_backing[0..first_code.len], first_code_backing.len);
+    try std.testing.expectEqual(@as(usize, 5), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 16), bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &first_code, bc.code);
+
+    const first_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
+    for (first_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    bc.installAtomOperandsWithCapacity(first_atom_backing[0..3], first_atom_backing.len);
+    try std.testing.expectEqual(@as(usize, 3), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 8), bc.atom_operands_capacity);
+    try std.testing.expectEqual(pre_install_refs + 3, rt.atoms.refCount(name).?);
+
+    const second_code = [_]u8{ 9, 8 };
+    const second_code_backing = try rt.memory.alloc(u8, 6);
+    @memcpy(second_code_backing[0..second_code.len], &second_code);
+    const second_atom_backing = try rt.memory.alloc(core.atom.Atom, 6);
+    for (second_atom_backing[0..2]) |*slot| slot.* = rt.atoms.dup(name);
+
+    for (bc.atom_operands) |old| rt.atoms.free(old);
+    bc.installAtomOperandsWithCapacity(second_atom_backing[0..2], second_atom_backing.len);
+    bc.installCodeWithCapacity(second_code_backing[0..second_code.len], second_code_backing.len);
+
+    try std.testing.expectEqual(@as(usize, 2), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 6), bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &second_code, bc.code);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 6), bc.atom_operands_capacity);
+    try std.testing.expectEqual(pre_install_refs + 2, rt.atoms.refCount(name).?);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "capacity-carry install with zero used length still owns and frees the backing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-zero-used");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+
+    const code_backing = try rt.memory.alloc(u8, 12);
+    bc.installCodeWithCapacity(code_backing.ptr[0..0], code_backing.len);
+    const atom_backing = try rt.memory.alloc(core.atom.Atom, 4);
+    bc.installAtomOperandsWithCapacity(atom_backing.ptr[0..0], atom_backing.len);
+
+    try std.testing.expectEqual(@as(usize, 0), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 12), bc.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 4), bc.atom_operands_capacity);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "phase-3 exact-fit replacement frees the carried capacity once and releases atom refs once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capacity-carry-phase-3-replacement");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+
+    const carried_code = [_]u8{ 1, 3, 5, 7, 9 };
+    const carried_code_backing = try rt.memory.alloc(u8, 16);
+    @memcpy(carried_code_backing[0..carried_code.len], &carried_code);
+    bc.installCodeWithCapacity(carried_code_backing[0..carried_code.len], carried_code_backing.len);
+
+    const carried_atom_backing = try rt.memory.alloc(core.atom.Atom, 8);
+    for (carried_atom_backing[0..3]) |*slot| slot.* = rt.atoms.dup(name);
+    bc.installAtomOperandsWithCapacity(carried_atom_backing[0..3], carried_atom_backing.len);
+    const carried_refs = rt.atoms.refCount(name).?;
+
+    const fresh_code = try rt.memory.alloc(u8, bc.code.len);
+    @memcpy(fresh_code, bc.code);
+    const fresh_atoms = try rt.memory.alloc(core.atom.Atom, bc.atom_operands.len);
+    for (fresh_atoms) |*slot| slot.* = rt.atoms.dup(name);
+    const bytes_with_both_generations = rt.memory.allocated_bytes;
+    const count_with_both_generations = rt.memory.allocation_count;
+
+    for (bc.atom_operands) |old| rt.atoms.free(old);
+    bc.installCode(fresh_code);
+    bc.installAtomOperands(fresh_atoms);
+
+    try std.testing.expectEqual(carried_refs, rt.atoms.refCount(name).?);
+    const carried_backing_bytes =
+        16 * @sizeOf(u8) + 8 * @sizeOf(core.atom.Atom);
+    try std.testing.expectEqual(
+        bytes_with_both_generations - carried_backing_bytes,
+        rt.memory.allocated_bytes,
+    );
+    try std.testing.expectEqual(count_with_both_generations - 2, rt.memory.allocation_count);
+    try std.testing.expectEqual(
+        base_bytes + fresh_code.len * @sizeOf(u8) + fresh_atoms.len * @sizeOf(core.atom.Atom),
+        rt.memory.allocated_bytes,
+    );
+    try std.testing.expectEqual(base_count + 2, rt.memory.allocation_count);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+test "Phase2Builder grows geometrically, moves atom ownership with the backing, and deinitUncommitted releases everything" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("phase-2-builder-growth");
+    defer rt.atoms.free(name);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(name).?;
+
+    var builder = try bytecode.pipeline_resolve_variables.Phase2Builder.init(
+        &rt.memory,
+        &rt.atoms,
+        4,
+        2,
+        1,
+    );
+    var builder_live = true;
+    defer if (builder_live) builder.deinitUncommitted();
+
+    const first_code = [_]u8{ 1, 2, 3, 4 };
+    builder.appendCodeAssumeCapacity(&first_code);
+    builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 7 });
+    const refs_before_grow = rt.atoms.refCount(name).?;
+    try std.testing.expectEqual(base_refs + 2, refs_before_grow);
+
+    try builder.ensureAdditional(8, 3, 2);
+    try std.testing.expectEqual(@as(usize, 12), builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 5), builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 3), builder.jump_capacity);
+    try std.testing.expectEqual(builder.code_capacity, builder.code.len);
+    try std.testing.expectEqual(builder.atom_capacity, builder.atom_operands.len);
+    try std.testing.expectEqual(builder.jump_capacity, builder.jump_sites.len);
+    try std.testing.expectEqualSlices(u8, &first_code, builder.code[0..builder.code_len]);
+    try std.testing.expectEqual(name, builder.atom_operands[0]);
+    try std.testing.expectEqual(name, builder.atom_operands[1]);
+    try std.testing.expectEqual(refs_before_grow, rt.atoms.refCount(name).?);
+
+    const second_code = [_]u8{ 5, 6, 7, 8, 9, 10, 11, 12 };
+    builder.appendCodeAssumeCapacity(&second_code);
+    for (0..3) |_| builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 11 });
+    builder.appendJumpAssumeCapacity(.{ .operand_pos = 19 });
+
+    try std.testing.expectEqual(@as(usize, 12), builder.code_len);
+    try std.testing.expectEqual(@as(usize, 5), builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 3), builder.jump_len);
+    try std.testing.expectEqual(@as(usize, 7), builder.jump_sites[0].operand_pos);
+
+    builder.deinitUncommitted();
+    builder_live = false;
+    try std.testing.expectEqual(@as(usize, 0), builder.code.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.code_len);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_sites.len);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_capacity);
+    try std.testing.expectEqual(@as(usize, 0), builder.jump_len);
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+
+    var zero_builder = try bytecode.pipeline_resolve_variables.Phase2Builder.init(
+        &rt.memory,
+        &rt.atoms,
+        0,
+        0,
+        0,
+    );
+    var zero_builder_live = true;
+    defer if (zero_builder_live) zero_builder.deinitUncommitted();
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.code.len);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 0), zero_builder.jump_sites.len);
+
+    try zero_builder.ensureAdditional(1, 1, 1);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.code_capacity);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.atom_capacity);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.jump_capacity);
+    zero_builder.appendCodeAssumeCapacity(&.{42});
+    zero_builder.appendAtomAssumeCapacity(rt.atoms.dup(name));
+    zero_builder.appendJumpAssumeCapacity(.{ .operand_pos = 23 });
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.code_len);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.atom_len);
+    try std.testing.expectEqual(@as(usize, 1), zero_builder.jump_len);
+
+    zero_builder.deinitUncommitted();
+    zero_builder_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(name).?);
+}
+
+fn phase2ProbeBranchGrowRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-grow-x");
+    defer rt.atoms.free(x);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Mirror addEvalVariables' demand-created dynamic environment objects: these
+    // rows live outside the scope chain, so probe eligibility comes solely from
+    // the recorded indices.
+    fd.var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    fd.arg_var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var code = [_]u8{0} ** 19;
+    code[0] = op.push_i32;
+    std.mem.writeInt(i32, code[1..5], 1, .little);
+    code[5] = op.if_true;
+    std.mem.writeInt(u32, code[6..10], 18, .little);
+    code[10] = op.scope_get_var;
+    std.mem.writeInt(u32, code[11..15], x, .little);
+    std.mem.writeInt(u16, code[15..17], 0, .little);
+    code[17] = op.drop;
+    code[18] = op.return_undef;
+    try bc.setCode(&code);
+    try bc.retainAtomOperand(x);
+    try bc.appendSourceLoc(0, 1, 1);
+    try bc.appendSourceLoc(10, 2, 1);
+    try bc.appendSourceLoc(18, 3, 1);
+
+    var original_code: [19]u8 = undefined;
+    @memcpy(&original_code, bc.code);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    const original_atom_operands = [_]core.atom.Atom{bc.atom_operands[0]};
+    try std.testing.expectEqual(@as(usize, 3), bc.source_loc_slots.len);
+    const original_slot_pcs = [_]u32{
+        bc.source_loc_slots[0].pc,
+        bc.source_loc_slots[1].pc,
+        bc.source_loc_slots[2].pc,
+    };
+    try std.testing.expectEqualSlices(u32, &.{ 0, 10, 18 }, &original_slot_pcs);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    pipeline.resolve_variables.run(&ctx) catch |err| {
+        // P2-S1 transactional contract: any injected failure — including one
+        // landing after the builder has already grown past the input capacity —
+        // leaves the input artifacts item-identical and every initialized
+        // output atom prefix released.
+        try std.testing.expectEqualSlices(u8, &original_code, bc.code);
+        try std.testing.expectEqualSlices(core.atom.Atom, &original_atom_operands, bc.atom_operands);
+        try std.testing.expectEqual(original_slot_pcs.len, bc.source_loc_slots.len);
+        for (bc.source_loc_slots, original_slot_pcs) |slot, expected_pc| {
+            try std.testing.expectEqual(expected_pc, slot.pc);
+        }
+        try std.testing.expectEqual(pre_run_refs, rt.atoms.refCount(x).?);
+        return err;
+    };
+
+    var expected = [_]u8{0} ** 41;
+    expected[0] = op.push_i32;
+    std.mem.writeInt(i32, expected[1..5], 1, .little);
+    expected[5] = op.if_true;
+    std.mem.writeInt(u32, expected[6..10], 40, .little);
+    expected[10] = op.get_loc;
+    std.mem.writeInt(u16, expected[11..13], 0, .little);
+    expected[13] = op.with_get_var;
+    std.mem.writeInt(u32, expected[14..18], x, .little);
+    std.mem.writeInt(u32, expected[18..22], 39, .little);
+    expected[22] = 0;
+    expected[23] = op.get_loc;
+    std.mem.writeInt(u16, expected[24..26], 1, .little);
+    expected[26] = op.with_get_var;
+    std.mem.writeInt(u32, expected[27..31], x, .little);
+    std.mem.writeInt(u32, expected[31..35], 39, .little);
+    expected[35] = 0;
+    expected[36] = op.get_var;
+    std.mem.writeInt(u16, expected[37..39], 0, .little);
+    expected[39] = op.drop;
+    expected[40] = op.return_undef;
+
+    try std.testing.expectEqual(@as(usize, 41), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > code.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expect(bc.atom_operands.len > original_atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(x, bc.atom_operands[1]);
+    // The output carries three label operands instead of the input's one: the
+    // patched branch plus two probes whose shared done_pc is already final in
+    // output pc space, so those probe labels are not patchable jump sites.
+    try std.testing.expectEqual(@as(u32, 40), std.mem.readInt(u32, bc.code[6..10], .little));
+    try std.testing.expectEqual(@as(u32, 39), std.mem.readInt(u32, bc.code[18..22], .little));
+    try std.testing.expectEqual(@as(u32, 39), std.mem.readInt(u32, bc.code[31..35], .little));
+    const expected_slot_pcs = [_]u32{ 0, 10, 40 };
+    try std.testing.expectEqual(expected_slot_pcs.len, bc.source_loc_slots.len);
+    for (bc.source_loc_slots, expected_slot_pcs) |slot, expected_pc| {
+        try std.testing.expectEqual(expected_pc, slot.pc);
+    }
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+}
+
+fn phase2DirectEvalConflictGrowRun(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-conflict-x");
+    defer rt.atoms.free(x);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    fd.is_eval = true;
+    fd.is_direct_eval = true;
+    // The outer lexical binding the direct eval's `var x` collides with.
+    _ = try fd.addClosureVar(.{
+        .closure_type = .ref,
+        .is_lexical = true,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+    try fd.appendGlobalVar(.{
+        .cpool_idx = -1,
+        .scope_level = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    defer bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    const code = [_]u8{op.return_undef};
+    try bc.setCode(&code);
+
+    const original_code = [1]u8{bc.code[0]};
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    pipeline.resolve_variables.run(&ctx) catch |err| {
+        try std.testing.expectEqualSlices(u8, &original_code, bc.code);
+        try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+        try std.testing.expectEqual(pre_run_refs, rt.atoms.refCount(x).?);
+        return err;
+    };
+
+    var expected = [_]u8{0} ** 7;
+    expected[0] = op.throw_error;
+    std.mem.writeInt(u32, expected[1..5], x, .little);
+    expected[5] = 1; // JS_THROW_VAR_REDECL
+    expected[6] = op.return_undef;
+    try std.testing.expectEqual(@as(usize, 7), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > code.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+}
+
+test "P2-S1 grow: dynamic-env probes grow phase-2 output beyond the input" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const x = try rt.internAtom("p2s1-grow-x");
+    defer rt.atoms.free(x);
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+    const base_refs = rt.atoms.refCount(x).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, x);
+    var fd_live = true;
+    defer if (fd_live) fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Mirror addEvalVariables' demand-created dynamic environment objects: these
+    // rows live outside the scope chain, so probe eligibility comes solely from
+    // the recorded indices.
+    fd.var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    fd.arg_var_object_idx = try fd.appendVar(.{
+        .var_name = core.atom.ids.arg_var_object,
+        .scope_level = 0,
+        .scope_next = 0,
+        .var_kind = .normal,
+    });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .global,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+        .var_idx = 0,
+        .var_name = x,
+    });
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, x);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x);
+    const pre_run_refs = rt.atoms.refCount(x).?;
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    var expected = [_]u8{0} ** 30;
+    expected[0] = op.get_loc;
+    std.mem.writeInt(u16, expected[1..3], 0, .little);
+    expected[3] = op.with_get_var;
+    std.mem.writeInt(u32, expected[4..8], x, .little);
+    std.mem.writeInt(u32, expected[8..12], 29, .little);
+    expected[12] = 0;
+    expected[13] = op.get_loc;
+    std.mem.writeInt(u16, expected[14..16], 1, .little);
+    expected[16] = op.with_get_var;
+    std.mem.writeInt(u32, expected[17..21], x, .little);
+    std.mem.writeInt(u32, expected[21..25], 29, .little);
+    expected[25] = 0;
+    expected[26] = op.get_var;
+    std.mem.writeInt(u16, expected[27..29], 0, .little);
+    expected[29] = op.return_undef;
+    try std.testing.expectEqual(@as(usize, 30), bc.code.len);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expect(bc.code.len > input.len);
+    try std.testing.expect(bc.code_capacity > bc.code.len);
+    try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
+    try std.testing.expect(bc.atom_operands.len > 1);
+    try std.testing.expectEqual(x, bc.atom_operands[0]);
+    try std.testing.expectEqual(x, bc.atom_operands[1]);
+    try std.testing.expectEqual(pre_run_refs + 1, rt.atoms.refCount(x).?);
+
+    // The phase-2 builder carries its oversized growth backing into Bytecode;
+    // explicit teardown proves that backing and its atom prefix free once.
+    bc.deinit(rt);
+    bc_live = false;
+    fd.deinit(rt);
+    fd_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+    try std.testing.expectEqual(base_refs, rt.atoms.refCount(x).?);
+}
+
+test "P2-S1 grow: direct-eval lexical redeclaration prepends throw and grows atom operands" {
+    try phase2DirectEvalConflictGrowRun(std.testing.allocator);
+}
+
+test "P2-S1 grow: probe labels and patched branch survive single-pass growth" {
+    // This covers jump-operand growth in emitted code (one input label operand
+    // becomes three output label operands) and patches a branch across a grown
+    // buffer. Patchable sites are bounded by the input label census because
+    // probe labels are finalized output-space operands; Phase2Builder's unit
+    // test above covers jump-array growth mechanics directly.
+    try phase2ProbeBranchGrowRun(std.testing.allocator);
+}
+
+test "P2-S1 grow OOM matrix: probe/branch fixture is transactional across every allocation failure" {
+    // The sweep reaches post-growth allocation indices, so a later OOM also
+    // proves rollback releases every already-initialized output atom prefix.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2ProbeBranchGrowRun, .{});
+}
+
+test "P2-S1 grow OOM matrix: direct-eval conflict fixture is transactional across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, phase2DirectEvalConflictGrowRun, .{});
+}
+
+test "P2-S1: line_num-only input shrinks to a zero-used capacity-carried backing through phase 2" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_count = rt.memory.allocation_count;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    var bc_live = true;
+    defer if (bc_live) bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 5;
+    input[0] = op.line_num;
+    std.mem.writeInt(u32, input[1..5], 1, .little);
+    try bc.setCode(&input);
+
+    // line_num is dropped without consuming the input-sized initial backing,
+    // exercising the production used=0/capacity>0 install and free path.
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+    try pipeline.resolve_variables.run(&ctx);
+    try std.testing.expectEqual(@as(usize, 0), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 5), bc.code_capacity);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+
+    bc.deinit(rt);
+    bc_live = false;
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_count, rt.memory.allocation_count);
+}
+
+test "four-ledger phase-boundary ownership accounting compile-only" {
+    const ownership = parser_tests.phase_ownership;
+
+    for (&ownership.shapes) |*shape| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+
+        try ownership.warmRuntime(rt, shape);
+
+        // A realm is only needed to materialise child FunctionBytecodes. Create
+        // it before the window so its own allocations and atoms sit outside the
+        // measured baseline.
+        const realm = try core.RealmContext.create(rt);
+        defer realm.destroy();
+
+        var window: ownership.Window = undefined;
+        try window.init(rt, shape);
+        defer window.deinit();
+
+        var b1 = try window.sampleB1();
+        // Parsing never publishes a FunctionBytecode; finalization is the only
+        // producer. Tier 2 therefore still starts at an exact census.
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            ownership.publishedFunctionBytecodeCount(&window.function),
+        );
+        try std.testing.expectEqual(@as(usize, 0), try ownership.atomResidual(b1));
+
+        var b2: ownership.Snapshot = undefined;
+        var b3: ownership.Snapshot = undefined;
+        var emit_residual: usize = 0;
+        if (shape.tier == .nested_function_bytecode) {
+            // Child FunctionDefs make per-phase driving illegal: the child
+            // FunctionBytecodes must be installed into the constant pool before
+            // resolve_variables, and the installer plus
+            // prepareCurrentBeforeChildren are private to pipeline_finalize.
+            // Driving resolve_variables directly here instead produces an
+            // invalid product (measured: 8 of 24 source events land past
+            // code.len). So B2 is not separately observable for this tier and
+            // collapses into the composite emit; tier 1 carries the isolated
+            // resolve_variables boundary.
+            try std.testing.expect(window.state.function_def.child_list.len > 0);
+            try pipeline.finalize.runWithFunctionDefRuntime(
+                &window.function,
+                &window.state.function_def,
+                .{ .realm = realm },
+            );
+            b3 = try window.sampleNext(.final, &b1);
+            b2 = b3;
+            // Finalization moved ownership under published FunctionBytecodes,
+            // which the census does not descend into. That residual is what the
+            // remaining boundaries must carry unchanged.
+            try std.testing.expect(ownership.publishedFunctionBytecodeCount(&window.function) > 0);
+            emit_residual = try ownership.atomResidual(b3);
+            try std.testing.expect(emit_residual > 0);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), window.state.function_def.child_list.len);
+            var variables_ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(
+                &window.function,
+                &window.state.function_def,
+            );
+            try pipeline.resolve_variables.run(&variables_ctx);
+            b2 = try window.sampleNext(.phase1, &b1);
+
+            // pipeline.finalize.runPhases flips this public phase-contract bit
+            // between resolve_variables and resolve_labels. The private prepare
+            // and metadata-sync helpers remain intentionally bypassed here.
+            window.state.function_def.use_short_opcodes = true;
+            var labels_ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(
+                &window.function,
+                &window.state.function_def,
+            );
+            try pipeline.resolve_labels.run(&labels_ctx);
+
+            var encoded = try pipeline.pc2line.encode(
+                &rt.memory,
+                window.function.source_loc_slots,
+                window.function.line_num,
+                window.function.col_num,
+            );
+            defer encoded.deinit();
+            window.function.installPc2Line(encoded.bytes);
+            encoded.bytes = &.{};
+            window.function.stack_size = try pipeline.stack_size.compute(window.function.code, .{
+                .scratch_allocator = rt.memory.allocator,
+            });
+            b3 = try window.sampleNext(.final, &b2);
+        }
+
+        window.discardTemporaries();
+        var b4 = try window.sampleNext(.final, &b3);
+        const committed = b4.builder.owned;
+        ownership.setBuilderCommitted(&b1, committed);
+        ownership.setBuilderCommitted(&b2, committed);
+        ownership.setBuilderCommitted(&b3, committed);
+        ownership.setBuilderCommitted(&b4, committed);
+
+        try ownership.expectAtomAccount(b1, 0);
+        try ownership.expectAtomAccount(b2, emit_residual);
+        try ownership.expectAtomAccount(b3, emit_residual);
+        // The published-FB residual is a constant of the compile: it appears at
+        // the emit boundary and must survive the temporaries discard untouched.
+        try ownership.expectAtomAccount(b4, emit_residual);
+        if (shape.tier == .nested_function_bytecode) {
+            try std.testing.expect(std.meta.eql(b2, b3));
+            try ownership.expectAtomTransition(b1, b3, true);
+        } else {
+            try ownership.expectAtomTransition(b1, b2, false);
+            try ownership.expectAtomTransition(b2, b3, true);
+        }
+        try ownership.expectAtomTransition(b3, b4, false);
+        try ownership.expectB1(b1);
+        if (shape.tier == .exact_leaf) try ownership.expectB2(b1, b2);
+        try ownership.expectB3(b1, b3);
+        try ownership.expectB4(b1, b3, b4);
+
+        ownership.dump(shape.*, "compile-only", "B1-after-parse", b1);
+        ownership.dump(
+            shape.*,
+            "compile-only",
+            if (shape.tier == .nested_function_bytecode)
+                "B2-collapsed-into-B3"
+            else
+                "B2-after-resolve-variables",
+            b2,
+        );
+        ownership.dump(shape.*, "compile-only", "B3-after-final-emit", b3);
+        ownership.dump(shape.*, "compile-only", "B4-artifact-only", b4);
+
+        window.releaseArtifact();
+        var terminal = try window.sampleNext(.final, &b4);
+        ownership.setBuilderCommitted(&terminal, 0);
+        try ownership.expectTerminal(terminal);
+        ownership.dump(shape.*, "compile-only", "terminal", terminal);
+    }
 }

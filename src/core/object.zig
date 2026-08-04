@@ -11833,10 +11833,8 @@ test "object value refs keep nested symbol bodies without external symbol roots"
     try object.defineOwnProperty(rt, key, descriptor.Descriptor.data(nested_value, true, true, true));
     nested_value.free(rt);
 
-    try std.testing.expect(!try rt.registerExternalValueSymbolRoot(object_value));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(nested_symbol) != null);
-    rt.unregisterExternalValueSymbolRoot(object_value);
 
     object_value.free(rt);
     object_value = JSValue.undefinedValue();

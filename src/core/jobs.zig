@@ -15,12 +15,10 @@ pub const GenericPayload = struct {
     func: Func,
     argc: u3 = 0,
     argv: [MaxArgs]core.JSValue = [_]core.JSValue{core.JSValue.undefinedValue()} ** MaxArgs,
-    symbol_arg_mask: u5 = 0,
 };
 
 pub const PromisePayload = struct {
     value: core.JSValue,
-    value_symbol_rooted: bool = false,
 };
 
 pub const PromiseReactionPhase = enum {
@@ -34,16 +32,11 @@ pub const PromiseReactionPayload = struct {
     value: core.JSValue,
     rejected: bool,
     phase: PromiseReactionPhase = .invoke,
-    symbol_root_mask: u2 = 0,
 
     /// Replace the job-owned handler input with an already-owned completion.
     /// Symbol values are refcounted, so the JSValue itself is the new root.
     pub fn replaceValueOwned(self: *PromiseReactionPayload, runtime: *core.JSRuntime, value: core.JSValue) void {
         const old = self.value;
-        if ((self.symbol_root_mask & 0b10) != 0) {
-            runtime.unregisterExternalValueSymbolRoot(old);
-            self.symbol_root_mask &= ~@as(u2, 0b10);
-        }
         self.value = value;
         old.free(runtime);
     }
@@ -63,17 +56,12 @@ pub const PromiseThenablePayload = struct {
     resolving_reject: core.JSValue = core.JSValue.undefinedValue(),
     completion: core.JSValue = core.JSValue.undefinedValue(),
     phase: PromiseThenablePhase = .prepare,
-    symbol_root_mask: u6 = 0,
 
     /// Store the abrupt completion produced by the one permitted invocation
     /// of the thenable. Retrying the job can now resume at rejection without
     /// invoking user code twice.
     pub fn replaceCompletionOwned(self: *PromiseThenablePayload, runtime: *core.JSRuntime, value: core.JSValue) void {
         const old = self.completion;
-        if ((self.symbol_root_mask & 0b100000) != 0) {
-            runtime.unregisterExternalValueSymbolRoot(old);
-            self.symbol_root_mask &= ~@as(u6, 0b100000);
-        }
         self.completion = value;
         old.free(runtime);
     }
@@ -103,7 +91,6 @@ pub const DynamicImportPayload = struct {
     basename: core.JSValue,
     specifier: core.JSValue,
     attributes: core.JSValue,
-    symbol_root_mask: u5 = 0,
 };
 
 /// A zjs Atomics.waitAsync host completion. The opaque waiter stays owned by
@@ -125,7 +112,6 @@ pub const AtomicsWaiterPayload = struct {
 pub const FinalizationPayload = struct {
     callback: core.JSValue,
     held_value: core.JSValue,
-    symbol_root_mask: u2 = 0,
 };
 
 pub const Payload = union(enum) {
@@ -162,22 +148,16 @@ pub const Job = struct {
         const payload = &job.payload.generic;
         for (args, 0..) |arg, index| {
             payload.argv[index] = arg.dup();
-            if (try context.runtime.registerExternalValueSymbolRoot(arg)) {
-                payload.symbol_arg_mask |= @as(u5, 1) << @intCast(index);
-            }
         }
         return job;
     }
 
-    pub fn initPromise(context: *core.JSContext, value: core.JSValue) !Job {
-        var job = Job{
+    pub fn initPromise(context: *core.JSContext, value: core.JSValue) Job {
+        return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .promise = .{ .value = value.dup() } },
         };
-        errdefer job.deinit();
-        job.payload.promise.value_symbol_rooted = try context.runtime.registerExternalValueSymbolRoot(value);
-        return job;
     }
 
     /// Build a no-fail commit entry from a caller-owned object value after the
@@ -192,24 +172,11 @@ pub const Job = struct {
         };
     }
 
+    /// Promise reaction entry construction. S2 JSValues own their symbol
+    /// bodies directly, so duplication and RealmRef retain are the complete,
+    /// no-fail root transaction (D1b: the fallible wrapper whose only `try`
+    /// was the retired symbol-root registration is gone).
     pub fn initPromiseReaction(
-        context: *core.JSContext,
-        reaction: core.JSValue,
-        value: core.JSValue,
-        rejected: bool,
-    ) !Job {
-        var job = initPromiseReactionNoFail(context, reaction, value, rejected);
-        errdefer job.deinit();
-        if (try context.runtime.registerExternalValueSymbolRoot(reaction)) job.payload.promise_reaction.symbol_root_mask |= 0b01;
-        if (try context.runtime.registerExternalValueSymbolRoot(value)) job.payload.promise_reaction.symbol_root_mask |= 0b10;
-        return job;
-    }
-
-    /// Allocation-free Promise reaction entry construction after the caller
-    /// has reserved both payload storage and a queue slot. S2 JSValues own
-    /// their symbol bodies directly, so duplication and RealmRef retain are
-    /// the complete root transaction.
-    pub fn initPromiseReactionNoFail(
         context: *core.JSContext,
         reaction: core.JSValue,
         value: core.JSValue,
@@ -226,24 +193,10 @@ pub const Job = struct {
         };
     }
 
+    /// Thenable entry construction for a pre-reserved FIFO slot; no-fail
+    /// (D1b). The execution-time resolving pair remains fallible and is
+    /// tracked by PromiseThenablePhase before any user callback runs.
     pub fn initPromiseThenable(
-        context: *core.JSContext,
-        target: core.JSValue,
-        thenable: core.JSValue,
-        then_function: core.JSValue,
-    ) !Job {
-        var job = initPromiseThenableNoFail(context, target, thenable, then_function);
-        errdefer job.deinit();
-        if (try context.runtime.registerExternalValueSymbolRoot(target)) job.payload.promise_thenable.symbol_root_mask |= 0b001;
-        if (try context.runtime.registerExternalValueSymbolRoot(thenable)) job.payload.promise_thenable.symbol_root_mask |= 0b010;
-        if (try context.runtime.registerExternalValueSymbolRoot(then_function)) job.payload.promise_thenable.symbol_root_mask |= 0b100;
-        return job;
-    }
-
-    /// Allocation-free thenable entry construction for a pre-reserved FIFO
-    /// slot. The execution-time resolving pair remains fallible and is tracked
-    /// by PromiseThenablePhase before any user callback runs.
-    pub fn initPromiseThenableNoFail(
         context: *core.JSContext,
         target: core.JSValue,
         thenable: core.JSValue,
@@ -289,9 +242,8 @@ pub const Job = struct {
         basename: core.JSValue,
         specifier: core.JSValue,
         attributes: core.JSValue,
-    ) !Job {
-        const values = [_]core.JSValue{ resolve, reject, basename, specifier, attributes };
-        var job = Job{
+    ) Job {
+        return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .dynamic_import = .{
@@ -303,13 +255,6 @@ pub const Job = struct {
                 .attributes = attributes.dup(),
             } },
         };
-        errdefer job.deinit();
-        inline for (values, 0..) |value, index| {
-            if (try context.runtime.registerExternalValueSymbolRoot(value)) {
-                job.payload.dynamic_import.symbol_root_mask |= @as(u5, 1) << @intCast(index);
-            }
-        }
-        return job;
     }
 
     pub fn initAtomicsWaiter(
@@ -336,8 +281,8 @@ pub const Job = struct {
         realm: *core.JSContext,
         callback: core.JSValue,
         held_value: core.JSValue,
-    ) !Job {
-        var job = Job{
+    ) Job {
+        return .{
             .runtime = realm.runtime,
             .realm = core.RealmRef.retain(realm),
             .payload = .{ .finalization = .{
@@ -345,10 +290,6 @@ pub const Job = struct {
                 .held_value = held_value.dup(),
             } },
         };
-        errdefer job.deinit();
-        if (try realm.runtime.registerExternalValueSymbolRoot(callback)) job.payload.finalization.symbol_root_mask |= 0b01;
-        if (try realm.runtime.registerExternalValueSymbolRoot(held_value)) job.payload.finalization.symbol_root_mask |= 0b10;
-        return job;
     }
 
     pub fn deinit(self: *Job) void {
@@ -360,27 +301,18 @@ pub const Job = struct {
                 while (index < argc) : (index += 1) {
                     const value = payload.argv[index];
                     payload.argv[index] = core.JSValue.undefinedValue();
-                    if ((payload.symbol_arg_mask & (@as(u5, 1) << @intCast(index))) != 0) {
-                        self.runtime.unregisterExternalValueSymbolRoot(value);
-                    }
                     value.free(self.runtime);
                 }
-                payload.symbol_arg_mask = 0;
             },
             .promise => |*payload| {
-                if (payload.value_symbol_rooted) self.runtime.unregisterExternalValueSymbolRoot(payload.value);
                 payload.value.free(self.runtime);
                 payload.value = core.JSValue.undefinedValue();
-                payload.value_symbol_rooted = false;
             },
             .promise_reaction => |*payload| {
-                if ((payload.symbol_root_mask & 0b01) != 0) self.runtime.unregisterExternalValueSymbolRoot(payload.reaction);
-                if ((payload.symbol_root_mask & 0b10) != 0) self.runtime.unregisterExternalValueSymbolRoot(payload.value);
                 payload.reaction.free(self.runtime);
                 payload.value.free(self.runtime);
                 payload.reaction = core.JSValue.undefinedValue();
                 payload.value = core.JSValue.undefinedValue();
-                payload.symbol_root_mask = 0;
             },
             .promise_thenable => |*payload| {
                 const values = [_]core.JSValue{
@@ -391,10 +323,7 @@ pub const Job = struct {
                     payload.resolving_reject,
                     payload.completion,
                 };
-                inline for (values, 0..) |value, index| {
-                    if ((payload.symbol_root_mask & (@as(u6, 1) << @intCast(index))) != 0) {
-                        self.runtime.unregisterExternalValueSymbolRoot(value);
-                    }
+                inline for (values) |value| {
                     value.free(self.runtime);
                 }
                 payload.target = core.JSValue.undefinedValue();
@@ -403,7 +332,6 @@ pub const Job = struct {
                 payload.resolving_resolve = core.JSValue.undefinedValue();
                 payload.resolving_reject = core.JSValue.undefinedValue();
                 payload.completion = core.JSValue.undefinedValue();
-                payload.symbol_root_mask = 0;
             },
             .promise_settlement => |*payload| {
                 payload.target.free(self.runtime);
@@ -413,10 +341,7 @@ pub const Job = struct {
             },
             .dynamic_import => |*payload| {
                 const values = [_]core.JSValue{ payload.resolve, payload.reject, payload.basename, payload.specifier, payload.attributes };
-                inline for (values, 0..) |value, index| {
-                    if ((payload.symbol_root_mask & (@as(u5, 1) << @intCast(index))) != 0) {
-                        self.runtime.unregisterExternalValueSymbolRoot(value);
-                    }
+                inline for (values) |value| {
                     value.free(self.runtime);
                 }
                 payload.resolve = core.JSValue.undefinedValue();
@@ -424,7 +349,6 @@ pub const Job = struct {
                 payload.basename = core.JSValue.undefinedValue();
                 payload.specifier = core.JSValue.undefinedValue();
                 payload.attributes = core.JSValue.undefinedValue();
-                payload.symbol_root_mask = 0;
             },
             .atomics_waiter => |*payload| {
                 payload.promise.free(self.runtime);
@@ -432,13 +356,10 @@ pub const Job = struct {
                 payload.destroyer(payload.waiter);
             },
             .finalization => |*payload| {
-                if ((payload.symbol_root_mask & 0b01) != 0) self.runtime.unregisterExternalValueSymbolRoot(payload.callback);
-                if ((payload.symbol_root_mask & 0b10) != 0) self.runtime.unregisterExternalValueSymbolRoot(payload.held_value);
                 payload.callback.free(self.runtime);
                 payload.held_value.free(self.runtime);
                 payload.callback = core.JSValue.undefinedValue();
                 payload.held_value = core.JSValue.undefinedValue();
-                payload.symbol_root_mask = 0;
             },
         }
         self.realm.deinit();
@@ -586,9 +507,7 @@ pub const Queue = struct {
 
     pub fn enqueuePromise(self: *Queue, context: *core.JSContext, value: core.JSValue) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initPromise(context, value);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initPromise(context, value));
     }
 
     /// Transfer an owned object payload into an already-reserved Promise job.
@@ -602,7 +521,7 @@ pub const Queue = struct {
         reaction: core.JSValue,
         value: core.JSValue,
         rejected: bool,
-    ) !Job {
+    ) Job {
         _ = self;
         return Job.initPromiseReaction(context, reaction, value, rejected);
     }
@@ -615,9 +534,7 @@ pub const Queue = struct {
         rejected: bool,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initPromiseReaction(context, reaction, value, rejected);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initPromiseReaction(context, reaction, value, rejected));
     }
 
     pub fn enqueuePromiseThenable(
@@ -628,9 +545,7 @@ pub const Queue = struct {
         then_function: core.JSValue,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initPromiseThenable(context, target, thenable, then_function);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initPromiseThenable(context, target, thenable, then_function));
     }
 
     pub fn enqueueDynamicImport(
@@ -644,9 +559,7 @@ pub const Queue = struct {
         attributes: core.JSValue,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initDynamicImport(context, runner, resolve, reject, basename, specifier, attributes);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initDynamicImport(context, runner, resolve, reject, basename, specifier, attributes));
     }
 
     pub fn enqueueAtomicsWaiter(
@@ -668,9 +581,7 @@ pub const Queue = struct {
         held_value: core.JSValue,
     ) !void {
         try self.ensureAdditionalCapacity(1);
-        var job = try Job.initFinalization(realm, callback, held_value);
-        errdefer job.deinit();
-        self.enqueuePrepared(job);
+        self.enqueuePrepared(Job.initFinalization(realm, callback, held_value));
     }
 
     pub fn hasJobs(self: Queue) bool {
@@ -860,4 +771,25 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
     try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
     try std.testing.expectEqual(@as(?i32, 3), third.asInt32());
+}
+
+// D1a size pins (2026-07-31): removing the obsolete symbol-root protocol
+// state must not silently regress. Pinned per JSValue representation
+// (16-byte tag+payload default / 8-byte nan-boxing under test-altrepr);
+// D1a's before-values in the default representation were Job=128
+// Generic=96 Promise=24 Reaction=40 Thenable=104 DynImport=96
+// Finalization=40.
+comptime {
+    const wide = @sizeOf(core.JSValue) == 16;
+    const pins = if (wide)
+        .{ 128, 96, 16, 40, 104, 88, 32 }
+    else
+        .{ 80, 56, 8, 24, 56, 48, 16 };
+    if (@sizeOf(Job) != pins[0]) @compileError("Job size drifted from the D1a pin");
+    if (@sizeOf(GenericPayload) != pins[1]) @compileError("GenericPayload size drifted from the D1a pin");
+    if (@sizeOf(PromisePayload) != pins[2]) @compileError("PromisePayload size drifted from the D1a pin");
+    if (@sizeOf(PromiseReactionPayload) != pins[3]) @compileError("PromiseReactionPayload size drifted from the D1a pin");
+    if (@sizeOf(PromiseThenablePayload) != pins[4]) @compileError("PromiseThenablePayload size drifted from the D1a pin");
+    if (@sizeOf(DynamicImportPayload) != pins[5]) @compileError("DynamicImportPayload size drifted from the D1a pin");
+    if (@sizeOf(FinalizationPayload) != pins[6]) @compileError("FinalizationPayload size drifted from the D1a pin");
 }

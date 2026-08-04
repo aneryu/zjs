@@ -1092,11 +1092,11 @@ test "prepared promise reaction jobs own direct symbol payloads" {
     const first_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-first");
     const first = try rt.symbolValue(first_atom);
     defer first.free(rt);
-    jobs[0] = try jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), first, false);
+    jobs[0] = jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), first, false);
     const second_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-second");
     const second = try rt.symbolValue(second_atom);
     defer second.free(rt);
-    jobs[1] = try jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), second, false);
+    jobs[1] = jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), second, false);
     var prepared = PreparedPromiseReactionJobs{
         .jobs = jobs,
         .initialized = 2,
@@ -1176,7 +1176,7 @@ pub fn qjsPromiseSettleValue(
     if (needs_callback_job) {
         try ctx.runtime.job_queue.reserveEntries(1);
         callback_reserved = true;
-        prepared_callback_job = try jobs_mod.Job.initPromise(ctx, promise.value());
+        prepared_callback_job = jobs_mod.Job.initPromise(ctx, promise.value());
     }
 
     const next_result = value.dup();
@@ -1456,7 +1456,7 @@ pub fn qjsPromiseResolvingFunctionCall(
                 // resolving with a callable-then object ALWAYS enqueues a
                 // js_promise_resolve_thenable_job — never stored lazily, never
                 // run synchronously; then is invoked exactly once, as a job.
-                ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initPromiseThenableNoFail(ctx, target_value, value, then_value));
+                ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initPromiseThenable(ctx, target_value, value, then_value));
                 thenable_slot_reserved = false;
                 return core.JSValue.undefinedValue();
             }
@@ -3250,7 +3250,7 @@ pub fn atomicsRunAsyncWaiterCompletion(
     const result_value = try value_ops.createStringValue(ctx.runtime, result);
     var result_value_owned = true;
     errdefer if (result_value_owned) result_value.free(ctx.runtime);
-    var prepared_job = try jobs_mod.Job.initPromise(ctx, promise);
+    var prepared_job = jobs_mod.Job.initPromise(ctx, promise);
     var prepared_job_owned = true;
     errdefer if (prepared_job_owned) prepared_job.deinit();
 
@@ -4243,7 +4243,7 @@ pub fn qjsPerformPromiseThen(
     defer result_value.free(ctx.runtime);
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
     const rejected = object.promiseIsRejected();
-    var prepared_job = try ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
+    var prepared_job = ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
     var prepared_job_owned = true;
     defer if (prepared_job_owned) prepared_job.deinit();
     try ctx.runtime.job_queue.reserveEntries(1);
@@ -4379,7 +4379,7 @@ pub fn qjsPromiseThen(
     defer reaction.free(ctx.runtime);
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
     const rejected = object.promiseIsRejected();
-    var prepared_job = try ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
+    var prepared_job = ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
     var prepared_job_owned = true;
     defer if (prepared_job_owned) prepared_job.deinit();
     try ctx.runtime.job_queue.reserveEntries(1);

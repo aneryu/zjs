@@ -24,6 +24,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const vm_profile = @import("vm_profile.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -4234,7 +4235,28 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
     return .{ .entry = entry };
 }
 
-const dispatch_table: [256]Handler = colds.buildTable(specials, true);
+const dispatch_table: [256]Handler = blk: {
+    const base: [256]Handler = colds.buildTable(specials, true);
+    if (!vm_profile.enabled) break :blk base;
+    @setEvalBranchQuota(8192);
+    var wrapped: [256]Handler = undefined;
+    for (base, 0..) |handler, op_index| wrapped[op_index] = profiledHandler(@intCast(op_index), handler);
+    break :blk wrapped;
+};
+
+/// Profiling-build shim around every hot-table entry: count the dispatched
+/// opcode and delta-attribute wall time to the previous one, then tail into
+/// the real handler. `cold_table` and the property/specialized tail tables
+/// stay unwrapped deliberately — they re-dispatch the SAME pc, and wrapping
+/// them would double-count. Default builds take the `base` table verbatim.
+fn profiledHandler(comptime profiled_op: u8, comptime real: Handler) Handler {
+    return struct {
+        fn dispatch(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            vm_profile.noteDispatch(vm.ctx.runtime, profiled_op);
+            return @call(.always_tail, real, .{ pc, sp, var_buf, vm });
+        }
+    }.dispatch;
+}
 const property_tail_table = [13]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,

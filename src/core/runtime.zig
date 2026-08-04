@@ -2226,20 +2226,6 @@ pub const JSRuntime = struct {
         return self.symbolValue(atom_id);
     }
 
-    pub fn registerExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) !void {
-        _ = self;
-        _ = atom_id;
-    }
-
-    /// Compatibility shim for host records that used to participate in zjs's
-    /// symbol-root scan. S2 made symbol values refcounted, so the stored
-    /// JSValue itself now owns any symbol body it needs.
-    pub fn registerExternalValueSymbolRoot(self: *JSRuntime, value: JSValue) !bool {
-        _ = self;
-        _ = value;
-        return false;
-    }
-
     pub fn dupValue(self: *JSRuntime, value: JSValue) JSValue {
         _ = self;
         return value.dup();
@@ -2268,16 +2254,6 @@ pub const JSRuntime = struct {
         callback_context: ?*anyopaque,
     ) !WeakPersistentValue {
         return WeakPersistentValue.init(self, value, callback, callback_context);
-    }
-
-    pub fn unregisterExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) void {
-        _ = self;
-        _ = atom_id;
-    }
-
-    pub fn unregisterExternalValueSymbolRoot(self: *JSRuntime, value: JSValue) void {
-        _ = self;
-        _ = value;
     }
 
     pub fn registerExternalHostFunction(self: *JSRuntime, record: host_function.ExternalRecord) !u32 {

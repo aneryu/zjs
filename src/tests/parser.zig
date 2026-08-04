@@ -11644,3 +11644,915 @@ test "flow-tail summary: label/patch/move/truncate corpus compiles under the Deb
         try std.testing.expect(parsed.syntax_error == null);
     }
 }
+
+/// Sum every live strong retain held by the runtime atom table. Mirrors the
+/// L0 compile-product invariant the compiler-v2 comparator checks around a
+/// compile: a finished compile must return the table to its entry balance.
+pub fn atomStrongRefTotal(rt: *const core.JSRuntime) usize {
+    var total: usize = 0;
+    for (rt.atoms.entries) |entry| total +|= entry.strongRefCount();
+    return total;
+}
+
+test "parser releases identifier and private-name token atoms" {
+    // qjs `free_token` drops the identifier/private-name atom that
+    // `next_token` interned into the token (quickjs.c:22190-22208). Without
+    // that release every identifier occurrence leaks one atom retain, so the
+    // atom table never returns to its pre-compile balance.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\class ZjsTokenOwnershipProbe {
+        \\  #zjsHiddenCounter = 0;
+        \\  static zjsStaticSeed = 1;
+        \\  zjsBump(zjsAmountArgument) {
+        \\    this.#zjsHiddenCounter += zjsAmountArgument;
+        \\    return this.#zjsHiddenCounter;
+        \\  }
+        \\  zjsHas(zjsOtherProbeObject) {
+        \\    return #zjsHiddenCounter in zjsOtherProbeObject;
+        \\  }
+        \\}
+        \\function zjsOuterHelperFunction(zjsFirstParameter, zjsSecondParameter) {
+        \\  var zjsLocalVariableName = zjsFirstParameter;
+        \\  let zjsLexicalBindingName = zjsSecondParameter;
+        \\  const zjsConstBindingName = { zjsObjectPropertyKey: zjsLexicalBindingName };
+        \\  zjsOuterLabelName: for (var zjsLoopIndexName = 0; zjsLoopIndexName < 2; zjsLoopIndexName++) {
+        \\    if (zjsLoopIndexName) continue zjsOuterLabelName;
+        \\    break zjsOuterLabelName;
+        \\  }
+        \\  const zjsArrowExpression = function zjsNamedFunctionExpression(zjsInnerParameter) {
+        \\    return zjsInnerParameter + zjsLocalVariableName;
+        \\  };
+        \\  return zjsArrowExpression(zjsConstBindingName.zjsObjectPropertyKey);
+        \\}
+        \\new ZjsTokenOwnershipProbe().zjsBump(zjsOuterHelperFunction(1, 2));
+    ;
+
+    // One warm-up compile publishes every atom this source keeps alive for
+    // the process (filenames, interned literals reused by the table), so the
+    // measured window sees only the per-compile balance.
+    {
+        var warmup = try compileForTest(rt, source, .{ .mode = .script, .filename = "token-ownership.js" });
+        defer warmup.deinit();
+        try std.testing.expect(warmup.syntax_error == null);
+    }
+
+    const before = atomStrongRefTotal(rt);
+    {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "token-ownership.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+    const after = atomStrongRefTotal(rt);
+    try std.testing.expectEqual(before, after);
+}
+
+test "parser releases module and import-attribute token atoms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        \\import zjsDefaultBindingName from "./zjs-token-module.js" with { zjsAttrKey: "zjsAttrValue" };
+        \\import { zjsNamedExportName as zjsRenamedLocalName } from "./zjs-token-other.js";
+        \\import * as zjsNamespaceBindingName from "./zjs-token-third.js";
+        \\export { zjsRenamedLocalName as zjsPublicExportName };
+        \\export * as zjsStarNamespaceName from "./zjs-token-fourth.js";
+        \\export function zjsExportedFunctionName(zjsExportedParameterName) {
+        \\  return zjsExportedParameterName;
+        \\}
+        \\zjsDefaultBindingName;
+        \\zjsNamespaceBindingName;
+    ;
+
+    {
+        var warmup = try compileForTest(rt, source, .{ .mode = .module, .filename = "token-ownership-module.js" });
+        defer warmup.deinit();
+        try std.testing.expect(warmup.syntax_error == null);
+    }
+
+    const before = atomStrongRefTotal(rt);
+    {
+        var parsed = try compileForTest(rt, source, .{ .mode = .module, .filename = "token-ownership-module.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+    const after = atomStrongRefTotal(rt);
+    try std.testing.expectEqual(before, after);
+}
+
+test "parser returns the atom table to balance across every token-bearing construct" {
+    // Wider guard for the same `free_token` contract: each source exercises a
+    // different parse path that takes an identifier/private-name atom out of a
+    // token (declarations, patterns, class bodies, labels, modules, TS enum and
+    // namespace). Any path that forgets to retain-then-release shows up as a
+    // non-zero delta over an identical second compile.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Case = struct { src: []const u8, file: []const u8, mode: parser.Mode };
+    const cases = [_]Case{
+        .{ .src = "var { zjsAlphaKey: zjsAlphaTarget = 1, ...zjsRestBinding } = zjsSourceObject; var [zjsFirstElem, [zjsNestedElem] = [], ...zjsTailElems] = zjsArraySource;", .file = "bal-pattern.js", .mode = .script },
+        .{ .src = "const zjsObjLit = { zjsPlainKey: 1, zjsShorthandKey, get zjsGetterName() { return 1 }, set zjsSetterName(zjsSetterParam) {}, [zjsComputedKeyExpr]: 2, zjsMethodName(zjsMethodParam) { return zjsMethodParam }, *zjsGenName() { yield 1 }, async zjsAsyncName() {} };", .file = "bal-objlit.js", .mode = .script },
+        .{ .src = "class ZjsBigClass extends ZjsBaseClass { #zjsPrivField = 1; static #zjsStaticPriv = 2; #zjsPrivMethod() { return this.#zjsPrivField } get #zjsPrivGetter() { return 1 } static { ZjsBigClass.zjsStaticInit = 1; } zjsPub = 3; static zjsStaticPub = 4; constructor(zjsCtorParam) { super(zjsCtorParam); } }", .file = "bal-class.js", .mode = .script },
+        .{ .src = "function* zjsGenFn(zjsGenParam = zjsDefaultExpr) { yield* zjsDelegateIter; } async function zjsAsyncFn(zjsAsyncParam) { for await (const zjsAwaitItem of zjsAsyncIterable) { await zjsAwaitItem; } }", .file = "bal-generator.js", .mode = .script },
+        .{ .src = "try { zjsRiskyCall(); } catch (zjsCaughtError) { zjsHandle(zjsCaughtError); } finally { zjsCleanupCall(); } try { zjsOther(); } catch { }", .file = "bal-try.js", .mode = .script },
+        .{ .src = "zjsOuterLbl: for (const zjsForOfItem of zjsIterableSource) { zjsInnerLbl: for (var zjsForInKey in zjsObjectSource) { if (zjsForInKey) continue zjsOuterLbl; else break zjsInnerLbl; } } do { zjsBodyCall(); } while (zjsCondCall());", .file = "bal-label.js", .mode = .script },
+        .{ .src = "switch (zjsSwitchDisc) { case zjsCaseOne: zjsBodyOne(); break; case zjsCaseTwo: default: zjsBodyTwo(); }", .file = "bal-switch.js", .mode = .script },
+        .{ .src = "const zjsArrowOne = (zjsArrowParamA, zjsArrowParamB = 2, ...zjsArrowRest) => zjsArrowParamA; const zjsArrowTwo = async (zjsAsyncArrowParam) => { return zjsAsyncArrowParam; }; zjsTagFn`zjsRawText${zjsInterpValue}more`;", .file = "bal-arrow.js", .mode = .script },
+        .{ .src = "zjsOptionalBase?.zjsOptionalProp?.[zjsOptionalIndex]?.(zjsOptionalArg); zjsSpreadTarget(...zjsSpreadArgs); new zjsCtorName(...zjsCtorArgs); delete zjsDeleteTarget.zjsDeleteProp; typeof zjsTypeofOperand;", .file = "bal-optional.js", .mode = .script },
+        .{ .src = "with (zjsWithObject) { zjsWithBody(); } function zjsSloppyOuter() { var zjsHoistedVar; { function zjsAnnexBFn() {} } return zjsAnnexBFn; }", .file = "bal-with.js", .mode = .script },
+        .{ .src = "enum ZjsEnumName { ZjsMemberA, ZjsMemberB = 5, ZjsMemberC = \"zjsStr\" } namespace ZjsNamespaceName { export const zjsNsConst = 1; }", .file = "bal-enum.ts", .mode = .script },
+        .{ .src = "function zjsUsingHost() { { using zjsUsingBinding = zjsDisposable; } } zjsUsingHost();", .file = "bal-using.js", .mode = .script },
+        .{ .src = "import zjsDefB, { zjsNamedB as zjsAliasB, \"zjsStringName\" as zjsStrAlias } from \"./m1.js\"; export { zjsAliasB as zjsOutName, zjsStrAlias }; export default function zjsDefaultExport() {}", .file = "bal-import.js", .mode = .module },
+        .{ .src = "export * from \"./m2.js\"; export * as zjsStarNs from \"./m3.js\"; import * as zjsNsB from \"./m4.js\" with { zjsAttrK: \"zjsAttrV\" }; export const zjsExportedConst = zjsNsB;", .file = "bal-export.js", .mode = .module },
+    };
+
+    for (cases, 0..) |c, index| {
+        const options: parser.Options = .{ .mode = c.mode, .filename = c.file };
+        {
+            var warmup = try compileForTest(rt, c.src, options);
+            defer warmup.deinit();
+            try std.testing.expect(warmup.syntax_error == null);
+        }
+        const before = atomStrongRefTotal(rt);
+        {
+            var parsed = try compileForTest(rt, c.src, options);
+            defer parsed.deinit();
+            try std.testing.expect(parsed.syntax_error == null);
+        }
+        const after = atomStrongRefTotal(rt);
+        if (before != after) {
+            std.debug.print("atom balance case {d} ({s}): before={d} after={d}\n", .{ index, c.file, before, after });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+/// Four-ledger phase-boundary ownership accounting, shared by the parse-only
+/// test below and the compile-only test in src/tests/bytecode.zig.
+///
+/// The atom-balance tests above prove only that the END state balances. The
+/// identifier/private-name token leak (qjs:22190) showed why that is not
+/// enough: a long-lived leak masks ownership bugs, and "the final GC balances"
+/// says nothing about the intermediate stages. This harness samples four
+/// ledgers at four boundaries — after parse, after resolve_variables, after
+/// final emit, after discarding temporaries — plus a terminal sample once the
+/// artifact itself is released:
+///
+///   ATOM         created / transferred / escaped / released / outstanding
+///   RELOC        created / bound / resolved / discarded / outstanding
+///   BUILDER      allocated / owned / committed / released
+///   SOURCE/EVENT created / attached / committed / discarded
+///
+/// The criterion is not "final zero" but monotone ownership convergence: at
+/// every boundary the outstanding set must be exactly the set the next stage is
+/// entitled to consume. `outstanding` is measured (atom-table strong refs,
+/// MemoryAccount counters); everything else is derived from structures that
+/// already exist, each derivation naming the production release path it
+/// mirrors. Nothing here may be relaxed to make a boundary pass: a boundary
+/// that does not converge is a finding.
+pub const phase_ownership = struct {
+    const dump_phase_ledgers = false;
+
+    pub const Tier = enum {
+        /// No nested function/class syntax: no child FunctionDef and no
+        /// published FunctionBytecode, so the structural census sees every
+        /// owner and the ATOM ledger holds with exact equality at all four
+        /// boundaries. These shapes also carry the isolated resolve_variables
+        /// boundary, which children make unreachable.
+        exact_leaf,
+        /// Production script-root policy: top-level functions become child
+        /// FunctionDefs that finalization materialises into published
+        /// FunctionBytecodes. The census stops at a published FB, so this tier
+        /// measures the FB-resident residual instead.
+        nested_function_bytecode,
+    };
+
+    pub const Shape = struct {
+        name: []const u8,
+        tier: Tier,
+        source: []const u8,
+    };
+
+    pub const shapes = [_]Shape{
+        .{
+            .name = "leaf-declarations-patterns-shadowing",
+            .tier = .exact_leaf,
+            .source =
+            \\var zjsPhaseLedgerVarBindingAlpha = 1;
+            \\let zjsPhaseLedgerLetBindingBeta = 2;
+            \\const zjsPhaseLedgerConstBindingGamma = 3;
+            \\var {
+            \\  zjsPhaseLedgerObjectPatternKey: zjsPhaseLedgerObjectPatternTarget = zjsPhaseLedgerObjectDefaultValue,
+            \\  ...zjsPhaseLedgerObjectRestBinding
+            \\} = zjsPhaseLedgerObjectPatternSource;
+            \\var [
+            \\  zjsPhaseLedgerArrayHeadBinding = zjsPhaseLedgerArrayDefaultValue,
+            \\  ,
+            \\  ...zjsPhaseLedgerArrayRestBinding
+            \\] = zjsPhaseLedgerArrayPatternSource;
+            \\{
+            \\  let zjsPhaseLedgerShadowedBindingName = zjsPhaseLedgerLetBindingBeta;
+            \\  {
+            \\    const zjsPhaseLedgerShadowedBindingName = zjsPhaseLedgerConstBindingGamma;
+            \\    zjsPhaseLedgerShadowedBindingName;
+            \\  }
+            \\  zjsPhaseLedgerShadowedBindingName;
+            \\}
+            \\(zjsPhaseLedgerVarBindingAlpha, zjsPhaseLedgerLetBindingBeta, zjsPhaseLedgerConstBindingGamma);
+            ,
+        },
+        .{
+            .name = "leaf-control-relocations",
+            .tier = .exact_leaf,
+            .source =
+            \\zjsPhaseLedgerOuterForInLabel:
+            \\for (var zjsPhaseLedgerForInKeyName in zjsPhaseLedgerForInSourceObject) {
+            \\  if (zjsPhaseLedgerForInKeyName) continue zjsPhaseLedgerOuterForInLabel;
+            \\  break zjsPhaseLedgerOuterForInLabel;
+            \\}
+            \\zjsPhaseLedgerOuterForOfLabel:
+            \\for (let zjsPhaseLedgerForOfValueName of zjsPhaseLedgerForOfSourceIterable) {
+            \\  if (zjsPhaseLedgerForOfValueName) break zjsPhaseLedgerOuterForOfLabel;
+            \\}
+            \\do {
+            \\  zjsPhaseLedgerDoWhileCounter = zjsPhaseLedgerDoWhileCounter + 1;
+            \\} while (zjsPhaseLedgerDoWhileCondition);
+            \\switch (zjsPhaseLedgerSwitchDiscriminant) {
+            \\  case zjsPhaseLedgerSwitchCaseValue:
+            \\    zjsPhaseLedgerSwitchCaseResult = 1;
+            \\    break;
+            \\  default:
+            \\    zjsPhaseLedgerSwitchDefaultResult = 2;
+            \\}
+            \\try {
+            \\  zjsPhaseLedgerTryOperation();
+            \\} catch (zjsPhaseLedgerCaughtExceptionName) {
+            \\  zjsPhaseLedgerCatchSink = zjsPhaseLedgerCaughtExceptionName;
+            \\} finally {
+            \\  zjsPhaseLedgerFinallyOperation();
+            \\}
+            ,
+        },
+        .{
+            .name = "leaf-properties-optional-template",
+            .tier = .exact_leaf,
+            .source =
+            \\let zjsPhaseLedgerShorthandPropertyName = 2;
+            \\let zjsPhaseLedgerComputedPropertyKeyName = "zjsPhaseLedgerComputedProperty";
+            \\const zjsPhaseLedgerObjectLiteralName = {
+            \\  zjsPhaseLedgerPlainPropertyName: 1,
+            \\  zjsPhaseLedgerShorthandPropertyName,
+            \\  [zjsPhaseLedgerComputedPropertyKeyName]: 3
+            \\};
+            \\zjsPhaseLedgerObjectLiteralName.zjsPhaseLedgerPlainPropertyName;
+            \\zjsPhaseLedgerObjectLiteralName[zjsPhaseLedgerComputedPropertyKeyName];
+            \\zjsPhaseLedgerObjectLiteralName?.zjsPhaseLedgerOptionalPropertyName?.[zjsPhaseLedgerOptionalElementKey];
+            \\zjsPhaseLedgerObjectLiteralName?.zjsPhaseLedgerOptionalMethodName?.(zjsPhaseLedgerOptionalCallArgument);
+            \\const zjsPhaseLedgerTemplateResultName = `zjsPhaseLedgerTemplateHead${zjsPhaseLedgerObjectLiteralName.zjsPhaseLedgerPlainPropertyName}zjsPhaseLedgerTemplateTail${zjsPhaseLedgerShorthandPropertyName}`;
+            \\typeof zjsPhaseLedgerTypeofOperandName;
+            \\delete zjsPhaseLedgerObjectLiteralName.zjsPhaseLedgerPlainPropertyName;
+            \\(zjsPhaseLedgerTemplateResultName, zjsPhaseLedgerObjectLiteralName, zjsPhaseLedgerShorthandPropertyName);
+            ,
+        },
+        .{
+            .name = "nested-function-bytecode",
+            .tier = .nested_function_bytecode,
+            // Tier 2 runs the production script-root policy: each top-level
+            // function is a child FunctionDef that finalization materialises
+            // into a published FunctionBytecode. The census walks child_list but
+            // deliberately stops at a published FB, so this shape measures the
+            // FB-resident residual — zero until the emit boundary, then a
+            // constant that must survive the temporaries discard and go back to
+            // zero when the artifact is released.
+            .source =
+            \\function zjsPhaseLedgerOuterFunctionDeclaration(zjsPhaseLedgerOuterFunctionParameter) {
+            \\  const zjsPhaseLedgerNestedFunctionExpressionBinding = function zjsPhaseLedgerNamedNestedFunctionExpression(zjsPhaseLedgerNestedFunctionParameter) {
+            \\    zjsPhaseLedgerNestedLoopLabel:
+            \\    for (let zjsPhaseLedgerNestedLoopIndex = 0; zjsPhaseLedgerNestedLoopIndex < 2; zjsPhaseLedgerNestedLoopIndex++) {
+            \\      try {
+            \\        if (zjsPhaseLedgerNestedLoopIndex) break zjsPhaseLedgerNestedLoopLabel;
+            \\      } finally {
+            \\        zjsPhaseLedgerNestedFinallySink = zjsPhaseLedgerNestedLoopIndex;
+            \\      }
+            \\    }
+            \\    return zjsPhaseLedgerNestedFunctionParameter + zjsPhaseLedgerOuterFunctionParameter;
+            \\  };
+            \\  return zjsPhaseLedgerNestedFunctionExpressionBinding(zjsPhaseLedgerOuterFunctionParameter);
+            \\}
+            \\zjsPhaseLedgerTopLevelLoopLabel:
+            \\for (var zjsPhaseLedgerTopLevelIndex = 0; zjsPhaseLedgerTopLevelIndex < 2; zjsPhaseLedgerTopLevelIndex++) {
+            \\  try {
+            \\    if (zjsPhaseLedgerTopLevelIndex) continue zjsPhaseLedgerTopLevelLoopLabel;
+            \\    break zjsPhaseLedgerTopLevelLoopLabel;
+            \\  } finally {
+            \\    zjsPhaseLedgerTopLevelFinallySink = zjsPhaseLedgerTopLevelIndex;
+            \\  }
+            \\}
+            \\zjsPhaseLedgerOuterFunctionDeclaration(zjsPhaseLedgerTopLevelCallArgument);
+            ,
+        },
+    };
+
+    pub const AtomLedger = struct {
+        created: usize,
+        transferred: usize,
+        escaped: usize,
+        released: usize,
+        outstanding: usize,
+    };
+
+    pub const RelocLedger = struct {
+        created: usize,
+        bound: usize,
+        resolved: usize,
+        discarded: usize,
+        outstanding: usize,
+        pending_fixups: usize,
+    };
+
+    pub const BuilderLedger = struct {
+        allocated: usize,
+        owned: usize,
+        committed: usize,
+        released: usize,
+    };
+
+    pub const SourceLedger = struct {
+        created: usize,
+        attached: usize,
+        committed: usize,
+        discarded: usize,
+        outstanding: usize,
+    };
+
+    pub const Snapshot = struct {
+        atom: AtomLedger,
+        reloc: RelocLedger,
+        builder: BuilderLedger,
+        source: SourceLedger,
+    };
+
+    pub const CodePhase = enum {
+        phase1,
+        final,
+    };
+
+    const Baseline = struct {
+        atom_strong_refs: usize,
+        acquisitions: usize,
+        releases: usize,
+        allocation_count: usize,
+
+        /// MemoryAccount.recordAlloc splits its call counters by shape: a
+        /// single-object `create` bumps create_calls, a slice `alloc` bumps
+        /// alloc_calls, and both bump the live allocation_count (core/memory.zig
+        /// recordAlloc/recordFree). The builder ledger must therefore sum both
+        /// entry points, or a FunctionDef child — allocated through `create` —
+        /// breaks the owned == allocated - released identity.
+        fn capture(rt: *const core.JSRuntime) Baseline {
+            return .{
+                .atom_strong_refs = atomStrongRefTotal(rt),
+                .acquisitions = rt.memory.alloc_calls + rt.memory.create_calls,
+                .releases = rt.memory.free_calls + rt.memory.destroy_calls,
+                .allocation_count = rt.memory.allocation_count,
+            };
+        }
+    };
+
+    const CodeCensus = struct {
+        label_markers: usize = 0,
+        label_operands: usize = 0,
+        valid: bool = true,
+    };
+
+    fn atomSlotCount(rt: *const core.JSRuntime, atom_id: atom.Atom) usize {
+        return @intFromBool(rt.atoms.refCount(atom_id) != null);
+    }
+
+    fn functionDefAtomOwners(rt: *const core.JSRuntime, fd: *const engine.bytecode.FunctionDef) usize {
+        // One count per release performed by FunctionDefImpl.deinit: the three
+        // header atoms, every named row/atom operand/symbol constant/closure
+        // row, then the same census recursively for child_list.
+        var count = atomSlotCount(rt, fd.func_name) +
+            atomSlotCount(rt, fd.filename) +
+            atomSlotCount(rt, fd.script_or_module);
+        for (fd.vars) |row| count += atomSlotCount(rt, row.var_name);
+        for (fd.args) |row| count += atomSlotCount(rt, row.var_name);
+        for (fd.global_vars) |row| count += atomSlotCount(rt, row.var_name);
+        for (fd.atom_operands) |atom_id| count += atomSlotCount(rt, atom_id);
+        for (fd.cpool) |value| {
+            if (value.asSymbolAtom()) |atom_id| count += atomSlotCount(rt, atom_id);
+        }
+        for (fd.closure_var) |row| count += atomSlotCount(rt, row.var_name);
+        for (fd.child_list) |child| count += functionDefAtomOwners(rt, child);
+        return count;
+    }
+
+    fn bytecodeAtomOwners(rt: *const core.JSRuntime, function: *const engine.bytecode.Bytecode) usize {
+        // Mirrors BytecodeImpl.deinit exactly: three header atoms followed by
+        // atom_operands, argdefs, vardefs, var_ref_names, and closure_var.
+        // FunctionBytecode values in constants are intentionally not walked;
+        // the tier-2 residual measures that published ownership graph.
+        var count = atomSlotCount(rt, function.name) +
+            atomSlotCount(rt, function.filename) +
+            atomSlotCount(rt, function.script_or_module);
+        for (function.atom_operands) |atom_id| count += atomSlotCount(rt, atom_id);
+        for (function.argdefs) |row| count += atomSlotCount(rt, row.var_name);
+        for (function.vardefs) |row| count += atomSlotCount(rt, row.var_name);
+        for (function.var_ref_names) |atom_id| count += atomSlotCount(rt, atom_id);
+        for (function.closure_var) |row| count += atomSlotCount(rt, row.var_name);
+        return count;
+    }
+
+    fn parseStateAtomOwners(rt: *const core.JSRuntime, state: *const ParseState) usize {
+        // Parser.State.deinit releases class_private_bound_names, while its
+        // Lexer.freeToken call releases an identifier/private-name token.
+        var count: usize = switch (state.token.payload) {
+            .ident => |ident| atomSlotCount(rt, ident.atom),
+            else => 0,
+        };
+        for (state.class_private_bound_names.items) |atom_id| count += atomSlotCount(rt, atom_id);
+        return count;
+    }
+
+    fn pendingFixupCount(state: *const ParseState) usize {
+        var count = state.break_fixups.items.len + state.continue_fixups.items.len;
+        for (state.label_frames.items) |frame| {
+            count += frame.break_fixups.items.len + frame.continue_fixups.items.len;
+        }
+        return count;
+    }
+
+    fn formatHasLabelOperand(format: engine.bytecode.opcode.Format) bool {
+        return switch (format) {
+            .label8, .label16, .label, .atom_label_u8, .atom_label_u16, .label_u16 => true,
+            else => false,
+        };
+    }
+
+    fn censusCode(code: []const u8, phase: CodePhase) CodeCensus {
+        // The phase-1 walk mirrors resolve_labels' instruction-sized OP_label
+        // consumption. The final view cannot count raw OP_label ids because
+        // that numeric range aliases final opcodes; reaching that view is the
+        // structural proof that markers were discarded. Label-format opcodes
+        // other than the marker are the resolved jump census.
+        var result = CodeCensus{};
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size: usize = switch (phase) {
+                .phase1 => engine.bytecode.opcode.sizeOfPhase1(op_id),
+                .final => engine.bytecode.opcode.sizeOf(op_id),
+            };
+            if (size == 0 or pc + size > code.len) {
+                result.valid = false;
+                return result;
+            }
+            const format = switch (phase) {
+                .phase1 => engine.bytecode.opcode.formatOfPhase1(op_id),
+                .final => engine.bytecode.opcode.formatOf(op_id),
+            };
+            if (phase == .phase1 and op_id == op.label) {
+                result.label_markers += 1;
+            } else if (formatHasLabelOperand(format)) {
+                result.label_operands += 1;
+            }
+            pc += size;
+        }
+        return result;
+    }
+
+    fn attachedSourceCount(function: *const engine.bytecode.Bytecode) usize {
+        var count: usize = 0;
+        for (function.source_loc_slots) |slot| {
+            if (slot.pc < function.code.len) count += 1;
+        }
+        return count;
+    }
+
+    fn expectNoLegacyParserRelocs(fd: *const engine.bytecode.FunctionDef) !void {
+        // No parser code writes FunctionDef.label_slots/RelocEntry. The live
+        // parser path is OP_label plus State break/continue fixups; keep this
+        // assertion beside the derived census so a future producer is visible.
+        try std.testing.expectEqual(@as(usize, 0), fd.label_slots.len);
+        for (fd.child_list) |child| try expectNoLegacyParserRelocs(child);
+    }
+
+    pub const Window = struct {
+        rt: *core.JSRuntime,
+        shape: *const Shape,
+        baseline: Baseline,
+        function: engine.bytecode.Bytecode,
+        lex: QjsLexer,
+        state: ParseState,
+        artifact_live: bool,
+        lexer_live: bool,
+        state_live: bool,
+        b1_reloc_created: usize,
+        b1_source_created: usize,
+
+        pub fn init(self: *Window, rt: *core.JSRuntime, shape: *const Shape) !void {
+            self.* = .{
+                .rt = rt,
+                .shape = shape,
+                .baseline = Baseline.capture(rt),
+                .function = undefined,
+                .lex = undefined,
+                .state = undefined,
+                .artifact_live = false,
+                .lexer_live = false,
+                .state_live = false,
+                .b1_reloc_created = 0,
+                .b1_source_created = 0,
+            };
+
+            self.function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, atom.ids.empty_string);
+            self.artifact_live = true;
+            errdefer self.deinit();
+
+            self.lex = QjsLexer.init(std.testing.allocator, &rt.atoms, shape.source);
+            self.lexer_live = true;
+            // The non-canonical root emitter: code lands in the mutable
+            // Bytecode rather than in the FunctionDef, which is what keeps the
+            // per-phase driving in the compile-only path legal. `initWithRuntime`
+            // additionally carries the JSContext-equivalent the parser needs for
+            // runtime-owned constants.
+            self.state = try ParseState.initWithRuntime(rt, &self.lex, &self.function);
+            self.state_live = true;
+            try std.testing.expect(!self.state.top_level_functions_as_children);
+            self.state.function_def.is_eval = true;
+            self.state.function_def.is_global_var = true;
+            // Tier 1 leaves the root childless so `resolve_variables` and
+            // `resolve_labels` can be driven one at a time. Tier 2 opts into the
+            // production script-root policy, where every top-level function
+            // becomes a child FunctionDef that finalization later materializes
+            // into a published FunctionBytecode.
+            if (shape.tier == .nested_function_bytecode) {
+                self.state.top_level_functions_as_children = true;
+                self.state.top_level_lexical_as_global_ref = true;
+            }
+            try parser_core.parseDirectives(&self.state);
+            try parser_core.parseProgramStatements(&self.state, .{ .func = true, .func_with_label = true, .other = true });
+            try self.function.appendCode(&.{op.return_undef});
+            try std.testing.expectEqual(t.TOK_EOF, self.state.token.val);
+        }
+
+        pub fn deinit(self: *Window) void {
+            self.discardTemporaries();
+            self.releaseArtifact();
+        }
+
+        pub fn discardTemporaries(self: *Window) void {
+            if (self.state_live) {
+                self.state.deinit(self.rt);
+                self.state_live = false;
+            }
+            if (self.lexer_live) {
+                self.lex.deinit();
+                self.lexer_live = false;
+            }
+        }
+
+        pub fn releaseArtifact(self: *Window) void {
+            if (!self.artifact_live) return;
+            self.function.deinit(self.rt);
+            self.artifact_live = false;
+        }
+
+        pub fn sampleB1(self: *Window) !Snapshot {
+            try expectNoLegacyParserRelocs(&self.state.function_def);
+            const census = censusCode(self.function.code, .phase1);
+            try std.testing.expect(census.valid);
+            self.b1_reloc_created = census.label_markers;
+            self.b1_source_created = self.function.source_loc_slots.len;
+            return self.sample(.phase1, null);
+        }
+
+        pub fn sampleNext(self: *Window, phase: CodePhase, previous: *const Snapshot) !Snapshot {
+            return self.sample(phase, previous);
+        }
+
+        fn sample(self: *Window, phase: CodePhase, previous: ?*const Snapshot) !Snapshot {
+            const current_atom_total = atomStrongRefTotal(self.rt);
+            try std.testing.expect(current_atom_total >= self.baseline.atom_strong_refs);
+            const atom_outstanding = current_atom_total - self.baseline.atom_strong_refs;
+
+            const direct_artifact_owners = if (self.artifact_live)
+                bytecodeAtomOwners(self.rt, &self.function)
+            else
+                0;
+            const temporary_owners = if (self.state_live)
+                functionDefAtomOwners(self.rt, &self.state.function_def) + parseStateAtomOwners(self.rt, &self.state)
+            else
+                0;
+            const atom_created = direct_artifact_owners + temporary_owners;
+            // Direct Bytecode owners are both transferred and escaped: they
+            // are the exact subset that survives Parser.State.deinit.
+            // Released is a boundary difference, not a production counter.
+            const atom_released = if (previous) |prev|
+                if (prev.atom.created >= atom_created) prev.atom.created - atom_created else 0
+            else
+                0;
+
+            const code_census = if (self.artifact_live) censusCode(self.function.code, phase) else CodeCensus{};
+            try std.testing.expect(code_census.valid);
+            const fixups = if (self.state_live) pendingFixupCount(&self.state) else 0;
+            // Bound subtracts the State fixup lists that Parser.State.deinit
+            // would discard. Discarded is the B1 marker census minus markers
+            // still present; outstanding adds both live mechanisms.
+            const reloc_created = if (self.artifact_live) self.b1_reloc_created else 0;
+            const reloc_bound = if (reloc_created >= fixups) reloc_created - fixups else 0;
+            const reloc_discarded = if (self.b1_reloc_created >= code_census.label_markers)
+                self.b1_reloc_created - code_census.label_markers
+            else
+                0;
+
+            const acquisitions = self.rt.memory.alloc_calls + self.rt.memory.create_calls;
+            const releases = self.rt.memory.free_calls + self.rt.memory.destroy_calls;
+            try std.testing.expect(acquisitions >= self.baseline.acquisitions);
+            try std.testing.expect(releases >= self.baseline.releases);
+            try std.testing.expect(self.rt.memory.allocation_count >= self.baseline.allocation_count);
+            const builder_allocated = acquisitions - self.baseline.acquisitions;
+            const builder_released = releases - self.baseline.releases;
+            const builder_owned = self.rt.memory.allocation_count - self.baseline.allocation_count;
+
+            // BytecodeImpl.deinit releases source_loc_slots and pc2line_buf.
+            // Slots are attached only when pc < code.len; discarded is the B1
+            // slot census minus the slots retained by lowering.
+            const source_created = if (self.artifact_live) self.function.source_loc_slots.len else 0;
+            const source_discarded = if (self.b1_source_created >= source_created)
+                self.b1_source_created - source_created
+            else
+                0;
+
+            return .{
+                .atom = .{
+                    .created = atom_created,
+                    .transferred = direct_artifact_owners,
+                    .escaped = direct_artifact_owners,
+                    .released = atom_released,
+                    .outstanding = atom_outstanding,
+                },
+                .reloc = .{
+                    .created = reloc_created,
+                    .bound = reloc_bound,
+                    .resolved = code_census.label_operands,
+                    .discarded = reloc_discarded,
+                    .outstanding = code_census.label_markers + fixups,
+                    .pending_fixups = fixups,
+                },
+                .builder = .{
+                    .allocated = builder_allocated,
+                    .owned = builder_owned,
+                    .committed = 0,
+                    .released = builder_released,
+                },
+                .source = .{
+                    .created = source_created,
+                    .attached = if (self.artifact_live) attachedSourceCount(&self.function) else 0,
+                    .committed = if (self.artifact_live) self.function.pc2line_buf.len else 0,
+                    .discarded = source_discarded,
+                    .outstanding = source_created,
+                },
+            };
+        }
+    };
+
+    pub fn warmRuntime(rt: *core.JSRuntime, shape: *const Shape) !void {
+        // Atom-table entry/index capacity is runtime-resident rather than a
+        // compile owner. Prime it before Baseline.capture so the measured
+        // window contains only allocations attributable to this compile.
+        var warm: Window = undefined;
+        try warm.init(rt, shape);
+        warm.deinit();
+    }
+
+    pub fn setBuilderCommitted(snapshot: *Snapshot, committed: usize) void {
+        // Before B4 the committed allocation count is derived from the B4
+        // artifact-only observation; B4 itself checks that prediction exactly.
+        snapshot.builder.committed = committed;
+    }
+
+    /// Strong retains the structural census cannot see. The census walks the
+    /// FunctionDef tree, the mutable Bytecode and Parser.State; it deliberately
+    /// does not descend into a published FunctionBytecode, so the residual is
+    /// exactly the ownership that finalization moved under an FB. It must be
+    /// zero everywhere no FB has been published yet, and it can never be
+    /// negative: `outstanding < created` would mean a counted owner slot no
+    /// longer holds the retain it is responsible for releasing.
+    pub fn atomResidual(snapshot: Snapshot) !usize {
+        try std.testing.expect(snapshot.atom.outstanding >= snapshot.atom.created);
+        return snapshot.atom.outstanding - snapshot.atom.created;
+    }
+
+    pub fn expectCommon(snapshot: Snapshot) !void {
+        try std.testing.expect(snapshot.builder.allocated >= snapshot.builder.released);
+        try std.testing.expectEqual(
+            snapshot.builder.owned,
+            snapshot.builder.allocated - snapshot.builder.released,
+        );
+        try std.testing.expect(snapshot.builder.committed <= snapshot.builder.owned);
+        try std.testing.expectEqual(snapshot.source.outstanding, snapshot.source.created);
+        try std.testing.expectEqual(snapshot.source.outstanding, snapshot.source.attached);
+    }
+
+    /// The measured strong-ref delta must equal the structural census plus the
+    /// exact FB-resident residual expected at this boundary — not merely be
+    /// bounded by it.
+    pub fn expectAtomAccount(snapshot: Snapshot, residual: usize) !void {
+        try std.testing.expectEqual(
+            snapshot.atom.created + residual,
+            snapshot.atom.outstanding,
+        );
+    }
+
+    /// Check the boundary-to-boundary movement of the census. `outstanding` is
+    /// already pinned exactly at every boundary by `expectAtomAccount`, so any
+    /// growth there is accounted for by construction; what this adds is the
+    /// direction constraint: a step that only consumes or only discards must
+    /// never grow the census. `allow_census_growth` is set exactly for the emit
+    /// step, which legitimately publishes new owner slots (arg/var/var-ref name
+    /// tables on the artifact).
+    pub fn expectAtomTransition(previous: Snapshot, current: Snapshot, allow_census_growth: bool) !void {
+        const expected_released = if (previous.atom.created >= current.atom.created)
+            previous.atom.created - current.atom.created
+        else
+            0;
+        try std.testing.expectEqual(expected_released, current.atom.released);
+        if (!allow_census_growth) try std.testing.expect(current.atom.created <= previous.atom.created);
+    }
+
+    pub fn expectB1(snapshot: Snapshot) !void {
+        try expectCommon(snapshot);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.reloc.pending_fixups);
+        try std.testing.expectEqual(snapshot.reloc.created, snapshot.reloc.outstanding);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.reloc.discarded);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.source.discarded);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.source.committed);
+    }
+
+    pub fn expectB2(b1: Snapshot, b2: Snapshot) !void {
+        try expectCommon(b2);
+        try std.testing.expectEqual(@as(usize, 0), b2.reloc.pending_fixups);
+        try std.testing.expect(b2.reloc.outstanding <= b1.reloc.created);
+        try std.testing.expectEqual(
+            b1.reloc.created,
+            b2.reloc.outstanding + b2.reloc.discarded,
+        );
+        try expectSourceFromB1(b1, b2);
+    }
+
+    pub fn expectB3(b1: Snapshot, b3: Snapshot) !void {
+        try expectCommon(b3);
+        try std.testing.expectEqual(@as(usize, 0), b3.reloc.outstanding);
+        try std.testing.expectEqual(@as(usize, 0), b3.reloc.pending_fixups);
+        try std.testing.expectEqual(b1.reloc.created, b3.reloc.discarded);
+        try expectSourceFromB1(b1, b3);
+        if (b3.source.outstanding != 0) try std.testing.expect(b3.source.committed > 0);
+    }
+
+    pub fn expectB4(b1: Snapshot, b3: Snapshot, b4: Snapshot) !void {
+        try expectCommon(b4);
+        try std.testing.expectEqual(b4.atom.created, b4.atom.transferred);
+        try std.testing.expectEqual(b4.atom.transferred, b4.atom.escaped);
+        try std.testing.expectEqual(@as(usize, 0), b4.reloc.outstanding);
+        try std.testing.expectEqual(@as(usize, 0), b4.reloc.pending_fixups);
+        try std.testing.expectEqual(b1.reloc.created, b4.reloc.discarded);
+        try std.testing.expect(b4.builder.owned <= b3.builder.owned);
+        try std.testing.expectEqual(b4.builder.owned, b4.builder.committed);
+        try expectSourceFromB1(b1, b4);
+    }
+
+    pub fn expectSourceFromB1(b1: Snapshot, current: Snapshot) !void {
+        try std.testing.expect(current.source.outstanding <= b1.source.created);
+        try std.testing.expectEqual(
+            b1.source.created,
+            current.source.outstanding + current.source.discarded,
+        );
+    }
+
+    pub fn expectTerminal(snapshot: Snapshot) !void {
+        try expectCommon(snapshot);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.created);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.transferred);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.escaped);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.atom.outstanding);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.reloc.created);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.reloc.outstanding);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.builder.owned);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.builder.committed);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.source.created);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.source.outstanding);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.source.committed);
+    }
+
+    pub fn publishedFunctionBytecodeCount(function: *const engine.bytecode.Bytecode) usize {
+        var count: usize = 0;
+        for (function.constants.values) |value| {
+            count += @intFromBool(value.tagOf() == core.value.Tag.function_bytecode);
+        }
+        return count;
+    }
+
+    pub fn dump(shape: Shape, path: []const u8, boundary: []const u8, snapshot: Snapshot) void {
+        if (!dump_phase_ledgers) return;
+        std.debug.print(
+            "\nphase-ledgers shape={s} path={s} boundary={s}\n" ++
+                "  ATOM    created={d} transferred={d} escaped={d} released={d} outstanding={d}\n" ++
+                "  RELOC   created={d} bound={d} resolved={d} discarded={d} outstanding={d} pending={d}\n" ++
+                "  BUILDER allocated={d} owned={d} committed={d} released={d}\n" ++
+                "  SOURCE  created={d} attached={d} committed={d} discarded={d} outstanding={d}\n",
+            .{
+                shape.name,
+                path,
+                boundary,
+                snapshot.atom.created,
+                snapshot.atom.transferred,
+                snapshot.atom.escaped,
+                snapshot.atom.released,
+                snapshot.atom.outstanding,
+                snapshot.reloc.created,
+                snapshot.reloc.bound,
+                snapshot.reloc.resolved,
+                snapshot.reloc.discarded,
+                snapshot.reloc.outstanding,
+                snapshot.reloc.pending_fixups,
+                snapshot.builder.allocated,
+                snapshot.builder.owned,
+                snapshot.builder.committed,
+                snapshot.builder.released,
+                snapshot.source.created,
+                snapshot.source.attached,
+                snapshot.source.committed,
+                snapshot.source.discarded,
+                snapshot.source.outstanding,
+            },
+        );
+    }
+};
+
+test "four-ledger phase-boundary ownership accounting parse-only" {
+    for (&phase_ownership.shapes) |*shape| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+
+        try phase_ownership.warmRuntime(rt, shape);
+
+        var window: phase_ownership.Window = undefined;
+        try window.init(rt, shape);
+        defer window.deinit();
+
+        var b1 = try window.sampleB1();
+        var before_discard = try window.sampleNext(.phase1, &b1);
+        try std.testing.expect(std.meta.eql(b1, before_discard));
+
+        // Parsing publishes no FunctionBytecode in any mode: the only producer
+        // is pipeline.finalize.createFunctionBytecode. A tier-2 nested function
+        // is a child FunctionDef here, and the census descends into child_list,
+        // so the parse-only residual is zero for both tiers.
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            phase_ownership.publishedFunctionBytecodeCount(&window.function),
+        );
+        switch (shape.tier) {
+            .exact_leaf => try std.testing.expectEqual(@as(usize, 0), window.state.function_def.child_list.len),
+            .nested_function_bytecode => try std.testing.expect(window.state.function_def.child_list.len > 0),
+        }
+
+        try std.testing.expectEqual(@as(usize, 0), try phase_ownership.atomResidual(b1));
+        try phase_ownership.expectAtomAccount(b1, 0);
+        try phase_ownership.expectB1(b1);
+
+        window.discardTemporaries();
+        var b4 = try window.sampleNext(.phase1, &before_discard);
+        const committed = b4.builder.owned;
+        phase_ownership.setBuilderCommitted(&b1, committed);
+        phase_ownership.setBuilderCommitted(&before_discard, committed);
+        phase_ownership.setBuilderCommitted(&b4, committed);
+
+        try std.testing.expect(std.meta.eql(b1, before_discard));
+        try phase_ownership.expectCommon(b1);
+        try phase_ownership.expectAtomAccount(b4, 0);
+        try phase_ownership.expectAtomTransition(before_discard, b4, false);
+        try phase_ownership.expectCommon(b4);
+        try std.testing.expectEqual(b4.atom.created, b4.atom.transferred);
+        try std.testing.expectEqual(b4.builder.owned, b4.builder.committed);
+        try std.testing.expect(b4.builder.owned <= before_discard.builder.owned);
+        try std.testing.expectEqual(b1.reloc.created, b4.reloc.outstanding);
+        try std.testing.expectEqual(b1.source.created, b4.source.outstanding);
+        try std.testing.expectEqual(@as(usize, 0), b4.source.committed);
+
+        phase_ownership.dump(shape.*, "parse-only", "B1-after-parse", b1);
+        phase_ownership.dump(shape.*, "parse-only", "B1-before-discard", before_discard);
+        phase_ownership.dump(shape.*, "parse-only", "B4-artifact-only", b4);
+
+        window.releaseArtifact();
+        var terminal = try window.sampleNext(.phase1, &b4);
+        phase_ownership.setBuilderCommitted(&terminal, 0);
+        try phase_ownership.expectTerminal(terminal);
+        phase_ownership.dump(shape.*, "parse-only", "terminal", terminal);
+    }
+}

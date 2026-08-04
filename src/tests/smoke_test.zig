@@ -5,8 +5,24 @@ const ProfileCase = struct {
     name: []const u8,
     source: []const u8,
     expected_stdout_prefix: []const u8,
+    // Total-dispatch shape band, recalibrated 2026-07-31 (D0). The ceiling
+    // is the de-fusing tripwire (one extra dispatch per iteration moves the
+    // total by the iteration count); the floor keeps the gate anti-vacuous
+    // (an all-zero profile must never pass). Recalibrate on purpose, never
+    // loosen into a vacuum.
     max_opcodes: u64,
+    min_opcodes: u64,
 };
+
+fn resolvedZjsProfilePath(buf: *[1024]u8) []const u8 {
+    const configured_path = build_options.zjs_profile_executable_path;
+    if (std.Io.Dir.cwd().openFile(std.testing.io, configured_path, .{})) |file| {
+        file.close(std.testing.io);
+        return configured_path;
+    } else |_| {
+        return std.fmt.bufPrint(buf, "../../{s}", .{configured_path}) catch configured_path;
+    }
+}
 
 fn resolvedZjsPath(buf: *[1024]u8) []const u8 {
     const configured_path = build_options.zjs_executable_path;
@@ -139,11 +155,18 @@ test "zjs CLI behavior" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "undefined\nundefined") != null);
     }
 
-    // 5. CLI string append loops should hit the top-level range fast path.
-    {
+    // 5. CLI string append loops keep the top-level range fast-path shape.
+    // Recalibrated 2026-07-31: opcode counting is total table dispatches now
+    // (the old assertion that `add` never appears was written for the
+    // retired cold-entry-only semantics and had been passing vacuously on
+    // an all-zero profile). Runs against the profiling binary; the default
+    // binary fails --profile-opcodes closed by contract (checked in 5b).
+    if (build_options.smoke_profile_checks) {
+        var profile_path_buf: [1024]u8 = undefined;
+        const zjs_profile_path = resolvedZjsProfilePath(&profile_path_buf);
         const result = try std.process.run(allocator, std.testing.io, .{
             .argv = &[_][]const u8{
-                zjs_path,
+                zjs_profile_path,
                 "--profile-opcodes",
                 "--perf-json",
                 "-e",
@@ -160,7 +183,39 @@ test "zjs CLI behavior" {
         try std.testing.expectEqual(@as(u8, 0), exit_code);
         try std.testing.expect(std.mem.startsWith(u8, result.stdout, "2000\n"));
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ZJS opcode profile") != null);
-        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "\"name\": \"add\"") == null);
+        // Exactly one string-append add dispatch per iteration; the fused
+        // range path must not add per-iteration dispatch overhead beyond
+        // the measured shape (30,019 total at recalibration).
+        const opcodes = try perfOpcodeCount(result.stderr);
+        try std.testing.expect(opcodes >= 10_000);
+        try std.testing.expect(opcodes <= 32_000);
+    }
+
+    // 5b. The default binary must fail --profile-opcodes closed instead of
+    // emitting an all-zero profile (the 2026-07-31 D0 contract).
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{
+                zjs_path,
+                "--profile-opcodes",
+                "-e",
+                "print(1);",
+            },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        if (build_options.smoke_profile_checks) {
+            try std.testing.expectEqual(@as(u8, 2), exit_code);
+            try std.testing.expect(std.mem.indexOf(u8, result.stderr, "requires a profiling build") != null);
+        } else {
+            // zjs-dev is built without profiling scopes too, so the same
+            // fail-closed contract applies.
+            try std.testing.expectEqual(@as(u8, 2), exit_code);
+        }
     }
 
     // 6. Prepared native Math calls must route sumPrecise through its iterable-aware implementation.
@@ -280,82 +335,98 @@ test "prepared method calls capture callee before argument side effects" {
 }
 
 test "CLI top-level range fast paths collapse completion-store loops" {
+    // Requires real opcode counting: release smoke runs this against the
+    // zjs-profile artifact; the dev inner loop skips it explicitly (it
+    // deliberately builds no ReleaseFast engine).
+    if (!build_options.smoke_profile_checks) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var zjs_path_buf: [1024]u8 = undefined;
-    const zjs_path = resolvedZjsPath(&zjs_path_buf);
+    const zjs_path = resolvedZjsProfilePath(&zjs_path_buf);
 
     const cases = [_]ProfileCase{
         .{
             .name = "int_sum",
             .source = "let sum = 0; for (let i = 0; i < 2000; i++) sum += i; print(sum);",
             .expected_stdout_prefix = "1999000\n",
-            .max_opcodes = 120,
+            .max_opcodes = 32000, // measured 30018 at recalibration
+            .min_opcodes = 10000,
         },
         .{
             .name = "array_read",
             .source = "let tab = [3]; let sum = 0; for (let i = 0; i < 2000; i++) sum += tab[0]; print(sum);",
             .expected_stdout_prefix = "6000\n",
-            .max_opcodes = 120,
+            .max_opcodes = 36000, // measured 34021 at recalibration
+            .min_opcodes = 10000,
         },
         .{
             .name = "global_read_loop",
             .source = "var x = 1; let s = 0; for (let i = 0; i < 2000; i++) s += x; print(s);",
             .expected_stdout_prefix = "2000\n",
-            .max_opcodes = 120,
+            .max_opcodes = 32000, // measured 30020 at recalibration
+            .min_opcodes = 10000,
         },
         .{
             .name = "global_write_loop",
             .source = "\"use strict\"; var g = 0; for (let i = 0; i < 2000; i++) g = i; print(g);",
             .expected_stdout_prefix = "1999\n",
-            .max_opcodes = 120,
+            .max_opcodes = 28000, // measured 26020 at recalibration
+            .min_opcodes = 10000,
         },
         .{
             .name = "prop_read_mono",
             .source = "const o = { a: 1, b: 2, c: 3 }; let s = 0; for (let i = 0; i < 2000; i++) s += o.b; print(s);",
             .expected_stdout_prefix = "4000\n",
-            .max_opcodes = 120,
+            .max_opcodes = 34000, // measured 32026 at recalibration
+            .min_opcodes = 10000,
         },
         .{
             .name = "prop_read_poly3",
             .source = "const a = { x: 1, y: 0 }; const b = { y: 0, x: 2 }; const c = { z: 0, x: 3 }; const arr = [a, b, c]; let s = 0; for (let i = 0; i < 2000; i++) s += arr[i % 3].x; print(s);",
             .expected_stdout_prefix = "3999\n",
-            .max_opcodes = 120,
+            .max_opcodes = 43000, // measured 40041 at recalibration
+            .min_opcodes = 10000,
         },
         .{
             .name = "proto_read",
             .source = "const p = { x: 1 }; const o = Object.create(p); let s = 0; for (let i = 0; i < 2000; i++) s += o.x; print(s);",
             .expected_stdout_prefix = "2000\n",
-            .max_opcodes = 120,
+            .max_opcodes = 34000, // measured 32027 at recalibration
+            .min_opcodes = 10000,
         },
         .{
             .name = "func_call",
             .source = "function f(x) { return x + 1; } let s = 0; for (let i = 0; i < 40000; i++) s += f(i); print(s);",
             .expected_stdout_prefix = "800020000\n",
-            .max_opcodes = 140,
+            .max_opcodes = 880000, // measured 840020 at recalibration
+            .min_opcodes = 400000,
         },
         .{
             .name = "call2_loop",
             .source = "function f(a, b) { return a + b; } let s = 0; for (let i = 0; i < 40000; i++) s += f(i, 1); print(s);",
             .expected_stdout_prefix = "800020000\n",
-            .max_opcodes = 140,
+            .max_opcodes = 924000, // measured 880020 at recalibration
+            .min_opcodes = 400000,
         },
         .{
             .name = "closure_call_loop",
             .source = "function make(x) { return function(y) { return x + y; }; } const f = make(1); let s = 0; for (let i = 0; i < 40000; i++) s += f(i); print(s);",
             .expected_stdout_prefix = "800020000\n",
-            .max_opcodes = 160,
+            .max_opcodes = 880000, // measured 840026 at recalibration
+            .min_opcodes = 400000,
         },
         .{
             .name = "math_min",
             .source = "let s = 0; for (let i = 0; i < 40000; i++) s += Math.min(i, 500); print(s);",
             .expected_stdout_prefix = "19874750\n",
-            .max_opcodes = 120,
+            .max_opcodes = 800000, // measured 760018 at recalibration
+            .min_opcodes = 400000,
         },
         .{
             .name = "map_string_keys",
             .source = "const m = new Map(); for (let i = 0; i < 10000; i++) m.set(\"k\" + i, i); let s = 0; for (let i = 0; i < 10000; i++) s += m.get(\"k\" + i); print(s);",
             .expected_stdout_prefix = "49995000\n",
-            .max_opcodes = 180,
+            .max_opcodes = 390000, // measured 370031 at recalibration
+            .min_opcodes = 100000,
         },
     };
 
@@ -380,6 +451,7 @@ test "CLI top-level range fast paths collapse completion-store loops" {
         try std.testing.expect(std.mem.startsWith(u8, result.stdout, case.expected_stdout_prefix));
 
         const opcodes = try perfOpcodeCount(result.stderr);
+        try std.testing.expect(opcodes >= case.min_opcodes);
         try std.testing.expect(opcodes <= case.max_opcodes);
     }
 }

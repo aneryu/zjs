@@ -92,26 +92,6 @@ pub inline fn dataPropertyValueForFastPath(
     return null;
 }
 
-/// Formerly a monomorphic OWN-data-property IC fast path for the lean inline
-/// get_field handler. With the inline cache removed (qjs has none), there is no
-/// per-call-site cache to hit, so this always returns null and the lean handler
-/// falls through to the cold `field` handler, which performs the full shape-hash
-/// lookup directly. The signature is retained for ABI stability with callers.
-pub inline fn cachedDataPropertyValueForFastPath(
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    rt: *core.JSRuntime,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    _ = function;
-    _ = site_pc;
-    _ = rt;
-    _ = receiver;
-    _ = atom_id;
-    return null;
-}
-
 pub fn functionOwnDataPropertyValueForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     const object = functionOwnDataPropertyObject(rt, value, atom_id) orelse return null;
     return object.getOwnDataPropertyValue(atom_id);
