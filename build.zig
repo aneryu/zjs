@@ -20,12 +20,21 @@ pub fn build(b: *std.Build) void {
     // the target default.
     const target_default_nan_boxing = target.result.ptrBitWidth() < 64;
     const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse target_default_nan_boxing;
-    // QCP-1: compiler selection. v2 = the QuickJS-model compiler-v2 and the
-    // production default since the switch ruling; legacy = the Phase 1/2/3
-    // pipeline, kept as the explicit fallback; dual = compile with both,
-    // compare, execute the v2 product, kept as the differential oracle.
-    // See docs/qcp1_switch_decision.md for the gate the default rests on.
-    const zjs_compiler = b.option([]const u8, "zjs_compiler", "Compiler selection: v2 (default), legacy, or dual") orelse "v2";
+    // QCP-1 RELEASE (verdict QCP-1A = ACCEPT): compiler selection.
+    //   v2     = the QuickJS-model compiler-v2. THE PRODUCTION DEFAULT, and the
+    //            only supported production configuration.
+    //   legacy = the Phase 1/2/3 pipeline. EXPERIMENTAL FALLBACK ONLY — it is
+    //            retained so a V2 defect has somewhere to fall back to and so
+    //            `dual` still has two compilers to compare, not because it is a
+    //            supported alternative. Do not read it as a second default.
+    //   dual   = compile with both, compare, execute the v2 product; retained
+    //            as the differential oracle.
+    // Legacy's physical removal is verdict QCP-1B = NO-GO, DEFERRED: deleting
+    // the legacy pipelines produced a stable runtime benchmark regression
+    // (crypto ~-4% vs pre-delete V2, geomean ~-0.7%) whose mechanism was never
+    // identified. See docs/qcp1_switch_decision.md §8 for both verdicts and the
+    // gate the default rests on.
+    const zjs_compiler = b.option([]const u8, "zjs_compiler", "Compiler selection: v2 (production default), legacy (experimental fallback, unsupported for production), or dual (differential oracle)") orelse "v2";
     if (!std.mem.eql(u8, zjs_compiler, "legacy") and
         !std.mem.eql(u8, zjs_compiler, "v2") and
         !std.mem.eql(u8, zjs_compiler, "dual"))

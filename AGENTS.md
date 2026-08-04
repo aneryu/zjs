@@ -50,6 +50,35 @@ Prior phase plans, percentage-gate plans, snapshot ledgers, one-off analyses,
 and detailed error catalogs were removed from the active tree and remain
 available only through git history.
 
+## Production Configuration
+
+The shipped configuration, and the build defaults:
+
+```
+zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+```
+
+- **`compiler=v2` is the production default and the only supported production
+  compiler.** `-Dzjs_compiler=legacy` selects the Phase 1/2/3 pipeline and is an
+  **experimental fallback only** — it builds and passes its suite, but it is not
+  a supported production configuration and must not be reported as a default.
+  `-Dzjs_compiler=dual` is the differential oracle.
+- **`layout=short` is release configuration, not a tuning knob.** The switch was
+  gated on it. `-Dzjs_v2_layout=plain` survives only as the A/B diagnostic
+  instrument.
+- Any measurement, gate result or report must name the configuration it ran. The
+  binary states its own (`zig-out/bin/zjs --print-config-signature`) and every
+  engine-bearing artifact asserts it at compile time.
+
+**Legacy source is still in the tree on purpose.** QCP-1 closed as two verdicts
+(`docs/qcp1_switch_decision.md` §8): **QCP-1A — make V2 the production compiler:
+ACCEPT**; **QCP-1B — physically delete the legacy pipelines: NO-GO, deferred**,
+because deletion produced a stable runtime benchmark regression (crypto about
+−4% versus the pre-delete V2 tip, full-suite geomean about −0.7%) whose
+mechanism was never identified. That is neither a correctness failure nor an
+architecture failure, and it is re-filed as a separate runtime-layout-stability
+project. Do not re-open legacy deletion as a cleanup task without answering it.
+
 ## Agent skills
 
 ### Issue tracker

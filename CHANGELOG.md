@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- QCP-1 release: the QuickJS-model **compiler-v2 with the short bytecode layout
+  is now the production default** (`compiler=v2,layout=short`). Verdict QCP-1A
+  is ACCEPT. `-Dzjs_compiler=legacy` still builds but is relabelled an
+  experimental fallback and is not a supported production configuration;
+  `-Dzjs_compiler=dual` remains the differential oracle and
+  `-Dzjs_v2_layout=plain` the A/B diagnostic instrument. Physical removal of the
+  legacy pipelines is verdict QCP-1B = **NO-GO, deferred** — deletion produced a
+  stable runtime benchmark regression (crypto about −4% versus the pre-delete V2
+  tip, full-suite geomean about −0.7%) with no identified mechanism, re-filed as
+  a separate runtime-layout-stability project. Both verdicts and the evidence
+  are in `docs/qcp1_switch_decision.md` §8.
 - Fixed Array sort writeback when an indexed setter mutates a successor
   element, Error.prototype.stack setter edge cases, and TypedArray
   DefineOwnProperty detach-during-conversion semantics.
