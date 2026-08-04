@@ -72,11 +72,10 @@ const ModuleEvaluationWaiter = struct {
 };
 
 /// The subset of import attributes that influences how the module loader
-/// interprets the source, mirroring qjs js_module_test_json /
-/// js_module_loader's `type` handling (quickjs-libc.c:656/703): only "json"
-/// changes the load kind. Unknown/absent types load as ordinary ES modules
-/// (qjs "XXX: raise an error if unknown type ?" — it does not).
-pub const ImportLoaderType = enum { none, json };
+/// interprets the source. The synthetic-module path already supports JSON,
+/// text, and bytes records for static imports; dynamic imports use the same
+/// registry identity and loader selection.
+pub const ImportLoaderType = enum { none, json, text };
 
 /// Extract the load-relevant `type` attribute from a validated attributes
 /// object (JS_UNDEFINED or a null-prototype object whose values are all
@@ -94,6 +93,7 @@ fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue
     defer buf.deinit(ctx.runtime.memory.allocator);
     exec.value_ops.appendRawString(ctx.runtime, &buf, type_value) catch return .none;
     if (std.mem.eql(u8, buf.items, "json")) return .json;
+    if (std.mem.eql(u8, buf.items, "text")) return .text;
     return .none;
 }
 
@@ -1608,14 +1608,19 @@ fn evalDynamicImportModule(
     defer allocator.free(target_path_base);
 
     // A `.json` target — or one tagged `with { type: 'json' }` — loads as a
-    // JSON module, mirroring js_module_loader's extension/attribute check
-    // (`has_suffix(module_name, ".json") || res > 0`, quickjs-libc.c:704,
-    // where `res = js_module_test_json(attributes)`). The synthetic registry
-    // name is shared with attribute-tagged static imports so both resolve to
+    // JSON module. Attribute `type: 'text'` selects the corresponding
+    // synthetic text module even when the file suffix is `.json`; otherwise
+    // unknown/absent types retain ordinary ESM loading. The registry name is
+    // shared with attribute-tagged static imports so both forms resolve to
     // one module record.
-    const is_json = std.mem.endsWith(u8, target_path_base, ".json") or import_type == .json;
-    const target_path = if (is_json)
-        try exec.module.syntheticModuleRegistryName(allocator, target_path_base, .json)
+    const synthetic_kind: ?core.module.SyntheticKind = switch (import_type) {
+        .none => if (std.mem.endsWith(u8, target_path_base, ".json")) .json else null,
+        .json => .json,
+        .text => .text,
+    };
+    const is_synthetic = synthetic_kind != null;
+    const target_path = if (synthetic_kind) |kind|
+        try exec.module.syntheticModuleRegistryName(allocator, target_path_base, kind)
     else
         try allocator.dupe(u8, target_path_base);
     defer allocator.free(target_path);
@@ -1629,7 +1634,7 @@ fn evalDynamicImportModule(
         preload_postorder.deinit(allocator);
     }
     if (context.modules.find(module_name) == null) {
-        if (!is_json) {
+        if (!is_synthetic) {
             const source = std.Io.Dir.cwd().readFileAlloc(io, target_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
                 error.FileNotFound => {
                     try exec.module.throwCouldNotLoadModule(context, target_path);
@@ -1643,7 +1648,7 @@ fn evalDynamicImportModule(
             // reset already-evaluated modules).
             try exec.module.preloadMissingFileModuleGraphWithOrder(io, allocator, context, source, target_path, max_source_size, &preload_postorder);
         } else {
-            try exec.module.preloadSyntheticFileModule(context, target_path, .json);
+            try exec.module.preloadSyntheticFileModule(context, target_path, synthetic_kind.?);
         }
     }
 
@@ -1664,7 +1669,7 @@ fn evalDynamicImportModule(
     // Synthetic records have no bytecode function. Publish their indexed
     // default cell before linking so ordinary import wiring sees the same
     // retained export-cell authority as source modules.
-    if (is_json) {
+    if (is_synthetic) {
         const source_path = exec.module.syntheticModuleFilePath(target_path);
         const module_source = std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
             error.FileNotFound => {
@@ -1703,8 +1708,8 @@ fn evalDynamicImportModule(
         defer runtime.atoms.free(module_atom);
         const record = context.modules.find(module_atom) orelse return error.ModuleNotFound;
         if (record.synthetic_kind != .none) {
-            // Synthetic (JSON) module records carry no code; their default
-            // binding was initialized at preload.
+            // Synthetic file-module records carry no code; their default
+            // binding was initialized before linking.
             record.status = .evaluated;
             continue;
         }

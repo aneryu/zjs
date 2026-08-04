@@ -720,10 +720,23 @@ const Resolver = struct {
                     try self.emitWideU16(op.get_var_ref, ref_idx);
                     if (gv.cpool_idx >= 0) {
                         try self.emitWideU32(op.fclosure, @intCast(gv.cpool_idx));
+                        try self.emitAtomWide(op.define_field, gv.var_name);
                     } else {
+                        // EvalDeclarationInstantiation creates a new var
+                        // object property only when the name is absent, so a
+                        // repeated direct-eval `var x` must preserve the
+                        // existing value and binding cell. Identity-native
+                        // twin of the legacy `writeBodyHoists` guard: the
+                        // branch destination is a LabelId here, and Stage 4
+                        // alone turns it into a displacement.
+                        const defined_label = try self.newProductLabel();
+                        try self.emitAtomWide(op.get_field2, gv.var_name);
+                        try self.emitInstruction(&.{op.is_undefined}, null);
+                        try self.emitProductJump(op.if_false, defined_label);
                         try self.emitInstruction(&.{op.undefined}, null);
+                        try self.emitAtomWide(op.define_field, gv.var_name);
+                        try self.bindProductLabel(defined_label);
                     }
-                    try self.emitAtomWide(op.define_field, gv.var_name);
                     try self.emitInstruction(&.{op.drop}, null);
                 },
                 .global => {},

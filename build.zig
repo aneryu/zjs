@@ -381,6 +381,9 @@ pub fn build(b: *std.Build) void {
         "test262/test/built-ins/RegExp/prototype/test/S15.10.6.3_A1_T1.js",
         "test262/test/built-ins/Promise/prototype/then/S25.4.5.3_A1.1_T1.js",
         "test262/test/built-ins/JSON/stringify/value-primitive-top-level.js",
+        "test262/test/staging/sm/generators/gen-with-call-obj.js",
+        "test262/test/staging/sm/extensions/weakmap.js",
+        "test262/test/staging/sm/statements/for-in-with-gc-and-unvisited-deletion.js",
     };
     const run_test262_smoke = b.addRunArtifact(run_test262_dev_exe);
     run_test262_smoke.step.dependOn(&install_run_test262_dev.step);

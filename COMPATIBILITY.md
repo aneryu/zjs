@@ -27,8 +27,8 @@ zig build run-test262 --seed 0 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-The checked 2026-07-27 report has 44,541 passes, 25 checked-in known failures,
-0 unexpected failures, and 5,209 feature skips. The checked report under
+The checked 2026-07-31 report has 44,581 passes, 0 checked-in known failures,
+0 unexpected failures, and 5,194 feature skips. The checked report under
 `reports/test262-latest/` records the bucket, per-directory, feature-skip, and
 failure details.
 
@@ -46,7 +46,7 @@ changed with a concrete implementation plan:
 - `test262/test/intl402/` is excluded. Intl requires data and API surface that
   are outside the current core-engine target.
 - Test262 features marked `=skip` include `Temporal`, `ShadowRealm`,
-  `decorators`, `host-gc-required`, `import-defer`, source-phase imports,
+  `decorators`, `import-defer`, source-phase imports,
   canonical time zone data, and the Intl feature groups listed in
   `test262.conf`.
 - Most `test262/test/staging/` tests are excluded by default, with selected
@@ -99,9 +99,11 @@ upstream QuickJS:
 - **Import Bytes**: The local profile enables and validates binary module
   imports (`import-bytes`), while the pinned QuickJS config skips them.
 
-Conversely, the pinned QuickJS profile enables `host-gc-required`, while zjs
-skips it. The two profiles also select different staging tests, so raw pass
-counts are not a direct completeness comparison.
+The local profile now also enables `host-gc-required`; all 15 selected staging
+cases pass, covering generator lifetime, WeakMap, detached buffers, dictionary
+properties, and `for-in` iteration across explicit GC. The two profiles still
+select different staging tests, so raw pass counts are not a direct completeness
+comparison.
 
 ## Validation Commands
 

@@ -5656,6 +5656,203 @@ pub const parser_core = struct {
             }
         }
 
+        /// Check the still-unparsed RHS of an assignment for a direct eval
+        /// call. A free closure target only needs the early Reference capture
+        /// when this expression can mutate the current variable environment;
+        /// emitting that representation for every ordinary closure write
+        /// breaks the stack contracts of destructuring and callback code.
+        ///
+        /// This is a lexer-only lookahead. It preserves the parser token and
+        /// lexer cursor, skips regexp/template bodies using the same helpers
+        /// as the declaration pre-scan, and stops at the current expression's
+        /// top-level boundary. Nested function bodies are not part of the
+        /// current function's direct-eval environment.
+        fn rhsContainsDirectEval(s: *State) bool {
+            const saved_pos = s.lex.pos;
+            const saved_line = s.lex.line;
+            const saved_col = s.lex.col;
+            const saved_got_lf = s.lex.got_lf;
+            const saved_mark_pos = s.lex.mark_pos;
+            const saved_mark_line = s.lex.mark_line;
+            const saved_mark_col = s.lex.mark_col;
+            // The scan advances past the current token and releases its atom.
+            // Keep an independent owner for the token restored at the end;
+            // copying the token struct would restore a dead identifier atom.
+            const saved_token = s.lex.dupToken(s.token) catch return false;
+            defer {
+                s.lex.freeToken(&s.token);
+                s.lex.pos = saved_pos;
+                s.lex.line = saved_line;
+                s.lex.col = saved_col;
+                s.lex.got_lf = saved_got_lf;
+                s.lex.mark_pos = saved_mark_pos;
+                s.lex.mark_line = saved_mark_line;
+                s.lex.mark_col = saved_mark_col;
+                s.token = saved_token;
+            }
+
+            const advanceLocal = struct {
+                fn call(state: *State) bool {
+                    const next = state.lex.next() catch return false;
+                    state.lex.freeToken(&state.token);
+                    state.token = next;
+                    return true;
+                }
+            }.call;
+
+            var paren_depth: usize = 0;
+            var bracket_depth: usize = 0;
+            var brace_depth: usize = 0;
+            var previous_token_kind: ?tok.TokenKind = null;
+            var eval_candidate = false;
+            // Keep a direct-eval candidate alive while closing a grouping
+            // whose complete expression was `eval`. This covers `(eval)(...)`
+            // and nested `((eval))(...)`, while a comma/operator inside the
+            // grouping clears the flag before the closing parenthesis.
+            var grouped_eval_candidate = false;
+
+            while (true) {
+                const kind = s.peekKind();
+                if (kind == tok.TOK_EOF) return false;
+
+                if (kind == tok.TOK_TEMPLATE) {
+                    if (templateContainsDirectEval(s, s.token)) return true;
+                    eval_candidate = false;
+                    previous_token_kind = tok.TOK_TEMPLATE;
+                    if (!advanceLocal(s)) return false;
+                    continue;
+                }
+                if (kind == tok.TOK_FUNCTION) {
+                    skipFunctionInPredeclareScan(s) catch return false;
+                    eval_candidate = false;
+                    previous_token_kind = tok.TOK_FUNCTION;
+                    if (!advanceLocal(s)) return false;
+                    continue;
+                }
+                if ((kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) and
+                    (skipRegexpInPredeclareScan(s, previous_token_kind) catch false))
+                {
+                    eval_candidate = false;
+                    previous_token_kind = tok.TOK_REGEXP;
+                    if (!advanceLocal(s)) return false;
+                    continue;
+                }
+
+                if (eval_candidate and kind == @as(tok.TokenKind, @intCast('('))) return true;
+                if (kind == @as(tok.TokenKind, @intCast(')')) and
+                    eval_candidate and
+                    grouped_eval_candidate and
+                    paren_depth > 0)
+                {
+                    paren_depth -= 1;
+                    previous_token_kind = kind;
+                    if (!advanceLocal(s)) return false;
+                    continue;
+                }
+                if (kind == tok.TOK_IDENT and
+                    !s.token.payload.ident.has_escape and
+                    atomNameEquals(s, s.token.payload.ident.atom, "eval") and
+                    previous_token_kind != @as(tok.TokenKind, @intCast('.')))
+                {
+                    eval_candidate = true;
+                    grouped_eval_candidate = previous_token_kind == @as(tok.TokenKind, @intCast('('));
+                } else {
+                    eval_candidate = false;
+                    grouped_eval_candidate = false;
+                }
+
+                switch (kind) {
+                    '(' => paren_depth += 1,
+                    ')' => {
+                        if (paren_depth == 0) return false;
+                        paren_depth -= 1;
+                    },
+                    '[' => bracket_depth += 1,
+                    ']' => {
+                        if (bracket_depth == 0) return false;
+                        bracket_depth -= 1;
+                    },
+                    '{' => brace_depth += 1,
+                    '}' => {
+                        if (brace_depth == 0) return false;
+                        brace_depth -= 1;
+                    },
+                    ',', ';' => if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return false,
+                    else => {},
+                }
+                previous_token_kind = kind;
+                if (!advanceLocal(s)) return false;
+            }
+        }
+
+        fn templateContainsDirectEval(s: *State, first: tok.Token) bool {
+            const first_part = first.payload.str.template orelse return false;
+            switch (first_part) {
+                .no_substitution, .tail => return false,
+                .head, .middle => {},
+            }
+
+            while (true) {
+                var expr_depth: usize = 0;
+                var previous_token_kind: ?tok.TokenKind = '{';
+                var eval_candidate = false;
+                while (true) {
+                    var scan_token = s.lex.next() catch return false;
+                    defer s.lex.freeToken(&scan_token);
+                    const kind = scan_token.val;
+                    if (kind == tok.TOK_EOF) return false;
+                    if (kind == tok.TOK_FUNCTION) {
+                        skipFunctionInPredeclareScan(s) catch return false;
+                        eval_candidate = false;
+                        previous_token_kind = tok.TOK_FUNCTION;
+                        continue;
+                    }
+                    if (kind == tok.TOK_TEMPLATE) {
+                        if (templateContainsDirectEval(s, scan_token)) return true;
+                        eval_candidate = false;
+                        previous_token_kind = tok.TOK_TEMPLATE;
+                        continue;
+                    }
+                    if ((kind == @as(tok.TokenKind, @intCast('/')) or kind == tok.TOK_DIV_ASSIGN) and
+                        (skipRegexpInPredeclareScan(s, previous_token_kind) catch false))
+                    {
+                        eval_candidate = false;
+                        previous_token_kind = tok.TOK_REGEXP;
+                        continue;
+                    }
+                    if (eval_candidate and kind == @as(tok.TokenKind, @intCast('('))) return true;
+                    if (kind == tok.TOK_IDENT and
+                        !scan_token.payload.ident.has_escape and
+                        atomNameEquals(s, scan_token.payload.ident.atom, "eval") and
+                        previous_token_kind != @as(tok.TokenKind, @intCast('.')))
+                    {
+                        eval_candidate = true;
+                    } else {
+                        eval_candidate = false;
+                    }
+
+                    switch (kind) {
+                        '{', '(', '[' => expr_depth += 1,
+                        '}', ')', ']' => {
+                            if (kind == '}' and expr_depth == 0) break;
+                            if (expr_depth == 0) return false;
+                            expr_depth -= 1;
+                        },
+                        else => {},
+                    }
+                    previous_token_kind = kind;
+                }
+
+                var next_part = s.lex.nextTemplatePartAfterBrace() catch return false;
+                defer s.lex.freeToken(&next_part);
+                const part = next_part.payload.str.template orelse return false;
+                switch (part) {
+                    .tail, .no_substitution => return false,
+                    .head, .middle => {},
+                }
+            }
+        }
+
         /// Check if the current token is an identifier with the given name
         fn isIdent(s: *State, name: []const u8) bool {
             if (s.peekKind() != tok.TOK_IDENT) return false;
@@ -6324,9 +6521,7 @@ pub const parser_core = struct {
                         self.in_parameter_initializer and
                         current.has_parameter_expressions and
                         current.func_type != .arrow and
-                        current.func_type != .class_static_init and
-                        (current.arguments_arg_idx >= 0 or
-                            (current.arguments_var_idx < 0 and current.findVar(atom_id) >= 0));
+                        current.func_type != .class_static_init;
                     if (needs_parameter_arguments_cell) {
                         try ensureParameterArgumentsLocals(current);
                     } else {
@@ -6376,6 +6571,35 @@ pub const parser_core = struct {
             while (parent_index > 0) {
                 parent_index -= 1;
                 const parent = self.funcAtVirtualIndex(parent_index);
+                // An arrow created in a parameter initializer sees the
+                // parameter environment before the function body's var
+                // environment.  In particular, a later `var arguments`
+                // must not make the arrow capture the body's pseudo/local
+                // binding instead of the parameter-environment arguments
+                // cell.  Check this before the ordinary visible-scope walk;
+                // that walk quite correctly finds the body var, but it is
+                // the wrong environment for this restricted child.
+                if (atom_id == atom_module.ids.arguments and
+                    parameter_environment_only and
+                    parent.has_parameter_expressions and
+                    parent.func_type != .arrow and
+                    parent.func_type != .class_static_init)
+                {
+                    try ensureParameterArgumentsLocals(parent);
+                    const parameter_arguments_idx = if (parent.hasExplicitArgumentsVar())
+                        parent.arguments_arg_idx
+                    else
+                        parent.arguments_var_idx;
+                    try self.ensureClosureChain(parent_index, .{
+                        .closure_type = .local,
+                        .is_lexical = parent.vars[@intCast(parameter_arguments_idx)].is_lexical,
+                        .is_const = false,
+                        .var_kind = parent.vars[@intCast(parameter_arguments_idx)].var_kind,
+                        .var_idx = @intCast(parameter_arguments_idx),
+                        .var_name = atom_id,
+                    });
+                    return;
+                }
                 if (try self.findVisibleParentVarCapturingWith(parent_index, parent, atom_id, visible_scope_level)) |parent_var| {
                     try self.ensureClosureChain(parent_index, .{
                         .closure_type = .local,
@@ -6404,17 +6628,19 @@ pub const parser_core = struct {
                         parameter_environment_only and
                         parent.has_parameter_expressions and
                         parent.func_type != .arrow and
-                        parent.func_type != .class_static_init and
-                        (parent.arguments_arg_idx >= 0 or
-                            (parent.arguments_var_idx < 0 and parent.findVar(atom_id) >= 0));
+                        parent.func_type != .class_static_init;
                     if (needs_parameter_arguments_cell) {
                         try ensureParameterArgumentsLocals(parent);
+                        const parameter_arguments_idx = if (parent.hasExplicitArgumentsVar())
+                            parent.arguments_arg_idx
+                        else
+                            parent.arguments_var_idx;
                         try self.ensureClosureChain(parent_index, .{
                             .closure_type = .local,
-                            .is_lexical = true,
+                            .is_lexical = parent.vars[@intCast(parameter_arguments_idx)].is_lexical,
                             .is_const = false,
-                            .var_kind = .normal,
-                            .var_idx = @intCast(parent.arguments_arg_idx),
+                            .var_kind = parent.vars[@intCast(parameter_arguments_idx)].var_kind,
+                            .var_idx = @intCast(parameter_arguments_idx),
                             .var_name = atom_id,
                         });
                         return;
@@ -7421,6 +7647,28 @@ pub const parser_core = struct {
         var lvalue = try getLValue(s, !is_plain_assign);
         defer lvalue.deinit(s);
 
+        if (lvalue.invalid_call and logical_assign != null) {
+            // Annex B does not extend runtime errors to logical assignment
+            // targets; these remain early SyntaxErrors.
+            return Error.InvalidAssignmentTarget;
+        }
+
+        if (lvalue.invalid_call) {
+            // Runtime-error CallExpression targets evaluate the call, then
+            // throw before evaluating the RHS. Parse the RHS into an
+            // unreachable, stack-balanced tail so syntax and nested parser
+            // state remain identical to an ordinary assignment.
+            var invalid_target_label: Label = .{};
+            try Emitter.newLabel(s, &invalid_target_label);
+            try Emitter.jump(s, opcode.op.goto, &invalid_target_label);
+            const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
+            try parseAssignExpr2(s, rhs_flags);
+            try Emitter.opNoSource(s, opcode.op.drop);
+            try Emitter.bind(s, &invalid_target_label);
+            try emitInvalidAssignmentTarget(s);
+            return;
+        }
+
         if (logical_assign) |kind| {
             try emitLogicalAssignLValue(s, flags, &lvalue, kind, direct_lhs_atom);
             return;
@@ -7549,6 +7797,7 @@ pub const parser_core = struct {
         /// travels as a LabelId; put binds it (qjs put_lvalue emit_label).
         v2_ref_label: ?compiler_v2.LabelId = null,
         depth: u8,
+        invalid_call: bool = false,
 
         fn deinit(self: *LValue, s: *State) void {
             if (self.owns_name) {
@@ -7557,6 +7806,33 @@ pub const parser_core = struct {
             }
         }
     };
+
+    fn isRuntimeInvalidCallOpcode(op_id: u8) bool {
+        return switch (op_id) {
+            opcode.op.call,
+            opcode.op.call_method,
+            opcode.op.apply,
+            opcode.op.eval,
+            opcode.op.apply_eval,
+            => true,
+            else => false,
+        };
+    }
+
+    /// Drop the evaluated CallExpression target and throw the Annex-B
+    /// runtime ReferenceError. Spoken through `Emitter` so both backends
+    /// materialize it: the legacy stream keeps the exact two calls it made
+    /// before, and a v2 parse routes them into the Builder instead of
+    /// silently appending to the unconsumed legacy buffer.
+    fn emitInvalidAssignmentTarget(s: *State) Error!void {
+        try Emitter.opNoSource(s, opcode.op.drop);
+        try Emitter.opAtomU8(
+            s,
+            opcode.op.throw_error,
+            atom_module.null_atom,
+            opcode.throw_error_invalid_assignment_target,
+        );
+    }
 
     const PutLValueMode = enum {
         no_keep,
@@ -7658,6 +7934,16 @@ pub const parser_core = struct {
         if (pos >= code.len) return Error.InvalidAssignmentTarget;
         const op_id = code[pos];
 
+        if (!s.is_strict and !fd.is_strict_mode and isRuntimeInvalidCallOpcode(op_id)) {
+            const call_size = opcode.sizeOfPhase1(op_id);
+            if (call_size == 0 or pos + call_size != code.len) return Error.InvalidAssignmentTarget;
+            return .{
+                .opcode = .scope_var,
+                .depth = 1,
+                .invalid_call = true,
+            };
+        }
+
         var lvalue: LValue = undefined;
         var getter_size: usize = 0;
         var replacement_size: usize = 0;
@@ -7679,8 +7965,33 @@ pub const parser_core = struct {
                 // Any topology allocation must happen while the original
                 // getter and its atom retain are still fully observable.
                 try s.ensureClosureVar(name);
-                const with_scope = hasWithScopeFrom(fd, scope);
-                replacement_size = if (with_scope) 11 + @as(usize, @intFromBool(keep)) else if (keep) getter_size else 0;
+                // A sloppy assignment must retain the binding selected while
+                // evaluating its LHS. A later direct eval may insert a var
+                // binding before the RHS finishes, so a plain scope_put_var
+                // would resolve a different binding at store time. Emit the
+                // existing scope_make_ref form for sloppy scope targets;
+                // resolve_variables folds static references back to direct
+                // local/closure/global stores when no dynamic environment is
+                // present. Strict code has no dynamic var environment.
+                var has_current_binding = State.hasVisibleCurrentBinding(fd, name, @intCast(scope));
+                if (!has_current_binding) {
+                    for (fd.global_vars) |global_var| {
+                        if (global_var.var_name == name) {
+                            has_current_binding = true;
+                            break;
+                        }
+                    }
+                }
+                const with_scope = hasWithScopeFrom(fd, @intCast(scope));
+                const needs_reference = with_scope or
+                    (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
+                        !has_current_binding and State.rhsContainsDirectEval(s));
+                replacement_size = if (needs_reference)
+                    11 + @as(usize, @intFromBool(keep))
+                else if (keep)
+                    getter_size
+                else
+                    0;
                 try s.reserveEmission(replacement_size -| getter_size, 0);
 
                 const owned_name = s.takeLastAtomOperand() catch unreachable;
@@ -7692,7 +8003,7 @@ pub const parser_core = struct {
                     .owns_name = true,
                     .depth = 0,
                 };
-                if (with_scope) {
+                if (needs_reference) {
                     lvalue.opcode = .ref_value;
                     lvalue.depth = 2;
                     lvalue.label_offset = emitScopeMakeRefForLValueAssumeCapacity(s, owned_name, scope);
@@ -7805,6 +8116,20 @@ pub const parser_core = struct {
         const op_id = v2b.code[pos];
         const fd = s.cur_func();
 
+        // Annex-B runtime-error CallExpression target, same classification the
+        // legacy twin runs: the call opcode must be the whole tail. The v2
+        // temp stream uses the phase-1 encodings, so the size table applies
+        // unchanged.
+        if (!s.is_strict and !fd.is_strict_mode and isRuntimeInvalidCallOpcode(op_id)) {
+            const call_size = opcode.sizeOfPhase1(op_id);
+            if (call_size == 0 or pos + call_size != v2b.code_len) return Error.InvalidAssignmentTarget;
+            return .{
+                .opcode = .scope_var,
+                .depth = 1,
+                .invalid_call = true,
+            };
+        }
+
         var lvalue: LValue = undefined;
         var lvalue_initialized = false;
         errdefer if (lvalue_initialized) lvalue.deinit(s);
@@ -7825,7 +8150,25 @@ pub const parser_core = struct {
                     return Error.UnexpectedToken;
                 }
                 try s.ensureClosureVar(name);
+                // Same reference-form selection as the legacy twin: a sloppy
+                // assignment whose RHS can run a direct eval must keep the
+                // binding it selected while evaluating the LHS, because the
+                // eval may insert a same-named var before the store happens.
+                // `resolve_variables` folds the reference back to a direct
+                // store when no dynamic environment is present.
+                var has_current_binding = State.hasVisibleCurrentBinding(fd, name, @intCast(scope));
+                if (!has_current_binding) {
+                    for (fd.global_vars) |global_var| {
+                        if (global_var.var_name == name) {
+                            has_current_binding = true;
+                            break;
+                        }
+                    }
+                }
                 const with_scope = hasWithScopeFrom(fd, scope);
+                const needs_reference = with_scope or
+                    (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
+                        !has_current_binding and State.rhsContainsDirectEval(s));
                 const owned_name = try v2FTakeLastAtomOwned(s);
                 v2b.truncateLastMarkedOpcode(pos) catch |err| return v2MapBuilderError(err);
                 lvalue = .{
@@ -7836,7 +8179,7 @@ pub const parser_core = struct {
                     .depth = 0,
                 };
                 lvalue_initialized = true;
-                if (with_scope) {
+                if (needs_reference) {
                     lvalue.opcode = .ref_value;
                     lvalue.depth = 2;
                     // qjs get_lvalue (quickjs.c:26000-26006): scope_make_ref carries the label
@@ -7906,6 +8249,11 @@ pub const parser_core = struct {
 
     /// QuickJS `put_lvalue`, including the five stack-preservation modes.
     fn putLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
+        // Backend-independent fail-closed check: a runtime-invalid
+        // CallExpression target never has a store form, so no caller may
+        // reach `put_lvalue` with one. Ahead of the backend split so both
+        // emitters are covered by the one assertion.
+        if (lvalue.invalid_call) return Error.InvalidAssignmentTarget;
         if (v2_available and s.emit_v2) return v2PutLValue(s, lvalue, mode);
         const shuffle_op: ?u8 = switch (lvalue.opcode) {
             .scope_var => switch (mode) {
@@ -8140,75 +8488,6 @@ pub const parser_core = struct {
             if (a.var_name == atom_id) return true;
         }
         return false;
-    }
-
-    fn evalDeleteBindingIsConfigurable(is_lexical: bool, var_kind: function_def_mod.VarKind) bool {
-        return !is_lexical or var_kind == .function_decl;
-    }
-
-    fn evalClosureBindingIsConfigurable(s: *State, owner_index: usize, cv: function_def_mod.ClosureVar) bool {
-        const owner = s.funcAtVirtualIndex(owner_index);
-        switch (cv.closureType()) {
-            .local => {
-                if (owner_index == 0) return s.eval_delete_bindings and evalDeleteBindingIsConfigurable(cv.isLexical(), cv.varKind());
-                const parent = s.funcAtVirtualIndex(owner_index - 1);
-                if (cv.var_idx >= parent.vars.len) return false;
-                const v = parent.vars[cv.var_idx];
-                return parent.is_eval and evalDeleteBindingIsConfigurable(v.is_lexical, v.var_kind);
-            },
-            .ref => {
-                if (owner_index == 0) return false;
-                const parent = s.funcAtVirtualIndex(owner_index - 1);
-                if (cv.var_idx >= parent.closure_var.len) return false;
-                return evalClosureBindingIsConfigurable(s, owner_index - 1, parent.closure_var[cv.var_idx]);
-            },
-            // `.module_decl` belongs in the configurable group: an eval top-level
-            // function declaration is recorded as a `.module_decl` (is_lexical,
-            // var_kind=.function_decl), and `delete x` on it must return true
-            // (configurable) per non-strict eval semantics. Genuine ES-module
-            // top-level decls never reach here (modules are always strict, and
-            // owner.is_eval is false). Matches ours/322af2f.
-            .global_decl, .global, .global_ref, .module_decl => {
-                return (owner.is_eval or s.eval_delete_bindings) and evalDeleteBindingIsConfigurable(cv.isLexical(), cv.varKind());
-            },
-            .arg, .module_import => return false,
-        }
-    }
-
-    fn hasEvalNonLexicalBinding(s: *State, atom_id: Atom) bool {
-        if (!s.eval_delete_bindings) return false;
-        if (s.is_eval) {
-            for (s.cur_func().vars) |v| {
-                if (v.var_name == atom_id) return evalDeleteBindingIsConfigurable(v.is_lexical, v.var_kind);
-            }
-            // Top-level eval declarations live in GlobalVar until
-            // add_global_variables/finalization. Deletion is parsed before
-            // that carrier exists, so consult the declaration record itself
-            // instead of depending on the retired parser closure placeholder.
-            for (s.cur_func().global_vars) |gv| {
-                if (gv.var_name == atom_id) return !gv.is_lexical;
-            }
-            for (s.cur_func().closure_var) |cv| {
-                if (cv.var_name == atom_id) return evalClosureBindingIsConfigurable(s, s.cur_func_stack.len, cv);
-            }
-            return false;
-        }
-        if (hasCurrentFunctionBinding(s, atom_id)) return false;
-        for (s.cur_func().closure_var) |cv| {
-            if (cv.var_name == atom_id) return evalClosureBindingIsConfigurable(s, s.cur_func_stack.len, cv);
-        }
-        return false;
-    }
-
-    fn shouldSnapshotStrictUnresolvedAssignment(s: *State, atom_id: Atom) bool {
-        if (!(s.is_strict or s.cur_func().is_strict_mode)) return false;
-        if (hasKnownBinding(s, atom_id)) return false;
-        if (hasEvalNonLexicalBinding(s, atom_id)) return false;
-        return true;
-    }
-
-    fn hasCurrentFunctionBinding(s: *State, atom_id: Atom) bool {
-        return s.cur_func().findVar(atom_id) >= 0 or s.cur_func().findArg(atom_id) >= 0;
     }
 
     fn argumentsIdentifierIsForbidden(s: *State) bool {
@@ -8571,6 +8850,10 @@ pub const parser_core = struct {
             try parseUnary(s, .{ .in_accepted = flags.in_accepted });
             var lvalue = try getLValue(s, true);
             defer lvalue.deinit(s);
+            if (lvalue.invalid_call) {
+                try emitInvalidAssignmentTarget(s);
+                return;
+            }
             if (v2_available and s.emit_v2) {
                 // qjs js_parse_unary (quickjs.c:27648-27649): prefix update is
                 // pinned to the operator's source event.
@@ -9635,6 +9918,11 @@ pub const parser_core = struct {
         const update_op: u8 = if (k == tok.TOK_INC) opcode.op.post_inc else opcode.op.post_dec;
         try s.advance(); // consume `++` or `--`
 
+        if (lvalue.invalid_call) {
+            try emitInvalidAssignmentTarget(s);
+            return;
+        }
+
         if (v2_available and s.emit_v2) {
             // qjs js_parse_unary postfix arm (quickjs.c:27700-27702): postfix
             // update is pinned to the operator's source event.
@@ -10103,6 +10391,11 @@ pub const parser_core = struct {
             try s.advance();
             try emitPreparedCall(s, prepared, .{ .direct = 1 }, call_line, call_col);
             s.last_anonymous_function_expr = false;
+            // A tagged template is a CallExpression TemplateLiteral, not a
+            // bare CallExpression assignment target. Keep the emitted call
+            // from being mistaken for the latter by getLValue; a subsequent
+            // member/call suffix will publish its own final opcode.
+            s.invalidateLastOpcode();
             return;
         }
 
@@ -10133,6 +10426,7 @@ pub const parser_core = struct {
         if (template_builder) |*builder| try builder.finish();
         try emitPreparedCall(s, prepared, .{ .direct = argc }, call_line, call_col);
         s.last_anonymous_function_expr = false;
+        s.invalidateLastOpcode();
     }
 
     /// Result of parsing a `(...)` argument list. When the list contains a
@@ -15661,6 +15955,7 @@ pub const parser_core = struct {
         var target_using_kind: DisposalHint = .sync;
         var target_var_initializer_atom: ?Atom = null;
         var iteration_using_value_loc: ?u16 = null;
+        var invalid_assignment_target = false;
 
         var pushed_for_scope = false;
         errdefer if (pushed_for_scope) s.popScopeIdentity();
@@ -15810,7 +16105,26 @@ pub const parser_core = struct {
                 try parseLhsExpr(s, .{ .in_accepted = false });
                 var lvalue = try getLValue(s, false);
                 defer lvalue.deinit(s);
-                try putLValue(s, &lvalue, .no_keep_bottom);
+                if (lvalue.invalid_call) {
+                    // The initial jump normally skips the target until the
+                    // iterator has produced a value. A runtime-invalid call
+                    // target is different: evaluate the call immediately,
+                    // then throw before touching the RHS iterable.
+                    invalid_assignment_target = true;
+                    if (v2_available and s.emit_v2) {
+                        // V2 never rewrites a jump's PC. The entry goto and
+                        // the target block are now ONE program point, so the
+                        // pending reference moves onto the identity that
+                        // already denotes it (`retargetLabelRefs`), which is
+                        // exactly what `patchJumpTarget` writes below.
+                        try v2FRetargetLabel(s, v2_expr_label, v2_assign_label);
+                    } else {
+                        try patchJumpTarget(s, expression_jump_offset, assignment_pc);
+                    }
+                    try emitInvalidAssignmentTarget(s);
+                } else {
+                    try putLValue(s, &lvalue, .no_keep_bottom);
+                }
             }
         }
 
@@ -15819,10 +16133,13 @@ pub const parser_core = struct {
         if (v2_available and s.emit_v2) {
             v2_body_label = try v2FNewLabel(s);
             try v2FEmitJump(s, opcode.op.goto, v2_body_label);
-            try v2FBindLabel(s, v2_expr_label);
+            // An invalid call target already consumed `v2_expr_label` by
+            // retargeting it onto the assignment boundary (which also bound
+            // it); binding it again would be a double bind.
+            if (!invalid_assignment_target) try v2FBindLabel(s, v2_expr_label);
         } else {
             body_jump_offset = try emitForwardJump(s, opcode.op.goto);
-            try patchForwardJump(s, expression_jump_offset);
+            if (!invalid_assignment_target) try patchForwardJump(s, expression_jump_offset);
         }
 
         // Annex-B legacy initializer: only sloppy non-lexical simple
@@ -16733,8 +17050,21 @@ pub const parser_core = struct {
                     // consults it so Annex B B.3.3 block functions skip hoisting when a
                     // top-level lexical collides. Required since
                     // top_level_lexical_as_global_ref moves these out of scope vars.
-                    const visible_lexical_blocking_annex_b =
-                        s.visibleLexicalScopeVar(name) != null or s.findLexicalGlobalVar(name);
+                    // A pair of Annex-B single-statement functions in one
+                    // IfStatement shares the wrapper scope above.  The first
+                    // declaration is therefore visible here as a lexical
+                    // function binding, but it is not the lexical binding
+                    // that B.3.3 must protect: the second branch is the
+                    // permitted same-scope function redefinition.  A
+                    // function declaration from an enclosing scope, and all
+                    // ordinary lexical declarations, still block the Annex-B
+                    // var copy.
+                    const visible_lexical_blocking_annex_b = blk: {
+                        const visible_idx = s.visibleLexicalScopeVar(name) orelse break :blk false;
+                        const visible = parent_fd.vars[visible_idx];
+                        break :blk visible.scope_level != parent_fd.scope_level or
+                            visible.var_kind != .function_decl;
+                    } or s.findLexicalGlobalVar(name);
                     const function_body_scope = parent_fd.body_scope;
                     const is_block_level_function_decl = parent_fd.scope_level > function_body_scope;
                     // QuickJS records a block function's cpool index on its

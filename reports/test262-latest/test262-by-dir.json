@@ -1,6 +1,6 @@
 [
   { "dir": "annexB/built-ins", "passed": 241, "failed": 0, "known_failed": 0 },
-  { "dir": "annexB/language", "passed": 838, "failed": 0, "known_failed": 7 },
+  { "dir": "annexB/language", "passed": 845, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/AggregateError", "passed": 25, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/Array", "passed": 3081, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/ArrayBuffer", "passed": 221, "failed": 0, "known_failed": 0 },
@@ -187,11 +187,11 @@
   { "dir": "language/directive-prologue", "passed": 62, "failed": 0, "known_failed": 0 },
   { "dir": "language/eval-code", "passed": 347, "failed": 0, "known_failed": 0 },
   { "dir": "language/export", "passed": 3, "failed": 0, "known_failed": 0 },
-  { "dir": "language/expressions", "passed": 10652, "failed": 0, "known_failed": 14 },
+  { "dir": "language/expressions", "passed": 10666, "failed": 0, "known_failed": 0 },
   { "dir": "language/function-code", "passed": 217, "failed": 0, "known_failed": 0 },
   { "dir": "language/future-reserved-words", "passed": 55, "failed": 0, "known_failed": 0 },
   { "dir": "language/global-code", "passed": 42, "failed": 0, "known_failed": 0 },
-  { "dir": "language/identifier-resolution", "passed": 13, "failed": 0, "known_failed": 1 },
+  { "dir": "language/identifier-resolution", "passed": 14, "failed": 0, "known_failed": 0 },
   { "dir": "language/identifiers", "passed": 268, "failed": 0, "known_failed": 0 },
   { "dir": "language/import", "passed": 26, "failed": 0, "known_failed": 0 },
   { "dir": "language/keywords", "passed": 25, "failed": 0, "known_failed": 0 },
@@ -213,6 +213,6 @@
   { "dir": "staging/set-is-subset-table-receiver-cleared.js", "passed": 1, "failed": 0, "known_failed": 0 },
   { "dir": "staging/set-is-subset-table-transition.js", "passed": 1, "failed": 0, "known_failed": 0 },
   { "dir": "staging/set-methods", "passed": 3, "failed": 0, "known_failed": 0 },
-  { "dir": "staging/sm", "passed": 1226, "failed": 0, "known_failed": 3 },
+  { "dir": "staging/sm", "passed": 1244, "failed": 0, "known_failed": 0 },
   { "dir": "staging/top-level-await", "passed": 1, "failed": 0, "known_failed": 0 }
 ]
