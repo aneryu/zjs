@@ -713,10 +713,11 @@ pub fn canonicalIdentityAtOffset(binds: []const BindEntry, input_offset: u32) ?u
     return binds[first].label_index;
 }
 
-pub const TempInstruction = struct {
+pub const TempInstruction = packed struct(u16) {
     size: u8,
     is_temp: bool = false,
     has_atom: bool = false,
+    reserved: u6 = 0,
 };
 
 fn tempAtomInstructionSize(op_id: u8) ?u8 {
@@ -739,29 +740,113 @@ fn tempAtomInstructionSize(op_id: u8) ?u8 {
     };
 }
 
-fn instructionHasAtom(op_id: u8, is_temp: bool) bool {
-    if (is_temp) return switch (op_id) {
-        op.scope_get_var_undef,
-        op.scope_get_var,
-        op.scope_put_var,
-        op.scope_delete_var,
-        op.scope_make_ref,
-        op.scope_get_ref,
-        op.scope_put_var_init,
-        op.scope_get_var_checkthis,
-        op.scope_get_private_field,
-        op.scope_get_private_field2,
-        op.scope_put_private_field,
-        op.scope_in_private_field,
-        op.get_field_opt_chain,
-        => true,
-        else => false,
-    };
-
-    return switch (opcode.formatOf(op_id)) {
+fn formatHasAtom(format: opcode.Format) bool {
+    return switch (format) {
         .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
         else => false,
     };
+}
+
+const TempDecodeKind = enum(u2) {
+    final,
+    forced_temp,
+    atom_candidate,
+    invalid,
+};
+
+/// Compact QuickJS-style opcode metadata for the mixed Builder stream.  The
+/// overlap range needs one extra state beyond QuickJS's phase-1 table because
+/// v2 can already contain selected final short opcodes there; an atom-ledger
+/// match disambiguates those ids from the temporary scope family.
+const TempDecodeInfo = packed struct(u32) {
+    fallback_size: u8,
+    temp_size: u8,
+    fallback_has_atom: bool,
+    temp_has_atom: bool,
+    kind: TempDecodeKind,
+    reserved: u12 = 0,
+};
+
+const temp_decode_info: [256]TempDecodeInfo = blk: {
+    @setEvalBranchQuota(10_000);
+    var table: [256]TempDecodeInfo = undefined;
+    for (&table, 0..) |*row, index| {
+        const op_id: u8 = @intCast(index);
+        row.* = .{
+            .fallback_size = opcode.sizeOf(op_id),
+            .temp_size = 0,
+            .fallback_has_atom = formatHasAtom(opcode.formatOf(op_id)),
+            .temp_has_atom = false,
+            .kind = .final,
+        };
+        if (tempAtomInstructionSize(op_id)) |temp_size| {
+            row.temp_size = temp_size;
+            row.temp_has_atom = true;
+            row.kind = .atom_candidate;
+        } else switch (op_id) {
+            // Labels and source positions are side-table entities in v2.
+            op.label, op.line_num => row.kind = .invalid,
+            op.enter_scope,
+            op.leave_scope,
+            op.get_array_el_opt_chain,
+            op.set_class_name,
+            => {
+                row.temp_size = opcode.sizeOfPhase1(op_id);
+                row.kind = .forced_temp;
+            },
+            else => {},
+        }
+    }
+    break :blk table;
+};
+
+/// Production compiler-v2 consumes a parser phase-1 Builder, not an arbitrary
+/// final bytecode stream.  QuickJS relies on the same phase boundary: ids in
+/// the temporary-opcode range name temporary instructions until
+/// `resolve_variables` removes them, and short opcodes are introduced only by
+/// `resolve_labels`.  Keeping that invariant explicit avoids treating every
+/// scope opcode as a possible final short opcode and then rereading its atom
+/// operand to disambiguate it.
+const Phase1DecodeInfo = packed struct(u16) {
+    size: u8,
+    has_atom: bool,
+    is_temp: bool,
+    reserved: u6 = 0,
+};
+
+const phase1_decode_info: [256]Phase1DecodeInfo = blk: {
+    @setEvalBranchQuota(10_000);
+    var table: [256]Phase1DecodeInfo = undefined;
+    for (&table, 0..) |*row, index| {
+        const op_id: u8 = @intCast(index);
+        const final_size = opcode.sizeOf(op_id);
+        row.* = .{
+            .size = final_size,
+            .has_atom = formatHasAtom(opcode.formatOf(op_id)),
+            .is_temp = false,
+        };
+        if (op_id >= op.op_temp_start and op_id < op.op_temp_end) {
+            row.* = switch (op_id) {
+                // Labels and source positions are side-table entities in v2.
+                op.label, op.line_num => .{
+                    .size = 0,
+                    .has_atom = false,
+                    .is_temp = true,
+                },
+                else => .{
+                    .size = opcode.sizeOfPhase1(op_id),
+                    .has_atom = formatHasAtom(opcode.formatOfPhase1(op_id)),
+                    .is_temp = true,
+                },
+            };
+        }
+    }
+    break :blk table;
+};
+
+fn instructionHasAtom(op_id: u8, is_temp: bool) bool {
+    const info = temp_decode_info[op_id];
+    return if (is_temp) info.temp_has_atom else info.fallback_has_atom;
 }
 
 /// Shared phase-aware decoder for the compact v2 temporary stream. The atom
@@ -776,34 +861,72 @@ pub fn tempInstruction(
     const pc_index: usize = @intCast(pc);
     if (pc_index >= code.len) return error.InvalidBytecode;
     const op_id = code[pc_index];
+    const info = temp_decode_info[op_id];
 
-    if (tempAtomInstructionSize(op_id)) |temp_size| {
-        const end = std.math.add(usize, pc_index, temp_size) catch
+    if (info.kind == .atom_candidate) {
+        const end = std.math.add(usize, pc_index, info.temp_size) catch
             return error.InvalidBytecode;
         if (end <= code.len and atom_index < atoms_ledger.len) {
             const operand = std.mem.readInt(u32, code[pc_index + 1 ..][0..4], .little);
             if (operand == atoms_ledger[atom_index]) {
-                return .{ .size = temp_size, .is_temp = true, .has_atom = true };
+                return .{
+                    .size = info.temp_size,
+                    .is_temp = true,
+                    .has_atom = info.temp_has_atom,
+                };
             }
         }
     }
 
-    var instruction: TempInstruction = switch (op_id) {
-        // v2 labels and source positions are side-table entities.
-        op.label, op.line_num => return error.InvalidBytecode,
-        op.enter_scope,
-        op.leave_scope,
-        op.get_array_el_opt_chain,
-        op.set_class_name,
-        => .{ .size = opcode.sizeOfPhase1(op_id), .is_temp = true },
-        else => .{ .size = opcode.sizeOf(op_id) },
+    const instruction: TempInstruction = switch (info.kind) {
+        .invalid => return error.InvalidBytecode,
+        .forced_temp => .{
+            .size = info.temp_size,
+            .is_temp = true,
+            .has_atom = info.temp_has_atom,
+        },
+        .final, .atom_candidate => .{
+            .size = info.fallback_size,
+            .has_atom = info.fallback_has_atom,
+        },
     };
     if (instruction.size == 0) return error.InvalidBytecode;
     const end = std.math.add(usize, pc_index, instruction.size) catch
         return error.InvalidBytecode;
     if (end > code.len) return error.InvalidBytecode;
-    instruction.has_atom = instructionHasAtom(op_id, instruction.is_temp);
     return instruction;
+}
+
+/// Decode and validate one instruction from the parser-owned phase-1 Builder.
+/// Unlike `tempInstruction`, this entry does not accept overlapping final
+/// short opcodes in the temporary id range.  The atom comparison both proves
+/// that the phase-1 interpretation is valid and authorizes the resolver to
+/// consume the matching ledger entry without checking the same operand again.
+pub inline fn phase1Instruction(
+    code: []const u8,
+    atoms_ledger: []const core.atom.Atom,
+    pc: u32,
+    atom_index: u32,
+) Error!TempInstruction {
+    const pc_index: usize = @intCast(pc);
+    if (pc_index >= code.len) return error.InvalidBytecode;
+    const info = phase1_decode_info[code[pc_index]];
+    // A zero width is the invalid-opcode sentinel.  `valid` used to encode
+    // exactly the same predicate, so checking both spent another branch per
+    // instruction without proving anything additional.
+    if (info.size == 0 or info.size > code.len - pc_index)
+        return error.InvalidBytecode;
+    if (info.has_atom) {
+        if (info.size < 5 or atom_index >= atoms_ledger.len)
+            return error.InvalidBytecode;
+        const operand = std.mem.readInt(u32, code[pc_index + 1 ..][0..4], .little);
+        if (operand != atoms_ledger[atom_index]) return error.InvalidBytecode;
+    }
+    return .{
+        .size = info.size,
+        .is_temp = info.is_temp,
+        .has_atom = info.has_atom,
+    };
 }
 
 pub fn isUnconditionalTerminal(op_id: u8) bool {
@@ -920,6 +1043,9 @@ pub const Graph = struct {
     edge_storage: []usize = &.{},
     edge_len: usize = 0,
     reachable_words: []usize = &.{},
+    /// Set by the mandatory construction walk. Consumers can avoid a second
+    /// full decode when no direct-eval instruction exists in the stream.
+    has_eval_instruction: bool = false,
 
     pub fn deinit(self: *Graph) void {
         self.memory.free(u32, self.block_starts);
@@ -931,6 +1057,7 @@ pub const Graph = struct {
         self.edge_storage = &.{};
         self.edge_len = 0;
         self.reachable_words = &.{};
+        self.has_eval_instruction = false;
     }
 
     pub fn edgesForBlock(self: *const Graph, block_index: usize) []const usize {
@@ -1011,6 +1138,228 @@ fn validateBindIndex(input: *const builder.Builder, binds: []const BindEntry) Er
     }
 }
 
+fn indexedControlKind(op_id: u8) ?builder.ControlKind {
+    if (op_id == op.eval or op_id == op.apply_eval) return .direct_eval;
+    if (op_id != op.goto and isUnconditionalTerminal(op_id)) return .terminal;
+    return null;
+}
+
+/// Debug/ReleaseSafe proof that the parser-maintained sparse index names
+/// exactly the non-reloc control events the legacy full decode would find.
+/// ReleaseFast can then consume the index without trusting untested metadata.
+fn validateControlIndex(input: *const builder.Builder) Error!void {
+    var pc: u32 = 0;
+    var atom_index: u32 = 0;
+    var control_index: u32 = 0;
+    while (pc < input.code_len) {
+        const instruction = try tempInstruction(
+            input.code[0..input.code_len],
+            input.atom_operands[0..input.atom_len],
+            pc,
+            atom_index,
+        );
+        try validateAndAdvanceAtom(input, pc, instruction, &atom_index);
+        if (indexedControlKind(input.code[pc])) |kind| {
+            if (control_index >= input.controlCount()) return error.InvalidBytecode;
+            const slot = input.controlAt(control_index);
+            if (slot.temp_offset != pc or slot.kind != kind)
+                return error.InvalidBytecode;
+            control_index += 1;
+        }
+        pc = std.math.add(u32, pc, instruction.size) catch
+            return error.InvalidBytecode;
+    }
+    if (pc != input.code_len or atom_index != input.atom_len or
+        control_index != input.controlCount())
+    {
+        return error.InvalidBytecode;
+    }
+}
+
+fn relocOpcodeOffset(
+    input: *const builder.Builder,
+    entry: labels.RelocEntry,
+) Error!u32 {
+    const delta: u32 = switch (entry.kind) {
+        .jump32 => 1,
+        .aux32 => 5,
+    };
+    if (entry.operand_offset < delta or
+        @as(u64, entry.operand_offset) + 4 > input.code_len)
+    {
+        return error.InvalidBytecode;
+    }
+    return entry.operand_offset - delta;
+}
+
+fn indexedRelocOpcodeValid(op_id: u8, kind: labels.RelocKind) bool {
+    return switch (kind) {
+        .jump32 => op_id == op.if_false or op_id == op.if_true or
+            op_id == op.goto or op_id == op.@"catch" or op_id == op.gosub,
+        .aux32 => op_id == op.scope_make_ref or switch (opcode.formatOf(op_id)) {
+            .atom_label_u8, .atom_label_u16 => true,
+            else => false,
+        },
+    };
+}
+
+/// Exact CFG from consumer-proportional side tables: bound labels partition
+/// blocks, RelocEntry rows provide explicit edges, and the sparse control
+/// index supplies only non-reloc terminals/direct-eval events. Ordinary
+/// instructions never need decoding here.
+fn buildFromControlIndex(
+    memory: *core.memory.MemoryAccount,
+    input: *const builder.Builder,
+    binds: []const BindEntry,
+) Error!Graph {
+    var block_count: usize = 1;
+    var last_start: u32 = 0;
+    for (binds) |entry| {
+        if (entry.input_offset != last_start) {
+            block_count = std.math.add(usize, block_count, 1) catch
+                return error.OutOfMemory;
+            last_start = entry.input_offset;
+        }
+    }
+    if (last_start != input.code_len) {
+        block_count = std.math.add(usize, block_count, 1) catch
+            return error.OutOfMemory;
+    }
+
+    var graph: Graph = .{ .memory = memory };
+    errdefer graph.deinit();
+    graph.block_starts = memory.alloc(u32, block_count) catch
+        return error.OutOfMemory;
+    graph.blocks = memory.alloc(Block, block_count) catch
+        return error.OutOfMemory;
+
+    var start_index: usize = 1;
+    graph.block_starts[0] = 0;
+    last_start = 0;
+    for (binds) |entry| {
+        if (entry.input_offset == last_start) continue;
+        graph.block_starts[start_index] = entry.input_offset;
+        start_index += 1;
+        last_start = entry.input_offset;
+    }
+    if (last_start != input.code_len) {
+        graph.block_starts[start_index] = input.code_len;
+        start_index += 1;
+    }
+    if (start_index != block_count or graph.block_starts[block_count - 1] != input.code_len)
+        return error.InvalidBytecode;
+
+    const edge_capacity = std.math.add(
+        usize,
+        @as(usize, input.reloc_len),
+        block_count - 1,
+    ) catch return error.OutOfMemory;
+    if (edge_capacity != 0) {
+        graph.edge_storage = memory.alloc(usize, edge_capacity) catch
+            return error.OutOfMemory;
+    }
+    const reachable_word_count = try bitWordCount(block_count);
+    graph.reachable_words = memory.alloc(usize, reachable_word_count) catch
+        return error.OutOfMemory;
+    @memset(graph.reachable_words, 0);
+
+    var reloc_index: u32 = 0;
+    var control_index: u32 = 0;
+    var previous_reloc_offset: ?u32 = null;
+    for (graph.blocks, 0..) |*block, block_index| {
+        const block_start = graph.block_starts[block_index];
+        const block_end = if (block_index + 1 < block_count)
+            graph.block_starts[block_index + 1]
+        else
+            input.code_len;
+        block.* = .{
+            .edge_start = graph.edge_len,
+            .edge_end = graph.edge_len,
+            .cutoff_offset = block_end,
+        };
+
+        while (true) {
+            const reloc_offset = if (reloc_index < input.reloc_len)
+                try relocOpcodeOffset(input, input.relocs[reloc_index])
+            else
+                std.math.maxInt(u32);
+            const control_offset: u32 = if (control_index < input.controlCount())
+                input.controlAt(control_index).temp_offset
+            else
+                std.math.maxInt(u32);
+            const event_offset = @min(reloc_offset, control_offset);
+            if (event_offset >= block_end) break;
+            if (event_offset < block_start or reloc_offset == control_offset)
+                return error.InvalidBytecode;
+
+            if (control_offset < reloc_offset) {
+                const control = input.controlAt(control_index);
+                switch (control.kind) {
+                    .direct_eval => graph.has_eval_instruction = true,
+                    .terminal => if (!block.has_terminal) {
+                        block.has_terminal = true;
+                        block.cutoff_offset = control_offset;
+                    },
+                }
+                control_index += 1;
+                continue;
+            }
+
+            const entry = input.relocs[reloc_index];
+            if (previous_reloc_offset) |previous| {
+                if (reloc_offset <= previous) return error.InvalidBytecode;
+            }
+            previous_reloc_offset = reloc_offset;
+            const op_id = input.code[reloc_offset];
+            if (!indexedRelocOpcodeValid(op_id, entry.kind))
+                return error.InvalidBytecode;
+            const operand_index: usize = @intCast(entry.operand_offset);
+            const label_index = std.mem.readInt(
+                u32,
+                input.code[operand_index..][0..4],
+                .little,
+            );
+            if (label_index >= input.label_len) return error.InvalidBytecode;
+            const target_offset = try labelTargetOffset(input, label_index);
+            const target_block = findBlockStart(graph.block_starts, target_offset) orelse
+                return error.InvalidBytecode;
+            if (!block.has_terminal and !isEmptyGosub(input, op_id, target_offset))
+                try appendEdge(&graph, target_block);
+            if (!block.has_terminal and op_id == op.goto) {
+                block.has_terminal = true;
+                block.cutoff_offset = reloc_offset;
+            }
+            reloc_index += 1;
+        }
+
+        if (!block.has_terminal and block_index + 1 < block_count)
+            try appendEdge(&graph, block_index + 1);
+        block.edge_end = graph.edge_len;
+    }
+    if (reloc_index != input.reloc_len or control_index != input.controlCount())
+        return error.InvalidBytecode;
+
+    const worklist = memory.alloc(usize, block_count) catch
+        return error.OutOfMemory;
+    defer memory.free(usize, worklist);
+    var worklist_len: usize = 1;
+    var worklist_index: usize = 0;
+    worklist[0] = 0;
+    setBit(graph.reachable_words, 0);
+    while (worklist_index < worklist_len) : (worklist_index += 1) {
+        const block_index = worklist[worklist_index];
+        for (graph.edgesForBlock(block_index)) |target_block| {
+            if (target_block >= block_count) return error.InvalidBytecode;
+            if (bitIsSet(graph.reachable_words, target_block)) continue;
+            if (worklist_len >= worklist.len) return error.InvalidBytecode;
+            setBit(graph.reachable_words, target_block);
+            worklist[worklist_len] = target_block;
+            worklist_len += 1;
+        }
+    }
+    return graph;
+}
+
 /// Build the exact block CFG once from the immutable Builder product.
 pub fn build(
     memory: *core.memory.MemoryAccount,
@@ -1025,6 +1374,10 @@ pub fn build(
         return error.InvalidBytecode;
     }
     try validateBindIndex(input, binds);
+    if (input.hasControlIndex()) {
+        if (comptime audit_oracles) try validateControlIndex(input);
+        return buildFromControlIndex(memory, input, binds);
+    }
 
     var block_count: usize = 1;
     var last_start: u32 = 0;
@@ -1108,6 +1461,8 @@ pub fn build(
             try validateAndAdvanceAtom(input, pc, instruction, &atom_index);
 
             const op_id = input.code[pc];
+            if (op_id == op.eval or op_id == op.apply_eval)
+                graph.has_eval_instruction = true;
             if (labelOperandOffset(op_id, instruction)) |operand_offset| {
                 if (label_reference_count == std.math.maxInt(u32))
                     return error.InvalidBytecode;

@@ -49,10 +49,12 @@ pub const ids = struct {
     pub const empty_string: Atom = 47;
     pub const length: Atom = 50;
     pub const name: Atom = 55;
+    pub const eval_: Atom = 59;
     pub const prototype: Atom = 60;
     pub const constructor: Atom = 61;
     pub const value: Atom = 65;
     pub const get: Atom = 66;
+    pub const of: Atom = 68;
     pub const done: Atom = 106;
     pub const undefined_: Atom = 70;
     // `typeof` result strings — predefined string atoms, so OP_typeof returns
@@ -72,12 +74,14 @@ pub const ids = struct {
     pub const arg_var_object: Atom = 84;
     pub const with_object: Atom = 85;
     pub const lastIndex: Atom = 86;
+    pub const target: Atom = 87;
     pub const source: Atom = 109;
     pub const rawJSON: Atom = 114;
     pub const new_target: Atom = 115;
     pub const this_active_func: Atom = 116;
     pub const home_object: Atom = 117;
     pub const class_fields_init: Atom = 120;
+    pub const async_: Atom = 136;
     pub const toJSON: Atom = 147;
     pub const Object: Atom = 151;
     pub const Array: Atom = 152;
@@ -800,10 +804,6 @@ fn makePredefinedMapEntries(comptime kind: AtomKind) [predefinedKindCount(kind)]
     return entries;
 }
 
-const predefined_string_map = blk: {
-    @setEvalBranchQuota(10000);
-    break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.string));
-};
 const predefined_symbol_map = blk: {
     @setEvalBranchQuota(10000);
     break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.symbol));
@@ -812,6 +812,41 @@ const predefined_private_map = blk: {
     @setEvalBranchQuota(10000);
     break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.private));
 };
+
+// QuickJS puts its predefined and dynamically-created atoms behind the same
+// hash lookup. Keep the immutable predefined half in static storage, but use
+// the same hash as `string_index`: a miss must not linearly compare every
+// predefined spelling of the same length before probing the dynamic table.
+// 640 string atoms in 2048 buckets leave the table at 31.25% load.
+const predefined_string_hash_capacity = 2048;
+const predefined_string_hash_mask = predefined_string_hash_capacity - 1;
+const predefined_string_hash_table = blk: {
+    @setEvalBranchQuota(100000);
+    var slots = [_]Atom{null_atom} ** predefined_string_hash_capacity;
+    for (predefined_atoms) |entry| {
+        if (entry.kind != .string) continue;
+        std.debug.assert(parseArrayIndex(entry.name) == null);
+        const hash = std.hash.Wyhash.hash(0, entry.name);
+        var index: usize = @intCast(hash & predefined_string_hash_mask);
+        while (slots[index] != null_atom) {
+            index = (index + 1) & predefined_string_hash_mask;
+        }
+        slots[index] = entry.id;
+    }
+    break :blk slots;
+};
+
+inline fn predefinedStringIdHashed(bytes: []const u8, hash: u64) ?Atom {
+    var index: usize = @intCast(hash & predefined_string_hash_mask);
+    var remaining: usize = predefined_string_hash_capacity;
+    while (remaining != 0) : (remaining -= 1) {
+        const id = predefined_string_hash_table[index];
+        if (id == null_atom) return null;
+        if (std.mem.eql(u8, predefined_atoms[id - 1].name, bytes)) return id;
+        index = (index + 1) & predefined_string_hash_mask;
+    }
+    unreachable;
+}
 
 pub const DynamicAtom = struct {
     id: Atom,
@@ -873,6 +908,22 @@ const InternContext = struct {
         return std.hash.Wyhash.hash(0, key.bytes);
     }
     pub fn eql(_: InternContext, a: InternKey, b: InternKey) bool {
+        return std.mem.eql(u8, a.bytes, b.bytes);
+    }
+};
+
+const HashedInternKey = struct {
+    bytes: []const u8,
+    hash: u64,
+};
+
+/// Adapted lookup for callers that already hashed the spelling while probing
+/// the predefined table. The stored key remains the compact slice-only form.
+const HashedInternContext = struct {
+    pub fn hash(_: HashedInternContext, key: HashedInternKey) u64 {
+        return key.hash;
+    }
+    pub fn eql(_: HashedInternContext, a: HashedInternKey, b: InternKey) bool {
         return std.mem.eql(u8, a.bytes, b.bytes);
     }
 };
@@ -1006,22 +1057,26 @@ pub const AtomTable = struct {
     }
 
     pub fn internString(self: *AtomTable, bytes: []const u8) !Atom {
-        if (predefinedId(bytes, .string)) |id| return id;
+        // Match JS_NewAtomLen's digit gate: integer atoms do not need a
+        // string hash at all. Non-integer spellings reuse one hash for both
+        // the predefined and dynamic atom tables.
         if (parseArrayIndex(bytes)) |n| return atomFromUInt32(n);
-        return self.internDynamic(bytes, .string, true, false, false);
+        const hash = std.hash.Wyhash.hash(0, bytes);
+        if (predefinedStringIdHashed(bytes, hash)) |id| return id;
+        return self.internDynamic(bytes, .string, true, false, false, hash);
     }
 
     pub fn newSymbol(self: *AtomTable, description: []const u8, atom_kind: AtomKind) !Atom {
         std.debug.assert(atom_kind == .symbol or atom_kind == .private);
-        return self.internDynamic(description, atom_kind, false, false, false);
+        return self.internDynamic(description, atom_kind, false, false, false, 0);
     }
 
     pub fn newValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internDynamic(description, .symbol, false, true, false);
+        return self.internDynamic(description, .symbol, false, true, false, 0);
     }
 
     pub fn newValueSymbolNoDescription(self: *AtomTable) !Atom {
-        return self.internDynamic("", .symbol, false, true, true);
+        return self.internDynamic("", .symbol, false, true, true, 0);
     }
 
     pub fn internSymbol(self: *AtomTable, description: []const u8) !Atom {
@@ -1029,17 +1084,19 @@ pub const AtomTable = struct {
     }
 
     pub fn internGlobalSymbol(self: *AtomTable, description: []const u8) !Atom {
-        if (self.symbol_index.get(.{ .bytes = description })) |idx| {
+        const hash = std.hash.Wyhash.hash(0, description);
+        if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = description, .hash = hash }, HashedInternContext{})) |idx| {
             const entry = &self.entries[idx];
             std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
             self.retainValueSymbolEntry(entry);
             return entry.id;
         }
-        return self.internDynamic(description, .global_symbol, true, false, false);
+        return self.internDynamic(description, .global_symbol, true, false, false, hash);
     }
 
     pub fn internRegisteredValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        if (self.symbol_index.get(.{ .bytes = description })) |idx| {
+        const hash = std.hash.Wyhash.hash(0, description);
+        if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = description, .hash = hash }, HashedInternContext{})) |idx| {
             const entry = &self.entries[idx];
             std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
             if (!entry.registry_managed_symbol) {
@@ -1048,7 +1105,7 @@ pub const AtomTable = struct {
             }
             return entry.id;
         }
-        const id = try self.internDynamic(description, .global_symbol, true, false, false);
+        const id = try self.internDynamic(description, .global_symbol, true, false, false, hash);
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
         return id;
@@ -1432,19 +1489,19 @@ pub const AtomTable = struct {
         return body;
     }
 
-    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool) !Atom {
+    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool, lookup_hash: u64) !Atom {
         // Fast path: interning lookup via hash map. The map is keyed by
         // bytes, indexed per-kind (string vs symbol/private) so a string
         // `"foo"` and a symbol description `"foo"` map to distinct atoms.
         if (atom_kind == .string) {
-            if (self.string_index.get(.{ .bytes = bytes })) |idx| {
+            if (self.string_index.getAdapted(HashedInternKey{ .bytes = bytes, .hash = lookup_hash }, HashedInternContext{})) |idx| {
                 const entry = &self.entries[idx];
                 std.debug.assert(entry.isLive() and entry.kind == .string);
                 entry.ref_count += 1;
                 return entry.id;
             }
         } else if (atom_kind == .global_symbol) {
-            if (self.symbol_index.get(.{ .bytes = bytes })) |idx| {
+            if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = bytes, .hash = lookup_hash }, HashedInternContext{})) |idx| {
                 const entry = &self.entries[idx];
                 std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
                 self.retainValueSymbolEntry(entry);
@@ -1652,9 +1709,9 @@ pub fn predefinedById(id: Atom) ?PredefinedAtom {
 }
 
 pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
-    @setEvalBranchQuota(10000);
+    @setEvalBranchQuota(100000);
     return switch (kind) {
-        .string => predefined_string_map.get(bytes),
+        .string => predefinedStringIdHashed(bytes, std.hash.Wyhash.hash(0, bytes)),
         .symbol => predefined_symbol_map.get(bytes),
         .global_symbol => null,
         .private => predefined_private_map.get(bytes),

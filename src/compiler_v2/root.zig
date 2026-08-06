@@ -61,7 +61,27 @@ pub fn compileFunctionV2(
     fd: *bytecode.function_def.FunctionDef,
     ledger: ?*compare.Ledger,
 ) resolve_variables.Error!void {
-    if (fd.v2_builder == null) return error.InvalidBytecode;
+    return compileFunctionV2Impl(false, function, fd, ledger);
+}
+
+/// Packed FunctionBytecode finalization variant.  The outer finalize choke
+/// point performs the final code/atom/var-ref proof in one fused traversal
+/// before publishing the artifact; direct callers use `compileFunctionV2` and
+/// retain resolve_labels' self-contained output validation.
+pub fn compileFunctionV2ForPackedFinalize(
+    function: *bytecode.Bytecode,
+    fd: *bytecode.function_def.FunctionDef,
+    ledger: ?*compare.Ledger,
+) resolve_variables.Error!void {
+    return compileFunctionV2Impl(true, function, fd, ledger);
+}
+
+fn compileFunctionV2Impl(
+    comptime packed_finalize_validates_code: bool,
+    function: *bytecode.Bytecode,
+    fd: *bytecode.function_def.FunctionDef,
+    ledger: ?*compare.Ledger,
+) resolve_variables.Error!void {
     var product = try resolve_variables.run(function, fd);
     defer product.deinitUncommitted();
     var input_labels_unbound: usize = 0;
@@ -76,8 +96,11 @@ pub fn compileFunctionV2(
     // Only dual compilation pays for the diagnostic walks. Ordinary v2 mode
     // passes null and performs exactly the S3 -> S4 pipeline work.
     const live_relocs = if (ledger != null) try countLiveRelocs(&product) else 0;
-    try resolve_labels.run(resolve_labels.default_layout, function, fd, &product);
-
+    if (comptime packed_finalize_validates_code) {
+        try resolve_labels.runForPackedFinalize(resolve_labels.default_layout, function, fd, &product);
+    } else {
+        try resolve_labels.run(resolve_labels.default_layout, function, fd, &product);
+    }
     if (ledger) |out| {
         try addLedger(&out.functions_lowered, 1);
         try addLedger(&out.labels_created, product.label_len);

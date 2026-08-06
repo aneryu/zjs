@@ -7572,17 +7572,6 @@ pub const Object = extern struct {
             }
         }
 
-        {
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                h.meta().flags.cycle_visited = false;
-            }
-            var cursor = garbage.head;
-            while (cursor) |h| : (cursor = h.next) {
-                h.meta().flags.cycle_visited = true;
-            }
-        }
-
         sweepCycleGarbageWeakCollectionEntries(rt);
 
         var garbage_count: usize = 0;

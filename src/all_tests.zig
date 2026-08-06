@@ -6,6 +6,7 @@ pub const public_api = kernel_api;
 pub const binding_root = @import("binding/root.zig");
 pub const core = @import("core/root.zig");
 pub const parser = @import("parser.zig");
+pub const simple_token = @import("simple_token.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");

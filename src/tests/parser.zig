@@ -51,13 +51,49 @@ test "F1.5: every keyword token maps to its predefined atom" {
 
     const cases = .{
         .{ "null", t.TOK_NULL, "null" },
+        .{ "false", t.TOK_FALSE, "false" },
         .{ "true", t.TOK_TRUE, "true" },
         .{ "if", t.TOK_IF, "if" },
+        .{ "else", t.TOK_ELSE, "else" },
         .{ "return", t.TOK_RETURN, "return" },
+        .{ "var", t.TOK_VAR, "var" },
+        .{ "this", t.TOK_THIS, "this" },
+        .{ "delete", t.TOK_DELETE, "delete" },
+        .{ "void", t.TOK_VOID, "void" },
+        .{ "typeof", t.TOK_TYPEOF, "typeof" },
+        .{ "new", t.TOK_NEW, "new" },
+        .{ "in", t.TOK_IN, "in" },
+        .{ "instanceof", t.TOK_INSTANCEOF, "instanceof" },
+        .{ "do", t.TOK_DO, "do" },
+        .{ "while", t.TOK_WHILE, "while" },
+        .{ "for", t.TOK_FOR, "for" },
+        .{ "break", t.TOK_BREAK, "break" },
+        .{ "continue", t.TOK_CONTINUE, "continue" },
+        .{ "switch", t.TOK_SWITCH, "switch" },
+        .{ "case", t.TOK_CASE, "case" },
+        .{ "default", t.TOK_DEFAULT, "default" },
+        .{ "throw", t.TOK_THROW, "throw" },
+        .{ "try", t.TOK_TRY, "try" },
+        .{ "catch", t.TOK_CATCH, "catch" },
+        .{ "finally", t.TOK_FINALLY, "finally" },
         .{ "function", t.TOK_FUNCTION, "function" },
+        .{ "debugger", t.TOK_DEBUGGER, "debugger" },
         .{ "with", t.TOK_WITH, "with" },
         .{ "class", t.TOK_CLASS, "class" },
+        .{ "const", t.TOK_CONST, "const" },
+        .{ "enum", t.TOK_ENUM, "enum" },
+        .{ "export", t.TOK_EXPORT, "export" },
+        .{ "extends", t.TOK_EXTENDS, "extends" },
+        .{ "import", t.TOK_IMPORT, "import" },
         .{ "super", t.TOK_SUPER, "super" },
+        .{ "implements", t.TOK_IMPLEMENTS, "implements" },
+        .{ "interface", t.TOK_INTERFACE, "interface" },
+        .{ "let", t.TOK_LET, "let" },
+        .{ "package", t.TOK_PACKAGE, "package" },
+        .{ "private", t.TOK_PRIVATE, "private" },
+        .{ "protected", t.TOK_PROTECTED, "protected" },
+        .{ "public", t.TOK_PUBLIC, "public" },
+        .{ "static", t.TOK_STATIC, "static" },
         .{ "yield", t.TOK_YIELD, "yield" },
         .{ "await", t.TOK_AWAIT, "await" },
     };
@@ -2071,9 +2107,12 @@ test "F4: collapsed multiline logical branches retain source progression" {
         line_num: i32,
         col_num: i32,
     }{
-        .{ .line_num = 1, .col_num = 4 },
+        // QuickJS does not attach source events to the synthetic logical
+        // branches.  Each branch therefore inherits the identifier source
+        // event for a/b/c (quickjs.c:27969-28008).
+        .{ .line_num = 1, .col_num = 5 },
         .{ .line_num = 2, .col_num = 5 },
-        .{ .line_num = 3, .col_num = 6 },
+        .{ .line_num = 3, .col_num = 5 },
     };
     var branch_count: usize = 0;
     var pc: usize = 0;
@@ -2443,7 +2482,10 @@ test "M3.1 F4: for-await close keeps body statement source location" {
         col_num = slot.col_num;
     }
     try std.testing.expectEqual(@as(i32, 10), line_num);
-    try std.testing.expectEqual(@as(i32, 7), col_num);
+    // QuickJS emits no source event for the synthetic iterator_close.  It
+    // inherits the last body-expression event, the `value` identifier in
+    // `void value` (quickjs.c:28953).
+    try std.testing.expectEqual(@as(i32, 12), col_num);
 }
 
 test "M3.1 F4: parser emits QuickJS line_num temp and finalize strips it" {
@@ -3231,6 +3273,33 @@ test "F4: simple template with one substitution uses get_field2 concat + call_me
     try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 18));
 }
 
+test "F4: returned interpolated template carries QuickJS tail-call source provenance" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var parsed = try compileForTest(
+        env.rt,
+        \\function escapeKey(key) {
+        \\  return `[${String(key)}]`;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "returned-template.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const child = findFunctionConstantNamed(&parsed, env.rt, "escapeKey") orelse
+        return error.TestExpectedEqual;
+    const call_pc = firstSemanticOpcodeOffset(child.byteCode(), op.call_method) orelse
+        return error.TestExpectedEqual;
+    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        child.pc2lineBuf(),
+        @intCast(call_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), source_loc.line_num);
+    try std.testing.expectEqual(@as(i32, 3), source_loc.col_num);
+}
+
 test "F4: empty-head template `${b}` skips middle/tail empty strings" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3870,14 +3939,31 @@ test "W5: tagged-int numeric strings use cpool without changing other string pro
         numeric_string.pc2lineBuf(),
         @intCast(string_pc),
     );
-    try std.testing.expectEqual(@as(i32, 2), string_source.line_num);
-    try std.testing.expectEqual(@as(i32, 3), string_source.col_num);
+    // QuickJS literal pushes are source-less.  Until the binary `+` event,
+    // both constants retain the function-entry source coordinate.
+    try std.testing.expectEqual(@as(i32, 1), string_source.line_num);
+    try std.testing.expectEqual(@as(i32, 1), string_source.col_num);
     const number_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
         numeric_string.pc2lineBuf(),
         @intCast(number_pc),
     );
-    try std.testing.expectEqual(@as(i32, 3), number_source.line_num);
-    try std.testing.expectEqual(@as(i32, 5), number_source.col_num);
+    try std.testing.expectEqual(@as(i32, 1), number_source.line_num);
+    try std.testing.expectEqual(@as(i32, 1), number_source.col_num);
+
+    const add_pc = firstSemanticOpcodeOffset(numeric_code, op.add) orelse return error.TestExpectedEqual;
+    const add_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(add_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), add_source.line_num);
+    try std.testing.expectEqual(@as(i32, 16), add_source.col_num);
+    const return_pc = firstSemanticOpcodeOffset(numeric_code, op.@"return") orelse return error.TestExpectedEqual;
+    const return_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(return_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), return_source.line_num);
+    try std.testing.expectEqual(@as(i32, 3), return_source.col_num);
 
     const numeric_template = findFunctionConstantNamed(&parsed, env.rt, "numericTemplate") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), numeric_template.cpoolSlice().len);
@@ -4507,6 +4593,116 @@ test "F6: arrow function with single parameter" {
     try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
     try expectOpcode(child.byteCode(), op.get_arg0);
     try expectOpcode(child.byteCode(), op.@"return");
+}
+
+test "F6: identifier arrow lookahead preserves trivia and line terminators" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const valid_sources = [_][]const u8{
+        "x /* same line */ => x",
+        "x\xC2\xA0=> x",
+        "x /* \xCF\x80 */ => x",
+    };
+    for (valid_sources) |source| {
+        var fn_bc = try parseExprWithTopLevelChildren(&env, source);
+        defer fn_bc.deinit(env.rt);
+        const child = try expectFunctionConstant(&fn_bc, 0);
+        try std.testing.expectEqual(@as(usize, 1), child.argVarDefs().len);
+        try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
+    }
+
+    const lookahead_cases = .{
+        .{ "x /* same line */ => x", @as(?bool, true) },
+        .{ "x\xC2\xA0=> x", @as(?bool, true) },
+        .{ "x\n=> x", @as(?bool, false) },
+        .{ "x /* line\n break */ => x", @as(?bool, false) },
+        // Non-ASCII inside a block comment deliberately selects the full
+        // lexer, which distinguishes ordinary Unicode from LS/PS.
+        .{ "x /* \xCF\x80 */ => x", @as(?bool, null) },
+        .{ "x /* \xE2\x80\xA8 */ => x", @as(?bool, null) },
+    };
+    inline for (lookahead_cases) |case| {
+        var lx = QjsLexer.init(std.testing.allocator, &env.rt.atoms, case[0]);
+        defer lx.deinit();
+        var ident = try lx.next();
+        defer lx.freeToken(&ident);
+        try std.testing.expectEqual(t.TOK_IDENT, ident.val);
+        try std.testing.expectEqual(case[1], lx.simpleNextIsArrowNoLineTerminator());
+    }
+
+    const invalid_sources = [_][]const u8{
+        "const f = x\n=> x;",
+        "const f = x /* line\n break */ => x;",
+        "const f = x /* \xE2\x80\xA8 */ => x;",
+    };
+    for (invalid_sources) |source| {
+        var parsed = try compileForTest(env.rt, source, .{ .mode = .script, .filename = "arrow-lookahead-line.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+}
+
+test "F6: parenthesized arrow lookahead skips only context-free source" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+
+    const fast_cases = .{
+        .{ "(a, (b + c)) => a", true },
+        .{ "(a = ')', /* ) */ b) => b", true },
+        .{ "(a // )\n) => a", true },
+        .{ "(a / b) => a", true },
+        .{ "(a = /\\)/) => a", true },
+        .{ "(a = '\xCF\x80)') => a", true },
+        .{ "(function(){ return /\\)/.test(')'); })()", false },
+        .{ "(a + (b)) * c", false },
+        .{ "(a)\n=> a", false },
+    };
+    inline for (fast_cases) |case| {
+        var lx = QjsLexer.init(std.testing.allocator, &env.rt.atoms, case[0]);
+        defer lx.deinit();
+        var open = try lx.next();
+        defer lx.freeToken(&open);
+        try std.testing.expectEqual(@as(t.TokenKind, '('), open.val);
+        try std.testing.expectEqual(@as(?bool, case[1]), lx.simpleCurrentParenIsArrowHead());
+    }
+
+    const fallback_cases = [_][]const u8{
+        "(`/\\)/`) => 1",
+        "(a\\u0062) => a",
+        "(\xCF\x80) => 1",
+    };
+    for (fallback_cases) |source| {
+        var lx = QjsLexer.init(std.testing.allocator, &env.rt.atoms, source);
+        defer lx.deinit();
+        var open = try lx.next();
+        defer lx.freeToken(&open);
+        try std.testing.expectEqual(@as(t.TokenKind, '('), open.val);
+        try std.testing.expectEqual(@as(?bool, null), lx.simpleCurrentParenIsArrowHead());
+    }
+
+    const valid_sources = [_][]const u8{
+        "const f = (a, b = ')') => a + b;",
+        "const f = (a /* ) */, b) => a + b;",
+        "const x = (a + (b * c));",
+        // Each ambiguous case must remain valid through the full-lexer fallback.
+        "const f = (a = /\\)/) => a;",
+        "const f = (a = '\xCF\x80)') => a;",
+        "const f = (a = `)`) => a;",
+        "const f = (a = `x${1}`) => a;",
+        "const f = async (a = `x${1}`) => a;",
+        "const f = (\xCF\x80) => \xCF\x80;",
+        // The borrowed pattern-topology scan must distinguish plain `=` from
+        // equality tokens after an object/array literal.
+        "({} == undefined);",
+        "({valueOf: function() { return 1; }} == true);",
+        "([] === 0n);",
+    };
+    for (valid_sources) |source| {
+        var parsed = try compileForTest(env.rt, source, .{ .mode = .script, .filename = "paren-arrow-lookahead.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
 }
 
 test "F6: arrow function with multiple parameters" {
@@ -5342,6 +5538,29 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     try std.testing.expect(eval_state.function_def.has_eval_call);
     try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.var_object_idx);
     try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.arg_var_object_idx);
+}
+
+test "parameter pre-scan balances regexp and template delimiters like QuickJS" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const name = try env.rt.internAtom("parameter-balanced-scan");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
+        \\function regular(a = /[)=}]/, { b = `x${/[}]/.test("}")}` } = {}) {}
+        \\const arrow = (a = /[)]/, b = { x: /[=]/ }) => [a, b];
+    );
+    var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
+    defer state.deinit(env.rt);
+    state.top_level_functions_as_children = true;
+
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 2), state.function_def.child_list.len);
+    try std.testing.expect(state.function_def.child_list[0].has_parameter_expressions);
+    try std.testing.expect(state.function_def.child_list[1].has_parameter_expressions);
 }
 
 test "parameter initializer direct eval emits active global-declaration carriers" {
@@ -8462,7 +8681,9 @@ test "F10.1c Nested function: bytecode dual-buffering" {
 
     try parser_core.parseExpr(&state);
 
-    try std.testing.expect(countOpcode(state.function.code, op.fclosure) + countOpcode(state.function.code, op.fclosure8) > 0);
+    // This is the unresolved phase-1 stream.  Its temporary opcode ids overlap
+    // the final short-opcode range, so it must use the phase-1 decoder.
+    try std.testing.expect((try findPhase1Opcode(state.function.code, op.fclosure, 0)) != null);
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
     const child = state.function_def.child_list[0];
@@ -9658,6 +9879,8 @@ test "for-of contextual async lookahead follows QuickJS grammar" {
         "var async; for ((async) of [1]) ;",
         "var i = 0; for (async of => {}; i < 1; ++i) {}",
         "async function f() { var async; for await (async of [1]) ; }",
+        "async function f() { for await ([value = 10] of [[2]]) {} }",
+        "async function f() { for await ({ value = 10 } of [{ value: 2 }]) {} }",
     };
     for (valid_cases) |source| {
         var parsed = try compileForTest(
@@ -11875,10 +12098,12 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     try std.testing.expect(b.label_slots[label.index()].flags.bound);
     try std.testing.expectEqual(@as(u32, 11), b.label_slots[label.index()].bound_offset);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos); // bind invalidates
-    // Marker precedes each opcode (appendBytesAt order): first marker's
-    // temp offset is the jump's offset 0.
-    try std.testing.expect(b.source_len >= 1);
-    try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
+    // Ordinary builder writes are source-less, exactly like QuickJS emit_op.
+    // Only the explicit grammar marker above is retained at the code tail.
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(@as(u32, 11), b.source_slots[0].temp_offset);
+    try std.testing.expectEqual(@as(i32, 3), b.source_slots[0].line);
+    try std.testing.expectEqual(@as(i32, 7), b.source_slots[0].col);
     // state.deinit -> function_def.deinit releases the builder; the
     // testing allocator turns any leak into a test failure.
 }

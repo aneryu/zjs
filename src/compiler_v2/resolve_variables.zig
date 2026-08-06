@@ -64,8 +64,9 @@ pub const ResolvedProduct = struct {
     /// resolved stream, the atom ledger and the source markers. They become
     /// inert here (slices empty, capacity 0, owned atom refs released item-wise)
     /// while `label_slots` stays live, because S4 keeps mutating label ref
-    /// counts after the walk. Idempotent, and `deinitUncommitted` remains
-    /// correct whether or not this ran.
+    /// counts after the walk.
+    /// Idempotent, and `deinitUncommitted` remains correct whether or not this
+    /// ran.
     pub fn releaseConsumedStreams(self: *ResolvedProduct) void {
         for (self.atom_operands[0..self.atom_len]) |atom_id| self.atoms.free(atom_id);
 
@@ -136,7 +137,10 @@ fn reserve(
 }
 
 const TempInstruction = cfg.TempInstruction;
-const tempInstruction = cfg.tempInstruction;
+// Sequential walks have the exact atom-ledger cursor for their current pc and
+// enforce the QuickJS phase-1 opcode view. Random-access pattern probes compare
+// their exact fixed-width opcodes directly, like QuickJS `code_match`.
+const phase1Instruction = cfg.phase1Instruction;
 const BindEntry = cfg.BindEntry;
 
 fn updateLabel(product: *ResolvedProduct, label_index: u32, delta: i32) Error!u32 {
@@ -204,6 +208,10 @@ const Resolver = struct {
     atom_index: u32 = 0,
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
+    next_bind_offset: u64,
+    next_source_offset: u64,
+    has_dynamic_env_objects: bool,
+    dynamic_env_closure_len: usize,
 
     fn deinitScratch(self: *Resolver) void {
         if (self.pending_tail_capacity != 0) {
@@ -220,6 +228,27 @@ const Resolver = struct {
             self.opt_boundary_capacity = 0;
             self.opt_boundary_len = 0;
         }
+    }
+
+    /// QuickJS discovers a binding and its preceding with/eval environments
+    /// in one `resolve_scope_var` walk. V2 splits topology discovery from
+    /// emission, so a function with no such environment must not rescan the
+    /// same scope/closure chains for every identifier. Vars and eval-object
+    /// slots are fixed before this pass; only closure rows can grow here, and
+    /// those are checked incrementally after each topology lookup.
+    inline fn hasDynamicEnvObjects(self: *Resolver) Error!bool {
+        if (self.has_dynamic_env_objects) return true;
+        const fd = self.ctx.function_def orelse return error.NoFunctionDef;
+        if (self.dynamic_env_closure_len > fd.closure_var.len)
+            return error.InvalidBytecode;
+        if (self.dynamic_env_closure_len != fd.closure_var.len) {
+            self.has_dynamic_env_objects = legacy.closureVarRangeHasDynamicEnvObjects(
+                fd,
+                self.dynamic_env_closure_len,
+            );
+            self.dynamic_env_closure_len = fd.closure_var.len;
+        }
+        return self.has_dynamic_env_objects;
     }
 
     /// `replacement_product` is the PRODUCT offset the replacement is written
@@ -278,6 +307,90 @@ const Resolver = struct {
         }
     }
 
+    inline fn streamHasCapacity(capacity: usize, used: u32, need: usize) bool {
+        const used_usize: usize = @intCast(used);
+        return used_usize <= capacity and need <= capacity - used_usize;
+    }
+
+    /// All three product ledgers are pre-sized from the Builder at entry.  A
+    /// rewrite that grows beyond those estimates still comes here and retains
+    /// the original overflow/OOM behavior, but ordinary copied instructions
+    /// should not carry three generic reserve calls through the hot loop.
+    noinline fn growProductStreams(
+        self: *Resolver,
+        code_need: usize,
+        atom_need: usize,
+        source_need: usize,
+    ) Error!void {
+        if (code_need > std.math.maxInt(u32) or
+            atom_need > std.math.maxInt(u32) or
+            source_need > std.math.maxInt(u32))
+        {
+            return error.BytecodeOverflow;
+        }
+        _ = std.math.add(u32, self.product.code_len, @as(u32, @intCast(code_need))) catch
+            return error.BytecodeOverflow;
+        _ = std.math.add(u32, self.product.atom_len, @as(u32, @intCast(atom_need))) catch
+            return error.BytecodeOverflow;
+        _ = std.math.add(u32, self.product.source_len, @as(u32, @intCast(source_need))) catch
+            return error.BytecodeOverflow;
+
+        if (code_need != 0) {
+            try reserve(
+                u8,
+                self.product.memory,
+                &self.product.code,
+                &self.product.code_capacity,
+                self.product.code_len,
+                code_need,
+                16,
+            );
+        }
+        if (atom_need != 0) {
+            try reserve(
+                core.atom.Atom,
+                self.product.memory,
+                &self.product.atom_operands,
+                &self.product.atom_capacity,
+                self.product.atom_len,
+                atom_need,
+                8,
+            );
+        }
+        if (source_need != 0) {
+            try reserve(
+                builder.SourceSlot,
+                self.product.memory,
+                &self.product.source_slots,
+                &self.product.source_capacity,
+                self.product.source_len,
+                source_need,
+                8,
+            );
+        }
+    }
+
+    inline fn ensureProductStreams(
+        self: *Resolver,
+        code_need: usize,
+        atom_need: usize,
+        source_need: usize,
+    ) Error!void {
+        if (code_need <= std.math.maxInt(u32) and
+            atom_need <= std.math.maxInt(u32) and
+            source_need <= std.math.maxInt(u32) and
+            code_need <= std.math.maxInt(u32) - self.product.code_len and
+            atom_need <= std.math.maxInt(u32) - self.product.atom_len and
+            source_need <= std.math.maxInt(u32) - self.product.source_len and
+            streamHasCapacity(self.product.code_capacity, self.product.code_len, code_need) and
+            streamHasCapacity(self.product.atom_capacity, self.product.atom_len, atom_need) and
+            streamHasCapacity(self.product.source_capacity, self.product.source_len, source_need))
+        {
+            return;
+        }
+        return self.growProductStreams(code_need, atom_need, source_need);
+    }
+
     fn prepareLegacyWrite(
         self: *Resolver,
         code_need: usize,
@@ -297,39 +410,8 @@ const Resolver = struct {
         const pending_source_count = try self.pendingSourceUpperBound();
         _ = std.math.add(u32, self.product.source_len, pending_source_count) catch
             return error.BytecodeOverflow;
-
-        try reserve(
-            u8,
-            self.product.memory,
-            &self.product.code,
-            &self.product.code_capacity,
-            self.product.code_len,
-            code_need,
-            16,
-        );
-        if (atom_need != 0) {
-            try reserve(
-                core.atom.Atom,
-                self.product.memory,
-                &self.product.atom_operands,
-                &self.product.atom_capacity,
-                self.product.atom_len,
-                atom_need,
-                8,
-            );
-        }
-        if (pending_source_count != 0) {
-            try reserve(
-                builder.SourceSlot,
-                self.product.memory,
-                &self.product.source_slots,
-                &self.product.source_capacity,
-                self.product.source_len,
-                pending_source_count,
-                8,
-            );
-            self.attachPendingSourcesAssumeCapacity();
-        }
+        try self.ensureProductStreams(code_need, atom_need, pending_source_count);
+        if (pending_source_count != 0) self.attachPendingSourcesAssumeCapacity();
     }
 
     fn finishLegacyWrite(
@@ -396,6 +478,44 @@ const Resolver = struct {
             return error.InvalidBytecode;
     }
 
+    /// Ordinary QuickJS scope resolution writes the selected local/argument/
+    /// closure/global opcode immediately.  Keep the generic pointer-counting
+    /// writer for the atom-bearing readonly throw, but write the overwhelmingly
+    /// common 1--3 byte action from the compact resolver result without
+    /// materializing another `ScopeVarAction` on the caller's stack.
+    fn writeResolvedScopeVarPlan(
+        self: *Resolver,
+        atom_id: core.atom.Atom,
+        plan: legacy.ResolvedScopeVarPlanAlias,
+    ) Error!void {
+        if (plan.action_op_id == op.throw_error) {
+            return self.writeScopeVarAction(
+                atom_id,
+                legacy.resolvedScopeVarPlanAction(plan),
+            );
+        }
+
+        const code_need: usize = plan.action_size;
+        if (code_need == 0 or code_need != @as(usize, plan.action_operand_size) + 1)
+            return error.InvalidBytecode;
+        try self.prepareLegacyWrite(code_need, 0);
+
+        const code_start: usize = @intCast(self.product.code_len);
+        const output = self.product.code[code_start..][0..code_need];
+        output[0] = plan.action_op_id;
+        switch (plan.action_operand_size) {
+            0 => {},
+            1 => {
+                if (plan.action_index > std.math.maxInt(u8))
+                    return error.InvalidBytecode;
+                output[1] = @intCast(plan.action_index);
+            },
+            2 => std.mem.writeInt(u16, output[1..3], plan.action_index, .little),
+            else => return error.InvalidBytecode,
+        }
+        self.product.code_len += @intCast(code_need);
+    }
+
     fn emitDynamicEnvProbe(
         self: *Resolver,
         atom_id: core.atom.Atom,
@@ -435,58 +555,111 @@ const Resolver = struct {
         try self.incrementJumpSize();
     }
 
+    fn ensureDynamicEnvLabel(
+        self: *Resolver,
+        label_done: *?u32,
+    ) Error!u32 {
+        if (label_done.*) |label_index| return label_index;
+        const label_index = try self.newProductLabel();
+        label_done.* = label_index;
+        return label_index;
+    }
+
+    /// QuickJS reaches `var_object_test()` only after its binding walk has
+    /// encountered a with/eval object.  Keep the equivalent negative test in
+    /// the caller's hot path: most functions have no dynamic environment, so
+    /// they must not materialize a binding or enter the outlined emitter just
+    /// to rediscover that fact.
+    inline fn needsDynamicEnvProbes(
+        self: *Resolver,
+        atom_id: core.atom.Atom,
+        scope_level: i32,
+        oracle_plan: ?legacy.ScopeVarProbePlanAlias,
+    ) Error!bool {
+        if (!legacy.scopeVarDynamicProbeEligible(atom_id, scope_level) or
+            !try self.hasDynamicEnvObjects())
+        {
+            if (comptime audit_oracles) {
+                if (oracle_plan != null) return error.InvalidBytecode;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /// QuickJS emits dynamic-environment probes while walking the binding
+    /// chain.  V2's growable product can do the same: allocate the done label
+    /// lazily on the first real probe and avoid the former count/size prepass.
+    /// `needsDynamicEnvProbes()` has already proved that the uncommon emitter
+    /// is required.
     fn emitDynamicEnvProbes(
         self: *Resolver,
         atom_id: core.atom.Atom,
         scope_level: i32,
         probe_op: u8,
-        expected_count: usize,
-        expected_prefix_size: usize,
-    ) Error!u32 {
-        if (expected_count == 0) return error.InvalidBytecode;
-        const label_done = try self.newProductLabel();
+        binding: legacy.ScopeVarBindingAlias,
+        oracle_plan: ?legacy.ScopeVarProbePlanAlias,
+    ) Error!?u32 {
+        var label_done: ?u32 = null;
         const code_start = self.product.code_len;
         const atom_start = self.product.atom_len;
 
         var with_iter = legacy.localWithProbeIteratorInit(self.ctx, atom_id, scope_level);
         while (legacy.localWithProbeIteratorNext(&with_iter)) |idx| {
-            try self.emitDynamicEnvProbe(atom_id, .{ .with_local = idx }, probe_op, label_done);
+            const label_index = try self.ensureDynamicEnvLabel(&label_done);
+            try self.emitDynamicEnvProbe(atom_id, .{ .with_local = idx }, probe_op, label_index);
         }
 
-        if (!legacy.staticBindingStopsDynamicEnvProbes(self.ctx, atom_id, scope_level)) {
+        if (!legacy.resolvedBindingStopsDynamicEnvProbes(
+            self.ctx,
+            atom_id,
+            scope_level,
+            binding,
+        )) {
             const fd = self.ctx.function_def orelse return error.NoFunctionDef;
             if (!legacy.scopeUsesArgumentEnvironmentOnly(fd, scope_level) and fd.var_object_idx >= 0) {
+                const label_index = try self.ensureDynamicEnvLabel(&label_done);
                 try self.emitDynamicEnvProbe(
                     atom_id,
                     .{ .local = @intCast(fd.var_object_idx) },
                     probe_op,
-                    label_done,
+                    label_index,
                 );
             }
             if (fd.arg_var_object_idx >= 0) {
+                const label_index = try self.ensureDynamicEnvLabel(&label_done);
                 try self.emitDynamicEnvProbe(
                     atom_id,
                     .{ .local = @intCast(fd.arg_var_object_idx) },
                     probe_op,
-                    label_done,
+                    label_index,
                 );
             }
-            var closure_iter = legacy.closureDynamicEnvProbeIteratorInit(self.ctx, atom_id);
+            var closure_iter = legacy.closureDynamicEnvProbeIteratorInitResolved(self.ctx, binding);
             while (legacy.closureDynamicEnvProbeIteratorNext(&closure_iter)) |idx| {
                 if (idx >= fd.closure_var.len) return error.InvalidBytecode;
+                const label_index = try self.ensureDynamicEnvLabel(&label_done);
                 try self.emitDynamicEnvProbe(
                     atom_id,
                     legacy.evalVarObjectClosureProbe(fd.closure_var[idx], idx),
                     probe_op,
-                    label_done,
+                    label_index,
                 );
             }
         }
 
-        if (@as(usize, self.product.code_len - code_start) != expected_prefix_size or
-            @as(usize, self.product.atom_len - atom_start) != expected_count)
-        {
-            return error.InvalidBytecode;
+        if (comptime audit_oracles) {
+            const actual_size: usize = @intCast(self.product.code_len - code_start);
+            const actual_count: usize = @intCast(self.product.atom_len - atom_start);
+            if (oracle_plan) |expected| {
+                if (actual_size != expected.prefix_size or actual_count != expected.count or
+                    label_done == null)
+                {
+                    return error.InvalidBytecode;
+                }
+            } else if (actual_size != 0 or actual_count != 0 or label_done != null) {
+                return error.InvalidBytecode;
+            }
         }
         return label_done;
     }
@@ -828,12 +1001,20 @@ const Resolver = struct {
             return error.BytecodeOverflow;
     }
 
+    inline fn refreshSourceFrontier(self: *Resolver) void {
+        self.next_source_offset = if (self.source_cursor < self.input_sources.len)
+            self.input_sources[self.source_cursor].temp_offset
+        else
+            std.math.maxInt(u64);
+    }
+
     fn absorbSourcesThrough(self: *Resolver, input_pos: u32) void {
-        while (self.source_cursor < self.input_sources.len and
-            self.input_sources[self.source_cursor].temp_offset <= input_pos)
-        {
+        if (self.next_source_offset > input_pos) return;
+        while (self.source_cursor < self.input_sources.len) {
+            if (self.input_sources[self.source_cursor].temp_offset > input_pos) break;
             self.source_cursor += 1;
         }
+        self.refreshSourceFrontier();
     }
 
     fn pendingSourceUpperBound(self: *const Resolver) Error!u32 {
@@ -884,37 +1065,11 @@ const Resolver = struct {
         _ = std.math.add(u32, self.product.source_len, pending_source_count) catch
             return error.BytecodeOverflow;
 
-        try reserve(
-            u8,
-            self.product.memory,
-            &self.product.code,
-            &self.product.code_capacity,
-            self.product.code_len,
+        try self.ensureProductStreams(
             bytes.len,
-            16,
+            @intFromBool(atom_id != null),
+            pending_source_count,
         );
-        if (atom_id != null) {
-            try reserve(
-                core.atom.Atom,
-                self.product.memory,
-                &self.product.atom_operands,
-                &self.product.atom_capacity,
-                self.product.atom_len,
-                1,
-                8,
-            );
-        }
-        if (pending_source_count != 0) {
-            try reserve(
-                builder.SourceSlot,
-                self.product.memory,
-                &self.product.source_slots,
-                &self.product.source_capacity,
-                self.product.source_len,
-                pending_source_count,
-                8,
-            );
-        }
 
         if (pending_source_count != 0) self.attachPendingSourcesAssumeCapacity();
 
@@ -929,18 +1084,72 @@ const Resolver = struct {
 
     fn consumeInputAtom(
         self: *Resolver,
-        input_pos: u32,
+        _: u32,
         instruction: TempInstruction,
     ) Error!?core.atom.Atom {
         if (!instruction.has_atom) return null;
-        if (self.atom_index >= self.atom_ledger.len or instruction.size < 5)
-            return error.InvalidBytecode;
-        const pc: usize = @intCast(input_pos);
-        const operand = std.mem.readInt(u32, self.code[pc + 1 ..][0..4], .little);
+        // phase1Instruction has just proved both facts for this cursor. Keep
+        // the assertions for debug builds without paying the same validation
+        // branches twice in the production loop.
+        std.debug.assert(self.atom_index < self.atom_ledger.len);
+        std.debug.assert(instruction.size >= 5);
         const ledger_atom = self.atom_ledger[self.atom_index];
-        if (operand != ledger_atom) return error.InvalidBytecode;
+        // phase1Instruction already matched the encoded operand to this exact
+        // ledger entry.  Do not reload and compare the same u32 a second time.
         self.atom_index += 1;
         return ledger_atom;
+    }
+
+    /// QuickJS's `no_change` arm appends the instruction selected by the
+    /// current decode directly to `bc_out`.  `phase1Instruction` has already
+    /// proved the non-zero size and input boundary for this exact instruction;
+    /// the no-atom copy therefore only has to reserve the output ledgers and
+    /// carry source events.  Rewritten/synthesized instructions continue to
+    /// use `emitInstruction`, which retains its full defensive validation.
+    fn emitValidatedCopyNoAtom(
+        self: *Resolver,
+        input_pos: u32,
+        byte_count: u8,
+    ) Error!void {
+        std.debug.assert(byte_count != 0);
+        const pending_source_count = try self.pendingSourceUpperBound();
+        try self.ensureProductStreams(byte_count, 0, pending_source_count);
+        if (pending_source_count != 0) self.attachPendingSourcesAssumeCapacity();
+
+        const input_start: usize = @intCast(input_pos);
+        const output_start: usize = @intCast(self.product.code_len);
+        @memcpy(
+            self.product.code[output_start..][0..byte_count],
+            self.code[input_start..][0..byte_count],
+        );
+        // ensureProductStreams proved this addition fits both the backing and
+        // the u32 logical length.
+        self.product.code_len += byte_count;
+    }
+
+    /// Atom-bearing copies have the same proof plus the exact operand/ledger
+    /// equality established by `phase1Instruction`.  ConsumeInputAtom supplies
+    /// that ledger entry, so do not reload the encoded u32 a third time here.
+    fn emitValidatedCopyAtom(
+        self: *Resolver,
+        input_pos: u32,
+        byte_count: u8,
+        atom_id: core.atom.Atom,
+    ) Error!void {
+        std.debug.assert(byte_count >= 5);
+        const pending_source_count = try self.pendingSourceUpperBound();
+        try self.ensureProductStreams(byte_count, 1, pending_source_count);
+        if (pending_source_count != 0) self.attachPendingSourcesAssumeCapacity();
+
+        const input_start: usize = @intCast(input_pos);
+        const output_start: usize = @intCast(self.product.code_len);
+        @memcpy(
+            self.product.code[output_start..][0..byte_count],
+            self.code[input_start..][0..byte_count],
+        );
+        self.product.atom_operands[self.product.atom_len] = self.product.atoms.dup(atom_id);
+        self.product.atom_len += 1;
+        self.product.code_len += byte_count;
     }
 
     fn copyInputInstruction(
@@ -949,9 +1158,12 @@ const Resolver = struct {
         instruction: TempInstruction,
         atom_id: ?core.atom.Atom,
     ) Error!void {
-        const start: usize = @intCast(input_pos);
-        const end = start + instruction.size;
-        try self.emitInstruction(self.code[start..end], atom_id);
+        if (instruction.has_atom) {
+            try self.emitValidatedCopyAtom(input_pos, instruction.size, atom_id.?);
+        } else {
+            std.debug.assert(atom_id == null);
+            try self.emitValidatedCopyNoAtom(input_pos, instruction.size);
+        }
     }
 
     fn validateLabelIndex(self: *const Resolver, label_index: u32) Error!void {
@@ -969,10 +1181,9 @@ const Resolver = struct {
     }
 
     fn passBindsAt(self: *Resolver, input_pos: u32) Error!void {
-        if (self.bind_cursor < self.binds.len and
-            self.binds[self.bind_cursor].input_offset < input_pos)
-        {
-            return error.InvalidBytecode;
+        if (self.next_bind_offset != input_pos) {
+            if (self.next_bind_offset < input_pos) return error.InvalidBytecode;
+            return;
         }
         while (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].input_offset == input_pos)
@@ -985,6 +1196,21 @@ const Resolver = struct {
             }
             self.bind_cursor += 1;
         }
+        self.refreshBindFrontier();
+    }
+
+    inline fn refreshBindFrontier(self: *Resolver) void {
+        self.next_bind_offset = if (self.bind_cursor < self.binds.len)
+            self.binds[self.bind_cursor].input_offset
+        else
+            std.math.maxInt(u64);
+    }
+
+    inline fn passSideEventsThrough(self: *Resolver, input_pos: u32) Error!void {
+        if (input_pos < self.next_bind_offset and input_pos < self.next_source_offset)
+            return;
+        try self.passBindsAt(input_pos);
+        self.absorbSourcesThrough(input_pos);
     }
 
     fn hasLiveMatchBarrierAt(self: *const Resolver, input_pos: u32) bool {
@@ -1021,15 +1247,44 @@ const Resolver = struct {
     /// start; at a reachable boundary, only zero-reference label positions are
     /// suppressed before the ordinary live bind pass.
     fn deadBoundaryAt(self: *Resolver, input_pos: u32) Error!bool {
-        const block_index = try self.blockAt(input_pos);
-        if (self.bind_cursor < self.binds.len and
-            self.binds[self.bind_cursor].input_offset < input_pos)
-        {
-            return error.InvalidBytecode;
+        if (comptime !audit_oracles) {
+            if (self.next_bind_offset < input_pos) return error.InvalidBytecode;
+            if (self.next_bind_offset != input_pos) return false;
+            var end = self.bind_cursor;
+            while (end < self.binds.len and self.binds[end].input_offset == input_pos) : (end += 1) {}
+            std.debug.assert(end != self.bind_cursor);
+
+            var has_live = false;
+            for (self.binds[self.bind_cursor..end]) |entry| {
+                if (self.product.label_slots[entry.label_index].ref_count != 0) {
+                    has_live = true;
+                    break;
+                }
+            }
+            if (has_live) {
+                for (self.binds[self.bind_cursor..end]) |*entry| {
+                    const slot = self.product.label_slots[entry.label_index];
+                    if (slot.ref_count == 0 and !slot.flags.match_barrier)
+                        entry.dead_skipped = true;
+                }
+                return true;
+            }
+
+            for (self.binds[self.bind_cursor..end]) |*entry| {
+                std.debug.assert(self.product.label_slots[entry.label_index].first_reloc == labels.no_reloc);
+                entry.dead_skipped = true;
+            }
+            self.bind_cursor = end;
+            self.refreshBindFrontier();
+            return false;
         }
+
+        const block_index = try self.blockAt(input_pos);
+        if (self.next_bind_offset < input_pos) return error.InvalidBytecode;
+        if (self.next_bind_offset != input_pos) return false;
         var end = self.bind_cursor;
         while (end < self.binds.len and self.binds[end].input_offset == input_pos) : (end += 1) {}
-        if (end == self.bind_cursor) return false;
+        std.debug.assert(end != self.bind_cursor);
 
         if (self.graph.block_starts[block_index] != input_pos)
             return error.InvalidBytecode;
@@ -1048,6 +1303,7 @@ const Resolver = struct {
             entry.dead_skipped = true;
         }
         self.bind_cursor = end;
+        self.refreshBindFrontier();
         return false;
     }
 
@@ -1086,6 +1342,7 @@ const Resolver = struct {
         atom_id: core.atom.Atom,
         scope_operand: legacy.ScopeOperandAlias,
         aux_label: u32,
+        binding: legacy.ScopeVarBindingAlias,
     ) Error!?MakeRefFold {
         if (legacy.evalVarObjectProbePlan(
             self.ctx,
@@ -1113,33 +1370,32 @@ const Resolver = struct {
         if (self.hasBindInRange(tail_offset + 1, tail_end, false))
             return null;
 
-        if (legacy.makeRefBindingIsGlobal(self.ctx, atom_id, scope_operand.level) and
-            !legacy.canOptimizeGlobalRefPutTail(self.ctx, atom_id))
-        {
+        const binding_is_global = switch (binding) {
+            .global => true,
+            else => false,
+        };
+        if (binding_is_global and !legacy.canOptimizeGlobalRefPutTail(self.ctx, atom_id)) {
             return null;
         }
 
-        const get_plan = try legacy.planScopeVarLowering(
+        const get_action = try legacy.planResolvedScopeVarAction(
             self.ctx,
             atom_id,
-            scope_operand,
             op.scope_get_var,
-            false,
+            binding,
         );
-        const put_plan = try legacy.planScopeVarLowering(
+        const put_action = try legacy.planResolvedScopeVarAction(
             self.ctx,
             atom_id,
-            scope_operand,
             op.scope_put_var,
-            false,
+            binding,
         );
-        if (get_plan.probe.count != 0 or put_plan.probe.count != 0 or
-            legacy.scopeVarActionAtomCount(get_plan.action) != 0 or
-            legacy.scopeVarActionAtomCount(put_plan.action) != 0 or
-            get_plan.action.selected.op_id == op.drop or
-            put_plan.action.selected.op_id == op.drop or
-            get_plan.action.selected.op_id == op.throw_error or
-            put_plan.action.selected.op_id == op.throw_error)
+        if (legacy.scopeVarActionAtomCount(get_action) != 0 or
+            legacy.scopeVarActionAtomCount(put_action) != 0 or
+            get_action.selected.op_id == op.drop or
+            put_action.selected.op_id == op.drop or
+            get_action.selected.op_id == op.throw_error or
+            put_action.selected.op_id == op.throw_error)
         {
             return null;
         }
@@ -1149,8 +1405,8 @@ const Resolver = struct {
             .emit_dup = first_op == op.insert3,
             .reads_value = position_next < self.input.code_len and
                 self.code[position_next] == op.get_ref_value,
-            .get_action = get_plan.action,
-            .put_action = put_plan.action,
+            .get_action = get_action,
+            .put_action = put_action,
         };
     }
 
@@ -1168,16 +1424,16 @@ const Resolver = struct {
         transparent_start_binds: bool,
     ) Error!?BranchDropMatch {
         if (start >= self.code.len) return null;
-        const branch = try tempInstruction(self.code, self.atom_ledger, start, self.atom_index);
         const branch_op = self.code[start];
         if (branch_op != op.if_false and branch_op != op.if_true) return null;
         if (expected_op) |wanted| if (branch_op != wanted) return null;
-        if (branch.size != 5 or branch.has_atom) return error.InvalidBytecode;
-        const drop_pos = start + branch.size;
+        const branch_size = opcode.sizeOf(branch_op);
+        if (branch_size != 5 or branch_size > self.code.len - start)
+            return error.InvalidBytecode;
+        const drop_pos = start + branch_size;
         if (drop_pos >= self.code.len) return null;
-        const drop = try tempInstruction(self.code, self.atom_ledger, drop_pos, self.atom_index);
-        if (self.code[drop_pos] != op.drop or drop.size != 1) return null;
-        const after = drop_pos + drop.size;
+        if (self.code[drop_pos] != op.drop) return null;
+        const after = drop_pos + 1;
         if (self.hasBindInRange(start, after, transparent_start_binds)) return null;
         return .{
             .branch_op = branch_op,
@@ -1194,9 +1450,8 @@ const Resolver = struct {
         transparent_start_binds: bool,
     ) Error!?BranchDropMatch {
         if (start >= self.code.len) return null;
-        const duplicate = try tempInstruction(self.code, self.atom_ledger, start, self.atom_index);
-        if (self.code[start] != op.dup or duplicate.size != 1) return null;
-        const branch_start = start + duplicate.size;
+        if (self.code[start] != op.dup) return null;
+        const branch_start = start + 1;
         const tail = (try self.matchBranchDrop(branch_start, expected_branch, true)) orelse return null;
         if (self.hasBindInRange(start, tail.after, transparent_start_binds)) return null;
         return tail;
@@ -1214,9 +1469,11 @@ const Resolver = struct {
         transparent_start_binds: bool,
     ) Error!?BareBranchMatch {
         if (start >= self.code.len) return null;
-        const branch = try tempInstruction(self.code, self.atom_ledger, start, self.atom_index);
-        if (self.code[start] != expected_branch or branch.size != 5 or branch.has_atom) return null;
-        const after = start + branch.size;
+        if (self.code[start] != expected_branch) return null;
+        const branch_size = opcode.sizeOf(expected_branch);
+        if (branch_size != 5 or branch_size > self.code.len - start)
+            return error.InvalidBytecode;
+        const after = start + branch_size;
         if (self.hasBindInRange(start, after, transparent_start_binds)) return null;
         return .{ .label_index = try self.labelAt(start, 1), .after = after };
     }
@@ -1271,15 +1528,13 @@ const Resolver = struct {
 
     fn matchInsertTail(self: *Resolver, start: u32) Error!?InsertTailMatch {
         if (start >= self.code.len) return null;
-        const middle = try tempInstruction(self.code, self.atom_ledger, start, self.atom_index);
         const middle_op = self.code[start];
-        if ((middle_op != op.put_array_el and middle_op != op.put_ref_value) or middle.size != 1)
+        if (middle_op != op.put_array_el and middle_op != op.put_ref_value)
             return null;
-        const drop_pos = start + middle.size;
+        const drop_pos = start + 1;
         if (drop_pos >= self.code.len) return null;
-        const drop = try tempInstruction(self.code, self.atom_ledger, drop_pos, self.atom_index);
-        if (self.code[drop_pos] != op.drop or drop.size != 1) return null;
-        const after = drop_pos + drop.size;
+        if (self.code[drop_pos] != op.drop) return null;
+        const after = drop_pos + 1;
         if (self.hasSourceTransitionAt(start) or self.hasSourceTransitionAt(drop_pos))
             return null;
         if (self.hasBindInRange(start, after, false)) return null;
@@ -1303,8 +1558,9 @@ const Resolver = struct {
             position = slot.bound_offset;
             if (position == self.input.code_len) return position;
             if (self.code[position] != op.goto) return position;
-            const instruction = try tempInstruction(self.code, self.atom_ledger, position, self.atom_index);
-            if (instruction.size != 5 or instruction.has_atom) return error.InvalidBytecode;
+            const goto_size = opcode.sizeOf(op.goto);
+            if (goto_size != 5 or goto_size > self.code.len - position)
+                return error.InvalidBytecode;
             label_index = try self.labelAt(position, 1);
         }
         return position;
@@ -1319,7 +1575,7 @@ const Resolver = struct {
             if (position > self.input.code_len) return error.InvalidBytecode;
 
             self.absorbSourcesThrough(position);
-            const instruction = try tempInstruction(
+            const instruction = try phase1Instruction(
                 self.code,
                 self.atom_ledger,
                 position,
@@ -1351,8 +1607,9 @@ const Resolver = struct {
                     }
                 },
             }
-            position = std.math.add(u32, position, instruction.size) catch
-                return error.InvalidBytecode;
+            // phase1Instruction proved this cursor advance is within the
+            // u32-sized input stream.
+            position += instruction.size;
         }
     }
 
@@ -1364,28 +1621,51 @@ const Resolver = struct {
     ) Error!void {
         const pc: usize = @intCast(position);
         const scope_operand = legacy.decodeScopeOperand(self.code[pc + 5 ..][0..2]);
-        try legacy.resolveBindingTopology(self.ctx, atom_id, scope_operand.level);
-        const plan = try legacy.planScopeVarLowering(
+        const plan = try legacy.resolveScopeVarPlan(
             self.ctx,
             atom_id,
-            scope_operand,
+            scope_operand.level,
             op_id,
-            legacy.functionHasDynamicEnvObjects(self.ctx),
         );
+        if (comptime audit_oracles) {
+            const action = legacy.resolvedScopeVarPlanAction(plan);
+            const oracle = try legacy.planScopeVarLowering(
+                self.ctx,
+                atom_id,
+                scope_operand,
+                op_id,
+                false,
+            );
+            if (!std.meta.eql(action, oracle.action)) return error.InvalidBytecode;
+        }
 
         var label_done: ?u32 = null;
-        if (plan.probe.count != 0) {
-            const kind = legacy.scopeVarProbeKind(op_id, scope_operand.no_dynamic_env) orelse
-                return error.InvalidBytecode;
-            label_done = try self.emitDynamicEnvProbes(
+        if (legacy.scopeVarProbeKind(op_id, scope_operand.no_dynamic_env)) |kind| {
+            const oracle_plan = if (comptime audit_oracles)
+                legacy.evalVarObjectProbePlan(
+                    self.ctx,
+                    atom_id,
+                    scope_operand.level,
+                    op_id,
+                    kind,
+                )
+            else
+                null;
+            if (try self.needsDynamicEnvProbes(
                 atom_id,
                 scope_operand.level,
-                legacy.scopeVarProbeOpcode(kind),
-                plan.probe.count,
-                plan.probe.prefix_size,
-            );
+                oracle_plan,
+            )) {
+                label_done = try self.emitDynamicEnvProbes(
+                    atom_id,
+                    scope_operand.level,
+                    legacy.scopeVarProbeOpcode(kind),
+                    legacy.resolvedScopeVarPlanBinding(plan),
+                    oracle_plan,
+                );
+            }
         }
-        try self.writeScopeVarAction(atom_id, plan.action);
+        try self.writeResolvedScopeVarPlan(atom_id, plan);
         if (label_done) |label_index| try self.bindProductLabel(label_index);
     }
 
@@ -1397,40 +1677,42 @@ const Resolver = struct {
     ) Error!void {
         const pc: usize = @intCast(position);
         const scope_operand = legacy.decodeScopeOperand(self.code[pc + 5 ..][0..2]);
-        try legacy.resolveBindingTopology(self.ctx, atom_id, scope_operand.level);
+        const binding = try legacy.resolveScopeVarBindingTopology(
+            self.ctx,
+            atom_id,
+            scope_operand.level,
+        );
 
-        const probe_kind: enum { delete, get_ref } = if (op_id == op.scope_delete_var)
+        const probe_kind: legacy.EvalVarObjectProbeKindAlias = if (op_id == op.scope_delete_var)
             .delete
         else if (op_id == op.scope_get_ref)
             .get_ref
         else
             return error.InvalidBytecode;
-        const probe_plan = switch (probe_kind) {
-            .delete => legacy.evalVarObjectProbePlan(
+        const oracle_plan = if (comptime audit_oracles)
+            legacy.evalVarObjectProbePlan(
                 self.ctx,
                 atom_id,
                 scope_operand.level,
                 op_id,
-                .delete,
-            ),
-            .get_ref => legacy.evalVarObjectProbePlan(
-                self.ctx,
+                probe_kind,
+            )
+        else
+            null;
+        const label_done = if (try self.needsDynamicEnvProbes(
+            atom_id,
+            scope_operand.level,
+            oracle_plan,
+        ))
+            try self.emitDynamicEnvProbes(
                 atom_id,
                 scope_operand.level,
-                op_id,
-                .get_ref,
-            ),
-        };
-        var label_done: ?u32 = null;
-        if (probe_plan) |probe| {
-            label_done = try self.emitDynamicEnvProbes(
-                atom_id,
-                scope_operand.level,
-                if (probe_kind == .delete) op.with_delete_var else op.with_get_ref,
-                probe.count,
-                probe.prefix_size,
-            );
-        }
+                legacy.scopeVarProbeOpcode(probe_kind),
+                binding,
+                oracle_plan,
+            )
+        else
+            null;
 
         if (op_id == op.scope_delete_var) {
             try self.writeLoweredScopeDeleteVar(atom_id, scope_operand.level);
@@ -1453,9 +1735,19 @@ const Resolver = struct {
         _ = try updateLabel(self.product, aux_label, -1);
 
         const scope_operand = legacy.decodeScopeOperand(self.code[pc + 9 ..][0..2]);
-        try legacy.resolveBindingTopology(self.ctx, atom_id, scope_operand.level);
+        const binding = try legacy.resolveScopeVarBindingTopology(
+            self.ctx,
+            atom_id,
+            scope_operand.level,
+        );
 
-        if (try self.planMakeRefFold(position_next, atom_id, scope_operand, aux_label)) |fold| {
+        if (try self.planMakeRefFold(
+            position_next,
+            atom_id,
+            scope_operand,
+            aux_label,
+            binding,
+        )) |fold| {
             try self.registerPendingTailRewrite(
                 fold.tail_offset,
                 fold.emit_dup,
@@ -1468,8 +1760,7 @@ const Resolver = struct {
             var value_product = head_product;
             var next = position_next;
             if (fold.reads_value) {
-                try self.passBindsAt(position_next);
-                self.absorbSourcesThrough(position_next);
+                try self.passSideEventsThrough(position_next);
                 value_product = self.product.code_len;
                 try self.writeScopeVarAction(atom_id, fold.get_action);
                 next = std.math.add(u32, next, 1) catch return error.InvalidBytecode;
@@ -1508,27 +1799,34 @@ const Resolver = struct {
             return next;
         }
 
-        const probe_plan = legacy.evalVarObjectProbePlan(
-            self.ctx,
-            atom_id,
-            scope_operand.level,
-            op.scope_make_ref,
-            .make_ref,
-        );
+        const oracle_plan = if (comptime audit_oracles)
+            legacy.evalVarObjectProbePlan(
+                self.ctx,
+                atom_id,
+                scope_operand.level,
+                op.scope_make_ref,
+                .make_ref,
+            )
+        else
+            null;
         // qjs:33024-33032, 33287-33299, 33332-33336. Only a surviving
         // reference captures a local/argument cell.
         try legacy.markReferenceTakenBinding(self.ctx, atom_id, scope_operand.level);
 
-        var label_done: ?u32 = null;
-        if (probe_plan) |probe| {
-            label_done = try self.emitDynamicEnvProbes(
+        const label_done = if (try self.needsDynamicEnvProbes(
+            atom_id,
+            scope_operand.level,
+            oracle_plan,
+        ))
+            try self.emitDynamicEnvProbes(
                 atom_id,
                 scope_operand.level,
                 op.with_make_ref,
-                probe.count,
-                probe.prefix_size,
-            );
-        }
+                binding,
+                oracle_plan,
+            )
+        else
+            null;
         try self.writeLoweredScopeMakeRef(atom_id, scope_operand.level);
         if (label_done) |label_index| try self.bindProductLabel(label_index);
         return position_next;
@@ -1570,25 +1868,24 @@ const Resolver = struct {
                 try self.emitThrowVarRedeclaration(global_var.var_name);
             }
         }
-
         var position: u32 = 0;
         while (position < self.input.code_len) {
-            try self.passBindsAt(position);
-            self.absorbSourcesThrough(position);
+            try self.passSideEventsThrough(position);
 
             if (try self.pendingTailRewriteAt(position)) |rewrite_index| {
                 position = try self.emitPendingTailRewrite(rewrite_index);
                 continue;
             }
 
-            const instruction = try tempInstruction(
+            const instruction = try phase1Instruction(
                 self.code,
                 self.atom_ledger,
                 position,
                 self.atom_index,
             );
-            var position_next = std.math.add(u32, position, instruction.size) catch
-                return error.InvalidBytecode;
+            // phase1Instruction proved this cursor advance is within the
+            // u32-sized input stream.
+            var position_next = position + instruction.size;
             const input_atom = try self.consumeInputAtom(position, instruction);
             const op_id = self.code[position];
 
@@ -1912,8 +2209,7 @@ const Resolver = struct {
             position = position_next;
         }
 
-        try self.passBindsAt(self.input.code_len);
-        self.absorbSourcesThrough(self.input.code_len);
+        try self.passSideEventsThrough(self.input.code_len);
         try self.ensureAllPendingTailsConsumed();
         if (self.bind_cursor != self.binds.len or
             self.atom_index != self.atom_ledger.len or
@@ -1978,6 +2274,49 @@ fn initializeLabels(product: *ResolvedProduct, input: *const builder.Builder) Er
     }
 }
 
+/// The resolved stream is normally no larger than its compact input; rare
+/// dynamic-environment probes and hoists grow from this baseline. Reserve the
+/// three common output ledgers once, like a sized QuickJS DynBuf, so the hot
+/// per-instruction emit path only takes the capacity-success branches.
+fn preallocateProductStreams(
+    product: *ResolvedProduct,
+    input: *const builder.Builder,
+) Error!void {
+    if (input.code_len != 0) {
+        try reserve(
+            u8,
+            product.memory,
+            &product.code,
+            &product.code_capacity,
+            0,
+            input.code_len,
+            16,
+        );
+    }
+    if (input.atom_len != 0) {
+        try reserve(
+            core.atom.Atom,
+            product.memory,
+            &product.atom_operands,
+            &product.atom_capacity,
+            0,
+            input.atom_len,
+            8,
+        );
+    }
+    if (input.source_len != 0) {
+        try reserve(
+            builder.SourceSlot,
+            product.memory,
+            &product.source_slots,
+            &product.source_capacity,
+            0,
+            input.source_len,
+            8,
+        );
+    }
+}
+
 fn buildBindIndex(
     memory: *core.memory.MemoryAccount,
     input: *const builder.Builder,
@@ -2029,7 +2368,7 @@ fn markReachableEvalCaptures(
             return error.InvalidBytecode;
         }
 
-        const instruction = try tempInstruction(
+        const instruction = try phase1Instruction(
             code,
             atom_ledger,
             position,
@@ -2062,8 +2401,9 @@ fn markReachableEvalCaptures(
             else => {},
         };
 
-        position = std.math.add(u32, position, instruction.size) catch
-            return error.InvalidBytecode;
+        // phase1Instruction proved this cursor advance is within the
+        // u32-sized input stream.
+        position += instruction.size;
     }
     if (position != input.code_len or atom_index != input.atom_len)
         return error.InvalidBytecode;
@@ -2086,16 +2426,26 @@ pub fn run(
     const binds = try buildBindIndex(fd.memory, input);
     defer if (binds.len != 0) fd.memory.free(BindEntry, binds);
 
-    var graph = try cfg.build(fd.memory, input, binds);
-    defer graph.deinit();
+    var graph: cfg.Graph = .{ .memory = fd.memory };
+    defer if (comptime audit_oracles) graph.deinit();
     if (comptime audit_oracles) {
+        graph = try cfg.build(fd.memory, input, binds);
         try cfg.auditInstructionOwnership(fd.memory, input, &graph);
     }
-    try markReachableEvalCaptures(input, &graph, fd);
+    // QuickJS marks captured scopes only when its resolve_variables walk
+    // reaches OP_eval / OP_apply_eval (quickjs.c:34247-34262). cfg.build has
+    // already decoded every instruction, so use its opcode census rather than
+    // rescanning streams that provably contain neither instruction. Do not use
+    // fd.has_eval_call here: synthetic/internal Builder callers are allowed to
+    // construct the opcode stream without parser metadata.
+    if (comptime audit_oracles) {
+        if (graph.has_eval_instruction) try markReachableEvalCaptures(input, &graph, fd);
+    }
 
     var product: ResolvedProduct = .{ .memory = fd.memory, .atoms = fd.atoms };
     errdefer product.deinitUncommitted();
     try initializeLabels(&product, input);
+    try preallocateProductStreams(&product, input);
 
     var ctx = legacy_pipeline.JSContext.initWithFunctionDef(function, fd);
     // QCP-1 S3: exact-scope accelerator deferred; the linked-chain fallback is
@@ -2110,6 +2460,16 @@ pub fn run(
         .product = &product,
         .binds = binds,
         .graph = &graph,
+        .next_bind_offset = if (binds.len != 0)
+            binds[0].input_offset
+        else
+            std.math.maxInt(u64),
+        .next_source_offset = if (input.source_len != 0)
+            input.source_slots[0].temp_offset
+        else
+            std.math.maxInt(u64),
+        .has_dynamic_env_objects = legacy.functionHasDynamicEnvObjects(&ctx),
+        .dynamic_env_closure_len = fd.closure_var.len,
     };
     defer resolver.deinitScratch();
     try resolver.run();

@@ -40,6 +40,7 @@ pub const ExternalHostFinalizer = binding_root.ExternalHostFinalizer;
 
 pub const core = @import("core/root.zig");
 pub const parser = @import("parser.zig");
+pub const simple_token = @import("simple_token.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
@@ -59,6 +60,7 @@ test {
 
     _ = core;
     _ = parser;
+    _ = simple_token;
     _ = bytecode;
     _ = exec;
     _ = libs;

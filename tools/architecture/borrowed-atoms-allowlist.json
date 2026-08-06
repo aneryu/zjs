@@ -65,9 +65,9 @@
   {
     "source": "src/parser.zig",
     "pattern": "borrowed-use-after-release",
-    "contains": "const direct_lhs_atom: ?Atom = if (isIdentifierLikeToken(s)) identifierLikeAtom(s) else null;",
-    "reason": "same shape as audit B-1/B-2: the assignment LHS name is borrowed before parseCondExpr, which consumes the token, and is read afterwards for anonymous-function naming; the retain is held elsewhere - emitScopeGetVar's atom operand, and for a direct lvalue the transfer into LValue.name with owns_name=true - never by this local",
-    "exit_milestone": "dup direct_lhs_atom + defer free at the point of capture (qjs js_parse_assign_expr2 keeps its own reference) so the naming path does not depend on the lvalue's retain, then drop this entry"
+    "contains": "const direct_lhs_atom: ?Atom = if (s.peekKind() == tok.TOK_IDENT)",
+    "reason": "same shape as audit B-1/B-2: the assignment LHS name is borrowed before parseCondExpr, which consumes the token, and is read afterwards for anonymous-function naming; as in QuickJS name0, the emitted scope-get atom operand pins the id until direct getLValue transfers that owner into LValue.name with owns_name=true",
+    "exit_milestone": "make the pin explicit in the lvalue API or hold a local dup if the emitted-operand transfer contract changes, then drop this entry"
   },
   {
     "source": "src/parser.zig",
