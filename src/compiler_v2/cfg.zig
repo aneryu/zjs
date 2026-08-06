@@ -43,8 +43,7 @@ pub const OptimizationBoundaryKind = enum {
     gosub_empty,
 };
 
-/// The ruling's six diff buckets. Every oracle violation — cfg.zig identity
-/// oracles and compare.zig dual-comparator tiers alike — is classified into
+/// The ruling's six diff buckets. Every oracle violation is classified into
 /// exactly one of these, and every failure message names its bucket before
 /// any coordinate. Offsets are the pre-v2 identity and must never be the
 /// primary classification key.
@@ -944,9 +943,8 @@ pub fn isUnconditionalTerminal(op_id: u8) bool {
     };
 }
 
-/// Continuation-kind opcodes. Keep synchronized with
-/// compare.zig's `continuationKind`, which is the dual comparator's
-/// definition of the same population.
+/// Continuation-kind opcodes: the population the CFG's continuation
+/// accounting is defined over.
 fn isContinuationOp(op_id: u8) bool {
     return switch (op_id) {
         op.@"catch",

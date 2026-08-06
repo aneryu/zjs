@@ -3226,14 +3226,7 @@ const ResolveLabelsTestHarness = struct {
     }
 };
 
-fn requireCompilerV2() !void {
-    var skip = std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-}
-
 test "compiler_v2.resolve_labels: straight-line slot shortening and source dedupe" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3290,7 +3283,6 @@ test "compiler_v2.resolve_labels: straight-line slot shortening and source dedup
 }
 
 test "compiler_v2.resolve_labels: plain layout keeps slot families wide" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3330,7 +3322,6 @@ test "compiler_v2.resolve_labels: plain layout keeps slot families wide" {
 }
 
 test "compiler_v2.resolve_labels: put-get fold preserves both source transitions" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3358,7 +3349,6 @@ test "compiler_v2.resolve_labels: put-get fold preserves both source transitions
 }
 
 test "compiler_v2.resolve_labels: dup put drop get delays getter source" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3396,7 +3386,6 @@ test "compiler_v2.resolve_labels: dup put drop get delays getter source" {
 }
 
 test "compiler_v2.resolve_labels: discarded field store delays tail sources" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3433,7 +3422,6 @@ test "compiler_v2.resolve_labels: discarded field store delays tail sources" {
 }
 
 test "compiler_v2.resolve_labels: typeof string fold preserves legacy source relocation order" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3476,7 +3464,6 @@ test "compiler_v2.resolve_labels: typeof string fold preserves legacy source rel
 }
 
 test "compiler_v2.resolve_labels: typeof branch keeps equal next-op source" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3521,8 +3508,6 @@ test "compiler_v2.resolve_labels: typeof branch keeps equal next-op source" {
 }
 
 test "compiler_v2.resolve_labels: backward goto selects exact i8 and i16 encodings" {
-    try requireCompilerV2();
-
     {
         var harness: ResolveLabelsTestHarness = undefined;
         try harness.init(std.testing.allocator);
@@ -3567,7 +3552,6 @@ test "compiler_v2.resolve_labels: backward goto selects exact i8 and i16 encodin
 }
 
 test "compiler_v2.resolve_labels: plain layout keeps backward goto wide" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3588,7 +3572,6 @@ test "compiler_v2.resolve_labels: plain layout keeps backward goto wide" {
 }
 
 test "compiler_v2.resolve_labels: forward goto uses a one-byte relocation" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3614,7 +3597,6 @@ test "compiler_v2.resolve_labels: forward goto uses a one-byte relocation" {
 }
 
 test "compiler_v2.resolve_labels: goto16 relaxes after body shortening and moves sources" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3652,8 +3634,6 @@ test "compiler_v2.resolve_labels: goto16 relaxes after body shortening and moves
 }
 
 test "compiler_v2.resolve_labels: next conditional drops and adjacent goto inverts" {
-    try requireCompilerV2();
-
     {
         var harness: ResolveLabelsTestHarness = undefined;
         try harness.init(std.testing.allocator);
@@ -3705,7 +3685,6 @@ test "compiler_v2.resolve_labels: next conditional drops and adjacent goto inver
 }
 
 test "compiler_v2.resolve_labels: unreferenced compact bind does not block drop return fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3727,7 +3706,6 @@ test "compiler_v2.resolve_labels: unreferenced compact bind does not block drop 
 }
 
 test "compiler_v2.resolve_labels: peephole consumes a spanned dead compact bind" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3749,7 +3727,6 @@ test "compiler_v2.resolve_labels: peephole consumes a spanned dead compact bind"
 }
 
 test "compiler_v2.resolve_labels: referenced compact bind blocks drop return fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3774,7 +3751,6 @@ test "compiler_v2.resolve_labels: referenced compact bind blocks drop return fol
 }
 
 test "compiler_v2.resolve_labels: consumed refcount remains a target barrier" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3801,7 +3777,6 @@ test "compiler_v2.resolve_labels: consumed refcount remains a target barrier" {
 }
 
 test "compiler_v2.resolve_labels: goto terminal fold skips live S3 fallthrough edges" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3830,7 +3805,6 @@ test "compiler_v2.resolve_labels: goto terminal fold skips live S3 fallthrough e
 }
 
 test "compiler_v2.resolve_labels: source after target drop blocks goto terminal fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3862,7 +3836,6 @@ test "compiler_v2.resolve_labels: source after target drop blocks goto terminal 
 }
 
 test "compiler_v2.resolve_labels: folded typeof branch threads through dead goto" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3919,7 +3892,6 @@ test "compiler_v2.resolve_labels: folded typeof branch threads through dead goto
 }
 
 test "compiler_v2.resolve_labels: folded nullish branches thread through dead goto" {
-    try requireCompilerV2();
     const cases = [_]struct { literal: u8, test_op: u8 }{
         .{ .literal = op.null, .test_op = op.is_null },
         .{ .literal = op.undefined, .test_op = op.is_undefined },
@@ -3978,7 +3950,6 @@ test "compiler_v2.resolve_labels: folded nullish branches thread through dead go
 }
 
 test "compiler_v2.resolve_labels: zero-ref parser label blocks nullish branch fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4016,7 +3987,6 @@ test "compiler_v2.resolve_labels: zero-ref parser label blocks nullish branch fo
 }
 
 test "compiler_v2.resolve_labels: ret discards an unreachable tail" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4032,7 +4002,6 @@ test "compiler_v2.resolve_labels: ret discards an unreachable tail" {
 }
 
 test "compiler_v2.resolve_labels: two-hop goto threading targets the final label" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4061,7 +4030,6 @@ test "compiler_v2.resolve_labels: two-hop goto threading targets the final label
 }
 
 test "compiler_v2.resolve_labels: goto over dead switch trampoline becomes fallthrough" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4095,7 +4063,6 @@ test "compiler_v2.resolve_labels: goto over dead switch trampoline becomes fallt
 }
 
 test "compiler_v2.resolve_labels: sourceful constant-false loop keeps legacy goto edge" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4123,7 +4090,6 @@ test "compiler_v2.resolve_labels: sourceful constant-false loop keeps legacy got
 }
 
 test "compiler_v2.resolve_labels: variable pass removes forward-only dead tail" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4149,8 +4115,6 @@ test "compiler_v2.resolve_labels: variable pass removes forward-only dead tail" 
 }
 
 test "compiler_v2.resolve_labels: boolean constant tests become goto or nothing" {
-    try requireCompilerV2();
-
     {
         var harness: ResolveLabelsTestHarness = undefined;
         try harness.init(std.testing.allocator);
@@ -4194,7 +4158,6 @@ test "compiler_v2.resolve_labels: boolean constant tests become goto or nothing"
 }
 
 test "compiler_v2.resolve_labels: dup put and local update peepholes use short forms" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4221,7 +4184,6 @@ test "compiler_v2.resolve_labels: dup put and local update peepholes use short f
 }
 
 test "compiler_v2.resolve_labels: post-update tails publish sources afterward" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4292,7 +4254,6 @@ test "compiler_v2.resolve_labels: post-update tails publish sources afterward" {
 }
 
 test "compiler_v2.resolve_labels: integer negation and short constants are byte exact" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4313,7 +4274,6 @@ test "compiler_v2.resolve_labels: integer negation and short constants are byte 
 }
 
 test "compiler_v2.resolve_labels: dropped atom and length field balance ownership" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4341,7 +4301,6 @@ test "compiler_v2.resolve_labels: dropped atom and length field balance ownershi
 }
 
 test "compiler_v2.resolve_labels: shared with probes resolve operand-relative done label" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4406,7 +4365,6 @@ test "compiler_v2.resolve_labels: shared with probes resolve operand-relative do
 }
 
 test "compiler_v2.resolve_labels: strict this and arguments prologue is exact" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4501,7 +4459,6 @@ fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void {
 }
 
 test "compiler_v2.resolve_labels: allocation failure sweep is transactional" {
-    try requireCompilerV2();
     try resolveLabelsOomScript(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,

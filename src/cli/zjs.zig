@@ -162,7 +162,6 @@ pub fn main(init: std.process.Init) !void {
     const total_start = monotonicNanos();
     setupHostDispatchStatsExitDump(init.environ_map);
     setupV2OracleReportExitDump(init.environ_map);
-    setupV2EmissionCoverageExitDump();
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
@@ -804,17 +803,6 @@ fn writeV2OracleReportAtExit() callconv(.c) void {
     const text = engine.compiler_v2.formatOracleReport(&buffer);
     if (text.len == 0) return;
     std.debug.print("{s}\n", .{text});
-}
-
-fn setupV2EmissionCoverageExitDump() void {
-    if (comptime !engine.compiler_v2.coverage.enabled) return;
-    if (!engine.compiler_v2.coverage.collectMode()) return;
-    _ = atexit(writeV2EmissionCoverageAtExit);
-}
-
-fn writeV2EmissionCoverageAtExit() callconv(.c) void {
-    if (comptime !engine.compiler_v2.coverage.enabled) return;
-    engine.compiler_v2.coverage.dumpReport();
 }
 
 fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {

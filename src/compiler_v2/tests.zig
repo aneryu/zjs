@@ -9,7 +9,6 @@ const object_ops = @import("../exec/object_ops.zig");
 const stack_mod = @import("../exec/stack.zig");
 const standard_globals = @import("../exec/standard_globals.zig");
 const builder_mod = @import("builder.zig");
-const coverage = @import("coverage.zig");
 const labels = @import("labels.zig");
 const resolve_labels = @import("resolve_labels.zig");
 const resolve_variables = @import("resolve_variables.zig");
@@ -62,47 +61,6 @@ const V2Parse = struct {
     }
 };
 
-const LegacyParse = struct {
-    rt: *core.JSRuntime,
-    name_atom: core.atom.Atom,
-    function: bytecode_mod.Bytecode,
-    lex: parser_mod.Lexer,
-    state: P.ParseState,
-
-    /// Parse through the ordinary phase-1 emitter. Unlike V2Parse, this keeps
-    /// source markers and scope temporary opcodes and emits the root stream to
-    /// function.code; nested functions own their FunctionDef.byte_code stream.
-    fn init(h: *LegacyParse, src: []const u8) !void {
-        h.rt = try core.JSRuntime.create(std.testing.allocator);
-        errdefer h.rt.destroy();
-        h.name_atom = try h.rt.atoms.internString("compiler_v2-s3-equivalence");
-        errdefer h.rt.atoms.free(h.name_atom);
-        h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
-        errdefer h.function.deinit(h.rt);
-        h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
-        h.state = try P.ParseState.init(&h.lex, &h.function);
-        // The seed models a script-global var environment while deliberately
-        // leaving is_eval false so top-level let/const remain local TDZ slots.
-        h.state.function_def.is_global_var = true;
-    }
-
-    fn parseProgram(h: *LegacyParse, capture_top_level_functions: bool) !void {
-        h.state.top_level_functions_as_children = capture_top_level_functions;
-        try P.parseProgramStatements(
-            &h.state,
-            P.DeclMask{ .func = true, .func_with_label = true, .other = true },
-        );
-        try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
-    }
-
-    fn deinit(h: *LegacyParse) void {
-        h.state.deinit(h.rt);
-        h.function.deinit(h.rt);
-        h.rt.atoms.free(h.name_atom);
-        h.rt.destroy();
-    }
-};
-
 const V2Exec = struct {
     rt: *core.JSRuntime,
     ctx: *core.JSContext,
@@ -128,6 +86,7 @@ const V2Exec = struct {
         h.state = try P.ParseState.initCanonicalRootWithRuntime(h.rt, &h.lex, &h.function);
         h.state.function_def.is_global_var = true;
         h.state.top_level_functions_as_children = true;
+        try h.state.beginV2ProgramEmission();
         h.installed_short_opcode = false;
     }
 
@@ -213,684 +172,6 @@ const Phase1Instruction = struct {
     has_atom: bool = false,
 };
 
-fn phase1TempAtomInstructionSize(op_id: u8) ?u8 {
-    return switch (op_id) {
-        qop.scope_get_var_undef,
-        qop.scope_get_var,
-        qop.scope_put_var,
-        qop.scope_delete_var,
-        qop.scope_get_ref,
-        qop.scope_put_var_init,
-        qop.scope_get_var_checkthis,
-        qop.scope_get_private_field,
-        qop.scope_get_private_field2,
-        qop.scope_put_private_field,
-        qop.scope_in_private_field,
-        => 7,
-        qop.scope_make_ref => 11,
-        qop.get_field_opt_chain => 5,
-        else => null,
-    };
-}
-
-fn phase1InstructionHasAtom(op_id: u8, is_temp: bool) bool {
-    if (is_temp) return switch (op_id) {
-        qop.scope_get_var_undef,
-        qop.scope_get_var,
-        qop.scope_put_var,
-        qop.scope_delete_var,
-        qop.scope_make_ref,
-        qop.scope_get_ref,
-        qop.scope_put_var_init,
-        qop.scope_get_var_checkthis,
-        qop.scope_get_private_field,
-        qop.scope_get_private_field2,
-        qop.scope_put_private_field,
-        qop.scope_in_private_field,
-        qop.get_field_opt_chain,
-        => true,
-        else => false,
-    };
-
-    return switch (opcode.formatOf(op_id)) {
-        .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
-        else => false,
-    };
-}
-
-/// Test-local twin of parserPhaseInstruction. The atom ledger disambiguates
-/// phase-1 temporary ids from the overlapping final short-opcode ids.
-fn decodePhase1Instruction(
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-    pc: usize,
-    atom_index: usize,
-) !Phase1Instruction {
-    if (pc >= code.len) return error.InvalidBytecode;
-    const op_id = code[pc];
-
-    if (phase1TempAtomInstructionSize(op_id)) |temp_size| {
-        if (pc + temp_size <= code.len and atom_index < atoms.len and
-            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == atoms[atom_index])
-        {
-            return .{ .size = temp_size, .is_temp = true, .has_atom = true };
-        }
-    }
-
-    var instruction: Phase1Instruction = switch (op_id) {
-        qop.enter_scope,
-        qop.leave_scope,
-        qop.label,
-        qop.get_array_el_opt_chain,
-        qop.set_class_name,
-        qop.line_num,
-        => .{ .size = opcode.sizeOfPhase1(op_id), .is_temp = true },
-        else => .{ .size = opcode.sizeOf(op_id) },
-    };
-    if (instruction.size == 0 or pc + instruction.size > code.len)
-        return error.InvalidBytecode;
-    instruction.has_atom = phase1InstructionHasAtom(op_id, instruction.is_temp);
-    return instruction;
-}
-
-fn phase1LabelOperandOffset(op_id: u8, instruction: Phase1Instruction) ?usize {
-    if (instruction.is_temp) {
-        if (op_id == qop.scope_make_ref) return 5;
-        return null;
-    }
-    return switch (opcode.formatOf(op_id)) {
-        .label => 1,
-        .atom_label_u8, .atom_label_u16 => 5,
-        else => null,
-    };
-}
-
-fn u32LessThan(_: void, lhs: u32, rhs: u32) bool {
-    return lhs < rhs;
-}
-
-fn translatedTargetLabel(
-    targets: []const u32,
-    target_labels: []const labels.LabelId,
-    target_pc: u32,
-) !labels.LabelId {
-    if (targets.len != target_labels.len) return error.InvalidBytecode;
-    var lo: usize = 0;
-    var hi = targets.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        if (targets[mid] < target_pc)
-            lo = mid + 1
-        else
-            hi = mid;
-    }
-    if (lo >= targets.len or targets[lo] != target_pc)
-        return error.InvalidBytecode;
-    return target_labels[lo];
-}
-
-/// Translate a real legacy parser phase-1 stream into a fresh identity-native
-/// Builder. Every legacy label instruction and absolute-PC label operand is
-/// mapped to a LabelId; line/label bytes disappear while binds retain their
-/// exact normalized instruction boundary.
-fn translatePhase1ToV2(
-    b: *builder_mod.Builder,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    if (b.code_len != 0 or b.atom_len != 0 or b.label_len != 0 or b.reloc_len != 0)
-        return error.InvalidBytecode;
-
-    var target_pcs: std.ArrayList(u32) = .empty;
-    defer target_pcs.deinit(std.testing.allocator);
-
-    var pc: usize = 0;
-    var atom_index: usize = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp and op_id == qop.label) {
-            try target_pcs.append(std.testing.allocator, @intCast(pc));
-        }
-        if (phase1LabelOperandOffset(op_id, instruction)) |operand_offset| {
-            if (operand_offset + 4 > instruction.size) return error.InvalidBytecode;
-            const target_pc = std.mem.readInt(u32, code[pc + operand_offset ..][0..4], .little);
-            if (target_pc > code.len) return error.InvalidBytecode;
-            try target_pcs.append(std.testing.allocator, target_pc);
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
-
-    std.mem.sort(u32, target_pcs.items, {}, u32LessThan);
-    var target_count: usize = 0;
-    for (target_pcs.items) |target_pc| {
-        if (target_count == 0 or target_pcs.items[target_count - 1] != target_pc) {
-            target_pcs.items[target_count] = target_pc;
-            target_count += 1;
-        }
-    }
-    const targets = target_pcs.items[0..target_count];
-    const target_labels = try std.testing.allocator.alloc(labels.LabelId, target_count);
-    defer std.testing.allocator.free(target_labels);
-    for (target_labels) |*label| label.* = try b.newLabel();
-
-    pc = 0;
-    atom_index = 0;
-    var bind_cursor: usize = 0;
-    while (pc < code.len) {
-        while (bind_cursor < targets.len and targets[bind_cursor] == pc) : (bind_cursor += 1) {
-            try b.bindLabel(target_labels[bind_cursor]);
-        }
-        if (bind_cursor < targets.len and targets[bind_cursor] < pc)
-            return error.InvalidBytecode;
-
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-
-        if (instruction.is_temp) {
-            switch (op_id) {
-                qop.label, qop.line_num => {},
-                qop.enter_scope, qop.leave_scope => {
-                    if (instruction.size != 3) return error.InvalidBytecode;
-                    try b.emitOpU16(
-                        op_id,
-                        std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                    );
-                },
-                qop.scope_get_var_undef,
-                qop.scope_get_var,
-                qop.scope_put_var,
-                qop.scope_delete_var,
-                qop.scope_get_ref,
-                qop.scope_put_var_init,
-                qop.scope_get_var_checkthis,
-                qop.scope_get_private_field,
-                qop.scope_get_private_field2,
-                qop.scope_put_private_field,
-                qop.scope_in_private_field,
-                => {
-                    if (instruction.size != 7 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    try b.emitAtomOpU16Owned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                qop.scope_make_ref => {
-                    if (instruction.size != 11 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                    try b.emitScopeRefOpOwned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        try translatedTargetLabel(targets, target_labels, target_pc),
-                        std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                else => return error.NonStraightLinePhase1,
-            }
-            pc += instruction.size;
-            continue;
-        }
-
-        const format = opcode.formatOf(op_id);
-        switch (format) {
-            .none, .none_int, .none_loc, .none_arg, .none_var_ref, .npopx => {
-                if (instruction.size != 1) return error.InvalidBytecode;
-                try b.emitOp(op_id);
-            },
-            .u8, .i8, .loc8, .const8 => {
-                if (instruction.size != 2) return error.InvalidBytecode;
-                try b.emitOpU8(op_id, code[pc + 1]);
-            },
-            .u16, .i16, .npop, .loc, .arg, .var_ref => {
-                if (instruction.size != 3) return error.InvalidBytecode;
-                try b.emitOpU16(
-                    op_id,
-                    std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                );
-            },
-            .npop_u16, .u32, .i32, .@"const" => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                try b.emitOpU32(
-                    op_id,
-                    std.mem.readInt(u32, code[pc + 1 ..][0..4], .little),
-                );
-            },
-            .atom, .atom_u8, .atom_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                switch (format) {
-                    .atom => {
-                        if (instruction.size != 5) return error.InvalidBytecode;
-                        try b.emitAtomOpOwned(op_id, b.atoms.dup(atom_id));
-                    },
-                    .atom_u8 => {
-                        if (instruction.size != 6) return error.InvalidBytecode;
-                        try b.emitAtomOpU8Owned(op_id, b.atoms.dup(atom_id), code[pc + 5]);
-                    },
-                    .atom_u16 => {
-                        if (instruction.size != 7) return error.InvalidBytecode;
-                        try b.emitAtomOpU16Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                try b.emitJump(
-                    op_id,
-                    try translatedTargetLabel(targets, target_labels, target_pc),
-                );
-            },
-            .atom_label_u8, .atom_label_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                const target_label = try translatedTargetLabel(targets, target_labels, target_pc);
-                switch (format) {
-                    .atom_label_u8 => {
-                        if (instruction.size != 10) return error.InvalidBytecode;
-                        try b.emitAtomLabelOpU8Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            code[pc + 9],
-                        );
-                    },
-                    .atom_label_u16 => {
-                        if (instruction.size != 11) return error.InvalidBytecode;
-                        try b.emitScopeRefOpOwned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label8, .label16, .label_u16 => return error.NonStraightLinePhase1,
-        }
-        pc += instruction.size;
-    }
-    while (bind_cursor < targets.len and targets[bind_cursor] == code.len) : (bind_cursor += 1) {
-        try b.bindLabel(target_labels[bind_cursor]);
-    }
-    if (bind_cursor != targets.len or atom_index != atoms.len)
-        return error.InvalidBytecode;
-}
-
-fn attachTranslatedBuilder(
-    fd: *bytecode_mod.function_def.FunctionDef,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    try std.testing.expect(fd.v2_builder == null);
-    const b = try fd.memory.create(builder_mod.Builder);
-    b.* = builder_mod.Builder.init(fd.memory, fd.atoms);
-    errdefer {
-        b.deinit();
-        fd.memory.destroy(builder_mod.Builder, b);
-    }
-    try translatePhase1ToV2(b, code, atoms);
-    fd.v2_builder = b;
-}
-
-fn isFullPhase1JumpOp(op_id: u8) bool {
-    return op_id == qop.goto or op_id == qop.if_true or
-        op_id == qop.if_false or op_id == qop.@"catch" or
-        op_id == qop.gosub;
-}
-
-/// Complete the legacy parser-label transaction before translation. Most
-/// forward jumps are patched in place by the parser; shared exception/finally
-/// labels retain parser identities until legacy resolve_variables binds them.
-/// The v2 test bridge performs that same allocation-before-mutation bind so
-/// translatePhase1ToV2Full still rejects any unpatched identity it receives.
-fn completeLegacyParserLabels(code: []u8, atoms: []const core.atom.Atom) !void {
-    if (code.len >= qop.parser_label_tag) return error.BytecodeOverflow;
-
-    var reference_sites: std.ArrayList(usize) = .empty;
-    defer reference_sites.deinit(std.testing.allocator);
-    var max_label_id: u32 = 0;
-    var pc: usize = 0;
-    var atom_index: usize = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp and op_id == qop.label) {
-            const id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (id > max_label_id) max_label_id = id;
-        }
-        if (phase1LabelOperandOffset(op_id, instruction)) |offset| {
-            if (offset + 4 > instruction.size) return error.InvalidBytecode;
-            const encoded = std.mem.readInt(u32, code[pc + offset ..][0..4], .little);
-            if ((encoded & qop.parser_label_tag) != 0) {
-                const id = encoded & ~qop.parser_label_tag;
-                if (id == 0) return error.InvalidBytecode;
-                if (id > max_label_id) max_label_id = id;
-                try reference_sites.append(std.testing.allocator, pc + offset);
-            }
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
-    if (reference_sites.items.len == 0) return;
-
-    const unbound = std.math.maxInt(u32);
-    const targets = try std.testing.allocator.alloc(u32, @as(usize, max_label_id) + 1);
-    defer std.testing.allocator.free(targets);
-    @memset(targets, unbound);
-
-    pc = 0;
-    atom_index = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp and op_id == qop.label) {
-            const id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (id != 0) {
-                if (id >= targets.len or targets[id] != unbound)
-                    return error.InvalidBytecode;
-                targets[id] = @intCast(pc);
-            }
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-
-    // Validate every site before publishing any absolute target.
-    for (reference_sites.items) |site| {
-        const encoded = std.mem.readInt(u32, code[site..][0..4], .little);
-        const id = encoded & ~qop.parser_label_tag;
-        if ((encoded & qop.parser_label_tag) == 0 or id >= targets.len or
-            targets[id] == unbound)
-        {
-            return error.InvalidBytecode;
-        }
-    }
-    for (reference_sites.items) |site| {
-        const encoded = std.mem.readInt(u32, code[site..][0..4], .little);
-        const id = encoded & ~qop.parser_label_tag;
-        std.mem.writeInt(u32, code[site..][0..4], targets[id], .little);
-    }
-}
-
-/// Translate a completed parser phase-1 stream. Parser label markers disappear;
-/// their patched absolute byte offsets become builder-native LabelIds.
-fn translatePhase1ToV2Full(
-    b: *builder_mod.Builder,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    if (b.code_len != 0 or b.atom_len != 0 or b.label_len != 0 or b.reloc_len != 0)
-        return error.InvalidBytecode;
-
-    var target_pcs: std.ArrayList(u32) = .empty;
-    defer target_pcs.deinit(std.testing.allocator);
-
-    // Pass 1 assigns one LabelId to each referenced absolute phase-1 target.
-    // The raw ids carried by op.label are parser-only patching identities.
-    var pc: usize = 0;
-    var atom_index: usize = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        var target_pc: ?u32 = null;
-        if (instruction.is_temp and op_id == qop.scope_make_ref) {
-            if (instruction.size != 11) return error.InvalidBytecode;
-            target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-        } else if (!instruction.is_temp and opcode.formatOf(op_id) == .label) {
-            if (!isFullPhase1JumpOp(op_id) or instruction.size != 5)
-                return error.InvalidBytecode;
-            target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-        }
-        if (target_pc) |target| {
-            if ((target & qop.parser_label_tag) != 0 or target > code.len)
-                return error.InvalidBytecode;
-            try target_pcs.append(std.testing.allocator, target);
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
-
-    std.mem.sort(u32, target_pcs.items, {}, u32LessThan);
-    var target_count: usize = 0;
-    for (target_pcs.items) |target_pc| {
-        if (target_count == 0 or target_pcs.items[target_count - 1] != target_pc) {
-            target_pcs.items[target_count] = target_pc;
-            target_count += 1;
-        }
-    }
-    const targets = target_pcs.items[0..target_count];
-    const target_labels = try std.testing.allocator.alloc(labels.LabelId, target_count);
-    defer std.testing.allocator.free(target_labels);
-    for (target_labels) |*label| label.* = try b.newLabel();
-
-    // Pass 2 binds targets at the corresponding instruction boundary and
-    // emits the compact v2 instruction stream.
-    pc = 0;
-    atom_index = 0;
-    var bind_cursor: usize = 0;
-    while (pc < code.len) {
-        while (bind_cursor < targets.len and targets[bind_cursor] == pc) : (bind_cursor += 1) {
-            try b.bindLabel(target_labels[bind_cursor]);
-        }
-        if (bind_cursor < targets.len and targets[bind_cursor] < pc)
-            return error.InvalidBytecode;
-
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp) {
-            switch (op_id) {
-                // v2 source markers are exercised by resolve_labels inline
-                // tests; VM execution semantics do not consume pc2line.
-                qop.label, qop.line_num => {},
-                qop.enter_scope, qop.leave_scope => {
-                    if (instruction.size != 3) return error.InvalidBytecode;
-                    try b.emitOpU16(
-                        op_id,
-                        std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                    );
-                },
-                qop.scope_get_var_undef,
-                qop.scope_get_var,
-                qop.scope_put_var,
-                qop.scope_delete_var,
-                qop.scope_get_ref,
-                qop.scope_put_var_init,
-                qop.scope_get_var_checkthis,
-                qop.scope_get_private_field,
-                qop.scope_get_private_field2,
-                qop.scope_put_private_field,
-                qop.scope_in_private_field,
-                => {
-                    if (instruction.size != 7 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    try b.emitAtomOpU16Owned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                qop.scope_make_ref => {
-                    if (instruction.size != 11 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                    if ((target_pc & qop.parser_label_tag) != 0)
-                        return error.InvalidBytecode;
-                    try b.emitScopeRefOpOwned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        try translatedTargetLabel(targets, target_labels, target_pc),
-                        std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                else => return error.NonStraightLinePhase1,
-            }
-            pc += instruction.size;
-            continue;
-        }
-
-        const format = opcode.formatOf(op_id);
-        switch (format) {
-            .none, .none_int, .none_loc, .none_arg, .none_var_ref, .npopx => {
-                if (instruction.size != 1) return error.InvalidBytecode;
-                try b.emitOp(op_id);
-            },
-            .u8, .i8, .loc8, .const8 => {
-                if (instruction.size != 2) return error.InvalidBytecode;
-                try b.emitOpU8(op_id, code[pc + 1]);
-            },
-            .u16, .i16, .npop, .loc, .arg, .var_ref => {
-                if (instruction.size != 3) return error.InvalidBytecode;
-                try b.emitOpU16(
-                    op_id,
-                    std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                );
-            },
-            .npop_u16, .u32, .i32, .@"const" => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                try b.emitOpU32(
-                    op_id,
-                    std.mem.readInt(u32, code[pc + 1 ..][0..4], .little),
-                );
-            },
-            .atom, .atom_u8, .atom_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                switch (format) {
-                    .atom => {
-                        if (instruction.size != 5) return error.InvalidBytecode;
-                        try b.emitAtomOpOwned(op_id, b.atoms.dup(atom_id));
-                    },
-                    .atom_u8 => {
-                        if (instruction.size != 6) return error.InvalidBytecode;
-                        try b.emitAtomOpU8Owned(op_id, b.atoms.dup(atom_id), code[pc + 5]);
-                    },
-                    .atom_u16 => {
-                        if (instruction.size != 7) return error.InvalidBytecode;
-                        try b.emitAtomOpU16Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label => {
-                if (!isFullPhase1JumpOp(op_id) or instruction.size != 5)
-                    return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if ((target_pc & qop.parser_label_tag) != 0)
-                    return error.InvalidBytecode;
-                try b.emitJump(
-                    op_id,
-                    try translatedTargetLabel(targets, target_labels, target_pc),
-                );
-            },
-            .atom_label_u8, .atom_label_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                if ((target_pc & qop.parser_label_tag) != 0)
-                    return error.InvalidBytecode;
-                const target_label = try translatedTargetLabel(targets, target_labels, target_pc);
-                switch (format) {
-                    .atom_label_u8 => {
-                        if (instruction.size != 10) return error.InvalidBytecode;
-                        try b.emitAtomLabelOpU8Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            code[pc + 9],
-                        );
-                    },
-                    .atom_label_u16 => {
-                        if (instruction.size != 11) return error.InvalidBytecode;
-                        try b.emitScopeRefOpOwned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label8, .label16, .label_u16 => return error.NonStraightLinePhase1,
-        }
-        pc += instruction.size;
-    }
-    while (bind_cursor < targets.len and targets[bind_cursor] == code.len) : (bind_cursor += 1) {
-        try b.bindLabel(target_labels[bind_cursor]);
-    }
-    if (bind_cursor != targets.len or atom_index != atoms.len)
-        return error.InvalidBytecode;
-}
-
-fn attachTranslatedBuilderFull(
-    fd: *bytecode_mod.function_def.FunctionDef,
-    code: []u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    try std.testing.expect(fd.v2_builder == null);
-    try completeLegacyParserLabels(code, atoms);
-    const b = try fd.memory.create(builder_mod.Builder);
-    b.* = builder_mod.Builder.init(fd.memory, fd.atoms);
-    errdefer {
-        b.deinit();
-        fd.memory.destroy(builder_mod.Builder, b);
-    }
-    try translatePhase1ToV2Full(b, code, atoms);
-    fd.v2_builder = b;
-}
-
-fn attachTranslatedBuilderTree(fd: *bytecode_mod.function_def.FunctionDef) !void {
-    try attachTranslatedBuilderFull(fd, fd.byte_code, fd.atom_operands);
-    for (fd.child_list) |child| try attachTranslatedBuilderTree(child);
-}
-
 fn installedFunctionHasShortOpcode(fb: *const bytecode_mod.FunctionBytecode) !bool {
     const code = fb.byteCode();
     var pc: usize = 0;
@@ -922,8 +203,6 @@ fn v2CompileAndRun(h: *V2Exec) !core.JSValue {
     );
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
     try h.state.finalizeEvalReturn();
-
-    try attachTranslatedBuilderTree(&h.state.function_def);
 
     const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
         &h.state.function_def,
@@ -1030,129 +309,11 @@ fn expectPublishedFunctionBytecodeOwnersResolve(
     }
 }
 
-fn expectFdTopologyEqual(
-    legacy_fd: *const bytecode_mod.function_def.FunctionDef,
-    v2_fd: *const bytecode_mod.function_def.FunctionDef,
-) !void {
-    try std.testing.expectEqual(legacy_fd.vars.len, v2_fd.vars.len);
-    for (legacy_fd.vars, v2_fd.vars) |legacy_var, v2_var| {
-        try std.testing.expectEqual(legacy_var.var_name, v2_var.var_name);
-        try std.testing.expectEqual(legacy_var.scope_level, v2_var.scope_level);
-        try std.testing.expectEqual(legacy_var.var_kind, v2_var.var_kind);
-        try std.testing.expectEqual(legacy_var.is_lexical, v2_var.is_lexical);
-        try std.testing.expectEqual(legacy_var.is_const, v2_var.is_const);
-        try std.testing.expectEqual(legacy_var.is_captured, v2_var.is_captured);
-    }
-
-    try std.testing.expectEqual(legacy_fd.args.len, v2_fd.args.len);
-    for (legacy_fd.args, v2_fd.args) |legacy_arg, v2_arg| {
-        try std.testing.expectEqual(legacy_arg.var_name, v2_arg.var_name);
-        try std.testing.expectEqual(legacy_arg.scope_level, v2_arg.scope_level);
-        try std.testing.expectEqual(legacy_arg.var_kind, v2_arg.var_kind);
-        try std.testing.expectEqual(legacy_arg.is_lexical, v2_arg.is_lexical);
-        try std.testing.expectEqual(legacy_arg.is_const, v2_arg.is_const);
-        try std.testing.expectEqual(legacy_arg.is_captured, v2_arg.is_captured);
-    }
-
-    try std.testing.expectEqual(legacy_fd.closure_var.len, v2_fd.closure_var.len);
-    for (legacy_fd.closure_var, v2_fd.closure_var) |legacy_ref, v2_ref| {
-        try std.testing.expectEqual(legacy_ref.var_name, v2_ref.var_name);
-        try std.testing.expectEqual(legacy_ref.closureType(), v2_ref.closureType());
-        try std.testing.expectEqual(legacy_ref.isLexical(), v2_ref.isLexical());
-        try std.testing.expectEqual(legacy_ref.isConst(), v2_ref.isConst());
-        // var_idx is the closure-ref topology order, not just row metadata.
-        try std.testing.expectEqual(legacy_ref.var_idx, v2_ref.var_idx);
-    }
-}
-
-fn normalizedLegacyCode(code: []const u8) ![]u8 {
-    var normalized: std.ArrayList(u8) = .empty;
-    errdefer normalized.deinit(std.testing.allocator);
-    var pc: usize = 0;
-    while (pc < code.len) {
-        const op_id = code[pc];
-        const size: usize = if (op_id == qop.label) 5 else opcode.sizeOf(op_id);
-        if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
-        if (op_id != qop.label and op_id != qop.nop)
-            try normalized.appendSlice(std.testing.allocator, code[pc .. pc + size]);
-        pc += size;
-    }
-    return normalized.toOwnedSlice(std.testing.allocator);
-}
-
-fn expectLoweredStreamEqual(
-    legacy_function: *const bytecode_mod.Bytecode,
-    v2_product: *const resolve_variables.ResolvedProduct,
-) !void {
-    const normalized = try normalizedLegacyCode(legacy_function.code);
-    defer std.testing.allocator.free(normalized);
-    try std.testing.expectEqualSlices(
-        u8,
-        normalized,
-        v2_product.code[0..v2_product.code_len],
-    );
-    try std.testing.expectEqualSlices(
-        core.atom.Atom,
-        legacy_function.atom_operands,
-        v2_product.atom_operands[0..v2_product.atom_len],
-    );
-}
-
 const AtomBalanceRow = struct {
     atom_id: core.atom.Atom,
     before_release: usize,
     owned_count: usize,
 };
-
-fn deinitProductAndExpectAtomBalance(
-    atoms: *core.atom.AtomTable,
-    product: *resolve_variables.ResolvedProduct,
-) !void {
-    var balances: std.ArrayList(AtomBalanceRow) = .empty;
-    defer balances.deinit(std.testing.allocator);
-    for (product.atom_operands[0..product.atom_len]) |atom_id| {
-        var found = false;
-        for (balances.items) |*row| {
-            if (row.atom_id != atom_id) continue;
-            row.owned_count += 1;
-            found = true;
-            break;
-        }
-        if (!found) {
-            try balances.append(std.testing.allocator, .{
-                .atom_id = atom_id,
-                .before_release = atoms.refCount(atom_id) orelse return error.InvalidBytecode,
-                .owned_count = 1,
-            });
-        }
-    }
-
-    product.deinitUncommitted();
-    for (balances.items) |row| {
-        try std.testing.expect(row.before_release >= row.owned_count);
-        try std.testing.expectEqual(
-            row.before_release - row.owned_count,
-            atoms.refCount(row.atom_id) orelse return error.InvalidBytecode,
-        );
-    }
-}
-
-fn runLegacyResolve(
-    function: *bytecode_mod.Bytecode,
-    fd: *bytecode_mod.function_def.FunctionDef,
-) !void {
-    var ctx = bytecode_mod.pipeline_resolve_variables.JSContext.initWithFunctionDef(function, fd);
-    try bytecode_mod.pipeline_resolve_variables.run(&ctx);
-}
-
-fn installPhase1Stream(
-    function: *bytecode_mod.Bytecode,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    try function.setCode(code);
-    for (atoms) |atom_id| try function.retainAtomOperand(atom_id);
-}
 
 const RootSeedKind = enum {
     global,
@@ -1160,97 +321,10 @@ const RootSeedKind = enum {
     block_lexical,
 };
 
-fn expectRootNormalizedEquivalence(src: []const u8, kind: RootSeedKind) !void {
-    var legacy: LegacyParse = undefined;
-    try legacy.init(src);
-    defer legacy.deinit();
-    try legacy.parseProgram(false);
-
-    var v2: LegacyParse = undefined;
-    try v2.init(src);
-    defer v2.deinit();
-    try v2.parseProgram(false);
-    try attachTranslatedBuilder(
-        &v2.state.function_def,
-        v2.function.code,
-        v2.function.atom_operands,
-    );
-
-    try runLegacyResolve(&legacy.function, &legacy.state.function_def);
-    var product = try resolve_variables.run(&v2.function, &v2.state.function_def);
-    defer product.deinitUncommitted();
-
-    try expectFdTopologyEqual(&legacy.state.function_def, &v2.state.function_def);
-    try expectLoweredStreamEqual(&legacy.function, &product);
-    switch (kind) {
-        .global => {
-            try std.testing.expectEqual(@as(usize, 1), legacy.state.function_def.closure_var.len);
-            try std.testing.expectEqual(
-                bytecode_mod.function_def.ClosureType.global,
-                legacy.state.function_def.closure_var[0].closureType(),
-            );
-        },
-        .top_level_lexical, .block_lexical => {
-            try std.testing.expect(legacy.state.function_def.vars.len != 0);
-        },
-    }
-    try deinitProductAndExpectAtomBalance(&v2.rt.atoms, &product);
-}
-
 const ExpectedChildShape = struct {
     args: ?usize = null,
     vars: ?usize = null,
 };
-
-fn expectChildNormalizedEquivalence(src: []const u8, expected_shape: ExpectedChildShape) !void {
-    var legacy: LegacyParse = undefined;
-    try legacy.init(src);
-    defer legacy.deinit();
-    try legacy.parseProgram(true);
-    try std.testing.expectEqual(@as(usize, 1), legacy.state.function_def.child_list.len);
-    const legacy_child = legacy.state.function_def.child_list[0];
-
-    var v2: LegacyParse = undefined;
-    try v2.init(src);
-    defer v2.deinit();
-    try v2.parseProgram(true);
-    try std.testing.expectEqual(@as(usize, 1), v2.state.function_def.child_list.len);
-    const v2_child = v2.state.function_def.child_list[0];
-    try attachTranslatedBuilder(v2_child, v2_child.byte_code, v2_child.atom_operands);
-
-    var legacy_function = bytecode_mod.Bytecode.init(
-        &legacy.rt.memory,
-        &legacy.rt.atoms,
-        legacy_child.func_name,
-    );
-    defer legacy_function.deinit(legacy.rt);
-    try installPhase1Stream(
-        &legacy_function,
-        legacy_child.byte_code,
-        legacy_child.atom_operands,
-    );
-    try runLegacyResolve(&legacy_function, legacy_child);
-
-    var v2_function = bytecode_mod.Bytecode.init(
-        &v2.rt.memory,
-        &v2.rt.atoms,
-        v2_child.func_name,
-    );
-    defer v2_function.deinit(v2.rt);
-    var product = try resolve_variables.run(&v2_function, v2_child);
-    defer product.deinitUncommitted();
-
-    try expectFdTopologyEqual(legacy_child, v2_child);
-    try expectLoweredStreamEqual(&legacy_function, &product);
-    // Byte equality proves selected loc/arg operands; var_idx equality in
-    // expectFdTopologyEqual proves closure-ref index order. Optional explicit
-    // shape checks keep seed-specific expectations out of the general helper.
-    if (expected_shape.args) |expected_args|
-        try std.testing.expectEqual(expected_args, legacy_child.args.len);
-    if (expected_shape.vars) |expected_vars|
-        try std.testing.expectEqual(expected_vars, legacy_child.vars.len);
-    try deinitProductAndExpectAtomBalance(&v2.rt.atoms, &product);
-}
 
 /// Validate every intrusive relocation chain, including unique coverage of the
 /// complete relocation ledger, and require every parser-created label bound.
@@ -1589,10 +663,6 @@ test "compiler_v2.tests: rollback restores a shared label reloc chain" {
 }
 
 test "compiler_v2.s2g1: conditional expression" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true ? false : null");
     defer h.deinit();
@@ -1619,10 +689,6 @@ test "compiler_v2.s2g1: conditional expression" {
 }
 
 test "compiler_v2.s2g1: logical or" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("false || true");
     defer h.deinit();
@@ -1648,10 +714,6 @@ test "compiler_v2.s2g1: logical or" {
 }
 
 test "compiler_v2.s2g1: logical and chain" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true && false && null");
     defer h.deinit();
@@ -1684,10 +746,6 @@ test "compiler_v2.s2g1: logical and chain" {
 }
 
 test "compiler_v2.s2g1: coalesce" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("null ?? true");
     defer h.deinit();
@@ -1714,10 +772,6 @@ test "compiler_v2.s2g1: coalesce" {
 }
 
 test "compiler_v2.s2g1: coalesce chain" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("null ?? null ?? true");
     defer h.deinit();
@@ -1752,10 +806,6 @@ test "compiler_v2.s2g1: coalesce chain" {
 }
 
 test "compiler_v2.s2g1: optional chain field" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true?.b");
     defer h.deinit();
@@ -1791,10 +841,6 @@ test "compiler_v2.s2g1: optional chain field" {
 }
 
 test "compiler_v2.s2g1: optional chain element" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true?.[false]");
     defer h.deinit();
@@ -1826,10 +872,6 @@ test "compiler_v2.s2g1: optional chain element" {
 }
 
 test "compiler_v2.s2g1: if else empty" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("if (true) ; else ;");
     defer h.deinit();
@@ -1854,10 +896,6 @@ test "compiler_v2.s2g1: if else empty" {
 }
 
 test "compiler_v2.s2g1: if else expression bodies" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("if (true) false; else null;");
     defer h.deinit();
@@ -1886,10 +924,6 @@ test "compiler_v2.s2g1: if else expression bodies" {
 }
 
 test "compiler_v2.s2g1: if without else" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("if (true) ;");
     defer h.deinit();
@@ -1912,10 +946,6 @@ test "compiler_v2.s2g1: if without else" {
 }
 
 test "compiler_v2.s2g1: labeled break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("L: if (true) break L;");
     defer h.deinit();
@@ -1940,10 +970,6 @@ test "compiler_v2.s2g1: labeled break" {
 }
 
 test "compiler_v2.s2g1: labeled statement without break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("L: ;");
     defer h.deinit();
@@ -1964,10 +990,6 @@ test "compiler_v2.s2g1: labeled statement without break" {
 }
 
 test "compiler_v2.s2g1: optional chain atom ownership" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true?.b");
     defer h.deinit();
@@ -1987,10 +1009,6 @@ test "compiler_v2.s2g1: optional chain atom ownership" {
 }
 
 test "compiler_v2.s2g2: while" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
@@ -2018,10 +1036,6 @@ test "compiler_v2.s2g2: while" {
 }
 
 test "compiler_v2.s2g2: while continue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) continue;");
     defer h.deinit();
@@ -2050,10 +1064,6 @@ test "compiler_v2.s2g2: while continue" {
 }
 
 test "compiler_v2.s2g2: labeled while continue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("L: while (true) continue L;");
     defer h.deinit();
@@ -2084,10 +1094,6 @@ test "compiler_v2.s2g2: labeled while continue" {
 }
 
 test "compiler_v2.s2g2: do while" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("do ; while (false);");
     defer h.deinit();
@@ -2113,10 +1119,6 @@ test "compiler_v2.s2g2: do while" {
 }
 
 test "compiler_v2.s2g2: classic for empty head" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (;;) ;");
     defer h.deinit();
@@ -2147,10 +1149,6 @@ test "compiler_v2.s2g2: classic for empty head" {
 }
 
 test "compiler_v2.s2g2: classic for test break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; ) break;");
     defer h.deinit();
@@ -2179,10 +1177,6 @@ test "compiler_v2.s2g2: classic for test break" {
 }
 
 test "compiler_v2.s2g2: for in" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x in null) ;");
     defer h.deinit();
@@ -2220,10 +1214,6 @@ test "compiler_v2.s2g2: for in" {
 }
 
 test "compiler_v2.s2g2: for in break cleanup" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x in null) break;");
     defer h.deinit();
@@ -2263,10 +1253,6 @@ test "compiler_v2.s2g2: for in break cleanup" {
 }
 
 test "compiler_v2.s2g2: for of" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x of null) ;");
     defer h.deinit();
@@ -2305,10 +1291,6 @@ test "compiler_v2.s2g2: for of" {
 }
 
 test "compiler_v2.s2g2: for of break cleanup" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x of null) break;");
     defer h.deinit();
@@ -2349,10 +1331,6 @@ test "compiler_v2.s2g2: for of break cleanup" {
 }
 
 test "compiler_v2.s2g2: switch single case" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: null; }");
     defer h.deinit();
@@ -2382,10 +1360,6 @@ test "compiler_v2.s2g2: switch single case" {
 }
 
 test "compiler_v2.s2g2: switch break default" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: break; default: null; }");
     defer h.deinit();
@@ -2422,10 +1396,6 @@ test "compiler_v2.s2g2: switch break default" {
 }
 
 test "compiler_v2.s2g2: switch case fallthrough" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: null; case null: false; }");
     defer h.deinit();
@@ -2464,10 +1434,6 @@ test "compiler_v2.s2g2: switch case fallthrough" {
 }
 
 test "compiler_v2.s2g2: switch default only" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { default: null; }");
     defer h.deinit();
@@ -2499,10 +1465,6 @@ test "compiler_v2.s2g2: switch default only" {
 }
 
 test "compiler_v2.s2g2: switch break suppresses fallthrough" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: break; case null: ; }");
     defer h.deinit();
@@ -2536,10 +1498,6 @@ test "compiler_v2.s2g2: switch break suppresses fallthrough" {
 }
 
 test "compiler_v2.s2g3: try finally live tail" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { null; } finally { false; }");
     defer h.deinit();
@@ -2575,10 +1533,6 @@ test "compiler_v2.s2g3: try finally live tail" {
 }
 
 test "compiler_v2.s2g3: try catch optional binding live tails" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { null; } catch { false; }");
     defer h.deinit();
@@ -2622,10 +1576,6 @@ test "compiler_v2.s2g3: try catch optional binding live tails" {
 }
 
 test "compiler_v2.s2g3: try catch binding after throw" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { throw true; } catch (e) { }");
     defer h.deinit();
@@ -2663,10 +1613,6 @@ test "compiler_v2.s2g3: try catch binding after throw" {
 }
 
 test "compiler_v2.s2g3: return through finally" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { null; }");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -2701,10 +1647,6 @@ test "compiler_v2.s2g3: return through finally" {
 }
 
 test "compiler_v2.s2g3: break through finally inside loop" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) { try { break; } finally { null; } }");
     defer h.deinit();
@@ -2746,10 +1688,6 @@ test "compiler_v2.s2g3: break through finally inside loop" {
 }
 
 test "compiler_v2.s2g3: epilogue after plain statement" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("null;");
     defer h.deinit();
@@ -2773,10 +1711,6 @@ test "compiler_v2.s2g3: epilogue after plain statement" {
 }
 
 test "compiler_v2.s2g3: epilogue after terminal" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("throw null;");
     defer h.deinit();
@@ -2799,10 +1733,6 @@ test "compiler_v2.s2g3: epilogue after terminal" {
 }
 
 test "compiler_v2.s2g3: epilogue after loop merge" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
@@ -2832,10 +1762,6 @@ test "compiler_v2.s2g3: epilogue after loop merge" {
 }
 
 test "compiler_v2.s2g3: plain return dead epilogue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("return;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -2861,10 +1787,6 @@ test "compiler_v2.s2g3: plain return dead epilogue" {
 }
 
 test "compiler_v2.s2g3: return with value" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("return null;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -2888,10 +1810,6 @@ test "compiler_v2.s2g3: return with value" {
 }
 
 test "compiler_v2.s2g4: classic for splices update after body" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; null) ;");
     defer h.deinit();
@@ -2925,10 +1843,6 @@ test "compiler_v2.s2g4: classic for splices update after body" {
 }
 
 test "compiler_v2.s2g4: classic for shifts detached conditional labels" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; true ? null : false) ;");
     defer h.deinit();
@@ -2970,10 +1884,6 @@ test "compiler_v2.s2g4: classic for shifts detached conditional labels" {
 }
 
 test "compiler_v2.s2g4: classic for splices update after break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; null) break;");
     defer h.deinit();
@@ -3006,10 +1916,6 @@ test "compiler_v2.s2g4: classic for splices update after break" {
 }
 
 test "compiler_v2.s2g4: plain field assignment rewinds getter" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true.b = null;");
     defer h.deinit();
@@ -3042,10 +1948,6 @@ test "compiler_v2.s2g4: plain field assignment rewinds getter" {
 }
 
 test "compiler_v2.s2g4: compound field assignment reemits getter" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true.b += null;");
     defer h.deinit();
@@ -3080,10 +1982,6 @@ test "compiler_v2.s2g4: compound field assignment reemits getter" {
 }
 
 test "compiler_v2.s2g4: plain array element assignment rewinds getter" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true[false] = null;");
     defer h.deinit();
@@ -3112,10 +2010,6 @@ test "compiler_v2.s2g4: plain array element assignment rewinds getter" {
 }
 
 test "compiler_v2.s2g4: postfix field update preserves old value" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true.b++;");
     defer h.deinit();
@@ -3148,10 +2042,6 @@ test "compiler_v2.s2g4: postfix field update preserves old value" {
 }
 
 test "compiler_v2.s2g4: prefix array element update preserves new value" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("++true[false];");
     defer h.deinit();
@@ -3180,10 +2070,6 @@ test "compiler_v2.s2g4: prefix array element update preserves new value" {
 }
 
 test "compiler_v2.s2g4: minimal class expression and default constructor" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class {});");
     defer h.deinit();
@@ -3248,10 +2134,6 @@ test "compiler_v2.s2g4: minimal class expression and default constructor" {
 }
 
 test "compiler_v2.s2g4: class declaration stores local binding" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("class C {}");
     defer h.deinit();
@@ -3320,10 +2202,6 @@ test "compiler_v2.s2g4: class declaration stores local binding" {
 }
 
 test "compiler_v2.s2g4: named class method splices runtime definition" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { m() { null; } });");
     defer h.deinit();
@@ -3407,10 +2285,6 @@ test "compiler_v2.s2g4: named class method splices runtime definition" {
 }
 
 test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { constructor() { null; } });");
     defer h.deinit();
@@ -3473,10 +2347,6 @@ test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
 }
 
 test "compiler_v2.s2g4: derived default constructor returns checked this" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class extends null {});");
     defer h.deinit();
@@ -3541,10 +2411,6 @@ test "compiler_v2.s2g4: derived default constructor returns checked this" {
 }
 
 test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { x = null; });");
     defer h.deinit();
@@ -3616,10 +2482,6 @@ test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
 }
 
 test "compiler_v2.s2g4: private method patches instance brand prologue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { #m() {} });");
     defer h.deinit();
@@ -3709,10 +2571,6 @@ test "compiler_v2.s2g4: private method patches instance brand prologue" {
 }
 
 test "compiler_v2.s2g4: static block nests closure in static initializer" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { static { null; } });");
     defer h.deinit();
@@ -3794,10 +2652,6 @@ test "compiler_v2.s2g4: static block nests closure in static initializer" {
 }
 
 test "compiler_v2.s2g4: static field emits through static initializer" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { static x = null; });");
     defer h.deinit();
@@ -3864,10 +2718,6 @@ test "compiler_v2.s2g4: static field emits through static initializer" {
 }
 
 test "compiler_v2.s2g4: computed method splices key and closure" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { [true]() {} });");
     defer h.deinit();
@@ -3922,10 +2772,6 @@ test "compiler_v2.s2g4: computed method splices key and closure" {
 }
 
 test "compiler_v2.s2g4: getter child keeps return terminal" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { get g() { return null; } });");
     defer h.deinit();
@@ -3983,10 +2829,6 @@ test "compiler_v2.s2g4: getter child keeps return terminal" {
 }
 
 test "compiler_v2.s3: parsed dead code after break is dropped" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     // Numeric literal emission is outside the migrated v2 parser surface;
     // null keeps the same dead expression-statement shape through v2.
@@ -4028,10 +2870,6 @@ test "compiler_v2.s3: parsed dead code after break is dropped" {
 }
 
 test "compiler_v2.s3: parsed dead-only loop labels stay dead" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (;;) { break; continue; }");
     defer h.deinit();
@@ -4072,10 +2910,6 @@ test "compiler_v2.s3: parsed dead-only loop labels stay dead" {
 }
 
 test "compiler_v2.s3: parsed return through finally keeps live gosub" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { null; }");
     h.state.return_depth = 1;
@@ -4115,10 +2949,6 @@ test "compiler_v2.s3: parsed return through finally keeps live gosub" {
 }
 
 test "compiler_v2.s3: parsed empty finally removes gosub" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { }");
     h.state.return_depth = 1;
@@ -4160,84 +2990,6 @@ test "compiler_v2.s3: parsed empty finally removes gosub" {
     try std.testing.expectEqual(@as(u32, 3), product.jump_size);
 }
 
-test "compiler_v2.s3: normalized global binding equals legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectRootNormalizedEquivalence("var g = 1; g;", .global);
-}
-
-test "compiler_v2.s3: normalized top-level lexical equals legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectRootNormalizedEquivalence(
-        "let a = 1; a = a + 2; a;",
-        .top_level_lexical,
-    );
-}
-
-test "compiler_v2.s3: normalized block lexical equals legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectRootNormalizedEquivalence("{ let b = 2; b; }", .block_lexical);
-}
-
-test "compiler_v2.s3: normalized child loc arg indices equal legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { var v; v = p; return v; }",
-        .{ .args = 1, .vars = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized dead jump cycle equals legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; for (;;) { p = p + 1; } }",
-        .{ .args = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized dead forward branch equals legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; if (p) { p = 1; } else { p = 2; } }",
-        .{ .args = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized assignment after return equals legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; p = 1; }",
-        .{ .args = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized dead binding events equal legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; { let b = 1; b; } }",
-        .{ .args = 1 },
-    );
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; var v; v = p; }",
-        .{ .args = 1, .vars = 1 },
-    );
-}
-
 fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
     var h: V2Exec = undefined;
     try h.init(src);
@@ -4248,16 +3000,10 @@ fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
 }
 
 test "compiler_v2.s4: arithmetic executes installed FunctionBytecode" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion("6 * 7;", 42);
 }
 
 test "compiler_v2.s4: if else true arm executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let r; if (true) { r = 1; } else { r = 2; } r;",
         1,
@@ -4265,9 +3011,6 @@ test "compiler_v2.s4: if else true arm executes" {
 }
 
 test "compiler_v2.s4: if else false arm executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let r; if (false) { r = 1; } else { r = 2; } r;",
         2,
@@ -4275,9 +3018,6 @@ test "compiler_v2.s4: if else false arm executes" {
 }
 
 test "compiler_v2.s4: while break executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let i = 0; while (true) { i = i + 1; if (i == 3) break; } i;",
         3,
@@ -4285,9 +3025,6 @@ test "compiler_v2.s4: while break executes" {
 }
 
 test "compiler_v2.s4: for accumulate executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;",
         10,
@@ -4295,9 +3032,6 @@ test "compiler_v2.s4: for accumulate executes" {
 }
 
 test "compiler_v2.s4: switch fallthrough executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let x = 0; switch (2) { case 1: x = x + 1; case 2: x = x + 10; case 3: x = x + 100; break; default: x = x + 1000; } x;",
         110,
@@ -4305,9 +3039,6 @@ test "compiler_v2.s4: switch fallthrough executes" {
 }
 
 test "compiler_v2.s4: try finally value executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let t = 0; try { t = 1; } finally { t = t + 10; } t;",
         11,
@@ -4315,9 +3046,6 @@ test "compiler_v2.s4: try finally value executes" {
 }
 
 test "compiler_v2.s4: try catch throw executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let c = 0; try { throw 5; } catch (e) { c = e + 2; } c;",
         7,
@@ -4325,9 +3053,6 @@ test "compiler_v2.s4: try catch throw executes" {
 }
 
 test "compiler_v2.s4: nested closure capture executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     // S3 deliberately leaves function-body hoist instantiation to a later
     // finalization owner (resolve_variables.zig enter_scope arm). Use an
     // explicit function-expression assignment until that documented stub is
@@ -4340,9 +3065,6 @@ test "compiler_v2.s4: nested closure capture executes" {
 }
 
 test "compiler_v2.s4: labeled break executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let n = 0; L: { n = 1; break L; n = 2; } n;",
         1,
@@ -4350,17 +3072,10 @@ test "compiler_v2.s4: labeled break executes" {
 }
 
 test "compiler_v2.s4: global var machinery executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion("var g = 4; g + 1;", 5);
 }
 
 test "compiler_v2.s4: installed for loop matches the configured default layout" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Exec = undefined;
     try h.init("let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;");
     defer h.deinit();
@@ -4423,8 +3138,6 @@ test "compiler_v2.p5: FunctionDef owners are inert after the FunctionBytecode es
     try h.state.finalizeEvalReturn();
     try std.testing.expect(h.state.function_def.child_list.len >= 1);
 
-    if (P.v2_available) try attachTranslatedBuilderTree(&h.state.function_def);
-
     const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
         &h.state.function_def,
         .{ .realm = h.ctx },
@@ -4461,6 +3174,7 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
     var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
     state.function_def.is_global_var = true;
     state.top_level_functions_as_children = true;
+    try state.beginV2ProgramEmission();
 
     {
         const probe = try rt.atoms.internString("escapeAuditProbeName");
@@ -4475,12 +3189,12 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
         try std.testing.expectEqual(parser_mod.token.TOK_EOF, state.token.val);
         try state.finalizeEvalReturn();
 
+        const parser_builder = state.function_def.v2_builder.?;
         var phase1_probe_refs: usize = 0;
-        for (state.function_def.atom_operands) |owner| {
+        for (parser_builder.atom_operands[0..parser_builder.atom_len]) |owner| {
             phase1_probe_refs += @intFromBool(owner == probe);
         }
         try std.testing.expectEqual(@as(usize, 2), phase1_probe_refs);
-        if (P.v2_available) try attachTranslatedBuilderTree(&state.function_def);
 
         const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
             &state.function_def,
@@ -4490,15 +3204,11 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
         const after_compile = rt.atoms.refCount(probe).?;
         try std.testing.expect(after_compile > baseline);
 
-        // The v2/dual test adapter duplicates every legacy phase-1 atom into
-        // its translated builder. v2 publication consumes the builder copy
-        // but intentionally leaves the original FunctionDef.atom_operands
-        // scratch ledger for state.deinit; legacy lowerLegacyPhase1 instead
-        // moves that original ledger into the FB. Account for those two
-        // compiler-only refs exactly rather than weakening the FB-owner check.
-        const retained_phase1_probe_refs = if (P.v2_available) phase1_probe_refs else 0;
+        // The compiler releases its producer at the consumption point, so the
+        // only refs left after publication are the artifact's own. Account for
+        // them exactly rather than weakening the FB-owner check.
         try std.testing.expectEqual(
-            baseline + phase1_probe_refs + retained_phase1_probe_refs,
+            baseline + phase1_probe_refs,
             after_compile,
         );
 
@@ -4506,6 +3216,8 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
         lex.deinit();
         function.deinit(rt);
 
+        // Compiler teardown releases no artifact-owned atom: the escaped refs
+        // are exactly the ones the published FunctionBytecode owns.
         try std.testing.expectEqual(
             baseline + phase1_probe_refs,
             rt.atoms.refCount(probe).?,
@@ -4643,7 +3355,7 @@ test "compiler_v2.coverage: RULE B -- TypeScript probes route through parseAndCo
     }
 }
 
-test "compiler_v2.coverage: production constructs never fall back to legacy emission" {
+test "compiler_v2.coverage: every production construct compiles through the one compiler" {
     const Case = CoverageCase;
     const cases = [_]Case{
         .{ .source = "let value = 1 + 2; value *= 3; value;" },
@@ -4703,9 +3415,6 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
         .{ .source = "interface Merged { first: number } interface Merged { second: string } namespace Merged { export const value = 1; }", .source_kind = .typescript },
     };
 
-    coverage.reset();
-    defer if (coverage.collectMode()) coverage.dumpReport();
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -4714,8 +3423,6 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
     // the EXPLICIT expected set carried by `.expect_skip`. Not a count, not a
     // proportion -- a set, matched by identity in both directions.
     var skipped = [_]bool{false} ** cases.len;
-    var all_fallbacks: std.EnumSet(coverage.LegacyConstruct) = .empty;
-    var total_unallowed: u64 = 0;
     for (cases, 0..) |case, index| {
         var program = test_entry.parseAndCompileV2TestProgram(
             rt,
@@ -4742,23 +3449,6 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
         defer program.deinit(rt);
 
         compiled += 1;
-        all_fallbacks.setUnion(program.fallbacks);
-        total_unallowed +|= program.unallowed_emissions;
-        if (coverage.collectMode()) {
-            var iterator = program.fallbacks.iterator();
-            while (iterator.next()) |construct| {
-                std.debug.print(
-                    "compiler_v2.coverage fallback construct={s} snippet[{d}]={s}\n",
-                    .{ @tagName(construct), index, case.source },
-                );
-            }
-            if (program.unallowed_emissions != 0) {
-                std.debug.print(
-                    "compiler_v2.coverage OFFENDING snippet[{d}] unallowed={d}: {s}\n",
-                    .{ index, program.unallowed_emissions, case.source },
-                );
-            }
-        }
     }
 
     comptime var expected_skips: usize = 0;
@@ -4779,8 +3469,4 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
     // There is deliberately no proportional form of this check.
     try expectCoverageSkipSetMatches(&cases, &skipped, true);
     try std.testing.expectEqual(cases.len - expected_skips, compiled);
-    try test_entry.expectNoUnallowedFallback(.{
-        .fallbacks = all_fallbacks,
-        .unallowed = total_unallowed,
-    });
 }

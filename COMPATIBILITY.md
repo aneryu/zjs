@@ -31,7 +31,7 @@ The checked 2026-08-05 report has 44,581 passes, 0 checked-in known failures,
 0 unexpected failures, and 5,194 feature skips, out of 49,775 prepared cases.
 It was recorded under the production default
 (`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`);
-`-Dzjs_compiler=legacy` reproduces the same line. The checked report under
+compiler-v2 is the only compiler. The checked report under
 `reports/test262-latest/` records the bucket, per-directory, feature-skip, and
 failure details.
 

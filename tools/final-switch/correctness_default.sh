@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # FINAL SWITCH -- correctness on TRUE PRODUCTION DEFAULTS.
 #
-# No -Dzjs_compiler and no -Dzjs_v2_layout appear anywhere in this file. That
+# No -Dzjs_v2_layout appears anywhere in this file. That
 # is the whole point of it: Gate A's predecessor was green about a
 # configuration it had never actually run, because every gate line carried an
 # explicit flag and the *default* build was therefore never the thing tested.
-# Variants live in correctness_variants.sh; migration oracles live in
-# migration_gates.sh. Keeping them in separate files is what makes "the
-# default path is green" a claim you can check by reading, not by auditing
-# flags line by line.
+# Variants live in correctness_variants.sh. Keeping them in separate files is
+# what makes "the default path is green" a claim you can check by reading, not
+# by auditing flags line by line.
 #
 # Usage: tools/final-switch/correctness_default.sh [--out DIR]
 
@@ -33,13 +32,13 @@ FAILED=0
 SUMMARY="$OUT/summary.tsv"
 : > "$SUMMARY"
 
-# Any -Dzjs_compiler / -Dzjs_v2_layout reaching this file is a bug in this
+# Any -Dzjs_v2_layout reaching this file is a bug in this
 # file, so refuse rather than run a mislabelled gate.
 gate() {
     local label="$1"; shift
     for arg in "$@"; do
         case "$arg" in
-            -Dzjs_compiler=*|-Dzjs_v2_layout=*)
+            -Dzjs_v2_layout=*)
                 fs_die "correctness_default.sh must not carry $arg (label=$label)" ;;
         esac
     done

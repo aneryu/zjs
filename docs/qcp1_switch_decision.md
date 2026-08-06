@@ -24,6 +24,13 @@ reserved.
 > deferred**. §8 is the release record; §0–§7 are the evidence it was decided
 > on. Nothing in §0–§7 is rewritten by §8.
 
+> **AMENDED 2026-08-06 — read §9 after §8.** QCP-1B was reopened only after
+> its blocking runtime regression was reduced to one field and reproduced with
+> layout-neutral controls. The legacy compiler is now physically removed and
+> **QCP-1B is ACCEPT** after restoring the explicit compiler-stage boundaries
+> recorded in §9. The 2026-08-04 NO-GO remains below as the historical ruling
+> that prevented an unexplained cleanup from shipping.
+
 ---
 
 ## 0. Headline
@@ -1330,3 +1337,132 @@ correction 3 (§8.5) it is a sanity check and **not** a paired result, and
 regexp's −2.79% is inside the range cross-session drift plus the suite's
 noisiest benchmark can produce. It is reported rather than dropped; it is not
 evidence of a regression, and it would not be evidence of parity either.
+
+---
+
+## 9. QCP-1B AMENDMENT — deletion bisection and final removal (2026-08-06)
+
+### 9.1 Amended verdict
+
+| question | 2026-08-04 verdict | 2026-08-06 verdict |
+| --- | --- | --- |
+| physically remove the legacy compiler pipelines | NO-GO, deferred | **ACCEPT** |
+
+The earlier verdict did its job: deletion did not ship while a repeatable
+crypto regression had no mechanism. This amendment does not reinterpret that
+evidence. It answers the missing question, restores two explicit compiler-stage
+boundaries whose accidental inlining carried the cost, and then removes the
+legacy Phase 1/2/3 passes, dual comparator, and `-Dzjs_compiler` option.
+
+### 9.2 Deletion bisection
+
+The deletion was split by subsystem and then by hunk against pre-delete V2.
+Removing parser/configuration code was neutral. Removing `src/bytecode.zig`
+carried the full step. The minimal reproducer was one otherwise-unused field:
+
+```zig
+pub const CompileContext = struct {
+    realm: *RealmContext,
+    policy: CompilePolicy = .{},
+    timing: ?*CompileTiming = null,
+    v2_ledger: ?*compare.Ledger = null, // production was always null
+};
+```
+
+Changing the only call site to literal `null` while retaining this field was
+neutral. Deleting the field reduced the context by one native word and made
+crypto slow. Replacing it with a same-sized `?*anyopaque` field recovered the
+score; the typed and opaque controls produced byte-identical `.text`. Applying
+the complete historical deletion while retaining that one behavior-free word
+also recovered the loss in the historical tree:
+
+| fixed binary | crypto samples | median | vs pre-delete |
+| --- | --- | ---: | ---: |
+| pre-delete V2 | 1609, 1603, 1604, 1609 | 1606.5 | — |
+| full deletion | 1550, 1548, 1551, 1550 | 1550.0 | **−3.52%** |
+| full deletion + reserved word | 1609, 1605, 1604, 1599 | 1604.5 | **−0.12%** |
+
+This established a deletion/layout interaction, not retained compiler
+behavior. The replacement field was a diagnostic control only; it is not in
+the final tree.
+
+### 9.3 Mechanism boundary
+
+The minimal fast/slow pair produced identical JavaScript artifacts: 10,765
+disassembly lines and 334,251 bytes matched in bytecode, functions, constants,
+and stack geometry. A fixed-work allocation trace also matched all 17,601
+operations by kind, size, phase, and address modulo 64. That refutes both a
+crypto semantic change and the earlier heap-alignment hypothesis.
+
+PMU attribution on the historical fixed-work pair found the slow binary at
+**+4.27% cycles** with essentially equal retired instructions, while
+backend-stall slots rose about **13%** and frontend stalls stayed flat. The
+field-width change altered 224 native symbol sizes across the Zig 0.16 whole
+program; sampled hot handler instruction sequences remained the same apart
+from addresses and relocations. That established the shape of the problem but
+did not yet provide a shippable fix.
+
+On the current tree, a complete deletion plus the reserved-word control made
+crypto neutral but moved the remaining cost to code-load (**0.9741x**, just
+below the 0.975 floor). A fixed compile-throughput run then made the carrier
+visible: the deletion executed **0.875% fewer instructions** but used **0.44%
+more cycles**. In the corresponding native profile,
+`computeStackSizeForCurrentBytecode` disappeared as an independent 0x7a4-byte
+symbol, and the V2 lowering path was folded into the already-large
+`createFunctionBytecodeAfterChildren` finalizer. The compiler-source deletion
+had changed LLVM's cross-stage inlining decisions.
+
+The durable fix is two real phase boundaries:
+
+* `compiler_v2.compileFunctionV2ForPackedFinalize` is `noinline`, matching the
+  architectural boundary between V2 lowering and packed artifact publication;
+* `computeStackSizeForCurrentBytecode` is `noinline`, keeping the full final
+  bytecode verification walk out of the publication function.
+
+With those boundaries, removing the diagnostic reserved word changes the three
+relevant symbol sizes by at most four bytes: the packed finalizer is 0x4820,
+the stack walk is 0x7a4, and packed V2 lowering is 0xc04. No padding, dummy
+field, benchmark-specific path, or linker-address restoration remains.
+
+### 9.4 Current-tree A/B and gates
+
+Both fixed binaries stated the production signature
+`compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast` and ran pinned to
+CPU 19 under the exclusive host lock. The undeleted main binary was
+`66586728693c…`; the no-padding deletion candidate was `0c036e2db5ee…`.
+
+The final fixed compile-throughput run (eight ABBA pairs) measured candidate /
+undeleted at **0.99112 instructions**, **1.00033 cycles**, and **0.99994 wall**
+by paired median: less compiler work with cycles and wall neutral at this run's
+noise scale. A balanced four-sample-per-binary run of all 15 Zoo throughput
+benchmarks measured geomean **1.0061**. The lowest individual ratio was
+code-load at **0.984**; crypto was **1.044**. No benchmark crossed the 0.975
+floor, so neither the original crypto cliff nor the later code-load shift
+survives the explicit compiler-stage boundaries.
+
+Applying the exact source tree to the main worktree produced a different binary
+hash (`d4a1a7009fcb…`), as expected under the known Zig 0.16 build-state risk,
+but retained the same three symbol boundaries (0x481c / 0x7a4 / 0xc00). Its own
+eight-pair compile-throughput confirmation measured **0.99093 instructions**,
+**1.00130 cycles**, and **1.00110 wall**; an eight-sample focused Zoo run
+measured code-load **0.980** and crypto **1.041**. Both independent build states
+therefore clear the 0.975 per-benchmark floor without a reserved field.
+
+Focused validation at the removal tree:
+
+| gate | result |
+| --- | --- |
+| `zig build test-compiler-v2` | 184 passed, 0 failed |
+| `zig build test-parser` | 480 passed, 0 failed |
+| `zig build test-bytecode` | 66 passed, 0 failed |
+| `zig build config-signature-check` | PASS |
+| `zig build config-drift-gate` | all five positive/negative halves behaved as required |
+| `zig build architecture-check` | PASS; 158 production-reachable files clean, **0/6197** retired pipeline symbols, 16 shared `binding_rules` symbols and both compiler-stage boundaries retained |
+| `mise run checkpoint-check` | PASS; unified Debug 2128 passed / 1 skipped, CLI smoke 2 passed / 1 skipped, test262 smoke 15/15 |
+| `zig build test -Doptimize=ReleaseSafe` | PASS; 2128 passed / 1 skipped / 0 failed |
+| `zig build test262-gate` | PASS; **0/49775 errors**, 44581 passed, 5194 feature skips |
+
+The architecture distinction is intentional: reusable QuickJS binding rules
+remain in `bytecode.binding_rules`; the legacy pass structures and selectable
+backend do not. `src/compiler_v2/` remains because it is the active compiler,
+not a compatibility directory.

@@ -15,8 +15,6 @@
 #                        trusts a runner's own affinity self-report.
 #   RULE B  TS PROBES    a TypeScript probe routes through
 #                        parseAndCompileV2TestProgram(), never `zjs -e '<ts>'`.
-#   RULE C  L3 COLLECT   `v2_construct_emitted > 0` is asserted BEFORE
-#                        `legacy_in_v2_unallowed == 0` is believed.
 #   RULE D  CORPUS SKIPS the actual skipped set is compared against an EXPLICIT
 #                        allowlist, per case, by identity. (src/compiler_v2.)
 #   RULE E  STRICT SHELL every script is strict-mode, is shellcheck-clean, and
@@ -209,50 +207,6 @@ fs_provenance() {
         "$([ "${FS_LOCK_ALREADY_HELD:-0}" = 1 ] && echo "assumed-held-by-caller (FS_LOCK_ALREADY_HELD=1)" || echo "$FS_LOCK")"
 }
 
-# --------------------------------------------------------------------------
-# RULE C -- an emission report is only evidence once something was emitted.
-#
-# The first Gate A L3 collect invoked the binary with --print-config-signature,
-# which compiles NOTHING, and reported
-#     v2_construct_emitted=0 ... legacy_in_v2_unallowed=0
-# a vacuous zero that reads exactly like a pass. `legacy_in_v2_unallowed == 0`
-# is a claim about constructs that were emitted; over zero emitted constructs
-# it is not a weak pass, it is not a measurement.
-#
-# fs_l3_verdict <report-line> prints one of
-#     PASS emitted=N unallowed=0
-#     VACUOUS emitted=0 unallowed=N   (rc 1) -- the defect, caught
-#     FAIL   emitted=N unallowed=M    (rc 1)
-#     NOREPORT                        (rc 1)
-# and is the single implementation both migration_gates.sh and selftest.sh use,
-# so the assertion cannot be right in the test and wrong in the gate.
-# --------------------------------------------------------------------------
-fs_l3_verdict() {
-    local report="${1:-}" emitted unallowed
-    if [ -z "$report" ]; then
-        printf 'NOREPORT no coverage line was emitted at all\n'
-        return 1
-    fi
-    emitted="$(printf '%s' "$report"   | grep -oE 'v2_construct_emitted=[0-9]+'   | cut -d= -f2)"
-    unallowed="$(printf '%s' "$report" | grep -oE 'legacy_in_v2_unallowed=[0-9]+' | cut -d= -f2)"
-    if [ -z "$emitted" ] || [ -z "$unallowed" ]; then
-        printf 'NOREPORT coverage line is missing v2_construct_emitted or legacy_in_v2_unallowed: %s\n' "$report"
-        return 1
-    fi
-    # THE ORDER IS THE RULE: emitted>0 is checked FIRST. A zero unallowed count
-    # over a workload that emitted nothing proves nothing about fallback.
-    if [ "$emitted" -le 0 ]; then
-        printf 'VACUOUS emitted=0 unallowed=%s -- this workload compiled NOTHING, so legacy_in_v2_unallowed=%s is not evidence\n' \
-            "$unallowed" "$unallowed"
-        return 1
-    fi
-    if [ "$unallowed" -ne 0 ]; then
-        printf 'FAIL emitted=%s unallowed=%s -- legacy emission inside v2 scope\n' "$emitted" "$unallowed"
-        return 1
-    fi
-    printf 'PASS emitted=%s unallowed=0\n' "$emitted"
-    return 0
-}
 
 # Checks required before anything is BUILT.
 fs_preflight_build() {
