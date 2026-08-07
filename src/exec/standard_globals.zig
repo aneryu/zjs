@@ -22,6 +22,8 @@ const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
 const number_builtin = @import("number_ops.zig");
+const primitive_builtin = @import("primitive_ops.zig");
+const promise_method_ids = core.host_function.builtin_method_ids.promise.PrototypeMethod;
 const promise_ops = @import("promise_ops.zig");
 const uri_builtin = @import("uri_ops.zig");
 const weak_ref_method_ids = core.host_function.builtin_method_ids.weak_ref.PrototypeMethod;
@@ -49,6 +51,8 @@ const MethodTableKind = enum {
     string_prototype,
     number_static,
     number_prototype,
+    bigint_static,
+    symbol_static,
     proxy_static,
     error_prototype,
     error_static,
@@ -56,6 +60,7 @@ const MethodTableKind = enum {
     date_prototype,
     regexp_prototype,
     promise_static,
+    promise_prototype,
     map_static,
     map_prototype,
     set_prototype,
@@ -66,6 +71,8 @@ const MethodTableKind = enum {
     buffer_prototype,
     shared_buffer_prototype,
     array_buffer_static,
+    uint8_array_static,
+    uint8_array_prototype,
     data_view_prototype,
     iterator_static,
     iterator_prototype,
@@ -188,6 +195,24 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                     setRequiredMethodNativeBuiltinId(method, .number, number_builtin.prototypeMethodId(name));
                 }
             },
+            .bigint_static => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "asIntN"))
+                    primitive_builtin.bigint_asintn_id
+                else if (std.mem.eql(u8, name, "asUintN"))
+                    primitive_builtin.bigint_asuintn_id
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .primitive, id);
+            },
+            .symbol_static => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "for"))
+                    primitive_builtin.symbol_for_id
+                else if (std.mem.eql(u8, name, "keyFor"))
+                    primitive_builtin.symbol_key_for_id
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .primitive, id);
+            },
             .proxy_static => {
                 if (!std.mem.eql(u8, name, "revocable")) @compileError("unexpected Proxy static method");
                 method.native_builtin_id = core.function.nativeBuiltinId(.reflect, @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable));
@@ -207,6 +232,17 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .date_prototype => setRequiredMethodNativeBuiltinId(method, .date, date_builtin.prototypeMethodId(name)),
             .regexp_prototype => setRequiredMethodNativeBuiltinId(method, .regexp, regexp_builtin.prototypeMethodId(name)),
             .promise_static => setRequiredMethodNativeBuiltinId(method, .promise, promise_ops.legacyStaticMethodId(name)),
+            .promise_prototype => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "then"))
+                    @intFromEnum(promise_method_ids.then)
+                else if (std.mem.eql(u8, name, "catch"))
+                    @intFromEnum(promise_method_ids.catch_)
+                else if (std.mem.eql(u8, name, "finally"))
+                    @intFromEnum(promise_method_ids.finally)
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .promise, id);
+            },
             .map_static => setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.staticMethodId(name)),
             .map_prototype => {
                 setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.prototypeMethodId(name));
@@ -243,6 +279,8 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .buffer_prototype =>setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
             .shared_buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.sharedArrayBufferPrototypeMethodId(name)),
             .array_buffer_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.staticMethodId(name)),
+            .uint8_array_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.uint8ArrayStaticMethodId(name)),
+            .uint8_array_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.uint8ArrayPrototypeMethodId(name)),
             .data_view_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.dataViewPrototypeMethodId(name)),
             .iterator_static => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.staticMethodId(name)),
             .iterator_prototype => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.prototypeMethodId(name)),
@@ -1967,17 +2005,20 @@ const typed_array_intrinsic_extra_methods = preparedMethods([_]Method{
     .{ .name = "subarray", .length = 2 },
 }, .typed_array_prototype);
 
+// qjs js_uint8array_funcs (quickjs.c:59820) / js_uint8array_proto_funcs
+// (quickjs.c:59812): ordinary JS_CFUNC_DEF entries, so they carry native
+// builtin ids and dispatch through the record table.
 const uint8_array_constructor_codec_methods = preparedMethods([_]Method{
     .{ .name = "fromBase64", .length = 1 },
     .{ .name = "fromHex", .length = 1 },
-}, .none);
+}, .uint8_array_static);
 
 const uint8_array_prototype_codec_methods = preparedMethods([_]Method{
     .{ .name = "toBase64", .length = 0 },
     .{ .name = "toHex", .length = 0 },
     .{ .name = "setFromBase64", .length = 1 },
     .{ .name = "setFromHex", .length = 1 },
-}, .none);
+}, .uint8_array_prototype);
 
 const string_static = preparedMethods([_]Method{
     .{ .name = "fromCharCode", .length = 1 },
@@ -2045,10 +2086,12 @@ const number_static = preparedMethods([_]Method{
     .{ .name = "isSafeInteger", .length = 1 },
 }, .number_static);
 
+// qjs js_bigint_funcs (quickjs.c:56350): two JS_CFUNC_MAGIC_DEF entries over
+// js_bigint_asUintN, dispatched by js_call_c_function like any other builtin.
 const bigint_static = preparedMethods([_]Method{
     .{ .name = "asIntN", .length = 2 },
     .{ .name = "asUintN", .length = 2 },
-}, .none);
+}, .bigint_static);
 
 const typed_array_static = preparedMethods([_]Method{
     .{ .name = "from", .length = 1 },
@@ -2089,10 +2132,12 @@ const error_prototype = preparedMethods([_]Method{
     .{ .name = "toString", .length = 0 },
 }, .error_prototype);
 
+// qjs js_symbol_funcs (quickjs.c:51672): plain JS_CFUNC_DEF entries over
+// js_symbol_for / js_symbol_keyFor, dispatched like any other builtin.
 const symbol_static = preparedMethods([_]Method{
     .{ .name = "for", .length = 1 },
     .{ .name = "keyFor", .length = 1 },
-}, .none);
+}, .symbol_static);
 
 const date_static = preparedMethods([_]Method{
     .{ .name = "now", .length = 0 },
@@ -2168,11 +2213,14 @@ const promise_static = preparedMethods([_]Method{
     .{ .name = "withResolvers", .length = 0 },
 }, .promise_static);
 
+// qjs js_promise_proto_funcs (quickjs.c:54376): ordinary JS_CFUNC_DEF entries
+// over js_promise_then / js_promise_catch / js_promise_finally, so they carry
+// native builtin ids and dispatch through the record table.
 const promise_prototype = preparedMethods([_]Method{
     .{ .name = "then", .length = 2 },
     .{ .name = "catch", .length = 1 },
     .{ .name = "finally", .length = 1 },
-}, .none);
+}, .promise_prototype);
 
 const error_static = preparedMethods([_]Method{
     .{ .name = "captureStackTrace", .length = 1 },

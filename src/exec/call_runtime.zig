@@ -1235,8 +1235,6 @@ noinline fn callNativeCallableByName(
         }
     }
     if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-    if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
     if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
@@ -1252,9 +1250,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
     if (std.mem.eql(u8, name, "isFinite")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
-    if (core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode(name)) |unsigned| {
-        return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
-    }
     if (std.mem.eql(u8, name, "RegExp")) {
         var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
         native_scope.push();
@@ -1286,7 +1281,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "set")) {
         if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
     }
-    if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
     if (std.mem.eql(u8, name, "next")) {
         if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
@@ -1405,6 +1399,11 @@ noinline fn callNativeCallableByName(
     if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
     if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
     if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    // Retained even though `Promise.prototype.{then,catch,finally}` now carry
+    // native records: `core.promise.constructWithPrototype` (src/core/promise.zig:29)
+    // still installs recordless own `then`/`catch` data functions on a
+    // prototype-less promise, which `call.zig`'s capability path can produce
+    // whenever `Promise.prototype` is not (yet) an own data property.
     if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
         if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
     }
