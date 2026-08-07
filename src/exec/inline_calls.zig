@@ -3163,6 +3163,10 @@ pub const Machine = struct {
         target: *const InlineTarget,
         region_start: [*]core.JSValue,
         argc: u16,
+        /// Constructor spread's parser-owned `new.target` operand, consumed on
+        /// success; `null` for direct `new F(...)`, whose new-target is the
+        /// callable itself. On failure the caller still owns it.
+        owned_new_target: ?core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(target.this_value.isObject());
@@ -3186,12 +3190,27 @@ pub const Machine = struct {
         setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
         errdefer entry.deinit(self.ctx);
 
-        const cold = try entry.frame.ensureCold(&self.ctx.runtime.memory);
-        cold.new_target = entry.frame.current_function;
+        // qjs keeps `new_target` in a JS_CallInternal register and gives
+        // JSStackFrame no field for it (quickjs.c:405-417); only a function
+        // that actually reads `new.target` pays anything, at the
+        // OP_special_object dup (quickjs.c:17984). Direct construction has
+        // `new.target == current_function`, so record the alias instead of
+        // heap-allocating a cold box on every `new`.
+        entry.frame.ownership.new_target = .aliases_function;
+        if (owned_new_target) |value| {
+            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, self.ctx.runtime, value);
+        }
         std.debug.assert(entry.frame.ownership.this_value == .owned);
         std.debug.assert(entry.frame.this_value.same(target.this_value));
         entry.native_caller = entry.frame.this_value;
         entry.frame.ownership.this_value = .borrowed;
+        // NOTE: do NOT set `teardown.simple` here. Dropping the cold box makes
+        // `canUseSimpleTeardown`'s `cold == null` test pass, but
+        // `deinitSimpleResources` derives its live-operand window from
+        // `frame.locals.ptr` — and a constructor body with no locals carries
+        // the empty-slice default, not the stack base that derivation assumes
+        // (the same hazard `deinit` documents for exact-args leaves). Doing so
+        // aborts in ReleaseSafe inside `popConstructorReturn`.
         entry.teardown.constructor_completion = true;
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
 
@@ -3213,6 +3232,8 @@ pub const Machine = struct {
         target: *const InlineTarget,
         region_start: [*]core.JSValue,
         argc: u16,
+        /// See `pushConstructorCall`: consumed on success, caller-owned on failure.
+        owned_new_target: ?core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(target.this_value.isUninitialized());
@@ -3236,8 +3257,10 @@ pub const Machine = struct {
         setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
         errdefer entry.deinit(self.ctx);
 
-        const cold = try entry.frame.ensureCold(&self.ctx.runtime.memory);
-        cold.new_target = entry.frame.current_function;
+        entry.frame.ownership.new_target = .aliases_function;
+        if (owned_new_target) |value| {
+            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, self.ctx.runtime, value);
+        }
         std.debug.assert(entry.frame.this_value.isUninitialized());
         entry.native_caller = core.JSValue.undefinedValue();
         entry.teardown.constructor_completion = true;

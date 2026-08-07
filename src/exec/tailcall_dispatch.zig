@@ -1803,6 +1803,7 @@ noinline fn pushDerivedConstructorEntry(
         &target,
         region_start,
         argc,
+        null,
     ) catch |err| {
         if (!constructorSetupRecover(vm, err)) return .threw;
         return .handled;
@@ -1843,12 +1844,12 @@ noinline fn pushSpreadDerivedConstructorEntry(
         &target,
         region_start,
         argc,
+        owned_new_target,
     ) catch |err| {
         owned_new_target.free(vm.rt);
         if (!constructorSetupRecover(vm, err)) return .threw;
         return .handled;
     };
-    entry.frame.takeConstructorNewTarget(owned_new_target);
     return .{ .entry = entry };
 }
 
@@ -1919,12 +1920,12 @@ fn enterSameMachineSpreadConstructor(
                 &target,
                 region_start,
                 argc,
+                owned_new_target,
             ) catch |err| {
                 owned_new_target.free(vm.rt);
                 if (!constructorSetupRecover(vm, err)) return .threw;
                 return .handled;
             };
-            entry.frame.takeConstructorNewTarget(owned_new_target);
             return .{ .entry = entry };
         },
     }
@@ -2003,6 +2004,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                         &target,
                         region_start,
                         argc,
+                        null,
                     ) catch |err| {
                         if (!constructorSetupRecover(vm, err)) return .threw;
                         return coldNext(vb, vm);
