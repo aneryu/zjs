@@ -900,7 +900,13 @@ pub const PromisePayload = struct {
     result: ?JSValue = null,
     reaction_callback: ?JSValue = null,
     reaction_arg: ?JSValue = null,
+    /// Live prefix of the subscriber list. qjs threads reaction records onto
+    /// the promise with `list_add_tail` (quickjs.c:54221-54222), so a pending
+    /// promise absorbs N subscribers in O(N); `reactions_capacity` describes
+    /// the backing allocation so the array adaptation grows amortized instead
+    /// of reallocating at the exact length on every subscription.
     reactions: []JSValue = &.{},
+    reactions_capacity: usize = 0,
     is_rejected: bool = false,
     atomics_wait_async: bool = false,
 
@@ -908,7 +914,7 @@ pub const PromisePayload = struct {
         destroyOptionalValue(rt, &self.result);
         destroyOptionalValue(rt, &self.reaction_callback);
         destroyOptionalValue(rt, &self.reaction_arg);
-        destroyValueSlice(rt, &self.reactions);
+        destroyValueSliceWithCapacity(rt, &self.reactions, &self.reactions_capacity);
         self.is_rejected = false;
         self.atomics_wait_async = false;
     }
@@ -5285,6 +5291,12 @@ pub const Object = extern struct {
     pub fn promiseReactions(self: *const Object) []JSValue {
         if (self.promisePayloadConst()) |payload| return payload.reactions;
         return &.{};
+    }
+
+    pub fn promiseReactionsCapacitySlot(self: *Object) *usize {
+        if (self.promisePayload()) |payload| return &payload.reactions_capacity;
+        std.debug.assert(self.flags.class_payload_kind == .promise);
+        unreachable;
     }
 
     pub fn promiseIsRejectedSlot(self: *Object) *bool {

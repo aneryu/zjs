@@ -408,12 +408,24 @@ pub const Job = struct {
 
 pub const Queue = struct {
     memory: *memory.MemoryAccount,
+    /// Live FIFO window inside the backing block. Every reader keeps treating
+    /// this as an ordinary slice; `head` records how far the window sits from
+    /// the block start so head removal never touches the tail.
     jobs: []Job = &.{},
     capacity: usize = 0,
+    /// Offset of `jobs.ptr` inside the backing block, i.e. the number of
+    /// already-drained slots below the window. qjs unlinks the head cell of
+    /// `rt->job_list` in O(1) (`list_del`, quickjs.c:2318); the array
+    /// adaptation advances this offset instead of memmoving the survivors.
+    head: usize = 0,
     /// Slots promised to prepared transactions that have not committed yet.
     /// Ordinary enqueues must leave these slots available, while still
     /// appending immediately so reentrant enqueue order remains observable.
     reserved_entries: usize = 0,
+    /// Drained head slots pinned for `prependReserved`. They live below the
+    /// window, so they are never part of the appendable tail budget and both
+    /// the compaction and the empty-window reset must preserve them.
+    unlinked_head_slots: usize = 0,
 
     pub fn init(account: *memory.MemoryAccount) Queue {
         return .{ .memory = account };
@@ -421,13 +433,33 @@ pub const Queue = struct {
 
     pub fn deinit(self: *Queue) void {
         std.debug.assert(self.reserved_entries == 0);
+        std.debug.assert(self.unlinked_head_slots == 0);
         const jobs = self.jobs;
         const capacity = self.capacity;
+        const block = self.blockStart();
         self.jobs = &.{};
         self.capacity = 0;
+        self.head = 0;
         self.reserved_entries = 0;
         for (jobs) |*job| job.deinit();
-        if (capacity != 0) self.memory.free(Job, jobs.ptr[0..capacity]);
+        if (capacity != 0) self.memory.free(Job, block[0..capacity]);
+    }
+
+    fn blockStart(self: *const Queue) [*]Job {
+        return self.jobs.ptr - self.head;
+    }
+
+    /// Slide the live window back onto the lowest legal offset, reclaiming the
+    /// drained prefix without allocating. Callers gate this so the copy stays
+    /// amortized O(1) per entry.
+    fn reclaimDrainedPrefix(self: *Queue) void {
+        const floor = self.unlinked_head_slots;
+        if (self.head == floor) return;
+        const block = self.blockStart();
+        const len = self.jobs.len;
+        if (len != 0) std.mem.copyForwards(Job, block[floor .. floor + len], self.jobs);
+        self.jobs = block[floor .. floor + len];
+        self.head = floor;
     }
 
     pub fn enqueue(self: *Queue, job: Job) !void {
@@ -440,17 +472,32 @@ pub const Queue = struct {
     }
 
     pub fn ensureCapacity(self: *Queue, min_capacity: usize) !void {
-        if (self.capacity >= min_capacity) return;
+        if (self.capacity - self.head >= min_capacity) return;
+        const floor = self.unlinked_head_slots;
+        // The drained prefix is already-owned storage, so reclaim it in place
+        // rather than growing -- but only under a gate that keeps the memmove
+        // amortized O(1) per entry instead of the O(depth) that head removal
+        // used to pay. Either the copy is paid for by the removals that
+        // produced the prefix, or the reclaim frees at least half the block
+        // and therefore cannot repeat until half a block of appends.
+        const reclaimable = self.head - floor;
+        if (self.capacity - floor >= min_capacity and
+            (reclaimable >= self.jobs.len or reclaimable * 2 >= self.capacity))
+        {
+            self.reclaimDrainedPrefix();
+            return;
+        }
         var next_capacity = if (self.capacity == 0) @as(usize, 4) else self.capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
+        while (next_capacity - floor < min_capacity) : (next_capacity *= 2) {}
         const next = try self.memory.alloc(Job, next_capacity);
-        errdefer self.memory.free(Job, next);
         const old_jobs = self.jobs;
         const old_capacity = self.capacity;
-        @memcpy(next[0..old_jobs.len], old_jobs);
-        self.jobs = next[0..old_jobs.len];
+        const old_block = self.blockStart();
+        @memcpy(next[floor..][0..old_jobs.len], old_jobs);
+        self.jobs = next[floor..][0..old_jobs.len];
+        self.head = floor;
         self.capacity = next_capacity;
-        if (old_capacity != 0) self.memory.free(Job, old_jobs.ptr[0..old_capacity]);
+        if (old_capacity != 0) self.memory.free(Job, old_block[0..old_capacity]);
     }
 
     /// Reserve queue storage for a transaction whose payload ownership is
@@ -469,18 +516,40 @@ pub const Queue = struct {
     }
 
     /// Hold the physical slot just freed by `takeFirst` while a retriable job
-    /// runs. This is deliberately no-fail: the unlinked entry proves that one
-    /// slot exists even if callbacks enqueue other work during the attempt.
+    /// runs. This is deliberately no-fail: the unlinked entry proves that the
+    /// slot directly below the window exists even if callbacks enqueue other
+    /// work during the attempt. The slot is pinned below `head`, so it never
+    /// competes with `reserved_entries` for appendable tail storage.
     pub fn reserveUnlinkedEntrySlot(self: *Queue) void {
-        std.debug.assert(self.jobs.len + self.reserved_entries < self.capacity);
-        self.reserved_entries += 1;
+        std.debug.assert(self.head > self.unlinked_head_slots);
+        self.unlinked_head_slots += 1;
+    }
+
+    /// Drop an unlinked-entry slot claim after the retriable job completed.
+    pub fn releaseUnlinkedEntrySlot(self: *Queue) void {
+        std.debug.assert(self.unlinked_head_slots != 0);
+        self.unlinked_head_slots -= 1;
+    }
+
+    /// Spend the pinned head slot on a tail append instead of a head reinsert.
+    /// A retriable runner that reached its commit point can no longer fail, so
+    /// the one promised slot is free to change position. No-fail: reclaiming
+    /// the drained prefix moves the pinned storage into appendable range.
+    pub fn enqueueUnlinkedEntrySlot(self: *Queue, job: Job) void {
+        std.debug.assert(self.unlinked_head_slots != 0);
+        self.unlinked_head_slots -= 1;
+        if (self.head + self.jobs.len + self.reserved_entries == self.capacity) {
+            std.debug.assert(self.head > self.unlinked_head_slots);
+            self.reclaimDrainedPrefix();
+        }
+        self.append(job);
     }
 
     /// Commit one already-prepared entry without allocation. The caller must
     /// reserve enough queue storage before entering its visible state-change
     /// phase.
     pub fn enqueuePrepared(self: *Queue, job: Job) void {
-        std.debug.assert(self.jobs.len + self.reserved_entries < self.capacity);
+        std.debug.assert(self.head + self.jobs.len + self.reserved_entries < self.capacity);
         self.append(job);
     }
 
@@ -488,12 +557,13 @@ pub const Queue = struct {
     pub fn enqueueReserved(self: *Queue, job: Job) void {
         std.debug.assert(self.reserved_entries != 0);
         self.reserved_entries -= 1;
-        std.debug.assert(self.jobs.len < self.capacity);
+        std.debug.assert(self.head + self.jobs.len < self.capacity);
         self.append(job);
     }
 
     fn append(self: *Queue, job: Job) void {
         const len = self.jobs.len;
+        std.debug.assert(self.head + len < self.capacity);
         self.jobs = self.jobs.ptr[0 .. len + 1];
         self.jobs[len] = job;
     }
@@ -592,11 +662,21 @@ pub const Queue = struct {
     /// caller. The caller must eventually invoke `Job.deinit`.
     pub fn takeFirst(self: *Queue) ?Job {
         if (self.jobs.len == 0) return null;
-        return self.takeAt(0);
+        // qjs `list_del(&job->link)` (quickjs.c:2318) unlinks the head cell in
+        // O(1); the array adaptation advances the window by one slot instead
+        // of memmoving every survivor down.
+        const job = self.jobs[0];
+        self.jobs = self.jobs[1..];
+        self.head += 1;
+        // The vacated slot is deliberately left below the window: the caller
+        // may pin it with `reserveUnlinkedEntrySlot`, and `ensureCapacity`
+        // reclaims the whole drained prefix in one amortized pass instead.
+        return job;
     }
 
     pub fn takeAt(self: *Queue, index: usize) Job {
         std.debug.assert(index < self.jobs.len);
+        if (index == 0) return self.takeFirst().?;
         const job = self.jobs[index];
         if (index + 1 < self.jobs.len) {
             std.mem.copyForwards(Job, self.jobs[index .. self.jobs.len - 1], self.jobs[index + 1 ..]);
@@ -607,16 +687,16 @@ pub const Queue = struct {
 
     /// Reinsert an active entry at the FIFO head after a retriable host
     /// completion failure. The active runner must have reserved this slot
-    /// immediately after unlinking the entry.
+    /// immediately after unlinking the entry, so the slot below the window is
+    /// still pinned and relinking stays O(1) (qjs `list_add`, quickjs.c:2318
+    /// removal site paired with quickjs.c:54221 insertion).
     pub fn prependReserved(self: *Queue, job: Job) void {
-        std.debug.assert(self.reserved_entries != 0);
-        self.reserved_entries -= 1;
-        std.debug.assert(self.jobs.len < self.capacity);
+        std.debug.assert(self.unlinked_head_slots != 0);
+        self.unlinked_head_slots -= 1;
+        std.debug.assert(self.head != 0);
+        self.head -= 1;
         const old_len = self.jobs.len;
-        self.jobs = self.jobs.ptr[0 .. old_len + 1];
-        if (old_len != 0) {
-            std.mem.copyBackwards(Job, self.jobs[1 .. old_len + 1], self.jobs[0..old_len]);
-        }
+        self.jobs = (self.jobs.ptr - 1)[0 .. old_len + 1];
         self.jobs[0] = job;
     }
 
