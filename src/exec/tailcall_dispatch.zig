@@ -2270,6 +2270,7 @@ const h_await = coldGen(struct {
 // sp — exactly dispatchLoop's reg_sp/reg_ip-with-lazy-syncDown model.
 // ===========================================================================
 const value_ops = @import("value_ops.zig");
+const coercion_ops = @import("coercion_ops.zig");
 
 const LocalOperand = struct { idx: u16, consume: usize };
 
@@ -3727,6 +3728,81 @@ pub fn op_div_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     vm.publish(pc, sp);
     _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
     return coldNext(var_buf, vm);
+}
+
+/// ToInt32 for the operand tags whose ToNumeric conversion is total, pure and
+/// allocation-free. qjs `JS_ToNumericFree` is the identity on JS_TAG_INT and
+/// JS_TAG_FLOAT64 and a plain 0/1 widen on JS_TAG_BOOL, so for those three tags all
+/// of `js_binary_logic_slow`'s prologue — the short-bigint arm, the two
+/// `JS_ToNumericFree` calls, the BigInt classification (quickjs.c:15222-15340) —
+/// collapses into its closing `JS_ToInt32Free` pair. Every other tag returns null and
+/// keeps the full generic shell: string needs a parse, object runs user code through
+/// valueOf/toString, symbol must throw, BigInt takes the bigint arm (or `>>>`'s
+/// TypeError). The float leg reuses the same modulo-2^32 wrap `value_ops.toInt32`
+/// closes with, so a fast-leg result is bit-identical to the shell's.
+inline fn logicOperandInt32(v: JSValue) ?i32 {
+    if (v.asInt32()) |i| return i;
+    if (v.asBool()) |b| return @intFromBool(b);
+    if (v.asFloat64()) |d| return @bitCast(coercion_ops.toUint32Number(d));
+    return null;
+}
+
+/// Dedicated cold-table handler for the six bitwise / shift ops after their
+/// both-int32 CASE missed — qjs OP_shl/OP_sar/OP_and/OP_or/OP_xor →
+/// `js_binary_logic_slow` (quickjs.c:15214) and OP_shr → `js_shr_slow`
+/// (quickjs.c:15735). Both qjs helpers work IN PLACE on `sp[-2]` with move
+/// semantics: no pop, no dup, no per-operand free defer.
+///
+/// zjs previously had NO handler here at all, so a single non-int32 operand fell
+/// through `cold_table[op]` → `vm.publish` → `binaryVm` → `binary()`, which pops both
+/// operands behind refcount defers and then runs BOTH through `toPrimitiveForNumber`
+/// (a call plus a `value.dup()` each) before arriving at the same ToInt32 — 423 insn
+/// against qjs's 205, and the source of most of the engine's ToPrimitive traffic.
+///
+/// The arms below are `js_binary_logic_slow`'s closing `JS_ToInt32Free` + `switch(op)`
+/// + `JS_NewInt32` leg (quickjs.c:15340-15366) reached with both ToNumeric conversions
+/// already resolved by `logicOperandInt32` — which is exactly the hot traffic:
+/// non-short-circuit boolean folds like `x == e & y == d` plus float/int mixes. The
+/// expressions are transcribed verbatim from `value_ops.binary`'s bitwise leg so the
+/// fast and shell results are bit-identical, and all three accepted tags are
+/// non-refcounted, so overwriting `sp[-2]` and dropping `sp[-1]` leaks nothing.
+/// Everything else — BigInt, string, object, symbol — plus the generator
+/// parameter/body stop boundary (`local_fast_blocked`) falls to the unchanged
+/// publishing shell, exactly like `op_div_cold`/`op_mod_cold`.
+pub fn opLogicCold(comptime opc: u8) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (!vm.local_fast_blocked) {
+                if (logicOperandInt32((sp - 2)[0])) |v1| {
+                    if (logicOperandInt32((sp - 1)[0])) |v2| {
+                        switch (opc) {
+                            // qjs js_shr_slow closes with `JS_NewUint32(ctx, v1 >> (v2 & 0x1f))`
+                            // (quickjs.c:15764-15765): int32 while the u32 fits, else the exact
+                            // double — the same split OP_shr's int leg inlines.
+                            op.shr => {
+                                const r = @as(u32, @bitCast(v1)) >> @intCast(v2 & 31);
+                                if (r <= std.math.maxInt(i32)) {
+                                    (sp - 2)[0] = JSValue.int32(@intCast(r));
+                                } else {
+                                    (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
+                                }
+                            },
+                            op.shl => (sp - 2)[0] = JSValue.int32(v1 << @intCast(v2 & 31)),
+                            op.sar => (sp - 2)[0] = JSValue.int32(v1 >> @intCast(v2 & 31)),
+                            op.@"and" => (sp - 2)[0] = JSValue.int32(v1 & v2),
+                            op.@"or" => (sp - 2)[0] = JSValue.int32(v1 | v2),
+                            op.xor => (sp - 2)[0] = JSValue.int32(v1 ^ v2),
+                            else => unreachable,
+                        }
+                        return cont(pc + 1, sp - 1, var_buf, vm);
+                    }
+                }
+            }
+            vm.publish(pc, sp);
+            _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+            return coldNext(var_buf, vm);
+        }
+    }.hnd;
 }
 
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
