@@ -2521,9 +2521,18 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             break :blk owned_name.?;
         };
         const is_native_array_constructor = function_object.arrayBuiltinMarker() == .constructor;
-        if (isBuiltinConstructorName(name) and
-            (!std.mem.eql(u8, name, "Array") or is_native_array_constructor) and
-            !new_target.sameValue(func))
+        // Order matters, not just the predicate: this whole gate only fires for
+        // subclass `super(...)` / `Reflect.construct` with a foreign new.target
+        // (qjs `js_create_from_ctor`, quickjs.c:8117, is likewise only consulted
+        // when new.target differs). `isBuiltinConstructorName` is a ~30-way
+        // string cascade (including the error-name and typed-array-name sets),
+        // and `and` short-circuits left to right, so testing it first made every
+        // direct `new Map()`/`new Date()`/`new WeakRef()` pay the full scan to
+        // reach a branch it can never take. The three operands are pure, so
+        // hoisting the one-word new.target comparison is behavior-identical.
+        if (!new_target.sameValue(func) and
+            isBuiltinConstructorName(name) and
+            (!std.mem.eql(u8, name, "Array") or is_native_array_constructor))
         {
             if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
                 return constructed;
