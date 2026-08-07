@@ -23,6 +23,7 @@ const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
 const number_builtin = @import("number_ops.zig");
 const primitive_builtin = @import("primitive_ops.zig");
+const promise_method_ids = core.host_function.builtin_method_ids.promise.PrototypeMethod;
 const promise_ops = @import("promise_ops.zig");
 const uri_builtin = @import("uri_ops.zig");
 const weak_ref_method_ids = core.host_function.builtin_method_ids.weak_ref.PrototypeMethod;
@@ -59,6 +60,7 @@ const MethodTableKind = enum {
     date_prototype,
     regexp_prototype,
     promise_static,
+    promise_prototype,
     map_static,
     map_prototype,
     set_prototype,
@@ -228,6 +230,17 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .date_prototype => setRequiredMethodNativeBuiltinId(method, .date, date_builtin.prototypeMethodId(name)),
             .regexp_prototype => setRequiredMethodNativeBuiltinId(method, .regexp, regexp_builtin.prototypeMethodId(name)),
             .promise_static => setRequiredMethodNativeBuiltinId(method, .promise, promise_ops.legacyStaticMethodId(name)),
+            .promise_prototype => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "then"))
+                    @intFromEnum(promise_method_ids.then)
+                else if (std.mem.eql(u8, name, "catch"))
+                    @intFromEnum(promise_method_ids.catch_)
+                else if (std.mem.eql(u8, name, "finally"))
+                    @intFromEnum(promise_method_ids.finally)
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .promise, id);
+            },
             .map_static => setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.staticMethodId(name)),
             .map_prototype => {
                 setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.prototypeMethodId(name));
@@ -2193,11 +2206,14 @@ const promise_static = preparedMethods([_]Method{
     .{ .name = "withResolvers", .length = 0 },
 }, .promise_static);
 
+// qjs js_promise_proto_funcs (quickjs.c:54376): ordinary JS_CFUNC_DEF entries
+// over js_promise_then / js_promise_catch / js_promise_finally, so they carry
+// native builtin ids and dispatch through the record table.
 const promise_prototype = preparedMethods([_]Method{
     .{ .name = "then", .length = 2 },
     .{ .name = "catch", .length = 1 },
     .{ .name = "finally", .length = 1 },
-}, .none);
+}, .promise_prototype);
 
 const error_static = preparedMethods([_]Method{
     .{ .name = "captureStackTrace", .length = 1 },

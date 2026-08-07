@@ -1400,6 +1400,11 @@ noinline fn callNativeCallableByName(
     if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
     if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
     if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    // Retained even though `Promise.prototype.{then,catch,finally}` now carry
+    // native records: `core.promise.constructWithPrototype` (src/core/promise.zig:29)
+    // still installs recordless own `then`/`catch` data functions on a
+    // prototype-less promise, which `call.zig`'s capability path can produce
+    // whenever `Promise.prototype` is not (yet) an own data property.
     if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
         if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
     }

@@ -734,6 +734,19 @@ pub const builtin_method_ids = struct {
             all_keyed = 9,
             all_settled_keyed = 10,
         };
+
+        /// qjs `js_promise_proto_funcs` (quickjs.c:54376). Its own
+        /// JSCFunctionListEntry array, distinct from the statics, so it takes
+        /// its own id block in the shared `.promise` domain (same layering the
+        /// `.regexp` and `.buffer` domains use for static vs prototype).
+        pub const PrototypeMethod = enum(u32) {
+            /// qjs `js_promise_then` (quickjs.c:54246).
+            then = 101,
+            /// qjs `js_promise_catch` (quickjs.c:54275).
+            catch_ = 102,
+            /// qjs `js_promise_finally` (quickjs.c:54329).
+            finally = 103,
+        };
     };
 
     pub const regexp = struct {
