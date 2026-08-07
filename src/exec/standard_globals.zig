@@ -71,6 +71,8 @@ const MethodTableKind = enum {
     buffer_prototype,
     shared_buffer_prototype,
     array_buffer_static,
+    uint8_array_static,
+    uint8_array_prototype,
     data_view_prototype,
     iterator_static,
     iterator_prototype,
@@ -277,6 +279,8 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .buffer_prototype =>setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
             .shared_buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.sharedArrayBufferPrototypeMethodId(name)),
             .array_buffer_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.staticMethodId(name)),
+            .uint8_array_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.uint8ArrayStaticMethodId(name)),
+            .uint8_array_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.uint8ArrayPrototypeMethodId(name)),
             .data_view_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.dataViewPrototypeMethodId(name)),
             .iterator_static => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.staticMethodId(name)),
             .iterator_prototype => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.prototypeMethodId(name)),
@@ -2001,17 +2005,20 @@ const typed_array_intrinsic_extra_methods = preparedMethods([_]Method{
     .{ .name = "subarray", .length = 2 },
 }, .typed_array_prototype);
 
+// qjs js_uint8array_funcs (quickjs.c:59820) / js_uint8array_proto_funcs
+// (quickjs.c:59812): ordinary JS_CFUNC_DEF entries, so they carry native
+// builtin ids and dispatch through the record table.
 const uint8_array_constructor_codec_methods = preparedMethods([_]Method{
     .{ .name = "fromBase64", .length = 1 },
     .{ .name = "fromHex", .length = 1 },
-}, .none);
+}, .uint8_array_static);
 
 const uint8_array_prototype_codec_methods = preparedMethods([_]Method{
     .{ .name = "toBase64", .length = 0 },
     .{ .name = "toHex", .length = 0 },
     .{ .name = "setFromBase64", .length = 1 },
     .{ .name = "setFromHex", .length = 1 },
-}, .none);
+}, .uint8_array_prototype);
 
 const string_static = preparedMethods([_]Method{
     .{ .name = "fromCharCode", .length = 1 },

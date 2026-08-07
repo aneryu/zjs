@@ -473,6 +473,30 @@ pub const builtin_method_ids = struct {
             length = 464,
             to_string_tag = 465,
         };
+
+        /// qjs `js_uint8array_funcs` (quickjs.c:59820): the Uint8Array
+        /// constructor's base64/hex decoders. Its own JSCFunctionListEntry
+        /// array, so it takes its own id block in the shared `.buffer` domain,
+        /// exactly like the ArrayBuffer / SharedArrayBuffer / DataView /
+        /// %TypedArray% lists already do.
+        pub const Uint8ArrayStaticMethod = enum(u32) {
+            /// qjs `js_uint8array_from_base64` (quickjs.c:59553).
+            from_base64 = 501,
+            /// qjs `js_uint8array_from_hex` (quickjs.c:59610).
+            from_hex = 502,
+        };
+
+        /// qjs `js_uint8array_proto_funcs` (quickjs.c:59812).
+        pub const Uint8ArrayPrototypeMethod = enum(u32) {
+            /// qjs `js_uint8array_to_base64` (quickjs.c:59467).
+            to_base64 = 521,
+            /// qjs `js_uint8array_to_hex` (quickjs.c:59525).
+            to_hex = 522,
+            /// qjs `js_uint8array_set_from_base64` (quickjs.c:59666).
+            set_from_base64 = 523,
+            /// qjs `js_uint8array_set_from_hex` (quickjs.c:59723).
+            set_from_hex = 524,
+        };
     };
 
     pub const reflect = struct {

@@ -1281,7 +1281,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "set")) {
         if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
     }
-    if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
     if (std.mem.eql(u8, name, "next")) {
         if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
