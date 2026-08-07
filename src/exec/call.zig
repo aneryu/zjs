@@ -1476,7 +1476,7 @@ pub fn callNativeFunctionRecord(
         // Migrated to the internal record table (rt.internal_builtins);
         // reaching here means the id is not installed, which only happens
         // for corrupt ids.
-        .math, .json, .uri, .number, .date, .error_object, .function, .primitive, .iterator, .collection, .reflect, .buffer, .string, .object, .array, .regexp, .performance, .atomics, .promise => error.TypeError,
+        .math, .json, .uri, .number, .date, .error_object, .function, .primitive, .iterator, .collection, .reflect, .buffer, .string, .object, .array, .regexp, .performance, .atomics, .promise, .weak_ref => error.TypeError,
         .host => blk: {
             const realm = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
             break :blk try callHostGlobalNativeFunctionRecord(realm.realm, realm.global, this_value, function_object, native_ref.id, args);

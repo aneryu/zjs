@@ -1183,12 +1183,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "sumPrecise")) {
         return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "register")) {
-        return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
-    }
-    if (std.mem.eql(u8, name, "unregister")) {
-        return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
-    }
     if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
         return value;
     }
@@ -1379,9 +1373,6 @@ noinline fn callNativeCallableByName(
     }
     if (std.mem.eql(u8, name, "set")) {
         if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-    }
-    if (std.mem.eql(u8, name, "deref")) {
-        return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
     }
     if (std.mem.eql(u8, name, "join")) {
         if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
@@ -2530,9 +2521,18 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             break :blk owned_name.?;
         };
         const is_native_array_constructor = function_object.arrayBuiltinMarker() == .constructor;
-        if (isBuiltinConstructorName(name) and
-            (!std.mem.eql(u8, name, "Array") or is_native_array_constructor) and
-            !new_target.sameValue(func))
+        // Order matters, not just the predicate: this whole gate only fires for
+        // subclass `super(...)` / `Reflect.construct` with a foreign new.target
+        // (qjs `js_create_from_ctor`, quickjs.c:8117, is likewise only consulted
+        // when new.target differs). `isBuiltinConstructorName` is a ~30-way
+        // string cascade (including the error-name and typed-array-name sets),
+        // and `and` short-circuits left to right, so testing it first made every
+        // direct `new Map()`/`new Date()`/`new WeakRef()` pay the full scan to
+        // reach a branch it can never take. The three operands are pure, so
+        // hoisting the one-word new.target comparison is behavior-identical.
+        if (!new_target.sameValue(func) and
+            isBuiltinConstructorName(name) and
+            (!std.mem.eql(u8, name, "Array") or is_native_array_constructor))
         {
             if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
                 return constructed;

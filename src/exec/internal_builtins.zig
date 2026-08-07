@@ -29,6 +29,7 @@ const reflect_proxy = @import("reflect_proxy_ops.zig");
 const regexp = @import("regexp_ops.zig");
 const string = @import("string_builtin_ops.zig");
 const uri = @import("uri_ops.zig");
+const weak_ref = @import("builtin_glue.zig");
 
 const InternalEntry = core.host_function.InternalEntry;
 const InternalRecord = core.host_function.InternalRecord;
@@ -101,6 +102,7 @@ pub const table: [domain_count][]const InternalRecord = build: {
     domains[@intFromEnum(NativeBuiltinDomain.object)] = denseRecords(&object.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.array)] = denseRecords(&array.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.regexp)] = denseRecords(&regexp.internal_entries);
+    domains[@intFromEnum(NativeBuiltinDomain.weak_ref)] = denseRecords(&weak_ref.internal_entries);
     break :build domains;
 };
 
