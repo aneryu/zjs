@@ -705,6 +705,22 @@ pub const builtin_method_ids = struct {
         };
     };
 
+    /// `.weak_ref` domain: WeakRef.prototype + FinalizationRegistry.prototype.
+    /// qjs keeps these in their own JSCFunctionListEntry arrays
+    /// (`js_weakref_proto_funcs` quickjs.c:61197,
+    /// `js_finrec_proto_funcs` quickjs.c:61376), so they share one id
+    /// namespace here rather than borrowing the Map/Set `.collection` ids.
+    pub const weak_ref = struct {
+        pub const PrototypeMethod = enum(u32) {
+            /// qjs `js_weakref_deref` (quickjs.c:61186).
+            deref = 1,
+            /// qjs `js_finrec_register` (quickjs.c:61318).
+            finrec_register = 2,
+            /// qjs `js_finrec_unregister` (quickjs.c:61348).
+            finrec_unregister = 3,
+        };
+    };
+
     pub const promise = struct {
         pub const LegacyStaticMethod = enum(u32) {
             resolve = 1,

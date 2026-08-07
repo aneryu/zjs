@@ -1183,12 +1183,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "sumPrecise")) {
         return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "register")) {
-        return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
-    }
-    if (std.mem.eql(u8, name, "unregister")) {
-        return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
-    }
     if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
         return value;
     }
@@ -1379,9 +1373,6 @@ noinline fn callNativeCallableByName(
     }
     if (std.mem.eql(u8, name, "set")) {
         if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-    }
-    if (std.mem.eql(u8, name, "deref")) {
-        return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
     }
     if (std.mem.eql(u8, name, "join")) {
         if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;

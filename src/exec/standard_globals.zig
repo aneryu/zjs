@@ -24,6 +24,7 @@ const math_builtin = @import("math_ops.zig");
 const number_builtin = @import("number_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const uri_builtin = @import("uri_ops.zig");
+const weak_ref_method_ids = core.host_function.builtin_method_ids.weak_ref.PrototypeMethod;
 const std = @import("std");
 
 pub const Flags = struct {
@@ -60,6 +61,8 @@ const MethodTableKind = enum {
     set_prototype,
     weak_map_prototype,
     weak_set_prototype,
+    weak_ref_prototype,
+    finalization_registry_prototype,
     buffer_prototype,
     shared_buffer_prototype,
     array_buffer_static,
@@ -221,7 +224,23 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                 setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.prototypeMethodId(name));
                 method.collection_method_owner_class = core.class.ids.weakset;
             },
-            .buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
+            .weak_ref_prototype => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "deref"))
+                    @intFromEnum(weak_ref_method_ids.deref)
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .weak_ref, id);
+            },
+            .finalization_registry_prototype => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "register"))
+                    @intFromEnum(weak_ref_method_ids.finrec_register)
+                else if (std.mem.eql(u8, name, "unregister"))
+                    @intFromEnum(weak_ref_method_ids.finrec_unregister)
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .weak_ref, id);
+            },
+            .buffer_prototype =>setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
             .shared_buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.sharedArrayBufferPrototypeMethodId(name)),
             .array_buffer_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.staticMethodId(name)),
             .data_view_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.dataViewPrototypeMethodId(name)),
@@ -2239,14 +2258,18 @@ const weak_set_prototype = preparedMethods([_]Method{
     .{ .name = "delete", .length = 1 },
 }, .weak_set_prototype);
 
+// qjs js_weakref_proto_funcs (quickjs.c:61197) / js_finrec_proto_funcs
+// (quickjs.c:61376): ordinary JS_CFUNC_DEF entries, so they carry a native
+// builtin id and dispatch through the record table like every other builtin
+// method instead of falling into the compatibility name cascade.
 const weak_ref_prototype = preparedMethods([_]Method{
     .{ .name = "deref", .length = 0 },
-}, .none);
+}, .weak_ref_prototype);
 
 const finalization_registry_prototype = preparedMethods([_]Method{
     .{ .name = "register", .length = 2 },
     .{ .name = "unregister", .length = 1 },
-}, .none);
+}, .finalization_registry_prototype);
 
 const disposable_stack_prototype = preparedMethods([_]Method{
     .{ .name = "use", .length = 1 },
