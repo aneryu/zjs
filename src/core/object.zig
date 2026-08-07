@@ -5067,6 +5067,42 @@ pub const Object = extern struct {
         return self.u.array.values[@intCast(index)].dup();
     }
 
+    /// Indexed read of a MAPPED arguments object — qjs JS_GetPropertyValue's
+    /// JS_CLASS_MAPPED_ARGUMENTS arm (quickjs.c:9047-9049), which sits beside
+    /// the JS_CLASS_ARRAY/ARGUMENTS arms and dereferences the element's var-ref
+    /// cell (`*p->u.array.u.var_refs[idx]->pvalue`). The dense arm cannot serve
+    /// this class: `u.array.values` holds JSVarRef pointers, not JSValues.
+    ///
+    /// qjs takes a whole object out of the fast representation when any index is
+    /// redefined (convert_fast_array_to_array, quickjs.c:9262); zjs records the
+    /// same fact per element by nulling the cell, so an unbound index falls
+    /// through to the full path while its neighbours keep the fast read.
+    /// noinline: this is the rarest of the indexed-read arms, and letting it
+    /// inline into `fastDenseArrayElementValue` grew that hot helper enough to
+    /// cost 26% cycles on a plain-call benchmark that never touches arguments
+    /// (instructions unchanged — pure layout). Keeping it out of line restores
+    /// the dense arm's code shape.
+    pub noinline fn mappedArgumentsElementDup(self: *const Object, index: u32) ?JSValue {
+        if (self.class_id != class.ids.mapped_arguments) return null;
+        const refs = self.argumentsVarRefs();
+        if (index >= refs.len) return null;
+        const cell = refs[index] orelse return null;
+        return cell.pvalue.*.dup();
+    }
+
+    /// Write twin of `mappedArgumentsElementDup` — qjs JS_SetPropertyValue's
+    /// JS_CLASS_MAPPED_ARGUMENTS arm (quickjs.c:9979-9982), which stores through
+    /// the cell so the aliased parameter observes the write. `new_value` is
+    /// borrowed; the cell takes its own reference.
+    pub fn setMappedArgumentsElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
+        if (self.class_id != class.ids.mapped_arguments) return false;
+        const refs = self.argumentsVarRefsMut();
+        if (index >= refs.len) return false;
+        const cell = refs[index] orelse return false;
+        cell.setVarRefValue(rt, new_value.dup());
+        return true;
+    }
+
     pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
         const slot = &self.u.array.values[@intCast(index)];

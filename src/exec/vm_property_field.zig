@@ -49,6 +49,7 @@ const decodeOptionalLocalCompletionTail = property_vm.decodeOptionalLocalComplet
 const decodeStringSliceConstLocalStore = property_vm.decodeStringSliceConstLocalStore;
 const fastArrayPrototypeMethodIsDefault = property_vm.fastArrayPrototypeMethodIsDefault;
 pub const fastDenseArrayElementValue = property_vm.fastDenseArrayElementValue;
+pub const fastMappedArgumentsElementValue = property_vm.fastMappedArgumentsElementValue;
 pub const fastArrayOwnIntElementValue = property_vm.fastArrayOwnIntElementValue;
 pub const fastArrayOwnIntElementSet = property_vm.fastArrayOwnIntElementSet;
 const fastRegExpPrototypeMethodIsDefault = property_vm.fastRegExpPrototypeMethodIsDefault;
@@ -1078,6 +1079,19 @@ pub noinline fn getArrayElement(
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
+            }
+            // Mapped-arguments element: qjs's JS_GetPropertyValue reaches its
+            // JS_CLASS_MAPPED_ARGUMENTS case through an O(1) switch on class_id
+            // (quickjs.c:9047-9049), so the arm costs it nothing wherever it
+            // sits. zjs probes in sequence, and this is the rarest indexed
+            // class, so it lives here on the cold VM path rather than in the
+            // threaded OP_get_array_el handler -- growing that handler cost
+            // navier -5.5%, mandreel -3.3% and crypto -3.2% on zoo for a class
+            // those benchmarks never read.
+            if (fastMappedArgumentsElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
