@@ -2270,6 +2270,7 @@ const h_await = coldGen(struct {
 // sp — exactly dispatchLoop's reg_sp/reg_ip-with-lazy-syncDown model.
 // ===========================================================================
 const value_ops = @import("value_ops.zig");
+const coercion_ops = @import("coercion_ops.zig");
 
 const LocalOperand = struct { idx: u16, consume: usize };
 
@@ -3680,11 +3681,113 @@ pub fn opCompare(comptime opc: u8) Handler {
                         }
                     }
                 },
-                else => {},
+                // The eq family's remaining operand shapes are qjs's OP_CMP_EQ /
+                // OP_CMP_STRICT_EQ arms, which need refcount releases and so would
+                // regrow this handler's frame — they live in their own handler,
+                // tail-jumped exactly like opBinary → opBinaryFloat.
+                else => return @call(.always_tail, opCompareEq(opc), .{ pc, sp, var_buf, vm }),
             }
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         }
     }.h;
+}
+
+/// The eq family's operand-shape arms, transcribed from qjs's OP_CMP_EQ
+/// (quickjs.c:20272-20341) and OP_CMP_STRICT_EQ (20343-20398) CASE bodies, which
+/// resolve NINE shapes inline — int/int, int/f64, f64/int, f64/f64,
+/// obj/(null|undefined), obj/obj, (null|undefined)/(null|undefined),
+/// (null|undefined)/obj and str/str — and reach `js_eq_slow`/`js_strict_eq2` only for
+/// genuinely mixed operands. zjs had only the int/int arm (inlined by `opCompare`),
+/// so every other shape paid the indirect `cold_table[pc[0]]` hop plus a `syncPc`
+/// store before `compareAt`.
+///
+/// Reached by tail-jump from `opCompare` rather than inlined into it: the object and
+/// string arms release operands, and a `bl` in `opCompare` would regrow the frame its
+/// hot both-int32 arm depends on (the same reason `op_compare_cold` is dispatched
+/// indirectly — routing it directly once cost the canonical `s=s+i` loop +37
+/// insn/iter). Unresolved shapes fall to the unchanged `cold_table[pc[0]]`, so
+/// string↔number coercion, ToPrimitive on objects, BigInt and Symbol keep the full
+/// `js_eq_slow` protocol.
+///
+/// Ownership: qjs frees exactly the operands whose tag is refcountable; `free` is a
+/// no-op on int/float/bool/null/undefined, so a single unconditional release pair at
+/// the tail is the same thing. The result is stored and the traced operand window
+/// shrunk BEFORE releasing, so a collection triggered by a drop-to-zero cannot see the
+/// dead slot (`op_drop_fast`'s discipline).
+fn opCompareEq(comptime opc: u8) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            const strict = comptime (opc == op.strict_eq or opc == op.strict_neq);
+            const inv = comptime (opc == op.neq or opc == op.strict_neq);
+            const lhs = (sp - 2)[0];
+            const rhs = (sp - 1)[0];
+
+            // null ⇒ no arm matched ⇒ keep the generic path.
+            const resolved: ?bool = blk: {
+                // int/int is already resolved by opCompare's leading arm.
+                if (lhs.asInt32()) |a| {
+                    if (rhs.asFloat64()) |d2| break :blk @as(f64, @floatFromInt(a)) == d2;
+                    // qjs strict compares tags first: a number against any other tag
+                    // is FALSE with no coercion (quickjs.c:20359-20361).
+                    break :blk if (comptime strict) false else null;
+                }
+                if (lhs.asFloat64()) |d1| {
+                    if (rhs.asInt32()) |b| break :blk d1 == @as(f64, @floatFromInt(b));
+                    if (rhs.asFloat64()) |d2| break :blk d1 == d2;
+                    break :blk if (comptime strict) false else null;
+                }
+                if (lhs.isObject()) {
+                    if (rhs.isObject()) break :blk lhs.same(rhs); // qjs: JS_VALUE_GET_OBJ(op1) == JS_VALUE_GET_OBJ(op2)
+                    if (comptime strict) break :blk false; // qjs 20372-20375
+                    // Loose object vs null/undefined is exactly the IsHTMLDDA test
+                    // (quickjs.c:20301-20304) — `document.all == null` is true.
+                    if (rhs.isNull() or rhs.isUndefined()) break :blk value_ops.isHTMLDDA(lhs);
+                    break :blk null;
+                }
+                // Two booleans have the same Type, so IsLooselyEqual reduces to strict
+                // equality (ECMA-262 7.2.14 step 1) and qjs resolves the shape in the
+                // FIRST case of js_strict_eq2 (quickjs.c:15781-15788:
+                // `res = JS_VALUE_GET_INT(op1) == JS_VALUE_GET_INT(op2)`, and FALSE
+                // whenever the tags differ). qjs can afford to leave it in that call
+                // because js_eq_slow/js_strict_eq2 are cheap leaf functions; zjs's
+                // equivalent is the publishing cold shell, so leaving bool/bool to the
+                // shell measured +11.5 insn/op — the only shape whose probe-chain miss
+                // cost more than the arms above save, and the second-largest eq shape.
+                if (lhs.asBool()) |a| {
+                    if (rhs.asBool()) |b| break :blk a == b;
+                    if (comptime strict) break :blk false; // js_strict_eq2: tag1 != tag2 ⇒ FALSE
+                    break :blk null; // loose bool vs non-bool needs ToNumber
+                }
+                if (lhs.isNull() or lhs.isUndefined()) {
+                    // qjs strict: `res = (tag1 == tag2)` (20383) — null===null and
+                    // undefined===undefined, but null!==undefined.
+                    if (comptime strict) break :blk lhs.tagOf() == rhs.tagOf();
+                    // Loose: null==undefined is TRUE (20320-20321).
+                    if (rhs.isNull() or rhs.isUndefined()) break :blk true;
+                    if (rhs.isObject()) break :blk value_ops.isHTMLDDA(rhs); // qjs 20324-20327
+                    break :blk null;
+                }
+                // qjs js_string_eq (20333/20388). Both operands are strings, so loose
+                // and strict agree; `same` short-circuits the shared-body case before
+                // the rope-aware byte compare, exactly as value_ops.valuesEqual does.
+                if (lhs.isString() and rhs.isString()) {
+                    if (lhs.same(rhs)) break :blk true;
+                    break :blk (core.string.compareStringValues(lhs, rhs, true) orelse 1) == 0;
+                }
+                break :blk null;
+            };
+
+            const res = resolved orelse
+                return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+
+            (sp - 2)[0] = JSValue.boolean(res != inv); // qjs JS_NewBool(ctx, res ^ inv)
+            const nsp = sp - 1;
+            vm.stack.setTopPtr(nsp);
+            lhs.freeDuringActiveBytecode(vm.ctx.runtime);
+            rhs.freeDuringActiveBytecode(vm.ctx.runtime);
+            return cont(pc + 1, nsp, var_buf, vm);
+        }
+    }.hnd;
 }
 
 /// Dedicated cold-table handler for OP_mod after its positive-int32 CASE misses.
@@ -3729,6 +3832,81 @@ pub fn op_div_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     return coldNext(var_buf, vm);
 }
 
+/// ToInt32 for the operand tags whose ToNumeric conversion is total, pure and
+/// allocation-free. qjs `JS_ToNumericFree` is the identity on JS_TAG_INT and
+/// JS_TAG_FLOAT64 and a plain 0/1 widen on JS_TAG_BOOL, so for those three tags all
+/// of `js_binary_logic_slow`'s prologue — the short-bigint arm, the two
+/// `JS_ToNumericFree` calls, the BigInt classification (quickjs.c:15222-15340) —
+/// collapses into its closing `JS_ToInt32Free` pair. Every other tag returns null and
+/// keeps the full generic shell: string needs a parse, object runs user code through
+/// valueOf/toString, symbol must throw, BigInt takes the bigint arm (or `>>>`'s
+/// TypeError). The float leg reuses the same modulo-2^32 wrap `value_ops.toInt32`
+/// closes with, so a fast-leg result is bit-identical to the shell's.
+inline fn logicOperandInt32(v: JSValue) ?i32 {
+    if (v.asInt32()) |i| return i;
+    if (v.asBool()) |b| return @intFromBool(b);
+    if (v.asFloat64()) |d| return @bitCast(coercion_ops.toUint32Number(d));
+    return null;
+}
+
+/// Dedicated cold-table handler for the six bitwise / shift ops after their
+/// both-int32 CASE missed — qjs OP_shl/OP_sar/OP_and/OP_or/OP_xor →
+/// `js_binary_logic_slow` (quickjs.c:15214) and OP_shr → `js_shr_slow`
+/// (quickjs.c:15735). Both qjs helpers work IN PLACE on `sp[-2]` with move
+/// semantics: no pop, no dup, no per-operand free defer.
+///
+/// zjs previously had NO handler here at all, so a single non-int32 operand fell
+/// through `cold_table[op]` → `vm.publish` → `binaryVm` → `binary()`, which pops both
+/// operands behind refcount defers and then runs BOTH through `toPrimitiveForNumber`
+/// (a call plus a `value.dup()` each) before arriving at the same ToInt32 — 423 insn
+/// against qjs's 205, and the source of most of the engine's ToPrimitive traffic.
+///
+/// The arms below are `js_binary_logic_slow`'s closing `JS_ToInt32Free` + `switch(op)`
+/// + `JS_NewInt32` leg (quickjs.c:15340-15366) reached with both ToNumeric conversions
+/// already resolved by `logicOperandInt32` — which is exactly the hot traffic:
+/// non-short-circuit boolean folds like `x == e & y == d` plus float/int mixes. The
+/// expressions are transcribed verbatim from `value_ops.binary`'s bitwise leg so the
+/// fast and shell results are bit-identical, and all three accepted tags are
+/// non-refcounted, so overwriting `sp[-2]` and dropping `sp[-1]` leaks nothing.
+/// Everything else — BigInt, string, object, symbol — plus the generator
+/// parameter/body stop boundary (`local_fast_blocked`) falls to the unchanged
+/// publishing shell, exactly like `op_div_cold`/`op_mod_cold`.
+pub fn opLogicCold(comptime opc: u8) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (!vm.local_fast_blocked) {
+                if (logicOperandInt32((sp - 2)[0])) |v1| {
+                    if (logicOperandInt32((sp - 1)[0])) |v2| {
+                        switch (opc) {
+                            // qjs js_shr_slow closes with `JS_NewUint32(ctx, v1 >> (v2 & 0x1f))`
+                            // (quickjs.c:15764-15765): int32 while the u32 fits, else the exact
+                            // double — the same split OP_shr's int leg inlines.
+                            op.shr => {
+                                const r = @as(u32, @bitCast(v1)) >> @intCast(v2 & 31);
+                                if (r <= std.math.maxInt(i32)) {
+                                    (sp - 2)[0] = JSValue.int32(@intCast(r));
+                                } else {
+                                    (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
+                                }
+                            },
+                            op.shl => (sp - 2)[0] = JSValue.int32(v1 << @intCast(v2 & 31)),
+                            op.sar => (sp - 2)[0] = JSValue.int32(v1 >> @intCast(v2 & 31)),
+                            op.@"and" => (sp - 2)[0] = JSValue.int32(v1 & v2),
+                            op.@"or" => (sp - 2)[0] = JSValue.int32(v1 | v2),
+                            op.xor => (sp - 2)[0] = JSValue.int32(v1 ^ v2),
+                            else => unreachable,
+                        }
+                        return cont(pc + 1, sp - 1, var_buf, vm);
+                    }
+                }
+            }
+            vm.publish(pc, sp);
+            _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+            return coldNext(var_buf, vm);
+        }
+    }.hnd;
+}
+
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
 /// float-vs-int / float / object / loose-eq cases (qjs js_relational_slow /
 /// js_eq_slow). Installed as the cold_table entry for the compare ops, so the
@@ -3743,25 +3921,34 @@ pub fn op_div_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 /// boundary
 /// (local_fast_blocked) it falls back to the publishing path so coldNext's maybeStop
 /// can still suspend at stop_before_pc.
-pub fn op_compare_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) {
-        vm.publish(pc, sp);
-        _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |e| return vm.fail(e);
-        return coldNext(var_buf, vm);
-    }
-    const lhs = (sp - 2)[0];
-    const rhs = (sp - 1)[0];
-    vm.syncPc(pc, 1); // qjs sf->cur_pc — backtrace fidelity through ToPrimitive valueOf (compare ops are 1 byte)
-    const result = arith_vm.compareAt(vm.ctx, vm.global, vm.output, pc[0], lhs, rhs) catch |err| {
-        // Error only: compareAt freed both operands, so publish the doubly-popped sp
-        // (frame.pc → next op) for a consistent catch stack.
-        vm.publish(pc, sp - 2);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
-    };
-    (sp - 2)[0] = result;
-    return cont(pc + 1, sp - 1, var_buf, vm);
+///
+/// Generated PER OPCODE so `compareAt`'s predicate is comptime — qjs never selects a
+/// slow-call predicate at run time either, since OP_CMP and OP_CMP_EQ expand to
+/// independent CASE labels that name `js_relational_slow` / `js_eq_slow` directly
+/// (quickjs.c:20268, 20330).
+pub fn opCompareCold(comptime opc: u8) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (vm.local_fast_blocked) {
+                vm.publish(pc, sp);
+                _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, opc, vm.output, vm.global) catch |e| return vm.fail(e);
+                return coldNext(var_buf, vm);
+            }
+            const lhs = (sp - 2)[0];
+            const rhs = (sp - 1)[0];
+            vm.syncPc(pc, 1); // qjs sf->cur_pc — backtrace fidelity through ToPrimitive valueOf (compare ops are 1 byte)
+            const result = arith_vm.compareAt(opc, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
+                // Error only: compareAt freed both operands, so publish the doubly-popped sp
+                // (frame.pc → next op) for a consistent catch stack.
+                vm.publish(pc, sp - 2);
+                const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+                if (!caught) return vm.fail(err);
+                return coldNext(var_buf, vm);
+            };
+            (sp - 2)[0] = result;
+            return cont(pc + 1, sp - 1, var_buf, vm);
+        }
+    }.hnd;
 }
 
 // I-cache pin (see op_return): keeps this hot handler's entry alignment
