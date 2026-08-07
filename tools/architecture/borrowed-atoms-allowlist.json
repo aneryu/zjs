@@ -23,13 +23,6 @@
   {
     "source": "src/parser.zig",
     "pattern": "borrowed-state-store",
-    "contains": "const atom_id = identifierLikeAtom(s);",
-    "reason": "same shape as audit B-2: the `using` binding name is borrowed, survives advance and is published through s.pending_function_name; the retain comes from the var row defineVar established just before advance (FunctionDef.appendVar, bytecode.zig:3300)",
-    "exit_milestone": "audit §6.4 - dup + defer free before defineVar so the using declarator owns its name, then drop this entry"
-  },
-  {
-    "source": "src/parser.zig",
-    "pattern": "borrowed-state-store",
     "contains": "const enum_atom = s.token.payload.ident.atom;",
     "reason": "audit B-3 (§3.2): the TS enum name is borrowed from s.token, used after advance and parked in s.last_declared_atom; the only retain is the one addScopeVar leaves behind, so correctness depends on statement order plus a downstream sink's dup",
     "exit_milestone": "audit §6.4 - dup + defer free locally before addScopeVar AND make last_declared_atom an owned field (a local dup alone converts this finding into the rule-D shape), then drop this entry"

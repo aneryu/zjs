@@ -2862,7 +2862,7 @@ pub const function_def = struct {
     /// Each append used to do `alloc(old + n) + memcpy + free(old)`, making
     /// repeated appends O(n²). Geometric growth (capacity doubling, with an
     /// 8-element floor) reduces total cost to amortised O(1) per item.
-    fn growSliceBy(
+    inline fn growSliceBy(
         comptime T: type,
         mem: *memory.MemoryAccount,
         slice: *[]T,
@@ -2875,6 +2875,23 @@ pub const function_def = struct {
             slice.* = slice.ptr[0..new_used];
             return slice.ptr[used..new_used];
         }
+
+        return growSliceBySlow(T, mem, slice, capacity, used, new_used);
+    }
+
+    /// QuickJS keeps `js_resize_array` inline and enters its no-inline
+    /// `js_realloc_array` only when the requested length exceeds capacity.
+    /// Preserve that call shape without changing this backing's growth policy
+    /// or its used-length/owned-capacity contract.
+    noinline fn growSliceBySlow(
+        comptime T: type,
+        mem: *memory.MemoryAccount,
+        slice: *[]T,
+        capacity: *usize,
+        used: usize,
+        new_used: usize,
+    ) ![]T {
+        std.debug.assert(new_used > capacity.*);
         var new_cap: usize = if (capacity.* == 0) 8 else capacity.* * 2;
         if (new_cap < new_used) new_cap = new_used;
         const new_buf = try mem.alloc(T, new_cap);
@@ -3199,6 +3216,88 @@ pub const function_def = struct {
                 -1;
         }
 
+        /// Prove the finalized lexical topology without allocating or changing
+        /// it.  QuickJS rebuilds these links once in `js_create_function`, then
+        /// its resolver consumes them without per-node bounds/cycle checks.  V2
+        /// uses the same boundary: production resolution calls this once after
+        /// descendant-driven mutations are complete, while standalone walkers
+        /// retain their defensive checks.
+        ///
+        /// Scope 0 and scope 1 have independent terminal sentinels.  Every
+        /// deeper scope either owns an exact-scope prefix or inherits its
+        /// already-proven parent head, matching `rebuildFinalScopeLinks` above.
+        pub fn validateFinalScopeLinks(self: *const FunctionDefImpl) error{InvalidScope}!void {
+            if (self.scopes.len == 0) {
+                // Synthetic resolve_variables fixtures may contain no lexical
+                // scopes at all.  The retained per-operand scope bound prevents
+                // a trusted walker from indexing this vacuous topology.
+                if (self.scope_count != 0 or self.body_scope >= 0 or self.scope_first != -1) {
+                    return error.InvalidScope;
+                }
+                return;
+            }
+            if (self.scopes.len > std.math.maxInt(i32) or
+                self.vars.len > @as(usize, std.math.maxInt(u16)) + 1 or
+                self.scope_count != @as(i32, @intCast(self.scopes.len)))
+            {
+                return error.InvalidScope;
+            }
+            if (self.scopes[0].parent != -1) return error.InvalidScope;
+            if (self.has_parameter_expressions and
+                (self.scopes.len <= 1 or self.scopes[1].parent != -1))
+            {
+                return error.InvalidScope;
+            }
+            if (self.body_scope >= 0 and @as(usize, @intCast(self.body_scope)) >= self.scopes.len) {
+                return error.InvalidScope;
+            }
+
+            for (self.scopes, 0..) |scope, scope_index| {
+                if (scope_index != 0 and
+                    (scope.parent < -1 or
+                        (scope.parent >= 0 and @as(usize, @intCast(scope.parent)) >= scope_index)))
+                {
+                    return error.InvalidScope;
+                }
+                if (scope_index >= 2 and scope.parent < 0) return error.InvalidScope;
+
+                const expected_terminal: i32 = if (scope_index == 0)
+                    -1
+                else if (scope_index == 1)
+                    if (self.has_parameter_expressions)
+                        function_bytecode_mod.arg_scope_end
+                    else
+                        -1
+                else
+                    self.scopes[@intCast(scope.parent)].first;
+
+                var index = scope.first;
+                var visited: usize = 0;
+                while (index != expected_terminal) {
+                    if (index < 0 or
+                        @as(usize, @intCast(index)) >= self.vars.len or
+                        visited >= self.vars.len)
+                    {
+                        return error.InvalidScope;
+                    }
+                    visited += 1;
+                    const vd = self.vars[@intCast(index)];
+                    if (vd.scope_level != @as(i32, @intCast(scope_index))) {
+                        return error.InvalidScope;
+                    }
+                    index = vd.scope_next;
+                }
+            }
+
+            // Unlinked pseudo rows are valid, but every row still names a real
+            // lexical level.  This also protects later flat scope-0 scans.
+            for (self.vars) |vd| {
+                if (vd.scope_level < 0 or @as(usize, @intCast(vd.scope_level)) >= self.scopes.len) {
+                    return error.InvalidScope;
+                }
+            }
+        }
+
         /// Release the parse-only GlobalVar ledger only after its hoist plan
         /// has been installed successfully into resolved bytecode.
         pub fn consumeGlobalVars(self: *FunctionDefImpl) void {
@@ -3319,6 +3418,11 @@ pub const function_def = struct {
         /// If an explicit parameter binding already occupies argument scope,
         /// it wins and no synthetic alias is recorded for the prologue copy.
         pub fn ensureArgumentsArgumentBinding(self: *FunctionDefImpl) !void {
+            // This is callable after the ordinary one-shot rebuild, including
+            // while a descendant resolves a prepared parent.  Refuse malformed
+            // input before following it, and leave a freshly proven topology
+            // before any caller can resume a trusted production walk.
+            try self.validateFinalScopeLinks();
             if (self.arguments_arg_idx >= 0) return;
             const argument_scope_level: i32 = 1;
             if (@as(usize, @intCast(argument_scope_level)) >= self.scopes.len) {
@@ -3343,6 +3447,7 @@ pub const function_def = struct {
             });
             self.scopes[@intCast(argument_scope_level)].first = idx;
             self.arguments_arg_idx = idx;
+            try self.validateFinalScopeLinks();
         }
 
         /// `arguments_var_idx` is also used for the lazy pseudo binding that
@@ -4314,6 +4419,27 @@ pub const binding_rules = struct {
         return @intCast(encoded);
     }
 
+    /// The FunctionDef parent relation is borrowed and intentionally has no
+    /// arbitrary nesting cap.  Floyd's walk makes both the production proof
+    /// and standalone fallback fail closed on a synthetic parent cycle without
+    /// allocating a visited set.
+    fn validateFunctionDefParentChain(start: *function_def_mod.FunctionDef) error{InvalidBytecode}!void {
+        var slow: ?*function_def_mod.FunctionDef = start;
+        var fast: ?*function_def_mod.FunctionDef = start;
+        while (true) {
+            slow = if (slow) |node| node.parent else return;
+            fast = if (fast) |node| node.parent else return;
+            fast = if (fast) |node| node.parent else return;
+            if (slow == fast) return error.InvalidBytecode;
+        }
+    }
+
+    const ScopeLinkProof = enum(u2) {
+        none,
+        current,
+        tree,
+    };
+
     /// JSContext for variable resolution.
     pub const JSContext = struct {
         function: *bytecode_function.Bytecode,
@@ -4323,6 +4449,11 @@ pub const binding_rules = struct {
         /// `resolve_variables` lowers `scope_get_var` / `scope_put_var` to
         /// local, closure, or QuickJS-style global closure-var references.
         function_def: ?*function_def_mod.FunctionDef = null,
+        /// Advanced only by structural validation, never by mutable FunctionDef
+        /// lifecycle state.  Current-scope lookup needs `.current`; the first
+        /// actual parent miss upgrades it to `.tree` before ancestor links are
+        /// consumed.
+        scope_link_proof: ScopeLinkProof = .none,
         /// Immutable sizing/write-pass accelerator built only after topology
         /// analysis has appended every demand-created local. The linked scope
         /// chain remains authoritative for outer-scope, with, and argument-
@@ -4350,6 +4481,31 @@ pub const binding_rules = struct {
                 .atoms = function.atoms,
                 .function_def = fd,
             };
+        }
+
+        /// Establish the no-allocation topology proof consumed by the V2-only
+        /// resolver specialization.  The current FunctionDef is always proven
+        /// at `run` entry. Ancestors are proven lazily on the first real parent
+        /// miss, keeping all callers fail closed without charging functions
+        /// whose bindings are entirely local.
+        pub fn proveScopeLinksForResolution(self: *JSContext) Error!void {
+            self.scope_link_proof = .none;
+            const fd = self.function_def orelse return error.NoFunctionDef;
+            fd.validateFinalScopeLinks() catch return error.InvalidBytecode;
+            self.scope_link_proof = .current;
+        }
+
+        fn proveParentScopeLinksForResolution(self: *JSContext) Error!void {
+            if (self.scope_link_proof == .tree) return;
+            if (self.scope_link_proof != .current) return error.InvalidBytecode;
+            const fd = self.function_def orelse return error.NoFunctionDef;
+            try validateFunctionDefParentChain(fd);
+            var maybe_parent = fd.parent;
+            while (maybe_parent) |parent| {
+                parent.validateFinalScopeLinks() catch return error.InvalidBytecode;
+                maybe_parent = parent.parent;
+            }
+            self.scope_link_proof = .tree;
         }
 
         fn exactScopeBindingKey(scope_level: i32, atom_id: atom.Atom) ?u64 {
@@ -5340,6 +5496,7 @@ pub const binding_rules = struct {
     /// every miss merely to decide whether formal arguments are visible.
     inline fn resolveScopeVarLookupImpl(
         comptime use_exact_scope_index: bool,
+        comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
         atom_id: u32,
         scope_level: i32,
@@ -5349,11 +5506,14 @@ pub const binding_rules = struct {
         if (comptime use_exact_scope_index) {
             if (ctx.exactScopeBinding(fd, atom_id, scope_level)) |idx| return .{ .local = idx };
         }
+        if (comptime trust_final_scope_links) std.debug.assert(ctx.scope_link_proof != .none);
         var idx = fd.scopes[@intCast(scope_level)].first;
         var visited: usize = 0;
         while (idx >= 0) {
-            if (@as(usize, @intCast(idx)) >= fd.vars.len or visited >= fd.vars.len) return .{};
-            visited += 1;
+            if (comptime !trust_final_scope_links) {
+                if (@as(usize, @intCast(idx)) >= fd.vars.len or visited >= fd.vars.len) return .{};
+                visited += 1;
+            }
             const vd = fd.vars[@intCast(idx)];
             if (vd.var_name == atom_id) return .{ .local = @intCast(idx) };
             idx = vd.scope_next;
@@ -5374,15 +5534,22 @@ pub const binding_rules = struct {
 
     inline fn resolveScopeVarImpl(
         comptime use_exact_scope_index: bool,
+        comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
         atom_id: u32,
         scope_level: i32,
     ) ?u16 {
-        return resolveScopeVarLookupImpl(use_exact_scope_index, ctx, atom_id, scope_level).local;
+        return resolveScopeVarLookupImpl(
+            use_exact_scope_index,
+            trust_final_scope_links,
+            ctx,
+            atom_id,
+            scope_level,
+        ).local;
     }
 
     inline fn resolveScopeVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
-        return resolveScopeVarImpl(true, ctx, atom_id, scope_level);
+        return resolveScopeVarImpl(true, false, ctx, atom_id, scope_level);
     }
 
     const LocalOrArg = union(enum) {
@@ -5403,12 +5570,19 @@ pub const binding_rules = struct {
 
     inline fn resolveLocalOrArgImpl(
         comptime use_exact_scope_index: bool,
+        comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
         atom_id: u32,
         scope_level: i32,
     ) ?LocalOrArg {
         const fd = ctx.function_def orelse return null;
-        const lookup = resolveScopeVarLookupImpl(use_exact_scope_index, ctx, atom_id, scope_level);
+        const lookup = resolveScopeVarLookupImpl(
+            use_exact_scope_index,
+            trust_final_scope_links,
+            ctx,
+            atom_id,
+            scope_level,
+        );
         if (lookup.local) |idx| return .{ .local = idx };
 
         // ARG_SCOPE_END suppresses the ordinary find_var pass (which includes
@@ -5426,7 +5600,7 @@ pub const binding_rules = struct {
     }
 
     inline fn resolveLocalOrArg(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?LocalOrArg {
-        return resolveLocalOrArgImpl(true, ctx, atom_id, scope_level);
+        return resolveLocalOrArgImpl(true, false, ctx, atom_id, scope_level);
     }
 
     const EvalVarObjectProbe = union(enum) {
@@ -6556,6 +6730,7 @@ pub const binding_rules = struct {
     };
 
     fn discoverParentScopedSource(
+        comptime trust_final_scope_links: bool,
         target: *function_def_mod.FunctionDef,
         parent: *function_def_mod.FunctionDef,
         atom_id: atom.Atom,
@@ -6567,9 +6742,11 @@ pub const binding_rules = struct {
         var var_idx = parent.scopes[@intCast(start_scope)].first;
         var visited_vars: usize = 0;
         while (var_idx >= 0) {
-            if (@as(usize, @intCast(var_idx)) >= parent.vars.len or
-                visited_vars >= parent.vars.len) return error.InvalidBytecode;
-            visited_vars += 1;
+            if (comptime !trust_final_scope_links) {
+                if (@as(usize, @intCast(var_idx)) >= parent.vars.len or
+                    visited_vars >= parent.vars.len) return error.InvalidBytecode;
+                visited_vars += 1;
+            }
             const vd = parent.vars[@intCast(var_idx)];
             if (vd.var_name == atom_id) return .{ .local = @intCast(var_idx) };
             if (!isPseudoBindingAtom(atom_id) and vd.var_name == atom.ids.with_object) {
@@ -6647,10 +6824,14 @@ pub const binding_rules = struct {
     /// local/argument path: those operations need fallible calls and a large
     /// spill frame, while QuickJS reaches them only after the same local miss.
     noinline fn resolveBindingTopologyAfterCurrentMiss(
+        comptime trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
     ) Error!ScopeVarBinding {
         const fd = ctx.function_def orelse return error.NoFunctionDef;
+        if (comptime trust_final_scope_links) {
+            std.debug.assert(ctx.scope_link_proof != .none);
+        }
         // Current-function fallbacks mirror resolve_scope_var exactly: normal
         // scope/var/argument lookup first, then pseudo variables, implicit
         // arguments, and finally a named function-expression self binding.
@@ -6673,10 +6854,24 @@ pub const binding_rules = struct {
         // of using a name-only guard and rediscovering it in the planner.
         if (findResolvedClosureBinding(fd, atom_id)) |binding| return binding;
 
+        if (fd.parent != null) {
+            if (comptime trust_final_scope_links) {
+                try ctx.proveParentScopeLinksForResolution();
+            } else {
+                try validateFunctionDefParentChain(fd);
+            }
+        }
+
         var maybe_parent = fd.parent;
         var visible_scope_level = fd.parent_scope_level;
         while (maybe_parent) |parent| {
-            const scoped_source = try discoverParentScopedSource(fd, parent, atom_id, visible_scope_level);
+            const scoped_source = try discoverParentScopedSource(
+                trust_final_scope_links,
+                fd,
+                parent,
+                atom_id,
+                visible_scope_level,
+            );
             const argument_environment_only = scoped_source.argument_environment_only;
             if (scoped_source.local) |local_idx| {
                 return .{ .closure = try threadParentLocalSource(fd, parent, local_idx) };
@@ -6804,19 +6999,26 @@ pub const binding_rules = struct {
     /// returned identity is the row that the same QuickJS walk just selected.
     inline fn resolveBindingTopologyResultImpl(
         comptime use_exact_scope_index: bool,
+        comptime trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
         if (scope_level >= 0) {
-            if (resolveLocalOrArgImpl(use_exact_scope_index, ctx, atom_id, scope_level)) |binding| {
+            if (resolveLocalOrArgImpl(
+                use_exact_scope_index,
+                trust_final_scope_links,
+                ctx,
+                atom_id,
+                scope_level,
+            )) |binding| {
                 return switch (binding) {
                     .local => |idx| .{ .local = idx },
                     .arg => |idx| .{ .arg = idx },
                 };
             }
         }
-        return resolveBindingTopologyAfterCurrentMiss(ctx, atom_id);
+        return resolveBindingTopologyAfterCurrentMiss(trust_final_scope_links, ctx, atom_id);
     }
 
     fn resolveBindingTopologyResult(
@@ -6824,7 +7026,7 @@ pub const binding_rules = struct {
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
-        return resolveBindingTopologyResultImpl(true, ctx, atom_id, scope_level);
+        return resolveBindingTopologyResultImpl(true, false, ctx, atom_id, scope_level);
     }
 
     /// Complete the binding classification needed by ordinary scope-var
@@ -6832,12 +7034,14 @@ pub const binding_rules = struct {
     /// semantics, so normalize them once here rather than in a later lookup.
     fn resolveScopeVarBindingTopologyImpl(
         comptime use_exact_scope_index: bool,
+        comptime trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
         const discovered = try resolveBindingTopologyResultImpl(
             use_exact_scope_index,
+            trust_final_scope_links,
             ctx,
             atom_id,
             scope_level,
@@ -6867,7 +7071,7 @@ pub const binding_rules = struct {
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
-        return resolveScopeVarBindingTopologyImpl(true, ctx, atom_id, scope_level);
+        return resolveScopeVarBindingTopologyImpl(true, false, ctx, atom_id, scope_level);
     }
 
     const ScopeVarBindingKind = enum(u8) {
@@ -6878,11 +7082,13 @@ pub const binding_rules = struct {
     };
 
     /// QuickJS `resolve_scope_var` discovers the binding and selects the final
-    /// opcode in one routine. Keep the ordinary V2 scope-op path equally fused:
-    /// the large semantic walk is inlined into this one outlined entry, while
-    /// reference/private consumers retain the standalone topology API. This is
-    /// only a call-shape change; lookup order and data structures stay identical
-    /// to the linked-scope QuickJS path above.
+    /// opcode in one routine. Keep the production V2 scope-op path equally
+    /// fused: its surface inlines this semantic walk into `lowerScopeVar`, so
+    /// discovery, action selection, and writing share one outlined compiler
+    /// entry. The exact-index compatibility wrapper below remains outlined,
+    /// while reference/private consumers retain the standalone topology API.
+    /// This is only a call-shape change; lookup order and data structures stay
+    /// identical to the linked-scope QuickJS path above.
     /// Register-sized result of the QuickJS-shaped binding walk.  The former
     /// tagged-union pair was 10 bytes, which forced the outlined resolver to
     /// return through caller-owned stack memory even though both identities
@@ -6951,8 +7157,9 @@ pub const binding_rules = struct {
         }
     };
 
-    noinline fn resolveScopeVarPlanImpl(
+    inline fn resolveScopeVarPlanImpl(
         comptime use_exact_scope_index: bool,
+        comptime trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
         scope_level: i32,
@@ -6961,7 +7168,7 @@ pub const binding_rules = struct {
         const discovered = try @call(
             .always_inline,
             resolveBindingTopologyResultImpl,
-            .{ use_exact_scope_index, ctx, atom_id, scope_level },
+            .{ use_exact_scope_index, trust_final_scope_links, ctx, atom_id, scope_level },
         );
         const binding: ScopeVarBinding = if (scope_level < 0)
             .{ .global = try ensureGlobalClosureVar(ctx, atom_id) }
@@ -6993,7 +7200,7 @@ pub const binding_rules = struct {
         scope_level: i32,
         op_id: u8,
     ) Error!ResolvedScopeVarPlan {
-        return resolveScopeVarPlanImpl(true, ctx, atom_id, scope_level, op_id);
+        return resolveScopeVarPlanImpl(true, false, ctx, atom_id, scope_level, op_id);
     }
 
     inline fn resolveScopeVarPlanV2(
@@ -7002,7 +7209,7 @@ pub const binding_rules = struct {
         scope_level: i32,
         op_id: u8,
     ) Error!ResolvedScopeVarPlan {
-        return resolveScopeVarPlanImpl(false, ctx, atom_id, scope_level, op_id);
+        return resolveScopeVarPlanImpl(false, true, ctx, atom_id, scope_level, op_id);
     }
 
     fn resolveBindingTopology(ctx: *JSContext, atom_id: atom.Atom, scope_level: i32) Error!void {
@@ -7010,7 +7217,7 @@ pub const binding_rules = struct {
     }
 
     inline fn resolveBindingTopologyV2(ctx: *JSContext, atom_id: atom.Atom, scope_level: i32) Error!void {
-        _ = try resolveBindingTopologyResultImpl(false, ctx, atom_id, scope_level);
+        _ = try resolveBindingTopologyResultImpl(false, true, ctx, atom_id, scope_level);
     }
 
     inline fn resolveScopeVarBindingTopologyV2(
@@ -7018,7 +7225,7 @@ pub const binding_rules = struct {
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
-        return resolveScopeVarBindingTopologyImpl(false, ctx, atom_id, scope_level);
+        return resolveScopeVarBindingTopologyImpl(false, true, ctx, atom_id, scope_level);
     }
 
     const PrivateBindingOwner = struct {
@@ -7265,9 +7472,20 @@ pub const pipeline_stack_size = struct {
         StackOverflow,
         StackMismatch,
         InvalidOpcode,
+        InvalidFinalArtifact,
         BytecodeOverflow,
         ReachableFalloff,
         OutOfMemory,
+    };
+
+    /// Extra production-artifact proof fused into the stack-size walk. The
+    /// atom ledger is ordered by physical instruction position, so its cursor
+    /// remains linear even though stack propagation follows the control-flow
+    /// graph. Whenever the graph walk reaches that linear frontier, both
+    /// proofs consume the same opcode metadata lookup.
+    pub const FinalArtifactValidation = struct {
+        atom_owners: []const u32,
+        closure_var_count: usize,
     };
 
     /// Options for the BFS.
@@ -7292,6 +7510,84 @@ pub const pipeline_stack_size = struct {
         /// branchy-but-balanced bodies keep their proof — a linear scan would
         /// have to refuse them conservatively.
         returns_balanced_out: ?*bool = null,
+
+        /// Packed-finalize-only validation. Standalone stack-size callers leave
+        /// this null because their producing pipeline retains its own output
+        /// proof.
+        final_artifact: ?FinalArtifactValidation = null,
+    };
+
+    const FinalArtifactValidator = struct {
+        config: FinalArtifactValidation,
+        pc: usize = 0,
+        owner_index: usize = 0,
+
+        fn validateKnownInstruction(
+            self: *FinalArtifactValidator,
+            bytecode: []const u8,
+            meta: *const opcode.CompactInfo,
+        ) Error!void {
+            const pos = self.pc;
+            const size: usize = meta.size;
+            if (size == 0 or size > bytecode.len - pos)
+                return error.InvalidFinalArtifact;
+
+            const has_atom = meta.fmt == .atom or meta.fmt == .atom_u8 or
+                meta.fmt == .atom_u16 or meta.fmt == .atom_label_u8 or
+                meta.fmt == .atom_label_u16;
+            if (has_atom) {
+                if (size < 5 or self.owner_index >= self.config.atom_owners.len)
+                    return error.InvalidFinalArtifact;
+                const encoded_atom = std.mem.readInt(u32, bytecode[pos + 1 ..][0..4], .little);
+                if (encoded_atom != self.config.atom_owners[self.owner_index])
+                    return error.InvalidFinalArtifact;
+                self.owner_index += 1;
+            }
+
+            switch (meta.fmt) {
+                .var_ref => {
+                    if (size < 3) return error.InvalidFinalArtifact;
+                    const idx = std.mem.readInt(u16, bytecode[pos + 1 ..][0..2], .little);
+                    if (idx >= self.config.closure_var_count)
+                        return error.InvalidFinalArtifact;
+                },
+                .none_var_ref => {
+                    const op_id = bytecode[pos];
+                    const idx: usize = switch (op_id) {
+                        opcode.op.get_var_ref0...opcode.op.get_var_ref3 => op_id - opcode.op.get_var_ref0,
+                        opcode.op.put_var_ref0...opcode.op.put_var_ref3 => op_id - opcode.op.put_var_ref0,
+                        opcode.op.set_var_ref0...opcode.op.set_var_ref3 => op_id - opcode.op.set_var_ref0,
+                        else => return error.InvalidFinalArtifact,
+                    };
+                    if (idx >= self.config.closure_var_count)
+                        return error.InvalidFinalArtifact;
+                },
+                else => {},
+            }
+            self.pc += size;
+        }
+
+        /// Validate physical instructions before `limit`. Overshooting `limit`
+        /// is intentional: a malformed jump into an operand remains the stack
+        /// verifier's diagnosis, while the linear proof still consumes the
+        /// containing instruction exactly once as before this fusion.
+        fn validateBefore(
+            self: *FinalArtifactValidator,
+            bytecode: []const u8,
+            limit: usize,
+        ) Error!void {
+            while (self.pc < limit) {
+                const meta = opcode.finalCompactInfo(bytecode[self.pc]) orelse
+                    return error.InvalidFinalArtifact;
+                try self.validateKnownInstruction(bytecode, meta);
+            }
+        }
+
+        fn finish(self: *FinalArtifactValidator, bytecode: []const u8) Error!void {
+            try self.validateBefore(bytecode, bytecode.len);
+            if (self.pc != bytecode.len or self.owner_index != self.config.atom_owners.len)
+                return error.InvalidFinalArtifact;
+        }
     };
 
     /// Compute the maximum stack size required to execute `bytecode`.
@@ -7325,6 +7621,15 @@ pub const pipeline_stack_size = struct {
         // stack_level_tab entry.
         const pending_pc = scratch_slices.items(.pending_pc);
         var pending_len: usize = 0;
+        var final_validator: ?FinalArtifactValidator = if (options.final_artifact) |config|
+            .{ .config = config }
+        else
+            null;
+        // Before this proof was fused, the stack verifier completed first and
+        // the artifact walk ran only after it succeeded.  Keep that public
+        // error priority: an artifact mismatch is remembered while the graph
+        // walk continues, then reported only if the stack proof succeeds.
+        var final_artifact_invalid = false;
 
         // Seed: entry pc=0 with stack level 0.
         try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, 0, 0, -1);
@@ -7337,12 +7642,28 @@ pub const pipeline_stack_size = struct {
             var stack_len = stack_level_tab[pos];
             var catch_pos = catch_pos_tab[pos];
             const op = bytecode[pos];
+            var frontier_meta: ?*const opcode.CompactInfo = null;
+            if (!final_artifact_invalid) {
+                if (final_validator) |*validator| {
+                    validator.validateBefore(bytecode, pos) catch |err| switch (err) {
+                        error.InvalidFinalArtifact => final_artifact_invalid = true,
+                        else => return err,
+                    };
+                    if (!final_artifact_invalid and validator.pc == pos) {
+                        // Let the stack verifier diagnose an invalid opcode.
+                        // On the valid production path this is still the one
+                        // metadata lookup shared by both proofs.
+                        frontier_meta = opcode.finalCompactInfo(op);
+                    }
+                }
+            }
             if (op == 0) return error.InvalidOpcode;
             // QuickJS takes one `short_opcode_info(op)` pointer and consumes
             // all metadata fields from that row. Keep the same one-lookup
             // shape: the previous size/name/pop/push/format helpers each
             // repeated the final-opcode index calculation.
-            const meta = opcode.finalCompactInfo(op) orelse return error.InvalidOpcode;
+            const meta = frontier_meta orelse
+                (opcode.finalCompactInfo(op) orelse return error.InvalidOpcode);
             const pos_next = pos + meta.size;
             if (pos_next > bytecode.len) return error.BytecodeOverflow;
 
@@ -7368,6 +7689,17 @@ pub const pipeline_stack_size = struct {
             if (new_stack_i32 > JS_STACK_SIZE_MAX) return error.StackOverflow;
             stack_len = @intCast(new_stack_i32);
             if (stack_len > stack_len_max) stack_len_max = stack_len;
+
+            if (!final_artifact_invalid) {
+                if (final_validator) |*validator| {
+                    if (validator.pc == pos) {
+                        validator.validateKnownInstruction(bytecode, meta) catch |err| switch (err) {
+                            error.InvalidFinalArtifact => final_artifact_invalid = true,
+                            else => return err,
+                        };
+                    }
+                }
+            }
 
             // QuickJS dispatches directly on the numeric opcode. Apart from
             // avoiding string comparisons, this keeps all control-flow
@@ -7467,6 +7799,15 @@ pub const pipeline_stack_size = struct {
             try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, pos_next, stack_len, catch_pos);
         }
 
+        if (!final_artifact_invalid) {
+            if (final_validator) |*validator| {
+                validator.finish(bytecode) catch |err| switch (err) {
+                    error.InvalidFinalArtifact => final_artifact_invalid = true,
+                    else => return err,
+                };
+            }
+        }
+        if (final_artifact_invalid) return error.InvalidFinalArtifact;
         return stack_len_max;
     }
 
@@ -7511,6 +7852,86 @@ pub const pipeline_stack_size = struct {
 
     test "stack_size: empty bytecode is reachable falloff" {
         try std.testing.expectError(error.ReachableFalloff, compute(&.{}, .{}));
+    }
+
+    test "stack_size: fused final artifact proof accepts owners and var refs" {
+        const owned_atom: u32 = 700;
+        var bc = [_]u8{0} ** 10;
+        bc[0] = opcode.op.push_atom_value;
+        std.mem.writeInt(u32, bc[1..5], owned_atom, .little);
+        bc[5] = opcode.op.drop;
+        bc[6] = opcode.op.get_var_ref;
+        std.mem.writeInt(u16, bc[7..9], 0, .little);
+        bc[9] = opcode.op.@"return";
+
+        try std.testing.expectEqual(@as(u16, 1), try compute(&bc, .{
+            .final_artifact = .{
+                .atom_owners = &.{owned_atom},
+                .closure_var_count = 1,
+            },
+        }));
+    }
+
+    test "stack_size: fused final artifact proof validates unreachable tail" {
+        const encoded_atom: u32 = 701;
+        const wrong_owner: u32 = 702;
+        var bc = [_]u8{0} ** 6;
+        bc[0] = opcode.op.return_undef;
+        bc[1] = opcode.op.push_atom_value;
+        std.mem.writeInt(u32, bc[2..6], encoded_atom, .little);
+
+        try std.testing.expectError(error.InvalidFinalArtifact, compute(&bc, .{
+            .final_artifact = .{
+                .atom_owners = &.{wrong_owner},
+                .closure_var_count = 0,
+            },
+        }));
+    }
+
+    test "stack_size: fused final artifact proof rejects wide and short var refs" {
+        var wide = [_]u8{ opcode.op.get_var_ref, 1, 0, opcode.op.@"return" };
+        try std.testing.expectError(error.InvalidFinalArtifact, compute(&wide, .{
+            .final_artifact = .{ .atom_owners = &.{}, .closure_var_count = 1 },
+        }));
+
+        const short = [_]u8{ opcode.op.get_var_ref1, opcode.op.@"return" };
+        try std.testing.expectError(error.InvalidFinalArtifact, compute(&short, .{
+            .final_artifact = .{ .atom_owners = &.{}, .closure_var_count = 1 },
+        }));
+    }
+
+    test "stack_size: fused final artifact proof preserves stack diagnostic priority" {
+        const invalid_opcode = [_]u8{0xff};
+        try std.testing.expectError(error.InvalidOpcode, compute(&invalid_opcode, .{
+            .final_artifact = .{ .atom_owners = &.{}, .closure_var_count = 0 },
+        }));
+
+        const truncated_atom = [_]u8{opcode.op.push_atom_value};
+        try std.testing.expectError(error.BytecodeOverflow, compute(&truncated_atom, .{
+            .final_artifact = .{ .atom_owners = &.{}, .closure_var_count = 0 },
+        }));
+
+        const invalid_var_ref_with_underflow = [_]u8{
+            opcode.op.put_var_ref,
+            0,
+            0,
+            opcode.op.return_undef,
+        };
+        try std.testing.expectError(error.StackUnderflow, compute(&invalid_var_ref_with_underflow, .{
+            .final_artifact = .{ .atom_owners = &.{}, .closure_var_count = 0 },
+        }));
+
+        const encoded_atom: u32 = 703;
+        const wrong_owner: u32 = 704;
+        var earlier_artifact_mismatch = [_]u8{0} ** 8;
+        earlier_artifact_mismatch[0] = opcode.op.push_atom_value;
+        std.mem.writeInt(u32, earlier_artifact_mismatch[1..5], encoded_atom, .little);
+        earlier_artifact_mismatch[5] = opcode.op.drop;
+        earlier_artifact_mismatch[6] = opcode.op.drop;
+        earlier_artifact_mismatch[7] = opcode.op.return_undef;
+        try std.testing.expectError(error.StackUnderflow, compute(&earlier_artifact_mismatch, .{
+            .final_artifact = .{ .atom_owners = &.{wrong_owner}, .closure_var_count = 0 },
+        }));
     }
 
     test "stack_size: simple push + return_undef gives stack=1" {
@@ -8163,9 +8584,10 @@ pub const pipeline_finalize = struct {
     /// 4. Returns the FunctionBytecode
     ///
     pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, compile_context: CompileContext) FinalizeError![]fb_mod.FunctionBytecode {
+        const disasm_enabled = std.c.getenv("ZJS_DISASM") != null;
         try validateRuntimeIdentity(fd, compile_context.realm.runtime);
-        try installChildFunctionBytecodes(fd, null, compile_context);
-        return createFunctionBytecodeAfterChildren(fd, compile_context);
+        try installChildFunctionBytecodes(fd, null, compile_context, disasm_enabled);
+        return createFunctionBytecodeAfterChildren(fd, compile_context, disasm_enabled);
     }
 
     /// Finalize an ECMAScript module root through the same canonical
@@ -8177,11 +8599,12 @@ pub const pipeline_finalize = struct {
         record: *module.Record,
         compile_context: CompileContext,
     ) FinalizeError![]fb_mod.FunctionBytecode {
+        const disasm_enabled = std.c.getenv("ZJS_DISASM") != null;
         if (!fd.is_module) return error.InvalidBytecode;
         try validateRuntimeIdentity(fd, compile_context.realm.runtime);
         if (record.memory != fd.memory or record.atoms != fd.atoms) return error.InvalidBytecode;
-        try installChildFunctionBytecodes(fd, record, compile_context);
-        return createFunctionBytecodeAfterChildren(fd, compile_context);
+        try installChildFunctionBytecodes(fd, record, compile_context, disasm_enabled);
+        return createFunctionBytecodeAfterChildren(fd, compile_context, disasm_enabled);
     }
 
     fn validateRuntimeIdentity(fd: *const function_def_mod.FunctionDef, rt: *runtime_mod.JSRuntime) FinalizeError!void {
@@ -8230,65 +8653,11 @@ pub const pipeline_finalize = struct {
         return std.math.add(usize, fd.args.len, fd.vars.len) catch return error.BytecodeOverflow;
     }
 
-    /// qjs's resolve_scope_var only ever emits a var-ref operand it obtained
-    /// from `fd->closure_var` (get_closure_var/add_closure_var append-only
-    /// indices, quickjs.c:32736-32760, 33290-33354), so the interpreter reads
-    /// `var_refs[idx]` with no bounds check at all (OP_get_var_ref 18627,
-    /// OP_get_var_ref_check 18655, OP_get_var 18461). zjs's lowering has the
-    /// same construction invariant: every producer (lookupClosureVar,
-    /// lookupGlobalClosureVar/emitGlobalVarOp, ensureGlobalClosureVar,
-    /// addOrFindClosureSource, lookupTopLevelModuleLexicalClosureVar) returns
-    /// an index into the append-only `fd.closure_var`. Enforce that invariant
-    /// once here, at the single production choke point every executable
-    /// FunctionBytecode passes through, so the resident var-ref handlers can
-    /// trust their operands exactly like qjs (Debug asserts remain in the
-    /// handlers for the test-only legacy adapter bridge).
-    /// Validate the final instruction topology, atom-owner sequence, and every
-    /// var-ref bound in one traversal.  These were formerly two separate outer
-    /// walks after resolve_labels had already scanned the same final code.
-    fn validateFinalCodeOwnersAndVarRefs(
-        code: []const u8,
-        owners: []const atom.Atom,
-        closure_var_count: usize,
-    ) FinalizeError!void {
-        var pc: usize = 0;
-        var owner_index: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size: usize = opcode.sizeOf(op_id);
-            if (size == 0 or size > code.len - pc) return error.InvalidBytecode;
-            const fmt = opcode.formatOf(op_id);
-            const has_atom = fmt == .atom or fmt == .atom_u8 or fmt == .atom_u16 or
-                fmt == .atom_label_u8 or fmt == .atom_label_u16;
-            if (has_atom) {
-                if (size < 5 or owner_index >= owners.len) return error.InvalidBytecode;
-                const encoded_atom = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if (encoded_atom != owners[owner_index]) return error.InvalidBytecode;
-                owner_index += 1;
-            }
-            switch (fmt) {
-                .var_ref => {
-                    if (size < 3) return error.InvalidBytecode;
-                    const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
-                    if (idx >= closure_var_count) return error.InvalidBytecode;
-                },
-                .none_var_ref => {
-                    const idx: usize = switch (op_id) {
-                        opcode.op.get_var_ref0...opcode.op.get_var_ref3 => op_id - opcode.op.get_var_ref0,
-                        opcode.op.put_var_ref0...opcode.op.put_var_ref3 => op_id - opcode.op.put_var_ref0,
-                        opcode.op.set_var_ref0...opcode.op.set_var_ref3 => op_id - opcode.op.set_var_ref0,
-                        else => return error.InvalidBytecode,
-                    };
-                    if (idx >= closure_var_count) return error.InvalidBytecode;
-                },
-                else => {},
-            }
-            pc += size;
-        }
-        if (owner_index != owners.len) return error.InvalidBytecode;
-    }
-
-    fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, compile_context: CompileContext) FinalizeError![]fb_mod.FunctionBytecode {
+    fn createFunctionBytecodeAfterChildren(
+        fd: *function_def_mod.FunctionDef,
+        compile_context: CompileContext,
+        disasm_enabled: bool,
+    ) FinalizeError![]fb_mod.FunctionBytecode {
         const rt = compile_context.realm.runtime;
         // Lowering publishes arg/var counts to u16 fields, so malformed or
         // oversized FunctionDefs must be rejected before it can cast them.
@@ -8319,10 +8688,9 @@ pub const pipeline_finalize = struct {
         fd.consumeGlobalVars();
         fd.finalization_state = .resolved;
         fd.use_short_opcodes = true;
-        try publishLoweredMetadata(true, &lowered, fd, fd, false);
+        try publishLoweredMetadata(true, true, &lowered, fd, fd, false);
 
         _ = try validateFinalArtifactShape(fd, &lowered);
-        try validateFinalCodeOwnersAndVarRefs(lowered.code, lowered.atom_operands, fd.closure_var.len);
 
         // Preflight the exact packed FunctionBytecode layout before the first
         // artifact allocation. Source and pc2line remain independent moved
@@ -8451,7 +8819,7 @@ pub const pipeline_finalize = struct {
         shell_owned = false;
         rt.gc.addInitializedWithSizeNoFail(&fb.header, fb.heapByteSizeWithLayout(layout));
 
-        if (std.c.getenv("ZJS_DISASM") != null) {
+        if (disasm_enabled) {
             const dump_mod = bytecode_dump;
             var disbuf: [65536]u8 = undefined;
             var diswriter = std.Io.Writer.fixed(&disbuf);
@@ -8497,12 +8865,13 @@ pub const pipeline_finalize = struct {
         compile_context: CompileContext,
     ) !void {
         const rt = compile_context.realm.runtime;
+        const disasm_enabled = std.c.getenv("ZJS_DISASM") != null;
         if (function.memory != &rt.memory or function.atoms != &rt.atoms or
             function.memory != fd.memory or function.atoms != fd.atoms)
         {
             return error.InvalidBytecode;
         }
-        try installChildFunctionBytecodes(fd, null, compile_context);
+        try installChildFunctionBytecodes(fd, null, compile_context, disasm_enabled);
         try syncFunctionDefCpool(function, fd);
         try lowerAttachedBuilder(function, fd);
     }
@@ -8520,11 +8889,12 @@ pub const pipeline_finalize = struct {
         def.consumeGlobalVars();
         def.finalization_state = .resolved;
         def.use_short_opcodes = true;
-        try publishLoweredMetadata(true, function, def, def, true);
+        try publishLoweredMetadata(true, false, function, def, def, true);
     }
 
     fn publishLoweredMetadata(
         comptime arguments_object_from_function_def: bool,
+        comptime validate_final_artifact: bool,
         function: *bytecode_function.Bytecode,
         fd: ?*const function_def_mod.FunctionDef,
         fd_mut: ?*function_def_mod.FunctionDef,
@@ -8594,24 +8964,44 @@ pub const pipeline_finalize = struct {
         try encodePc2Line(function);
 
         // Phase 3c: compute_stack_size over resolved QuickJS-format bytecode.
-        function.stack_size = try computeStackSizeForCurrentBytecode(function, &function.leaf_returns_balanced);
+        // The packed production path folds its final topology, atom-owner and
+        // var-ref proof into this walk. Direct Bytecode callers retain the
+        // self-contained resolve_labels proof and do not repeat it here.
+        const final_artifact: ?stack_size.FinalArtifactValidation = if (comptime validate_final_artifact) blk: {
+            const def = fd orelse return error.InvalidBytecode;
+            break :blk .{
+                .atom_owners = function.atom_operands,
+                .closure_var_count = def.closure_var.len,
+            };
+        } else null;
+        function.stack_size = try computeStackSizeForCurrentBytecode(
+            function,
+            &function.leaf_returns_balanced,
+            final_artifact,
+        );
     }
 
     // Keep the final bytecode verification walk as its own compiler stage.
     // Whole-program source deletion otherwise let Zig/LLVM fold this into the
     // packed finalizer; the resulting backend-stall regression was the carrier
     // behind QCP-1B's crypto/code-load shift. See the decision record §9.3.
-    noinline fn computeStackSizeForCurrentBytecode(function: *bytecode_function.Bytecode, leaf_returns_balanced: *bool) FinalizeError!u16 {
+    noinline fn computeStackSizeForCurrentBytecode(
+        function: *bytecode_function.Bytecode,
+        leaf_returns_balanced: *bool,
+        final_artifact: ?stack_size.FinalArtifactValidation,
+    ) FinalizeError!u16 {
         // Parser compilation switches MemoryAccount.allocator to the stable,
         // accounted artifact allocator before entering finalization. Direct
         // finalize callers likewise carry the runtime's current allocator.
         return stack_size.compute(function.code, .{
             .scratch_allocator = function.memory.allocator,
             .returns_balanced_out = leaf_returns_balanced,
+            .final_artifact = final_artifact,
         }) catch |err| switch (err) {
             // Reachable falloff is a verifier diagnosis; consumers of the
             // finalize pipeline observe the established invalid-bytecode API.
             error.ReachableFalloff => error.InvalidBytecode,
+            error.InvalidFinalArtifact => error.InvalidBytecode,
             else => |other| other,
         };
     }
@@ -8711,6 +9101,7 @@ pub const pipeline_finalize = struct {
         fd: *function_def_mod.FunctionDef,
         root_module_record: ?*module.Record,
         compile_context: CompileContext,
+        disasm_enabled: bool,
     ) FinalizeError!void {
         const rt = compile_context.realm.runtime;
         try validateRuntimeIdentity(fd, rt);
@@ -8746,7 +9137,7 @@ pub const pipeline_finalize = struct {
             const parent = frames.items[frames.items.len - 1].function_def;
             const cpool_idx = current.parent_cpool_idx;
             const idx: usize = @intCast(cpool_idx);
-            const fb_slice = try createFunctionBytecodeAfterChildren(current, compile_context);
+            const fb_slice = try createFunctionBytecodeAfterChildren(current, compile_context, disasm_enabled);
             const fb = &fb_slice[0];
             const value = JSValue.functionBytecode(&fb.header);
             var value_owned = true;

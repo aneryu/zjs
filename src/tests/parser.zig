@@ -137,6 +137,26 @@ test "F1: freeToken releases its identifier atom owner" {
     try std.testing.expectEqual(@as(?usize, null), env.rt.atoms.refCount(atom_id));
 }
 
+test "F1: replacing a token releases its owner and stays safe on lexer error" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("lexer_replace_owned_probe @");
+    var tok = try lx.next();
+    const atom_id = tok.payload.ident.atom;
+    try std.testing.expectEqual(@as(usize, 1), env.rt.atoms.refCount(atom_id).?);
+
+    try std.testing.expectError(error.InvalidIdentifier, lx.nextIntoReplacing(&tok));
+    try std.testing.expectEqual(@as(?usize, null), env.rt.atoms.refCount(atom_id));
+    switch (tok.payload) {
+        .none => {},
+        else => return error.TestUnexpectedResult,
+    }
+    // The failed replacement invalidated the released payload, so ordinary
+    // parser cleanup remains idempotent instead of releasing the atom twice.
+    lx.freeToken(&tok);
+}
+
 test "F1: punctuators use raw ASCII for single-character tokens" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
@@ -1080,6 +1100,54 @@ fn countOpcodeRecursive(function: anytype, opcode: u8) usize {
         if (functionBytecodeFromValue(value)) |fb| {
             count += countOpcodeInFunctionBytecode(fb, opcode);
         }
+    }
+    return count;
+}
+
+fn countDefineClassNamedInCode(
+    rt: *core.JSRuntime,
+    code: []const u8,
+    opcode_id: u8,
+    expected_name: []const u8,
+) usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        if (size == 0 or size > code.len - pc) break;
+        if (code[pc] == opcode_id) {
+            const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (std.mem.eql(u8, rt.atoms.name(atom_id) orelse "", expected_name)) count += 1;
+        }
+        pc += size;
+    }
+    return count;
+}
+
+fn countDefineClassNamedInFunctionBytecode(
+    rt: *core.JSRuntime,
+    function: *const engine.bytecode.FunctionBytecode,
+    opcode_id: u8,
+    expected_name: []const u8,
+) usize {
+    var count = countDefineClassNamedInCode(rt, function.byteCode(), opcode_id, expected_name);
+    for (function.cpoolSlice()) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        count += countDefineClassNamedInFunctionBytecode(rt, child, opcode_id, expected_name);
+    }
+    return count;
+}
+
+fn countDefineClassNamedRecursive(
+    function: anytype,
+    rt: *core.JSRuntime,
+    opcode_id: u8,
+    expected_name: []const u8,
+) usize {
+    var count = countDefineClassNamedInCode(rt, rootCode(function), opcode_id, expected_name);
+    for (rootConstants(function)) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        count += countDefineClassNamedInFunctionBytecode(rt, child, opcode_id, expected_name);
     }
     return count;
 }
@@ -4732,6 +4800,40 @@ test "F6: parenthesized arrow lookahead skips only context-free source" {
     }
 }
 
+test "F6: assignment-entry arrow dispatch preserves primary-expression boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const valid_sources = [_][]const u8{
+        "new (x => x);",
+        "const nested = (((x => x)));",
+        "const single = async x => x; const paren = async (x) => x;",
+        "const pattern = async ({ x, y: [z] }) => x + z; ({ x } = { x: 1 });",
+        "const call = ((x) => x)(1); const member = ((x) => x).name;",
+        "const sloppyYield = yield => yield; const sloppyAwait = await => await;",
+    };
+    for (valid_sources) |source| {
+        var parsed = try parser.compile(env.compileContext(), source, .{ .filename = "arrow-assignment-entry.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+        try std.testing.expect(parsed.hasFeature(.arrow));
+    }
+
+    const invalid_sources = [_][]const u8{
+        "new x => x;",
+        "async\n(x) => x;",
+        "const f = (x)\n=> x;",
+        "function* g() { yield => 1; }",
+        "async function f() { await => 1; }",
+        "const f = \\u0069f => 1;",
+    };
+    for (invalid_sources) |source| {
+        var parsed = try parser.compile(env.compileContext(), source, .{ .filename = "arrow-assignment-entry-negative.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+}
+
 test "F6: arrow function with multiple parameters" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -5253,6 +5355,93 @@ test "F7: private field in class" {
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcodeRecursive(&fn_bc, op.private_symbol);
     try expectOpcodeRecursive(&fn_bc, op.define_private_field);
+}
+
+test "assignment inferred class name is embedded before static initialization" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var assignment = try compileForTest(
+        env.rt,
+        "let C; C = class { static { globalThis.assignmentSeen = this.name; } };",
+        .{ .mode = .script, .filename = "anonymous-class-assignment.js" },
+    );
+    defer assignment.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countDefineClassNamedRecursive(&assignment, env.rt, op.define_class, "C"),
+    );
+}
+
+test "computed property class name is embedded before static initialization" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var computed_property = try compileForTest(
+        env.rt,
+        "let holder = { ['computed']: class { static { globalThis.computedSeen = this.name; } } };",
+        .{ .mode = .script, .filename = "anonymous-class-computed-property.js" },
+    );
+    defer computed_property.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countDefineClassNamedRecursive(&computed_property, env.rt, op.define_class_computed, ""),
+    );
+}
+
+test "class field inferred names are embedded before static initialization" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var class_fields = try compileForTest(
+        env.rt,
+        "class Outer { instance = class { static { globalThis.instanceSeen = this.name; } }; static field = class { static { globalThis.staticSeen = this.name; } }; }",
+        .{ .mode = .script, .filename = "anonymous-class-fields.js" },
+    );
+    defer class_fields.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countDefineClassNamedRecursive(&class_fields, env.rt, op.define_class, "field") +
+            countDefineClassNamedRecursive(&class_fields, env.rt, op.define_class, "instance"),
+    );
+}
+
+test "comma expression does not infer an anonymous class name" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var function = try compileForTest(
+        env.rt,
+        "let C = (0, class { static { globalThis.commaSeen = this.name; } });",
+        .{ .mode = .script, .filename = "anonymous-class-comma.js" },
+    );
+    defer function.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countDefineClassNamedRecursive(&function, env.rt, op.define_class, ""),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countDefineClassNamedRecursive(&function, env.rt, op.define_class, "C"),
+    );
+}
+
+test "inferred function names do not become named-expression self bindings" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var function = try compileForTest(
+        env.rt,
+        "let inferred = function () { return inferred; }; let explicit = function Inner() { return Inner; };",
+        .{ .mode = .script, .filename = "function-inferred-self-binding.js" },
+    );
+    defer function.deinit();
+
+    const inferred = findFunctionConstantNamed(&function, env.rt, "") orelse return error.TestExpectedEqual;
+    const explicit = findFunctionConstantNamed(&function, env.rt, "Inner") orelse return error.TestExpectedEqual;
+    try std.testing.expect(varDefNamed(inferred, env.rt, "inferred") == null);
+    const self_binding = varDefNamed(explicit, env.rt, "Inner") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(function_def.VarKind.function_name, self_binding.varKind());
 }
 
 test "W1d: finalized private operations have no raw private atom operands" {

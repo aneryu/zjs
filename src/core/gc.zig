@@ -1084,6 +1084,15 @@ pub const Registry = struct {
             slot.reason = reason;
             return;
         }
+        // An allocation-threshold request is level-triggered: the live-byte
+        // condition may disappear before the next scheduler boundary. Do not
+        // let that weak request hide an independently requested same-urgency
+        // collection, because the allocation boundary may later discard only
+        // the stale threshold request.
+        if (slot.reason == .allocation_threshold and reason != .allocation_threshold) {
+            slot.reason = reason;
+            return;
+        }
         if (slot.reason == null) slot.reason = reason;
     }
 
@@ -1104,6 +1113,13 @@ pub const Registry = struct {
         const request = self.major_request;
         self.major_request = .{};
         return request;
+    }
+
+    pub fn clearStaleAllocationThresholdRequest(self: *Registry) bool {
+        const request = self.pendingMajorRequest() orelse return false;
+        if (request.reason != .allocation_threshold or request.urgency != .soon) return false;
+        self.major_request = .{};
+        return true;
     }
 
     pub fn sliceBudgetNs(self: Registry, point: SchedulerPoint) u64 {

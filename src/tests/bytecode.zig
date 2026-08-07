@@ -1135,6 +1135,131 @@ test "FunctionDef: add scope" {
     try std.testing.expectEqual(@as(i32, -1), fd.scopes[0].parent);
 }
 
+test "FunctionDef final scope proof reseals late arguments links and rejects cycles" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("scope-proof-arguments");
+    const parameter = try rt.internAtom("parameter");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(parameter);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.appendScope(-1);
+    fd.has_parameter_expressions = true;
+    const parameter_idx = try fd.addScopeVar(parameter, .normal, 1, true, false);
+    try fd.rebuildFinalScopeLinks();
+    try fd.validateFinalScopeLinks();
+
+    // This is the same late mutation a parameter-initializer descendant can
+    // trigger after its parent has been prepared.  The helper must return with
+    // a complete proof boundary restored for later sibling/parent resolution.
+    try fd.ensureArgumentsArgumentBinding();
+    try fd.validateFinalScopeLinks();
+    try std.testing.expect(fd.arguments_arg_idx > parameter_idx);
+    try std.testing.expectEqual(fd.arguments_arg_idx, fd.scopes[1].first);
+    try std.testing.expectEqual(
+        parameter_idx,
+        fd.vars[@intCast(fd.arguments_arg_idx)].scope_next,
+    );
+    try std.testing.expectEqual(
+        bytecode.function_bytecode.arg_scope_end,
+        fd.vars[@intCast(parameter_idx)].scope_next,
+    );
+
+    // Even the idempotent early-return arm validates first; a synthetic caller
+    // cannot smuggle a cyclic chain into the trusted production specialization.
+    fd.vars[@intCast(fd.arguments_arg_idx)].scope_next = fd.arguments_arg_idx;
+    try std.testing.expectError(error.InvalidScope, fd.validateFinalScopeLinks());
+    try std.testing.expectError(error.InvalidScope, fd.ensureArgumentsArgumentBinding());
+}
+
+test "compiler-v2 run rejects cyclic scope links before trusted lookup" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("scope-proof-run");
+    const local = try rt.internAtom("local");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(local);
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    const local_idx = try fd.addScopeVar(local, .normal, 0, false, false);
+    try fd.rebuildFinalScopeLinks();
+
+    const input = try attachV2Builder(&fd);
+    try input.emitAtomOpU16Owned(
+        bytecode.opcode.op.scope_get_var,
+        rt.atoms.dup(local),
+        0,
+    );
+    try input.emitOp(bytecode.opcode.op.return_undef);
+
+    fd.vars[@intCast(local_idx)].scope_next = local_idx;
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        compiler_v2.resolve_variables.run(&function, &fd),
+    );
+}
+
+test "compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("scope-proof-parent-run");
+    const requested = try rt.internAtom("requested");
+    const parent_local = try rt.internAtom("parent-local");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(requested);
+    defer rt.atoms.free(parent_local);
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    var parent = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer parent.deinit(rt);
+    _ = try parent.appendScope(-1);
+    const parent_local_idx = try parent.addScopeVar(parent_local, .normal, 0, false, false);
+    try parent.rebuildFinalScopeLinks();
+
+    var child = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer child.deinit(rt);
+    _ = try child.appendScope(-1);
+    try child.rebuildFinalScopeLinks();
+    child.parent = &parent;
+    child.parent_scope_level = 0;
+
+    const input = try attachV2Builder(&child);
+    try input.emitAtomOpU16Owned(
+        bytecode.opcode.op.scope_get_var,
+        rt.atoms.dup(requested),
+        0,
+    );
+    try input.emitOp(bytecode.opcode.op.return_undef);
+
+    // A forged lifecycle state must not act as a proof capability.
+    child.finalization_state = .prepared;
+    parent.finalization_state = .prepared;
+    parent.vars[@intCast(parent_local_idx)].scope_next = parent_local_idx;
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        compiler_v2.resolve_variables.run(&function, &child),
+    );
+
+    parent.vars[@intCast(parent_local_idx)].scope_next = -1;
+    parent.parent = &parent;
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        compiler_v2.resolve_variables.run(&function, &child),
+    );
+    parent.parent = null;
+}
+
 test "FunctionDef: closure_var" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

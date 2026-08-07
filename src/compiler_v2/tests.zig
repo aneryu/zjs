@@ -2092,15 +2092,18 @@ test "compiler_v2.s2g4: minimal class expression and default constructor" {
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        // Anonymous class expressions retain QuickJS's parser-only backpatch marker.
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 21), b.code_len);
+    try std.testing.expectEqual(@as(u32, 26), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[14]);
-    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 12), std.mem.readInt(u32, b.code[21..25], .little));
+    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2226,19 +2229,22 @@ test "compiler_v2.s2g4: named class method splices runtime definition" {
         .{ .op = qop.put_loc_check_init, .size = 3 },
         // parseClass splices the method closure and definition after define_class setup.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.define_method, .size = 6, .atom = method_atom },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 39), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(method_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(method_atom, b.atom_operands[2]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
-    try std.testing.expectEqual(@as(u8, 0), b.code[26]);
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0), b.code[31]);
+    try std.testing.expectEqual(@as(i64, 38), b.last_opcode_pos);
     // Runtime method markers at 19/21 belong to the detached class segment;
     // legacy moves the instructions and atoms but not those source slots.
     try expectSourceOffsets(b, &.{0});
@@ -2306,14 +2312,15 @@ test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
         .{ .op = qop.put_loc_check_init, .size = 3 },
         // The detached class-body runtime segment is empty after constructor rollback.
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 21), b.code_len);
+    try std.testing.expectEqual(@as(u32, 26), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2369,15 +2376,16 @@ test "compiler_v2.s2g4: derived default constructor returns checked this" {
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 21), b.code_len);
+    try std.testing.expectEqual(@as(u32, 26), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 1), b.code[14]);
-    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2438,15 +2446,16 @@ test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 23), b.code_len);
+    try std.testing.expectEqual(@as(u32, 28), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[16]);
-    try std.testing.expectEqual(@as(i64, 22), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 27), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2497,8 +2506,8 @@ test "compiler_v2.s2g4: private method patches instance brand prologue" {
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
 
     const b = h.builder();
-    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
-    const private_atom = b.atom_operands[1];
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
+    const private_atom = b.atom_operands[2];
     try std.testing.expectEqualStrings("#m", h.rt.atoms.name(private_atom).?);
     try expectV2Stream(b, &.{
         .{ .op = qop.undefined, .size = 1 },
@@ -2515,21 +2524,25 @@ test "compiler_v2.s2g4: private method patches instance brand prologue" {
         .{ .op = qop.add_brand, .size = 1 },
         // parseClassElement's deferred private-method sequence.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.set_name, .size = 5, .atom = private_atom },
         .{ .op = qop.put_var_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 38), b.code_len);
+    try std.testing.expectEqual(@as(u32, 48), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    // The root ledger exactly covers define_class's empty name and set_name's private symbol.
+    // The root ledger covers define_class, the anonymous-method placeholder,
+    // and the explicit private-symbol display name.
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(private_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(private_atom, b.atom_operands[2]);
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 1), b.code[16]);
     try std.testing.expectEqual(@as(u8, 0), b.code[26]);
-    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 47), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2598,16 +2611,17 @@ test "compiler_v2.s2g4: static block nests closure in static initializer" {
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 34), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 33), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2620,18 +2634,20 @@ test "compiler_v2.s2g4: static block nests closure in static initializer" {
     try expectV2Stream(static_init, &.{
         // Static initializers deliberately have no instance-brand prologue.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.get_var, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
         .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 11), static_init.code_len);
+    try std.testing.expectEqual(@as(u32, 16), static_init.code_len);
     try std.testing.expectEqual(@as(u32, 0), static_init.label_len);
-    try std.testing.expectEqual(@as(u32, 0), static_init.atom_len);
+    try std.testing.expectEqual(@as(u32, 1), static_init.atom_len);
+    try std.testing.expectEqual(core.atom.null_atom, static_init.atom_operands[0]);
     try std.testing.expectEqual(@as(u8, 0), static_init.code[1]);
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[7..9], .little));
-    try std.testing.expectEqual(@as(i64, 10), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[12..14], .little));
+    try std.testing.expectEqual(@as(i64, 15), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 
@@ -2681,16 +2697,17 @@ test "compiler_v2.s2g4: static field emits through static initializer" {
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 34), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 33), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2740,18 +2757,21 @@ test "compiler_v2.s2g4: computed method splices key and closure" {
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.to_propkey, .size = 1 },
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.define_method_computed, .size = 2 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 27), b.code_len);
+    try std.testing.expectEqual(@as(u32, 37), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
-    try std.testing.expectEqual(@as(u8, 0), b.code[24]);
-    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0), b.code[29]);
+    try std.testing.expectEqual(@as(i64, 36), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2794,19 +2814,22 @@ test "compiler_v2.s2g4: getter child keeps return terminal" {
         .{ .op = qop.put_loc_check_init, .size = 3 },
         // The accessor closure and define_method flag travel in the detached segment.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.define_method, .size = 6, .atom = getter_atom },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 39), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(getter_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(getter_atom, b.atom_operands[2]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
-    try std.testing.expectEqual(@as(u8, 1), b.code[26]);
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 1), b.code[31]);
+    try std.testing.expectEqual(@as(i64, 38), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);

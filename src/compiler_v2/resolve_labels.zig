@@ -449,6 +449,11 @@ const Resolver = struct {
     output_atoms: []core.atom.Atom = &.{},
     output_atom_capacity: usize = 0,
     output_atom_len: u32 = 0,
+    /// False while the S4 output ledger borrows the S3 owners. It becomes true
+    /// only after a successful walk transfers the retained subsequence out of
+    /// `product`; error paths therefore leave the input ledger owning every
+    /// atom and free only the uncommitted output backing.
+    output_atoms_owned: bool = false,
 
     output_sources: []SourceLocSlot = &.{},
     output_source_capacity: usize = 0,
@@ -462,8 +467,10 @@ const Resolver = struct {
     last_attached_source: ?SourcePoint = null,
 
     fn deinit(self: *Resolver) void {
-        for (self.output_atoms[0..self.output_atom_len]) |atom_id|
-            self.atoms.free(atom_id);
+        if (self.output_atoms_owned) {
+            for (self.output_atoms[0..self.output_atom_len]) |atom_id|
+                self.atoms.free(atom_id);
+        }
         if (self.output_atom_capacity != 0)
             self.memory.free(core.atom.Atom, self.output_atoms);
         if (self.output_capacity != 0) self.memory.free(u8, self.output);
@@ -477,6 +484,7 @@ const Resolver = struct {
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
+        self.output_atoms_owned = false;
         self.output = &.{};
         self.output_capacity = 0;
         self.output_len = 0;
@@ -491,7 +499,34 @@ const Resolver = struct {
         self.jump_slots = &.{};
     }
 
-    fn releaseConsumedProduct(self: *Resolver) void {
+    fn releaseConsumedProduct(self: *Resolver) Error!void {
+        // QuickJS copies atom ids between its resolve_labels DynBufs without
+        // changing their reference counts: the new buffer inherits the old
+        // buffer's owners. S4 never invents or reorders atom-bearing values;
+        // its output atom ledger is a retained subsequence of S3. Prove that
+        // invariant before changing either owner's state, then move those
+        // references and let releaseConsumedStreams free only discarded ones.
+        var input_index: usize = 0;
+        var output_index: usize = 0;
+        while (output_index < self.output_atom_len) : (output_index += 1) {
+            const output_atom = self.output_atoms[output_index];
+            while (input_index < self.input_atoms.len and
+                self.input_atoms[input_index] != output_atom) : (input_index += 1)
+            {}
+            if (input_index == self.input_atoms.len)
+                return error.InvalidBytecode;
+            input_index += 1;
+        }
+
+        input_index = 0;
+        output_index = 0;
+        while (output_index < self.output_atom_len) : (output_index += 1) {
+            const output_atom = self.output_atoms[output_index];
+            while (self.input_atoms[input_index] != output_atom) : (input_index += 1) {}
+            self.product.atom_operands[input_index] = core.atom.null_atom;
+            input_index += 1;
+        }
+        self.output_atoms_owned = true;
         self.code = &.{};
         self.input_atoms = &.{};
         self.input_sources = &.{};
@@ -571,6 +606,22 @@ const Resolver = struct {
                 &self.output_source_capacity,
                 0,
                 self.input_sources.len,
+                8,
+            );
+        }
+
+        // resolve_labels only drops or retains atom-bearing instructions; it
+        // never synthesizes another atom owner. Reserve the exact hard upper
+        // bound once, then publish borrowed ids in the hot walk without a
+        // retain and without geometric ledger growth.
+        if (self.input_atoms.len != 0) {
+            try reserve(
+                core.atom.Atom,
+                self.memory,
+                &self.output_atoms,
+                &self.output_atom_capacity,
+                0,
+                self.input_atoms.len,
                 8,
             );
         }
@@ -665,16 +716,9 @@ const Resolver = struct {
     fn appendOutputAtom(self: *Resolver, atom_id: core.atom.Atom) Error!void {
         if (self.output_atom_len == std.math.maxInt(u32))
             return error.BytecodeOverflow;
-        try reserve(
-            core.atom.Atom,
-            self.memory,
-            &self.output_atoms,
-            &self.output_atom_capacity,
-            self.output_atom_len,
-            1,
-            8,
-        );
-        self.output_atoms[self.output_atom_len] = self.atoms.dup(atom_id);
+        if (self.output_atom_len >= self.output_atom_capacity)
+            return error.InvalidBytecode;
+        self.output_atoms[self.output_atom_len] = atom_id;
         self.output_atom_len += 1;
     }
 
@@ -3088,6 +3132,7 @@ const Resolver = struct {
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
+        self.output_atoms_owned = false;
         for (self.function.atom_operands) |old_atom|
             self.atoms.free(old_atom);
         self.function.installAtomOperandsWithCapacity(owned_atoms, owned_atom_capacity);
@@ -3135,7 +3180,7 @@ fn runImpl(
     defer resolver.deinit();
     try resolver.initScratch(layout);
     try resolver.walk(layout);
-    resolver.releaseConsumedProduct();
+    try resolver.releaseConsumedProduct();
     if (layout == .short) {
         // F3: relaxJumps is the one pass that moves source events and label
         // addresses after they are both fixed. Snapshot which events sit on an

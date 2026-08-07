@@ -1023,16 +1023,36 @@ const Resolver = struct {
         return self.source_cursor - self.source_attach_cursor;
     }
 
-    /// Carry every parser source event consumed since the previous output
-    /// instruction. Stage 3 must not deduplicate even identical consecutive
-    /// points: Stage 4 can relocate or discard the earlier event while a later
-    /// equal event remains authoritative at a different output boundary.
-    /// Final-output attachment performs coordinate deduplication only after
-    /// those independent relocation decisions.
-    fn attachPendingSourcesAssumeCapacity(self: *Resolver) void {
+    /// Carry the overwhelmingly common single parser source event inline.
+    /// Multiple events are uncommon and need one extra rule: events at the
+    /// same parser input offset all have the same Stage-4 relocation identity,
+    /// so only the last transition is authoritative. Events from distinct
+    /// input offsets remain independent even when Stage 3 outlines them onto
+    /// the same output instruction.
+    inline fn attachPendingSourcesAssumeCapacity(self: *Resolver) void {
+        if (self.source_cursor - self.source_attach_cursor != 1) {
+            self.attachPendingSourcesSlowAssumeCapacity();
+            return;
+        }
+        const slot = self.input_sources[self.source_attach_cursor];
+        self.source_attach_cursor += 1;
+        self.product.source_slots[self.product.source_len] = .{
+            .temp_offset = self.product.code_len,
+            .line = slot.line,
+            .col = slot.col,
+        };
+        self.product.source_len += 1;
+    }
+
+    noinline fn attachPendingSourcesSlowAssumeCapacity(self: *Resolver) void {
         while (self.source_attach_cursor < self.source_cursor) {
             const slot = self.input_sources[self.source_attach_cursor];
             self.source_attach_cursor += 1;
+            if (self.source_attach_cursor < self.source_cursor and
+                self.input_sources[self.source_attach_cursor].temp_offset == slot.temp_offset)
+            {
+                continue;
+            }
             self.product.source_slots[self.product.source_len] = .{
                 .temp_offset = self.product.code_len,
                 .line = slot.line,
@@ -2421,6 +2441,8 @@ pub fn run(
     if (input.memory != fd.memory or input.atoms != fd.atoms)
         return error.InvalidBytecode;
     try validateInput(input);
+    var ctx = binding_rules.JSContext.initWithFunctionDef(function, fd);
+    try ctx.proveScopeLinksForResolution();
     try rules.resolveEvalGlobalVarTargets(fd);
 
     const binds = try buildBindIndex(fd.memory, input);
@@ -2447,7 +2469,6 @@ pub fn run(
     try initializeLabels(&product, input);
     try preallocateProductStreams(&product, input);
 
-    var ctx = binding_rules.JSContext.initWithFunctionDef(function, fd);
     // QCP-1 S3: exact-scope accelerator deferred; the linked-chain fallback is
     // the semantic path shared with the legacy pipeline.
 
@@ -2708,13 +2729,35 @@ test "compiler_v2.resolve_variables: copy-through and source carry" {
     try std.testing.expectEqual(@as(i32, 3), product.source_slots[2].col);
 }
 
-test "compiler_v2.resolve_variables: preserves ordered source transitions at one offset" {
+test "compiler_v2.resolve_variables: last source transition wins at one input offset" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
     const input = harness.input();
 
     try input.addSourceMarker(10, 2);
+    try input.addSourceMarker(20, 3);
+    try input.addSourceMarker(30, 4);
+    try input.emitOp(op.undefined);
+
+    var product = try harness.resolve();
+    defer product.deinitUncommitted();
+
+    try expectProductCode(&product, &.{op.undefined});
+    try std.testing.expectEqual(@as(u32, 1), product.source_len);
+    try std.testing.expectEqual(@as(u32, 0), product.source_slots[0].temp_offset);
+    try std.testing.expectEqual(@as(i32, 30), product.source_slots[0].line);
+    try std.testing.expectEqual(@as(i32, 4), product.source_slots[0].col);
+}
+
+test "compiler_v2.resolve_variables: outlined source transitions keep distinct input offsets" {
+    var harness: ResolveTestHarness = undefined;
+    try harness.init(std.testing.allocator);
+    defer harness.deinit();
+    const input = harness.input();
+
+    try input.addSourceMarker(10, 2);
+    try input.emitOp(op.nop);
     try input.addSourceMarker(20, 3);
     try input.emitOp(op.undefined);
 

@@ -85,7 +85,7 @@ pub const Error = error{
 /// Grow a backing without changing its initialized-prefix length. The visible
 /// slice always spans the full allocation; `used` alone identifies readable
 /// entries.
-fn reserve(
+inline fn reserve(
     comptime T: type,
     mem: *core.memory.MemoryAccount,
     slice: *[]T,
@@ -97,6 +97,24 @@ fn reserve(
     const required = std.math.add(usize, @as(usize, used), need) catch
         return error.OutOfMemory;
     if (required <= capacity.*) return;
+
+    return reserveSlow(T, mem, slice, capacity, used, required, min_cap);
+}
+
+/// QuickJS keeps the DynBuf capacity check in its inline `dbuf_put*` helpers
+/// and enters an outlined allocator only when the backing must grow.  Keep the
+/// same call shape here: ordinary emission pays a compare, while the uncommon
+/// allocation/copy/free path remains shared and recoverable.
+noinline fn reserveSlow(
+    comptime T: type,
+    mem: *core.memory.MemoryAccount,
+    slice: *[]T,
+    capacity: *usize,
+    used: u32,
+    required: usize,
+    comptime min_cap: usize,
+) Error!void {
+    std.debug.assert(required > capacity.*);
 
     const doubled = std.math.mul(usize, capacity.*, 2) catch std.math.maxInt(usize);
     const new_capacity = @max(@max(required, doubled), min_cap);
@@ -769,6 +787,117 @@ pub const Builder = struct {
         return self.atom_operands[self.atom_len];
     }
 
+    /// QuickJS `get_lvalue` takes the trailing atom operand back while it
+    /// rewinds the getter opcode. Validate both ledgers first, then publish
+    /// the owner transfer and truncation as one allocation-free transaction.
+    pub fn takeTrailingAtomOpcodeOwned(
+        self: *Builder,
+        opcode_offset: u32,
+        expected_opcode: u8,
+        expected_atom: core.atom.Atom,
+    ) Error!core.atom.Atom {
+        const offset: usize = @intCast(opcode_offset);
+        if (self.last_opcode_pos < 0 or
+            @as(u32, @intCast(self.last_opcode_pos)) != opcode_offset or
+            opcode_offset > self.code_len or self.code_len - opcode_offset < 5 or
+            self.code[offset] != expected_opcode or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            self.atom_len == 0 or
+            self.atom_operands[self.atom_len - 1] != expected_atom)
+        {
+            return error.InvalidBytecode;
+        }
+        if (self.reloc_len != 0 and
+            self.relocs[self.reloc_len - 1].operand_offset + 4 > opcode_offset)
+        {
+            return error.InvalidBytecode;
+        }
+        for (self.label_slots[0..self.label_len]) |slot| {
+            if (slot.flags.bound and slot.bound_offset > opcode_offset)
+                return error.InvalidBytecode;
+        }
+
+        self.atom_len -= 1;
+        while (self.source_len > 0 and
+            self.source_slots[self.source_len - 1].temp_offset > opcode_offset)
+        {
+            self.source_len -= 1;
+        }
+        while (self.control_len > 0 and
+            self.controlAt(self.control_len - 1).temp_offset >= opcode_offset)
+        {
+            self.control_len -= 1;
+        }
+        self.code_len = opcode_offset;
+        self.last_opcode_pos = -1;
+        return expected_atom;
+    }
+
+    /// Replace one already-owned atom operand in place. The caller supplies
+    /// the exact compact opcode and ledger positions captured when the
+    /// instruction was emitted; validating both keeps bytecode and the
+    /// lockstep ownership ledger from drifting. `replacement` is borrowed:
+    /// this method retains it before releasing the previous owner and cannot
+    /// fail after validation.
+    pub fn replaceAtomOperand(
+        self: *Builder,
+        opcode_offset: u32,
+        atom_index: u32,
+        expected_opcode: u8,
+        expected_atom: core.atom.Atom,
+        replacement: core.atom.Atom,
+    ) Error!void {
+        const offset: usize = @intCast(opcode_offset);
+        const index: usize = @intCast(atom_index);
+        const code_len: usize = @intCast(self.code_len);
+        if (offset > code_len or code_len - offset < 5 or
+            index >= @as(usize, @intCast(self.atom_len)))
+            return error.InvalidBytecode;
+        if (self.code[offset] != expected_opcode or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            self.atom_operands[index] != expected_atom)
+        {
+            return error.InvalidBytecode;
+        }
+
+        const retained = self.atoms.dup(replacement);
+        self.atom_operands[index] = retained;
+        std.mem.writeInt(u32, self.code[offset + 1 ..][0..4], replacement, .little);
+        self.atoms.free(expected_atom);
+    }
+
+    /// Rewrite the trailing atom opcode as a one-byte plain opcode while
+    /// preserving source events at its start. This is the compact-builder
+    /// form of QuickJS truncating `OP_set_name(NULL)` and re-emitting
+    /// `OP_set_name_computed`. The existing five-byte capacity makes the
+    /// replacement allocation-free; the removed ledger owner is released
+    /// exactly once.
+    pub fn rewriteTrailingAtomOpAsPlain(
+        self: *Builder,
+        expected_opcode: u8,
+        expected_atom: core.atom.Atom,
+        replacement_opcode: u8,
+    ) Error!void {
+        if (self.last_opcode_pos < 0 or self.atom_len == 0)
+            return error.InvalidBytecode;
+        const opcode_offset: u32 = @intCast(self.last_opcode_pos);
+        const offset: usize = @intCast(opcode_offset);
+        if (opcode_offset > self.code_len or self.code_len - opcode_offset != 5 or
+            self.code[offset] != expected_opcode or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            self.atom_operands[self.atom_len - 1] != expected_atom)
+        {
+            return error.InvalidBytecode;
+        }
+
+        try self.truncateLastOpcodePreserveSources(opcode_offset);
+        const removed = try self.takeLastAtomOwned();
+        self.atoms.free(removed);
+        self.code[offset] = replacement_opcode;
+        self.code_len = std.math.add(u32, opcode_offset, 1) catch return error.InvalidBytecode;
+        self.last_opcode_pos = @intCast(opcode_offset);
+    }
+
     pub fn addSourceMarker(self: *Builder, line: i32, col: i32) Error!void {
         if (line <= 0 or col <= 0) return;
         if (builtin.mode == .Debug) {
@@ -1275,7 +1404,7 @@ pub const Builder = struct {
         seg.* = .{};
     }
 
-    fn reserveCode(self: *Builder, need: usize) Error!void {
+    inline fn reserveCode(self: *Builder, need: usize) Error!void {
         // One event per emitted instruction, plus one per spliced segment.
         // Legacy counts its byte-append events, so the measures are comparable
         // emission funnels rather than byte-identical totals.
@@ -1617,6 +1746,43 @@ test "compiler_v2.builder: s2g4 take atom and truncate speculative tail" {
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
+test "compiler_v2.builder: lvalue atom take and opcode rewind are one transaction" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const atom_id = try table.internString("lvalue_transaction_atom");
+    defer table.free(atom_id);
+    const base_ref_count = table.refCount(atom_id).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    try b.emitOp(0x20);
+    const op_start = b.code_len;
+    try b.addSourceMarker(2, 2);
+    try b.emitAtomOpU16Owned(0xd5, table.dup(atom_id), 7);
+    try b.addSourceMarker(3, 3);
+
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        b.takeTrailingAtomOpcodeOwned(op_start, 0xd4, atom_id),
+    );
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(op_start + 7, b.code_len);
+
+    const owned = try b.takeTrailingAtomOpcodeOwned(op_start, 0xd5, atom_id);
+    try std.testing.expectEqual(atom_id, owned);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(op_start, b.code_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(op_start, b.source_slots[0].temp_offset);
+
+    table.free(owned);
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+}
+
 test "compiler_v2.builder: marked opcode rewind preserves older same-offset source" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
@@ -1919,4 +2085,45 @@ test "compiler_v2.builder: snapshot rollback restores chains, atoms, markers" {
     try b.emitJump(0x21, l0);
     b.deinit();
     b.deinit();
+}
+
+test "compiler_v2.builder: inferred-name patches keep code and atom ownership in lockstep" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const placeholder = try table.internString("builder-name-placeholder");
+    defer table.free(placeholder);
+    const inferred = try table.internString("builder-inferred-name");
+    defer table.free(inferred);
+    const placeholder_base = table.refCount(placeholder).?;
+    const inferred_base = table.refCount(inferred).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    try b.emitAtomOpOwned(0x40, table.dup(placeholder));
+    try std.testing.expectEqual(placeholder_base + 1, table.refCount(placeholder).?);
+    try b.replaceAtomOperand(0, 0, 0x40, placeholder, inferred);
+    try std.testing.expectEqual(placeholder_base, table.refCount(placeholder).?);
+    try std.testing.expectEqual(inferred_base + 1, table.refCount(inferred).?);
+    try std.testing.expectEqual(inferred, std.mem.readInt(u32, b.code[1..5], .little));
+    try std.testing.expectEqual(inferred, b.atom_operands[0]);
+
+    try b.addSourceMarker(7, 3);
+    try b.emitAtomOpOwned(0x41, core.atom.null_atom);
+    try std.testing.expectEqual(@as(u32, 10), b.code_len);
+    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
+    try b.rewriteTrailingAtomOpAsPlain(0x41, core.atom.null_atom, 0x42);
+    try std.testing.expectEqual(@as(u32, 6), b.code_len);
+    try std.testing.expectEqual(@as(u8, 0x40), b.code[0]);
+    try std.testing.expectEqual(inferred, std.mem.readInt(u32, b.code[1..5], .little));
+    try std.testing.expectEqual(@as(u8, 0x42), b.code[5]);
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(@as(u32, 5), b.source_slots[0].temp_offset);
+
+    b.deinit();
+    try std.testing.expectEqual(inferred_base, table.refCount(inferred).?);
 }

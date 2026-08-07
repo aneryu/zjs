@@ -2693,6 +2693,15 @@ pub const JSRuntime = struct {
     /// cycles before rejecting the replacement object.
     pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) void {
         self.requestGCForAllocation(size);
+        // Scratch allocation can cross the threshold and queue a request, then
+        // fall back below it before the next qjs-style object boundary. The
+        // threshold condition is level-triggered: discard only that ordinary
+        // stale request. Registry request coalescing preserves manual/external/
+        // pressure reasons so they cannot be cancelled here.
+        const prospective = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
+        if (prospective <= self.malloc_gc_threshold) {
+            _ = self.gc.clearStaleAllocationThresholdRequest();
+        }
         if (self.gc_running or self.gc.phase != .none or !self.gc.hasPendingMajorRequest()) return;
         _ = self.pollGC(null, .normal) catch {};
     }

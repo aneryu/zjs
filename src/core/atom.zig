@@ -928,7 +928,10 @@ const HashedInternContext = struct {
     }
 };
 
-const InternMap = std.HashMapUnmanaged(InternKey, EntryIndex, InternContext, std.hash_map.default_max_load_percentage);
+// QuickJS's atom hash stores atom ids for both predefined and dynamic atoms.
+// Use the same value here so the string index can cache predefined atoms and
+// answer the steady-state lookup with one probe regardless of atom lifetime.
+const InternMap = std.HashMapUnmanaged(InternKey, Atom, InternContext, std.hash_map.default_max_load_percentage);
 
 pub const AtomTable = struct {
     /// Extra table state carried only by `-Dzjs_ownership_audit` builds.
@@ -1062,21 +1065,38 @@ pub const AtomTable = struct {
         // the predefined and dynamic atom tables.
         if (parseArrayIndex(bytes)) |n| return atomFromUInt32(n);
         const hash = std.hash.Wyhash.hash(0, bytes);
-        if (predefinedStringIdHashed(bytes, hash)) |id| return id;
-        return self.internDynamic(bytes, .string, true, false, false, hash);
+        const lookup = HashedInternKey{ .bytes = bytes, .hash = hash };
+        if (self.string_index.getAdapted(lookup, HashedInternContext{})) |id| {
+            if (isConst(id)) return id;
+            const entry = self.findDynamic(id).?;
+            std.debug.assert(entry.isLive() and entry.kind == .string);
+            entry.ref_count += 1;
+            return id;
+        }
+        if (predefinedStringIdHashed(bytes, hash)) |id| {
+            // The cache is optional: a predefined atom already exists and
+            // remains valid if growing the runtime index is denied by OOM.
+            self.string_index.put(
+                self.memory.persistent_allocator,
+                .{ .bytes = predefined_atoms[id - 1].name },
+                id,
+            ) catch return id;
+            return id;
+        }
+        return self.internDynamic(bytes, .string, true, false, false, hash, true);
     }
 
     pub fn newSymbol(self: *AtomTable, description: []const u8, atom_kind: AtomKind) !Atom {
         std.debug.assert(atom_kind == .symbol or atom_kind == .private);
-        return self.internDynamic(description, atom_kind, false, false, false, 0);
+        return self.internDynamic(description, atom_kind, false, false, false, 0, false);
     }
 
     pub fn newValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internDynamic(description, .symbol, false, true, false, 0);
+        return self.internDynamic(description, .symbol, false, true, false, 0, false);
     }
 
     pub fn newValueSymbolNoDescription(self: *AtomTable) !Atom {
-        return self.internDynamic("", .symbol, false, true, true, 0);
+        return self.internDynamic("", .symbol, false, true, true, 0, false);
     }
 
     pub fn internSymbol(self: *AtomTable, description: []const u8) !Atom {
@@ -1085,27 +1105,27 @@ pub const AtomTable = struct {
 
     pub fn internGlobalSymbol(self: *AtomTable, description: []const u8) !Atom {
         const hash = std.hash.Wyhash.hash(0, description);
-        if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = description, .hash = hash }, HashedInternContext{})) |idx| {
-            const entry = &self.entries[idx];
+        if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = description, .hash = hash }, HashedInternContext{})) |id| {
+            const entry = self.findDynamic(id).?;
             std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
             self.retainValueSymbolEntry(entry);
-            return entry.id;
+            return id;
         }
-        return self.internDynamic(description, .global_symbol, true, false, false, hash);
+        return self.internDynamic(description, .global_symbol, true, false, false, hash, true);
     }
 
     pub fn internRegisteredValueSymbol(self: *AtomTable, description: []const u8) !Atom {
         const hash = std.hash.Wyhash.hash(0, description);
-        if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = description, .hash = hash }, HashedInternContext{})) |idx| {
-            const entry = &self.entries[idx];
+        if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = description, .hash = hash }, HashedInternContext{})) |id| {
+            const entry = self.findDynamic(id).?;
             std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
             if (!entry.registry_managed_symbol) {
                 self.retainValueSymbolEntry(entry);
                 entry.registry_managed_symbol = true;
             }
-            return entry.id;
+            return id;
         }
-        const id = try self.internDynamic(description, .global_symbol, true, false, false, hash);
+        const id = try self.internDynamic(description, .global_symbol, true, false, false, hash, true);
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
         return id;
@@ -1117,7 +1137,7 @@ pub const AtomTable = struct {
         const entry = self.entries[idx];
         if (!entry.hasLiveValue() or entry.kind != .global_symbol) return false;
         const indexed = self.symbol_index.get(.{ .bytes = entry.bytes }) orelse return false;
-        return indexed == idx;
+        return indexed == atom_id;
     }
 
     pub fn dup(self: *AtomTable, atom: Atom) Atom {
@@ -1489,23 +1509,23 @@ pub const AtomTable = struct {
         return body;
     }
 
-    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool, lookup_hash: u64) !Atom {
+    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool, lookup_hash: u64, index_lookup_done: bool) !Atom {
         // Fast path: interning lookup via hash map. The map is keyed by
         // bytes, indexed per-kind (string vs symbol/private) so a string
         // `"foo"` and a symbol description `"foo"` map to distinct atoms.
-        if (atom_kind == .string) {
-            if (self.string_index.getAdapted(HashedInternKey{ .bytes = bytes, .hash = lookup_hash }, HashedInternContext{})) |idx| {
-                const entry = &self.entries[idx];
+        if (atom_kind == .string and !index_lookup_done) {
+            if (self.string_index.getAdapted(HashedInternKey{ .bytes = bytes, .hash = lookup_hash }, HashedInternContext{})) |id| {
+                const entry = self.findDynamic(id).?;
                 std.debug.assert(entry.isLive() and entry.kind == .string);
                 entry.ref_count += 1;
-                return entry.id;
+                return id;
             }
-        } else if (atom_kind == .global_symbol) {
-            if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = bytes, .hash = lookup_hash }, HashedInternContext{})) |idx| {
-                const entry = &self.entries[idx];
+        } else if (atom_kind == .global_symbol and !index_lookup_done) {
+            if (self.symbol_index.getAdapted(HashedInternKey{ .bytes = bytes, .hash = lookup_hash }, HashedInternContext{})) |id| {
+                const entry = self.findDynamic(id).?;
                 std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
                 self.retainValueSymbolEntry(entry);
-                return entry.id;
+                return id;
             }
         }
 
@@ -1599,8 +1619,8 @@ pub const AtomTable = struct {
     fn indexEntry(self: *AtomTable, idx: EntryIndex) !void {
         const entry = &self.entries[idx];
         switch (entry.kind) {
-            .string => try self.string_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
-            .global_symbol => try self.symbol_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
+            .string => try self.string_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, entry.id),
+            .global_symbol => try self.symbol_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, entry.id),
             .symbol => {},
             .private => {},
         }

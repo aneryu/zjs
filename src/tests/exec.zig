@@ -11560,6 +11560,45 @@ test "Engine heritage closures retain the initialized inner class-name binding" 
     try std.testing.expect(result.isUndefined());
 }
 
+test "Engine inferred class names precede static initialization across named-evaluation sites" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\  let Assigned;
+        \\  Assigned = class { static { this.observedName = this.name; } };
+        \\  assert.sameValue(Assigned.name, "Assigned");
+        \\  assert.sameValue(Assigned.observedName, "Assigned");
+        \\  const computedKey = Symbol("computed");
+        \\  const holder = { [computedKey]: class { static { this.observedName = this.name; } } };
+        \\  assert.sameValue(holder[computedKey].name, "[computed]");
+        \\  assert.sameValue(holder[computedKey].observedName, "[computed]");
+        \\  class Outer {
+        \\    instance = class { static { this.observedName = this.name; } };
+        \\    static field = class { static { this.observedName = this.name; } };
+        \\  }
+        \\  const outer = new Outer();
+        \\  assert.sameValue(outer.instance.name, "instance");
+        \\  assert.sameValue(outer.instance.observedName, "instance");
+        \\  assert.sameValue(Outer.field.name, "field");
+        \\  assert.sameValue(Outer.field.observedName, "field");
+        \\  const Sequence = (0, class { static { this.observedName = this.name; } });
+        \\  assert.sameValue(Sequence.name, "");
+        \\  assert.sameValue(Sequence.observedName, "");
+        \\  const Override = class {
+        \\    static name = "override";
+        \\    static { this.observedName = this.name; }
+        \\  };
+        \\  assert.sameValue(Override.name, "override");
+        \\  assert.sameValue(Override.observedName, "override");
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval assigns contextual await bindings in sloppy scripts" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

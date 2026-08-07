@@ -27,7 +27,7 @@ const Decoded = struct {
 /// `no_line_terminator` is true, a line terminator in the skipped trivia is
 /// returned instead of crossed. `pos.*` is local caller state; the engine
 /// lexer is never touched.
-pub fn next(source: []const u8, pos: *usize, no_line_terminator: bool) Kind {
+pub inline fn next(source: []const u8, pos: *usize, no_line_terminator: bool) Kind {
     var p = pos.*;
     while (p < source.len) {
         const c = source[p];
