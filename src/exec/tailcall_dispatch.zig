@@ -1610,74 +1610,100 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         const region_start = sp - total;
         const receiver = region_start[0];
         const method = region_start[1];
-        if (inline_calls.resolveInlineFunction(vm.global, method)) |resolved| {
-            vm.frame.pc += 2;
-            vm.stack.setTopPtr(region_start);
-            const execution = resolved.call_facts.execution;
-            // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
-            // published leaf skips InlineTarget freight and the three-deep
-            // pushFrame/fallback/setup constructor chain. The receiver rides
-            // into the frame's owned raw `this` (identical ownership to the
-            // general method arm); `pc + 3` (opcode + 2-byte argc operand) is
-            // the register-resident twin of the frame.pc advance above.
-            if (argc == 0 and execution.simple_inline_empty_leaf) {
-                return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, pc + 3, resolved.fb.byteCode().ptr);
-            }
-            // Strict methods and arrow-valued properties share the
-            // policy-independent receiver arm (the raw receiver transfers
-            // verbatim in every case; sloppy coercion stays deferred to the
-            // this-reading opcodes, and an arrow never consults the slot) but
-            // enter through the authoritative out-of-line leaf constructor: a
-            // second inline warm body here would be instruction-identical to
-            // the sloppy one and could tail-merge back into a shared
-            // discrimination head on the established sloppy method arm. One
-            // bl still beats the retired pushFrame(.generic) three-deep
-            // chain, and the empty-leaf resume record and return epilogue are
-            // identical from there.
-            if (argc == 0 and execution.raw_this_inline_empty_leaf) {
-                return pushEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, resolved.fb.byteCode().ptr);
-            }
-            // O2 capture-leaf method twin: `recv.cb()` where cb is a zero-arg
-            // closure/arrow over captured state. The receiver arm is
-            // policy-independent (the raw receiver transfers verbatim; an
-            // arrow body never consults the slot). One bl into the
-            // authoritative constructor mirrors the raw zero-arg method arm
-            // above; the kind byte is tested only after both established
-            // zero-arg bits missed.
-            if (argc == 0 and execution.capture_leaf_kind != .none) {
-                return pushCaptureLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, resolved.fb.byteCode().ptr);
-            }
-            // O1 exact-args method arms: `recv.m(x)` on a published exact-args
-            // leaf. The receiver arm is policy-independent (raw receiver
-            // transfers verbatim), but sloppy and raw keep the zero-arg
-            // family's warm/outline split so the second body cannot
-            // tail-merge into a shared discrimination head with the first.
-            // Fused kind byte first (one-load leaf-miss), arity second (see
-            // the opCall arm).
-            const leaf_kind = execution.exact_args_leaf_kind;
-            if (leaf_kind != .none) {
-                if (argc == resolved.fb.arg_count) {
-                    if (leaf_kind == .sloppy) {
-                        return pushWarmExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
+        // Shared unpacking (Phase 2b): do objectFromValue once, then branch on
+        // class_id. This avoids a redundant objectFromValue for the ~85% native-
+        // method case (the native arm reuses the same object pointer). The
+        // bytecode inline path gets the same object it would have unpacked inside
+        // resolveInlineFunction; the extracted resolveInlineFunctionFromObject
+        // skips the re-unpack.
+        if (class_vm.objectFromValue(method)) |method_obj| {
+            if (method_obj.class_id == core.class.ids.bytecode_function) {
+                if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
+                    vm.frame.pc += 2;
+                    vm.stack.setTopPtr(region_start);
+                    const execution = resolved.call_facts.execution;
+                    // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
+                    // published leaf skips InlineTarget freight and the three-deep
+                    // pushFrame/fallback/setup constructor chain. The receiver rides
+                    // into the frame's owned raw `this` (identical ownership to the
+                    // general method arm); `pc + 3` (opcode + 2-byte argc operand) is
+                    // the register-resident twin of the frame.pc advance above.
+                    if (argc == 0 and execution.simple_inline_empty_leaf) {
+                        return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, pc + 3, resolved.fb.byteCode().ptr);
                     }
-                    return pushExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, resolved.fb.byteCode().ptr);
+                    // Strict methods and arrow-valued properties share the
+                    // policy-independent receiver arm (the raw receiver transfers
+                    // verbatim in every case; sloppy coercion stays deferred to the
+                    // this-reading opcodes, and an arrow never consults the slot) but
+                    // enter through the authoritative out-of-line leaf constructor: a
+                    // second inline warm body here would be instruction-identical to
+                    // the sloppy one and could tail-merge back into a shared
+                    // discrimination head on the established sloppy method arm. One
+                    // bl still beats the retired pushFrame(.generic) three-deep
+                    // chain, and the empty-leaf resume record and return epilogue are
+                    // identical from there.
+                    if (argc == 0 and execution.raw_this_inline_empty_leaf) {
+                        return pushEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, resolved.fb.byteCode().ptr);
+                    }
+                    // O2 capture-leaf method twin: `recv.cb()` where cb is a zero-arg
+                    // closure/arrow over captured state. The receiver arm is
+                    // policy-independent (the raw receiver transfers verbatim; an
+                    // arrow body never consults the slot). One bl into the
+                    // authoritative constructor mirrors the raw zero-arg method arm
+                    // above; the kind byte is tested only after both established
+                    // zero-arg bits missed.
+                    if (argc == 0 and execution.capture_leaf_kind != .none) {
+                        return pushCaptureLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, resolved.fb.byteCode().ptr);
+                    }
+                    // O1 exact-args method arms: `recv.m(x)` on a published exact-args
+                    // leaf. The receiver arm is policy-independent (raw receiver
+                    // transfers verbatim), but sloppy and raw keep the zero-arg
+                    // family's warm/outline split so the second body cannot
+                    // tail-merge into a shared discrimination head with the first.
+                    // Fused kind byte first (one-load leaf-miss), arity second (see
+                    // the opCall arm).
+                    const leaf_kind = execution.exact_args_leaf_kind;
+                    if (leaf_kind != .none) {
+                        if (argc == resolved.fb.arg_count) {
+                            if (leaf_kind == .sloppy) {
+                                return pushWarmExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
+                            }
+                            return pushExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, resolved.fb.byteCode().ptr);
+                        }
+                        // Q3 padded method sibling: `recv.one()` with
+                        // `function one(value)`. The receiver arm is
+                        // policy-independent (the raw receiver transfers verbatim;
+                        // both published kinds accept the .receiver instantiation),
+                        // so ONE bl into the outline warm constructor serves both
+                        // modes without adding a third warm inline body to this
+                        // handler. Capacity compare mirrors the plain arm; a miss
+                        // keeps the established full-price padded constructor.
+                        if (argc < resolved.fb.arg_count and
+                            paddedLeafRegionHasCapacity(vm.stack, region_start, true, resolved.fb.arg_count))
+                        {
+                            return pushWarmOutlinePaddedArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
+                        }
+                    }
+                    const target = resolved.bind(receiver, method);
+                    return pushAndEnter(vb, vm, &target, region_start, argc, .method, false);
                 }
-                // Q3 padded method sibling: `recv.one()` with
-                // `function one(value)`. The receiver arm is
-                // policy-independent (the raw receiver transfers verbatim;
-                // both published kinds accept the .receiver instantiation),
-                // so ONE bl into the outline warm constructor serves both
-                // modes without adding a third warm inline body to this
-                // handler. Capacity compare mirrors the plain arm; a miss
-                // keeps the established full-price padded constructor.
-                if (argc < resolved.fb.arg_count and
-                    paddedLeafRegionHasCapacity(vm.stack, region_start, true, resolved.fb.arg_count))
-                {
-                    return pushWarmOutlinePaddedArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
+            } else if (method_obj.class_id == core.class.ids.c_function) {
+                // Native c_function fast dispatch (Phase 2a/2b): skip
+                // callMethod's call boundary for the ~85% native-method case
+                // (Phase 1 measurement). The helper is outlined (noinline) to
+                // keep op_call_method's I-cache footprint unchanged; it mirrors
+                // callMethod's native leg exactly. forwards_call records
+                // (Function.prototype.call) return .miss so the forwarding arm
+                // below keeps its fused-frame optimization. On .miss, frame.pc
+                // is restored to the argc operand for the fallthrough paths.
+                // Sync stack top so the helper's stack.len() reflects the live
+                // region (syncPc above only updated frame.pc, not stack.top_ptr).
+                vm.stack.setTopPtr(sp);
+                switch (call_vm.nativeMethodFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc) catch |e| return vm.fail(e)) {
+                    .hit, .caught => return coldNext(vb, vm),
+                    .miss => {}, // fall through to forwarding arm / callMethod
                 }
             }
-            const target = resolved.bind(receiver, method);
-            return pushAndEnter(vb, vm, &target, region_start, argc, .method, false);
         }
         if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
             const this_arg = if (argc == 0) JSValue.undefinedValue() else region_start[2];
@@ -3061,22 +3087,35 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     const key = (sp - 2)[0];
     const obj = (sp - 3)[0];
     const rt = vm.ctx.runtime;
-    const overwrite_result = array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value);
-    if (overwrite_result == .handled) {
-        // QuickJS still uses generic JS_FreeValue for sp[-3] here: preserve
-        // its refcount-tag check and omit only zjs's active-impossible deinit
-        // phase gate.
-        obj.freeDuringActiveBytecode(rt);
-        return cont(pc + 1, sp - 3, var_buf, vm);
-    }
-    if (overwrite_result == .append_candidate) {
-        switch (array_ops.putDenseArrayElementAppendOwnedFast(rt, obj, key, value)) {
-            .handled => {
-                obj.freeDuringActiveBytecode(rt);
-                return cont(pc + 1, sp - 3, var_buf, vm);
-            },
-            .out_of_memory => return vm.fail(error.OutOfMemory),
-            .miss => {},
+    // Inline Array check: skip the noinline dense overwrite/append probes for
+    // non-Array objects (typed arrays, regular objects). 72% of puts in pdfjs
+    // are typed array writes that always miss the dense probes — the noinline
+    // call to putDenseArrayElementOverwriteOwnedFast just checks isArray()
+    // and returns .miss, costing ~2.27M function calls for zero hits.
+    const obj_is_array = if (obj.isObject()) blk: {
+        if (class_vm.objectFromValue(obj)) |obj_ptr| {
+            break :blk obj_ptr.isArray();
+        }
+        break :blk false;
+    } else false;
+    if (obj_is_array) {
+        const overwrite_result = array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value);
+        if (overwrite_result == .handled) {
+            // QuickJS still uses generic JS_FreeValue for sp[-3] here: preserve
+            // its refcount-tag check and omit only zjs's active-impossible deinit
+            // phase gate.
+            obj.freeDuringActiveBytecode(rt);
+            return cont(pc + 1, sp - 3, var_buf, vm);
+        }
+        if (overwrite_result == .append_candidate) {
+            switch (array_ops.putDenseArrayElementAppendOwnedFast(rt, obj, key, value)) {
+                .handled => {
+                    obj.freeDuringActiveBytecode(rt);
+                    return cont(pc + 1, sp - 3, var_buf, vm);
+                },
+                .out_of_memory => return vm.fail(error.OutOfMemory),
+                .miss => {},
+            }
         }
     }
     if (key.isInt() and obj.isObject()) {
@@ -3410,7 +3449,9 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
     }
-    if (key.isString()) return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_string), .{ pc, sp, var_buf, vm });
+    if (key.isString()) {
+        return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_string), .{ pc, sp, var_buf, vm });
+    }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
