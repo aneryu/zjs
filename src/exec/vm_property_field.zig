@@ -381,6 +381,8 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
     atom_id: core.Atom,
     comptime trust_mapped_arguments_probe: bool,
     comptime trust_non_private_atom: bool,
+    comptime report_absent: bool,
+    absent: *bool,
 ) ?*const core.JSValue {
     // Object-ness gate FIRST, mirroring qjs GET_FIELD_INLINE's leading
     // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
@@ -410,31 +412,77 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
     // get_field / get_field2 hot path) off the per-object class test entirely; the
     // predicate comptime-folds to false for the get_length caller (trust=true).
     const probe_mapped_arguments = !trust_mapped_arguments_probe and core.atom.isTaggedInt(atom_id);
+    // Phase 1 — the absence-authoritative prefix (only compiled for callers that
+    // ask for the tri-state). qjs ends its inline window at the chain root with
+    // `p = p->shape->proto; if (!p) { val = JS_UNDEFINED; break; }`
+    // (quickjs.c:19141-19143), because there a shape miss on a non-exotic link
+    // is the whole answer. zjs cannot say that for every class:
+    // `object_ops.getValuePropertyObjectMiss` still resolves built-in prototype
+    // members by CLASS NAME off the global (Array/Function/String/Date/...
+    // prototypes) after the real chain missed, and some objects (rest-parameter
+    // arrays, regexp-split results) legitimately have a null self.prototype
+    // while still resolving members through that fallback. So `undefined` may
+    // only be synthesized when EVERY link walked was one of the two classes with
+    // no such fallback and no exotic miss behaviour — plain `object` and the
+    // global object. That is exactly the per-cursor admission set of the
+    // out-of-line `property_ic.ordinaryDataPropertyLookup`, whose `.undefined`
+    // arm is what the cold tail reaches today: this leg is a pure fusion of that
+    // walk into the handler, not a new semantic.
+    //
+    // Structured as a separate loop rather than a running "still ordinary" latch
+    // so the own-hit path stays byte-identical to the two-state walk: a latch is
+    // loop-carried and forces its initializer into the loop preheader, which the
+    // depth-0 hit executes (measured: +2 insn/read on hit4..hit256 and del).
+    // Crossing a non-authoritative link just falls into phase 2 below.
+    if (comptime report_absent) {
+        while (true) {
+            // zjs-only divergence from qjs's probe-first order: mapped Arguments
+            // numeric bindings live in out-of-shape var-ref cells, so a shape
+            // data slot on a mapped Arguments object can be stale and its hit
+            // cannot be trusted — bail before probing. (qjs stores those
+            // bindings as JS_PROP_VARREF shape entries, which its own probe
+            // rejects via JS_PROP_TMASK.) Only a tagged-int operand atom can
+            // alias one of those numeric bindings; named atoms and the constant
+            // `length` atom skip it.
+            if (probe_mapped_arguments and object.class_id == core.class.ids.mapped_arguments) return null;
+            var slow_property = false;
+            if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
+            if (slow_property) return null;
+            // qjs GET_FIELD_INLINE consults `p->is_exotic` only AFTER the own
+            // probe misses (quickjs.c:19135-19141): an own plain-data hit — a
+            // sparse array element, named data on a typed array, anything the
+            // shape authoritatively owns — never pays the class test.
+            //
+            // For `object`/`global_object`, `classNeedsSlowPropertyAccess`
+            // reduces exactly to the exotic-methods bit (neither class appears
+            // in any of its slow arms), so an authoritative link costs one
+            // compare plus one bit test instead of the whole class switch.
+            if (object.class_id == core.class.ids.object or object.isGlobal()) {
+                if (object.hasExoticMethods()) return null;
+                object = object.getPrototype() orelse {
+                    absent.* = true;
+                    return null;
+                };
+                continue;
+            }
+            // Non-authoritative link: it may still hold or inherit the property,
+            // so keep walking — but absence can no longer be concluded from here
+            // on, which is precisely phase 2's two-state contract.
+            if (object.needsSlowPropertyAccess()) return null;
+            object = object.getPrototype() orelse return null;
+            break;
+        }
+    }
+    // Phase 2 — the pre-existing two-state walk, verbatim. Reached directly by
+    // the two-state callers and by phase 1 once a non-authoritative link has
+    // been crossed. Running off the end here returns null (= "defer to the
+    // resolver"), preserving the by-class-name fallback described above.
     while (true) {
-        // zjs-only divergence from qjs's probe-first order: mapped Arguments
-        // numeric bindings live in out-of-shape var-ref cells, so a shape data
-        // slot on a mapped Arguments object can be stale and its hit cannot be
-        // trusted — bail before probing. (qjs stores those bindings as
-        // JS_PROP_VARREF shape entries, which its own probe rejects via
-        // JS_PROP_TMASK.) Only a tagged-int operand atom can alias one of those
-        // numeric bindings; named atoms and the constant `length` atom skip it.
         if (probe_mapped_arguments and object.class_id == core.class.ids.mapped_arguments) return null;
         var slow_property = false;
         if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
         if (slow_property) return null;
-        // qjs GET_FIELD_INLINE consults `p->is_exotic` only AFTER the own
-        // probe misses (quickjs.c:19135-19141): an own plain-data hit — sparse
-        // array element, named data on a typed array, anything the shape
-        // authoritatively owns — never pays the class test. Mirror that; a
-        // miss on a slow class defers to the full resolver.
         if (object.needsSlowPropertyAccess()) return null;
-        // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
-        // here: zjs resolves built-in prototype methods/constructor for arrays and other
-        // class objects via a by-class-name global fallback (object_ops.getValueProperty),
-        // and some objects (rest-parameter arrays, regexp-split results) legitimately have
-        // a null self.prototype while still resolving those members through that fallback.
-        // Returning null defers to the slow path, which both does the global fallback and
-        // returns a genuine `undefined` for truly-absent properties.
         object = object.getPrototype() orelse return null;
     }
 }
@@ -444,11 +492,30 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
 /// words (see findOwnDataSlotFast). The pointer is only valid until the next
 /// potentially-shape-mutating operation; both callers consume it immediately.
 pub inline fn qjsGetFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
-    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true);
+    var absent = false;
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true, false, &absent);
+}
+
+/// Tri-state twin of `qjsGetFieldFastSlot` for op_get_field / op_get_field2.
+/// A null return now carries a discriminator: `absent.*` is set only when the
+/// walk ran off the end of a chain whose every link was absence-authoritative
+/// (see the terminal comment above), i.e. the property is genuinely missing and
+/// the result is `undefined` — qjs GET_FIELD_INLINE's `if (!p) { val =
+/// JS_UNDEFINED; break; }` (quickjs.c:19141-19143). `absent.*` false keeps the
+/// previous meaning: defer to the resolver. The caller must initialize it to
+/// false; the walk only ever writes it on the chain-exhausted leg.
+pub inline fn qjsGetFieldFastSlotOrAbsent(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+    absent: *bool,
+) ?*const core.JSValue {
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true, true, absent);
 }
 
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, false) orelse return null;
+    var absent = false;
+    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, false, false, &absent) orelse return null;
     return slot.*;
 }
 
@@ -458,7 +525,8 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
 /// own `length` data on Arguments and typed arrays hit before their slow class
 /// semantics while misses and accessor entries still defer to the resolver.
 pub inline fn qjsGetLengthFieldFast(rt: *core.JSRuntime, receiver: core.JSValue) ?core.JSValue {
-    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, core.atom.ids.length, true, true) orelse return null;
+    var absent = false;
+    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, core.atom.ids.length, true, true, false, &absent) orelse return null;
     return slot.*;
 }
 
