@@ -10516,6 +10516,24 @@ pub const Object = extern struct {
         if (self.class_id == class.ids.module_ns) return error.ReadOnly;
         if (self.isArray() and atom_id == atom.ids.length) {
             if (!self.flags.length_writable) return error.ReadOnly;
+            // Fast path: fast_array length assignment mirrors qjs set_array_length
+            // (quickjs.c:9447-9455). A fast array's elements live in u.array.values,
+            // NOT in the shape property table, so the generic defineArrayLength
+            // path does two full shape-prop scans (the shrink loop + recomputeArrayStorageMode)
+            // that touch zero relevant entries. This fast path does only:
+            //   1. arrayLengthFromValue (number→uint32, no side effects on pre-coerced values)
+            //   2. truncateArrayElements (free tail values on shrink)
+            //   3. set u.array.length
+            // Non-fast arrays, invalid lengths, and side-effecting coercions fall
+            // through to defineArrayLength unchanged.
+            if (self.flags.fast_array) {
+                if (try arrayLengthFromValue(rt, new_value)) |len| {
+                    self.truncateArrayElements(rt, len);
+                    self.u.array.length = len;
+                    return;
+                }
+                return error.InvalidLength;
+            }
             try self.defineArrayLength(rt, descriptor.Descriptor.data(new_value, true, false, false));
             return;
         }
@@ -11052,7 +11070,14 @@ pub const Object = extern struct {
         }
         self.truncateArrayElements(rt, target_len);
         self.setArrayLength(target_len);
-        self.recomputeArrayStorageMode(rt);
+        // qjs set_array_length never re-densifies: a non-fast array stays
+        // non-fast after a length change. The retired recomputeArrayStorageMode
+        // was a zjs-specific O(prop_count) shape scan on every length
+        // assignment that tried to re-densify arrays whose indexed shape props
+        // were all deleted by the shrink loop — but that scan dominated
+        // pdfjs's `arr.length = n` hot path (16+ samples self-time). qjs pays
+        // zero here; matching it keeps semantics identical (the shrink loop
+        // above already handles non-configurable prop fallback).
         if (desc.writable) |writable| self.flags.length_writable = writable;
     }
 

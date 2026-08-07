@@ -4138,10 +4138,13 @@ pub fn ordinaryHasValueProperty(
     }
     if (typedArrayCanonicalHas(ctx.runtime, object, atom_id)) |has| return has;
     if (indexedExoticHasProperty(ctx.runtime, object, atom_id)) return true;
-    if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-        desc.destroy(ctx.runtime);
-        return true;
-    }
+    // Use existsOwnProperty (qjs JS_GetOwnPropertyInternal desc==NULL mode)
+    // instead of getOwnProperty + destroy: the HasProperty trap only needs
+    // existence, not a materialized Descriptor. getOwnProperty calls
+    // descriptorFromOwnPropertySlot which dups the value — pure waste here
+    // since the descriptor is immediately destroyed. This was ~5.5% of pdfjs
+    // self-time (ordinaryHasValueProperty 13 + getOwnProperty 16 samples).
+    if (try object.existsOwnProperty(ctx.runtime, atom_id)) return true;
 
     var current = object.getPrototype();
     while (current) |proto| : (current = proto.getPrototype()) {
@@ -4153,10 +4156,7 @@ pub fn ordinaryHasValueProperty(
         }
         if (typedArrayCanonicalHas(ctx.runtime, proto, atom_id)) |has| return has;
         if (indexedExoticHasProperty(ctx.runtime, proto, atom_id)) return true;
-        if (try proto.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-            desc.destroy(ctx.runtime);
-            return true;
-        }
+        if (try proto.existsOwnProperty(ctx.runtime, atom_id)) return true;
     }
     return has_builtin_object_proto;
 }
