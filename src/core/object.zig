@@ -320,6 +320,13 @@ pub const IteratorPayload = struct {
     zip_mode: u8 = 0,
     zip_state: u8 = 0,
     executing: bool = false,
+    /// Set while this Map/Set iterator holds a cursor on `target`'s entry
+    /// array. Taken on the first advance and dropped on exhaustion or
+    /// finalization, mirroring qjs's `it->cur_record` reference: an iterator
+    /// that has not stepped yet holds no record (js_map_iterator_next
+    /// quickjs.c:52596 only refs once it has picked one), so it must not pin
+    /// anything either.
+    collection_cursor_held: bool = false,
 
     pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
@@ -3902,6 +3909,20 @@ pub const Object = extern struct {
         return 0;
     }
 
+    /// Park this Map/Set iterator's cursor on its target collection, once.
+    /// Mirrors `mr->ref_count++` in js_map_iterator_next (quickjs.c:52605):
+    /// taken when the iterator settles on a position, not when it is created,
+    /// so an iterator that never stepped pins nothing.
+    pub fn retainCollectionIteratorCursor(self: *Object) void {
+        const payload = self.iteratorPayload() orelse return;
+        if (payload.collection_cursor_held) return;
+        if (self.class_id != class.ids.map_iterator and self.class_id != class.ids.set_iterator) return;
+        const target = payload.target orelse return;
+        const target_object = objectFromValue(target) orelse return;
+        target_object.retainCollectionCursor();
+        payload.collection_cursor_held = true;
+    }
+
     /// Drop a Map/Set iterator's hold on its target collection: releases the
     /// entry-array cursor and then the target reference itself. Mirrors
     /// js_map_iterator_next's end-of-enumeration arm (quickjs.c:52608-52613),
@@ -6836,6 +6857,8 @@ pub const Object = extern struct {
     /// releasing `it->obj`, guarded by a liveness check because the map's own
     /// teardown may have run first.
     fn releaseIteratorCollectionCursor(class_id: class.ClassId, payload: *IteratorPayload) void {
+        if (!payload.collection_cursor_held) return;
+        payload.collection_cursor_held = false;
         if (class_id != class.ids.map_iterator and class_id != class.ids.set_iterator) return;
         const target = payload.target orelse return;
         const target_object = objectFromValue(target) orelse return;

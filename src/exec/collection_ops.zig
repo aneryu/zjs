@@ -675,12 +675,10 @@ fn collectionIterator(
     const iterator = try core.Object.create(rt, iterator_class, prototype.object);
     errdefer core.Object.destroyFromHeader(rt, &iterator.header);
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), target_value.dup());
-    // The iterator now parks an entry-array cursor on the target until it is
-    // exhausted or finalized, mirroring the record `ref_count` a qjs Map
-    // iterator holds (js_map_iterator_next quickjs.c:52605). The matching
-    // release lives in `detachCollectionIteratorTarget` and in the iterator
-    // payload teardown, so the errdefer above stays balanced.
-    object.retainCollectionCursor();
+    // No entry-array cursor yet: qjs's fresh iterator has `cur_record == NULL`
+    // and holds no record reference (js_map_iterator_new quickjs.c:52556). The
+    // cursor is taken on the first advance and released on exhaustion or in the
+    // iterator payload teardown.
     iterator.iteratorIndexSlot().* = 0;
     iterator.iteratorKindSlot().* = @intFromEnum(kind);
     return iterator.value();
@@ -780,6 +778,9 @@ fn collectionIteratorNext(rt: *core.JSRuntime, iterator: *core.Object) !core.JSV
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return error.TypeError;
     const target_value = (iterator.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const target = try expectObject(target_value);
+    // Park the cursor before reading a position out of the entry array
+    // (quickjs.c:52605 `mr->ref_count++`); the done arm below detaches it.
+    iterator.retainCollectionIteratorCursor();
     while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().*.len) {
         const index = (iterator.iteratorIndexSlot().*);
         iterator.iteratorIndexSlot().* += 1;
