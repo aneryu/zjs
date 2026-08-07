@@ -2468,6 +2468,63 @@ pub fn nativeFunctionNameForVm(rt: *core.JSRuntime, function_object: *core.Objec
     return nativeFunctionDispatchName(rt, function_object);
 }
 
+/// Borrowed-bytes result of `nativeFunctionNameForVmBorrowed`. `name` holds
+/// exactly the bytes `nativeFunctionNameForVm` would have returned. `owned`
+/// is non-null only when the fallback had to materialize them, so
+/// `deinit` is unconditionally correct.
+///
+/// `name` borrows the runtime atom table on the fast path, so it stays valid
+/// only until the next atom-table mutation. Every dispatch probe compares it
+/// immediately and drops it, which is a strictly shorter borrow than the one
+/// `nativeFunctionDispatchNameRef` already holds across the whole
+/// `callNativeCallableByName` chain.
+pub const VmDispatchName = struct {
+    name: []const u8,
+    owned: ?[]u8,
+
+    pub fn deinit(self: VmDispatchName, rt: *core.JSRuntime) void {
+        if (self.owned) |bytes| rt.memory.allocator.free(bytes);
+    }
+};
+
+/// Allocation-free counterpart to `nativeFunctionNameForVm` for the native
+/// dispatch probes. Every probe used to re-materialize the dispatch name with
+/// an `allocator.dupe` + `free` round trip purely to run one `std.mem.eql`;
+/// a single `ta.subarray()` walked ~13 of them and paid 14 allocations before
+/// reaching its handler. QuickJS never re-derives a name to dispatch a native
+/// call: `js_call_c_function` (quickjs.c:17562, reached from OP_call_method at
+/// quickjs.c:18220) switches on the already-resolved function's `magic`. This
+/// borrows the interned dispatch atom's bytes instead, which is the closest
+/// zjs equivalent of reading that pre-resolved identity.
+///
+/// The fallback deliberately calls the exact allocating path, so callables
+/// with no interned dispatch atom keep every observable behavior: utf16 and
+/// accessor (`get x` / `set x`) names, `.bind` wrappers, anonymous and
+/// symbol-derived names, the `name` property getter's side effects, and the
+/// `error.TypeError` a non-string `name` raises. Failing open to the old path
+/// (never "assume not equal") is what keeps this a pure cost removal.
+pub fn nativeFunctionNameForVmBorrowed(rt: *core.JSRuntime, function_object: *core.Object) !VmDispatchName {
+    const dispatch_atom = function_object.nativeDispatchName();
+    if (dispatch_atom != core.atom.null_atom) {
+        if (rt.atoms.name(dispatch_atom)) |bytes| return .{ .name = bytes, .owned = null };
+    }
+    const owned = try nativeFunctionDispatchName(rt, function_object);
+    return .{ .name = owned, .owned = owned };
+}
+
+/// Single-name form of `nativeFunctionNameForVmBorrowed`, equivalent to
+/// `std.mem.eql(u8, try nativeFunctionNameForVm(rt, o), expected)` including
+/// the error cases, but without the allocation on the interned-atom path.
+pub fn nativeFunctionNameForVmEquals(
+    rt: *core.JSRuntime,
+    function_object: *core.Object,
+    expected: []const u8,
+) !bool {
+    const dispatch = try nativeFunctionNameForVmBorrowed(rt, function_object);
+    defer dispatch.deinit(rt);
+    return std.mem.eql(u8, dispatch.name, expected);
+}
+
 pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isFunctionBytecode()) {
         const bytecode = functionBytecodeFromValue(value) orelse return error.TypeError;
