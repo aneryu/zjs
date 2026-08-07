@@ -261,7 +261,16 @@ const Instruction = struct {
 fn decodeInstruction(code: []const u8, position: u32) Error!Instruction {
     if (position >= code.len) return error.InvalidBytecode;
     const op_id = code[position];
-    const size = opcode.sizeOf(op_id);
+    // qjs:34900 reads ONE `opcode_info[op]` row and takes both `.size` and
+    // `.fmt` out of it. `sizeOf`/`formatOf` each re-derive the short-opcode
+    // index and then stride the 24-byte diagnostic `Info` row separately, so
+    // every S4 decode paid two address computations and two loads into a table
+    // six times larger than it needs to be. `compact_opcode_info` is the
+    // four-byte production row QuickJS actually compiles (bytecode.zig
+    // `CompactInfo`, "do not make each verifier instruction stride across a
+    // 24-byte row just to read these four fields"). Take both fields from it.
+    const info = opcode.finalCompactInfo(op_id) orelse return error.InvalidBytecode;
+    const size = info.size;
     // `position < code.len` makes the subtraction well-defined, and this
     // comparison proves the caller's subsequent `position + size` is within
     // the u32-sized product stream. Do not encode the same proof again as a
@@ -269,7 +278,7 @@ fn decodeInstruction(code: []const u8, position: u32) Error!Instruction {
     // lookup for the same reason).
     if (size == 0 or size > code.len - position)
         return error.InvalidBytecode;
-    return .{ .op_id = op_id, .size = size, .format = opcode.formatOf(op_id) };
+    return .{ .op_id = op_id, .size = size, .format = info.fmt };
 }
 
 fn isJumpOp(op_id: u8) bool {
@@ -460,6 +469,14 @@ const Resolver = struct {
     output_source_len: u32 = 0,
 
     bind_cursor: usize = 0,
+    /// Product offset of `binds[bind_cursor]`, or `maxInt` once the sorted
+    /// bind side table is exhausted. QuickJS reaches OP_label as an ordinary
+    /// switch arm of the same walk (qjs:34911), so an instruction that carries
+    /// no identity pays nothing at all for the label machinery. V2 keeps
+    /// identities out of band; this frontier gives them the same zero cost,
+    /// and is the idiom `resolve_variables` already uses for both of its side
+    /// tables (`refreshBindFrontier` / `refreshSourceFrontier` there).
+    next_bind_offset: u64 = std.math.maxInt(u64),
     jump_count: u32 = 0,
     atom_cursor: u32 = 0,
     source_cursor: u32 = 0,
@@ -563,6 +580,7 @@ const Resolver = struct {
             }
             std.mem.sort(BindEntry, self.binds, {}, bindLessThan);
         }
+        self.refreshBindFrontier();
 
         if (self.product.jump_size != 0) {
             self.jump_slots = self.memory.alloc(JumpSlot, self.product.jump_size) catch
@@ -1072,10 +1090,29 @@ const Resolver = struct {
             self.binds[self.bind_cursor].dead_skipped = true;
             self.bind_cursor += 1;
         }
+        self.refreshBindFrontier();
+    }
+
+    inline fn refreshBindFrontier(self: *Resolver) void {
+        self.next_bind_offset = if (self.bind_cursor < self.binds.len)
+            self.binds[self.bind_cursor].bound_offset
+        else
+            std.math.maxInt(u64);
     }
 
     /// qjs:34911-34939 OP_label, represented by the sorted bind side table.
-    fn processBindsAt(self: *Resolver, position: u32) Error!void {
+    /// `binds` is sorted by product offset and `bind_cursor` only moves
+    /// forward, so a frontier strictly past `position` proves BOTH loops below
+    /// would find nothing: every unconsumed bind is at or past the frontier,
+    /// hence none is `< position` for `retireSpannedDeadBinds` and none is
+    /// `== position` for the pass-over loop. That compare is then the whole
+    /// per-instruction cost of the out-of-band identity table.
+    inline fn processBindsAt(self: *Resolver, position: u32) Error!void {
+        if (position < self.next_bind_offset) return;
+        return self.processBindsAtCold(position);
+    }
+
+    noinline fn processBindsAtCold(self: *Resolver, position: u32) Error!void {
         try self.retireSpannedDeadBinds(position);
         while (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].bound_offset == position)
@@ -1103,6 +1140,7 @@ const Resolver = struct {
             }
             slot.first_reloc = labels.no_reloc;
         }
+        self.refreshBindFrontier();
     }
 
     fn appendJumpSlot(
@@ -1395,6 +1433,7 @@ const Resolver = struct {
             if (has_live_bind) return position;
             for (self.binds[bind_start..bind_end]) |*entry| entry.dead_skipped = true;
             self.bind_cursor = bind_end;
+            self.refreshBindFrontier();
             if (position == self.product.code_len) return position;
 
             const instruction = try decodeInstruction(self.code, position);
