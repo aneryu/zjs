@@ -862,28 +862,42 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     try std.testing.expect(rt.atoms.name(state_symbol) == null);
 }
 
+/// qjs `list_add_tail(&rd->link, &s->promise_reactions[is_reject])`
+/// (quickjs.c:54221-54222) links the reaction record onto the pending promise
+/// in O(1) with no allocation of its own. The array adaptation keeps a
+/// capacity alongside the live prefix and grows by doubling, so subscribing N
+/// handlers to one pending promise costs O(N) rather than the O(N^2) that an
+/// exact-size realloc per subscription used to pay.
 pub fn qjsAppendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reaction: core.JSValue) !void {
-    const current = promise.promiseReactions();
-    const next = try rt.memory.alloc(core.JSValue, current.len + 1);
-    errdefer rt.memory.free(core.JSValue, next);
-    var rooted_next: []core.JSValue = next[0..0];
-    var next_root = ValueSliceRoot{};
-    next_root.init(rt, &rooted_next);
-    defer next_root.deinit();
+    const slot = promise.promiseReactionsSlot();
+    const capacity_slot = promise.promiseReactionsCapacitySlot();
+    if (slot.*.len == capacity_slot.*) {
+        const current = slot.*;
+        const old_capacity = capacity_slot.*;
+        const next_capacity = if (old_capacity == 0) @as(usize, 4) else old_capacity * 2;
+        const next = try rt.memory.alloc(core.JSValue, next_capacity);
+        var rooted_next: []core.JSValue = next[0..0];
+        var next_root = ValueSliceRoot{};
+        next_root.init(rt, &rooted_next);
+        defer next_root.deinit();
 
-    @memcpy(next[0..current.len], current);
-    rooted_next = next[0..current.len];
-    next[current.len] = reaction.dup();
-    rooted_next = next[0 .. current.len + 1];
-    var reaction_owned = true;
-    errdefer if (reaction_owned) {
-        next[current.len].free(rt);
-        next[current.len] = core.JSValue.undefinedValue();
+        @memcpy(next[0..current.len], current);
         rooted_next = next[0..current.len];
-    };
-    reaction_owned = false;
-    promise.promiseReactionsSlot().* = next;
-    if (current.len != 0) rt.memory.free(core.JSValue, current);
+        slot.* = next[0..current.len];
+        capacity_slot.* = next_capacity;
+        if (old_capacity != 0) {
+            rt.memory.free(core.JSValue, current.ptr[0..old_capacity]);
+        } else if (current.len != 0) {
+            rt.memory.free(core.JSValue, current);
+        }
+    }
+
+    // Past the last fallible step: the append itself is a no-fail publish into
+    // reserved storage, so the promise is never observed in a torn state.
+    const len = slot.*.len;
+    std.debug.assert(len < capacity_slot.*);
+    slot.*.ptr[len] = reaction.dup();
+    slot.* = slot.*.ptr[0 .. len + 1];
 }
 
 pub fn qjsPromiseReactionRecord(
@@ -1066,9 +1080,16 @@ pub const PreparedPromiseReactionJobs = struct {
         }
         std.debug.assert(self.reserved_entries == self.initialized);
 
+        const capacity_slot = promise.promiseReactionsCapacitySlot();
+        const capacity = capacity_slot.*;
         promise.promiseReactionsSlot().* = &.{};
+        capacity_slot.* = 0;
         for (reactions) |reaction| reaction.free(ctx.runtime);
-        ctx.runtime.memory.free(core.JSValue, reactions);
+        if (capacity != 0) {
+            ctx.runtime.memory.free(core.JSValue, reactions.ptr[0..capacity]);
+        } else {
+            ctx.runtime.memory.free(core.JSValue, reactions);
+        }
 
         for (self.jobs[0..self.initialized]) |job| {
             ctx.runtime.job_queue.enqueueReserved(job);
