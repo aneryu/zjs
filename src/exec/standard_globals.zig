@@ -772,6 +772,12 @@ pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, method: Met
     const realm = try bootstrapPropertyRealm(rt, target, null);
     const value = try core.function.nativeFunction(realm, method.name, method.length);
     defer value.free(rt);
+    // Without this the function object carries no native record, so
+    // `nativeMethodFastDispatch` rejects it and every call walks the
+    // `callNativeCallableByName` name cascade instead.
+    if (method.native_builtin_id != 0) {
+        expectObject(value).setNativeBuiltinIdAndRecord(rt, method.native_builtin_id);
+    }
     try defineData(rt, target, method.name, value, method_flags);
 }
 
