@@ -3680,6 +3680,36 @@ pub fn opCompare(comptime opc: u8) Handler {
                         }
                     }
                 },
+                // qjs's OP_CMP_EQ / OP_CMP_STRICT_EQ arms resolve string==string
+                // INLINE inside JS_CallInternal (quickjs.c:20321-20325 and
+                // 20382-20386): `tag1 == JS_TAG_STRING && tag2 == JS_TAG_STRING`
+                // -> js_string_eq -> free both operands. Without this arm every
+                // string comparison fell to op_compare_cold and then through
+                // valuesEqual -> compareStringValues, whose rope-capable
+                // iterator pair costs a 1360-byte frame before it can compare
+                // lengths. Ropes carry Tag.string_rope, so like qjs's arm this
+                // fires on flat operands only and everything else still routes
+                // to cold_table[pc[0]] unchanged.
+                op.eq, op.neq, op.strict_eq, op.strict_neq => {
+                    const lhs = (sp - 2)[0];
+                    const rhs = (sp - 1)[0];
+                    if (lhs.tagOf() == core.Tag.string and rhs.tagOf() == core.Tag.string) {
+                        const equal = core.string.flatStringsEq(
+                            core.string.String.fromHeader(lhs.stringHeaderAssumeStringLike()),
+                            core.string.String.fromHeader(rhs.stringHeaderAssumeStringLike()),
+                        );
+                        const r = switch (opc) {
+                            op.eq, op.strict_eq => equal,
+                            op.neq, op.strict_neq => !equal,
+                            else => unreachable,
+                        };
+                        const rt = vm.ctx.runtime;
+                        lhs.free(rt);
+                        rhs.free(rt);
+                        (sp - 2)[0] = JSValue.boolean(r);
+                        return cont(pc + 1, sp - 1, var_buf, vm);
+                    }
+                },
                 else => {},
             }
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
