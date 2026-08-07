@@ -22,6 +22,33 @@ const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .Debug;
 pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
 pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 
+/// Whether an ordinary allocation consults the GC threshold at all.
+///
+/// QuickJS reaches its allocation-threshold GC from exactly one site:
+/// `js_trigger_gc(ctx->rt, sizeof(JSObject))` at the top of
+/// `JS_NewObjectFromShape` (quickjs.c:5619). The allocators underneath it —
+/// `js_malloc_rt` / `js_realloc_rt` / `js_mallocz_rt` (quickjs.c:1799-1826)
+/// and the `__js_malloc` family they call (quickjs.c:1566) — only ever check
+/// `malloc_limit`; none of them reads `malloc_gc_threshold`, which is touched
+/// exclusively by `js_trigger_gc` itself (quickjs.c:1780-1797). Property
+/// arrays (quickjs.c:5636), bytecode buffers, atom tables and parser scratch
+/// therefore carry no per-allocation GC bookkeeping in QuickJS at all.
+///
+/// zjs mirrors that shape: `JSRuntime.collectBeforeObjectAllocation` is the
+/// single production threshold boundary. The condition is level-triggered on
+/// `allocated_bytes`, and it is recomputed from scratch at that boundary and
+/// again at every `pollGC` (`over_threshold` feeds `Registry.shouldRunMajorAt`),
+/// so a crossing produced by a non-object allocation is still serviced at the
+/// next boundary — exactly as a prop-array `js_malloc` crossing in qjs waits
+/// for the next `js_trigger_gc`. Recording a request per allocation adds no
+/// scheduling information those boundaries cannot recompute.
+///
+/// Test builds inject probes through `trigger_gc_fn` to observe allocation
+/// events, and force-GC builds must still collect before every allocation, so
+/// those comptime modes retain the full per-allocation trigger. This is the
+/// same rule that already governs `JSRuntime.allocStringAlignedBytes`.
+pub const allocation_gc_trigger_enabled: bool = builtin.is_test or force_gc_on_allocation_enabled;
+
 const oom_coverage = struct {
     // Plain atomic spinlock: diagnostic instrumentation must not depend on
     // an Io handle (std.Io.Mutex) and contention is negligible (worker
@@ -1049,9 +1076,17 @@ pub const MemoryAccount = struct {
     }
 
     inline fn triggerGCBeforeAllocation(self: *MemoryAccount, byte_count: usize) void {
+        // qjs `__js_malloc` (quickjs.c:1566) checks `malloc_limit` and nothing
+        // else; `malloc_gc_threshold` belongs to `js_trigger_gc`
+        // (quickjs.c:1780-1797), whose only caller is `JS_NewObjectFromShape`
+        // (quickjs.c:5619). A production allocation therefore has no GC trigger
+        // — see `allocation_gc_trigger_enabled`.
+        //
         // Runtime-owned accounts install this after GC initialization. In the
         // forced-GC build, the same trigger performs a full collection here,
-        // before the backing allocation.
+        // before the backing allocation; test builds keep it so injected probes
+        // still observe every allocation.
+        if (comptime !allocation_gc_trigger_enabled) return;
         if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, byte_count);
     }
 

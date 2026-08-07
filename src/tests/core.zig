@@ -6131,6 +6131,57 @@ test "stale threshold request cannot mask explicit or pressure major requests" {
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
+// Production builds record no allocation-threshold request at all: qjs's
+// `js_malloc_rt` / `__js_malloc` (quickjs.c:1799-1812, 1566) never read
+// `malloc_gc_threshold`, so `memory.allocation_gc_trigger_enabled` compiles the
+// per-allocation trigger out of everything except test and force-GC builds.
+// The mechanism that makes that safe is that the threshold condition is
+// level-triggered and re-derived from `allocated_bytes` at every service point,
+// so a crossing produced by a non-object allocation is still collected at the
+// next boundary. These two cases pin that re-derivation by allocating straight
+// through `MemoryAccount.*NoTrigger`, which is exactly the shape a production
+// allocation has.
+test "an unrequested threshold crossing is still serviced at the object boundary" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    const baseline = rt.memory.allocated_bytes;
+    const object_bytes = @sizeOf(core.Object);
+    rt.setGCThreshold(baseline + object_bytes);
+
+    // No `requestGCForAllocation` on this path — the production shape.
+    const transient = try rt.memory.allocNoTrigger(u8, object_bytes + 1);
+    defer rt.memory.free(u8, transient);
+    try std.testing.expect(!rt.gcPendingForTest());
+    try std.testing.expect(rt.memory.allocated_bytes > rt.gcThreshold());
+
+    const collections_before = rt.gc.stats.collections;
+    rt.collectBeforeObjectAllocation(object_bytes);
+    try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
+    try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "an unrequested threshold crossing is still serviced at a scheduler poll" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+
+    const baseline = rt.memory.allocated_bytes;
+    rt.setGCThreshold(baseline + @sizeOf(core.Object));
+
+    const transient = try rt.memory.allocNoTrigger(u8, @sizeOf(core.Object) + 1);
+    defer rt.memory.free(u8, transient);
+    try std.testing.expect(!rt.gcPendingForTest());
+    try std.testing.expect(rt.memory.allocated_bytes > rt.gcThreshold());
+
+    // `shouldRunMajorAt` takes `over_threshold` recomputed by `pollGC`, so even
+    // the weakest scheduler points collect without a recorded request.
+    const collections_before = rt.gc.stats.collections;
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
+}
+
 test "persistent value handle keeps object and nested symbols alive" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
