@@ -3116,9 +3116,9 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 // Typed arrays (not is_array), string keys, out-of-range / holey, and exotic
 // receivers fall to the cold h_put_array_element with all operands still owned.
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const value = (sp - 1)[0];
-    const key = (sp - 2)[0];
-    const obj = (sp - 3)[0];
+    const value = loadValueAsIntPair(&(sp - 1)[0]);
+    const key = loadValueAsIntPair(&(sp - 2)[0]);
+    const obj = loadValueAsIntPair(&(sp - 3)[0]);
     const rt = vm.ctx.runtime;
     // Inline Array check: skip the noinline dense overwrite/append probes for
     // non-Array objects (typed arrays, regular objects). 72% of puts in pdfjs
