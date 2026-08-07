@@ -110,7 +110,10 @@ test "dense array writer readers retain their semantic guard class" {
         .{ .class = .qjs_bulk_set, .source = array_ops_source, .needle = ".appendDenseArrayValues(ctx.runtime,", .count = 1 },
         .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataPropertyUnchecked(ctx.runtime,", .count = 1 },
         .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
-        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 2 },
+        // shift, unshift and splice: the three dense bulk relocations that skip
+        // the per-index [[Set]]/[[Delete]] walk and therefore must prove the
+        // prototype chain carries no indexed property first.
+        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 3 },
         .{ .class = .zjs_bulk_set, .source = object_source, .needle = "if (!arrayPrototypeChainAllowsBulkIndexedSet(proto))", .count = 3 },
     };
     for (readers) |reader| {

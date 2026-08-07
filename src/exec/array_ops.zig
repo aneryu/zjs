@@ -2696,6 +2696,155 @@ pub fn typedArraySpeciesConstructorForObject(
     return species_value;
 }
 
+/// Dense fast path for Array.prototype.splice, mirroring the fast_array case of
+/// quickjs js_array_splice (quickjs.c:43040-43082): when the species constructor
+/// is the default and the receiver is an ordinary dense fast array whose
+/// affected range lies inside the dense extent, the removed elements are
+/// bulk-copied into a fresh dense array (js_create_array, quickjs.c:9601) and the
+/// tail is relocated with one bulk move (quickjs.c:43064/43072) instead of the
+/// spec-literal per-element HasProperty/Get/Set loop.
+///
+/// Returns the removed array on success, or null to fall through to the generic
+/// path for anything not provably an ordinary dense array. Every argument
+/// coercion has already run in the caller, so the dense extent is re-read here:
+/// a user `valueOf` may have mutated the receiver meanwhile, which is exactly
+/// why qjs re-reads p->u.array.count at its own gate (quickjs.c:43033).
+fn qjsFastDenseArraySplice(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    receiver: core.JSValue,
+    object: *core.Object,
+    length: usize,
+    actual_start: usize,
+    actual_delete_count: usize,
+    insert_items: []const core.JSValue,
+    new_length: usize,
+) !?core.JSValue {
+    const rt = ctx.runtime;
+    // Receiver must BE the array (no primitive wrapper / proxy indirection), and
+    // an ordinary, extensible, length-writable dense fast array with no exotic
+    // [[Set]]/[[DefineOwnProperty]]/[[Delete]] behaviour.
+    if (objectFromValue(receiver) != object) return null;
+    if (!object.isArray() or !object.isFastArray()) return null;
+    if (object.hasExoticMethods() or object.proxyTarget() != null) return null;
+    if (!object.flags.length_writable or !object.flags.extensible) return null;
+    // qjs `can_extend_fast_array` (quickjs.c:9935-9944), the same term its splice
+    // gate carries at quickjs.c:43046.
+    if (!object.canExtendFastArray()) return null;
+    // Any inherited indexed property would make the generic [[Set]]/[[Delete]] of
+    // a moved slot observe a prototype accessor; the bulk move skips the
+    // prototype chain, so only proceed when the chain has no indexed props.
+    if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+
+    // Re-read the dense extent AFTER the coercions. Requiring count == length
+    // covers both a holey tail (whose holes the generic path must preserve via
+    // per-index HasProperty) and any coercion-time mutation of the receiver:
+    // actual_start / actual_delete_count were derived from the pre-coercion
+    // length, so they are only in bounds while the extent still agrees with it.
+    const count32: usize = @intCast(object.fastArrayCount());
+    if (count32 != length) return null;
+    if (count32 != @as(usize, @intCast(object.arrayLength()))) return null;
+    if (actual_start + actual_delete_count > count32) return null;
+    const new_count = count32 - actual_delete_count + insert_items.len;
+    if (new_count != new_length) return null;
+    if (new_count > core.array.max_array_length) return null;
+    const new_count_u32 = std.math.cast(u32, new_count) orelse return null;
+
+    const array_proto = (try arrayHasDefaultSpecies(rt, global, object)) orelse return null;
+
+    // Removed elements: js_create_array mirror (quickjs.c:43048 -> 9601), the
+    // same bulk-dup construction slice already uses above.
+    const removed = try core.Object.createArray(rt, array_proto);
+    var removed_value = removed.value();
+    errdefer removed_value.free(rt);
+
+    // memory.alloc and fastArrayEnsureCapacity below can GC; root the fresh
+    // array across both.
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &removed_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    if (actual_delete_count > 0) {
+        const elements = try rt.memory.alloc(core.JSValue, actual_delete_count);
+        const src = object.arrayElements()[actual_start .. actual_start + actual_delete_count];
+        for (src, 0..) |v, i| elements[i] = v.dup();
+        removed.adoptDenseArrayElementsAssumingEmpty(elements);
+        removed.flags.may_have_indexed_properties = true;
+    }
+
+    // From here on nothing allocates, so no GC can observe the half-moved
+    // element window. Every deleted reference is already duplicated into
+    // `removed`, so each free below is a pure refcount decrement.
+    const tail_src = actual_start + actual_delete_count;
+    const tail_len = count32 - tail_src;
+    const tail_dst = actual_start + insert_items.len;
+    if (insert_items.len < actual_delete_count) {
+        const values = object.fastArrayValuesMut();
+        // qjs frees the deleted slots the inserts will not overwrite
+        // (quickjs.c:43061-43062) before moving the tail down (quickjs.c:43064).
+        for (values[tail_dst..tail_src]) |v| v.free(rt);
+        if (tail_len > 0) {
+            std.mem.copyForwards(
+                core.JSValue,
+                values[tail_dst .. tail_dst + tail_len],
+                values[tail_src .. tail_src + tail_len],
+            );
+        }
+        // Slots past the new extent still hold aliases of references that now
+        // live in their moved-down positions; dropping the count is what
+        // retires them, exactly as qjs assigns p->u.array.count directly.
+        object.setFastArrayCountAssumeCapacity(new_count_u32);
+    } else if (insert_items.len > actual_delete_count) {
+        try object.fastArrayEnsureCapacity(rt, new_count_u32);
+        // Growth may reallocate the backing buffer, so publish the new extent
+        // first and only then take the window (qjs re-assigns arrp for the same
+        // reason at quickjs.c:43069). Count and length must move together to
+        // preserve the `length >= count` invariant that arrayElementsMut
+        // asserts; the array was fully dense on entry, so the new dense extent
+        // IS the new logical length. This is the idiom qjsFastDenseArrayUnshift
+        // already relies on.
+        object.setFastArrayCountAssumeCapacity(new_count_u32);
+        object.setArrayLength(new_count_u32);
+        const values = object.fastArrayValuesMut();
+        if (tail_len > 0) {
+            std.mem.copyBackwards(
+                core.JSValue,
+                values[tail_dst .. tail_dst + tail_len],
+                values[tail_src .. tail_src + tail_len],
+            );
+        }
+        // The widened gap still holds aliases of the references that just moved
+        // up; blank it so the insert loop's free() cannot drop a live tail
+        // reference (qjs fills the same range with JS_UNDEFINED,
+        // quickjs.c:43073-43074).
+        for (values[tail_src..tail_dst]) |*slot| slot.* = core.JSValue.undefinedValue();
+    }
+
+    // Insert loop: qjs set_value(&arrp[start + i], JS_DupValue(argv[i + 2]))
+    // (quickjs.c:43080-43081). Each overwritten slot is either a deleted
+    // original (already duplicated into `removed`) or the undefined filler
+    // above, so no destructor can run here.
+    if (insert_items.len > 0) {
+        const values = object.fastArrayValuesMut();
+        for (insert_items, 0..) |item, offset| {
+            const slot = &values[actual_start + offset];
+            const old = slot.*;
+            slot.* = item.dup();
+            old.free(rt);
+        }
+    }
+
+    object.setArrayLength(new_count_u32);
+    object.markIndexedProperties(rt);
+    return removed_value;
+}
+
 pub fn qjsArraySpliceCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2751,6 +2900,25 @@ pub fn qjsArraySpliceCall(
     const max_safe_length: usize = 9007199254740991;
     const new_length = length - actual_delete_count + insert_count;
     if (new_length > max_safe_length) return error.TypeError;
+
+    // qjs js_array_splice takes its fast_array branch here, after every argument
+    // coercion and before allocating the result via the species constructor
+    // (quickjs.c:43040). Placing the arm at the same point keeps the observable
+    // order identical: a user `valueOf` in the arguments still runs first, and
+    // the arm re-validates the receiver against the post-coercion state.
+    if (try qjsFastDenseArraySplice(
+        ctx,
+        global,
+        receiver,
+        object,
+        length,
+        actual_start,
+        actual_delete_count,
+        if (args.len > 2) args[2..] else &.{},
+        new_length,
+    )) |removed_fast| {
+        return removed_fast;
+    }
 
     const removed_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, actual_delete_count, null, null);
     errdefer removed_value.free(ctx.runtime);
