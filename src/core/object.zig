@@ -320,6 +320,13 @@ pub const IteratorPayload = struct {
     zip_mode: u8 = 0,
     zip_state: u8 = 0,
     executing: bool = false,
+    /// Set while this Map/Set iterator holds a cursor on `target`'s entry
+    /// array. Taken on the first advance and dropped on exhaustion or
+    /// finalization, mirroring qjs's `it->cur_record` reference: an iterator
+    /// that has not stepped yet holds no record (js_map_iterator_next
+    /// quickjs.c:52596 only refs once it has picked one), so it must not pin
+    /// anything either.
+    collection_cursor_held: bool = false,
 
     pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
@@ -351,6 +358,18 @@ pub const CollectionPayload = struct {
     entries_capacity: usize = 0,
     bucket_heads: []usize = &.{},
     active_count: usize = 0,
+    /// Number of cursors currently parked inside `entries`: live Map/Set
+    /// iterators plus in-flight native scans (forEach, the Set-composition
+    /// helpers). This is the zjs form of the per-record `ref_count` an
+    /// enumerator takes in qjs (`JSMapRecord.ref_count`, quickjs.c:1080;
+    /// `mr->ref_count++` in js_map_iterator_next quickjs.c:52605 and
+    /// js_map_forEach quickjs.c:52320): a qjs cursor is a record pointer, so it
+    /// pins one record, while a zjs cursor is an entry index, so it pins the
+    /// whole array layout. Nonzero => deletions keep tombstones exactly like a
+    /// qjs zombie record (`mr->empty = TRUE`, quickjs.c:52082); zero => the
+    /// tombstones can be compacted away, which is what
+    /// `map_delete_record_internal` does when `--ref_count == 0`.
+    live_cursors: usize = 0,
     weak_entries: []WeakCollectionEntry = &.{},
     weak_entries_capacity: usize = 0,
     weak_holder_link: WeakReferenceHolderLink = .{},
@@ -1611,7 +1630,6 @@ pub const BytecodeFunctionStorage = extern struct {
 };
 
 pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payload_kind: class.PayloadKind, payload: *class.Payload) void {
-    _ = class_id;
     const ptr = payload.* orelse return;
     payload.* = null;
     switch (payload_kind) {
@@ -1622,6 +1640,7 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         },
         .iterator => {
             const typed: *IteratorPayload = @ptrCast(@alignCast(ptr));
+            Object.releaseIteratorCollectionCursor(class_id, typed);
             typed.destroy(rt);
             rt.memory.destroy(IteratorPayload, typed);
         },
@@ -3870,6 +3889,56 @@ pub const Object = extern struct {
     pub fn collectionActiveCount(self: *const Object) usize {
         if (self.collectionPayloadConst()) |payload| return payload.active_count;
         return 0;
+    }
+
+    /// Park a cursor inside this collection's entry array. Mirrors the
+    /// `mr->ref_count++` an enumerator takes on the record it is sitting on
+    /// (js_map_iterator_next quickjs.c:52605, js_map_forEach quickjs.c:52320).
+    pub fn retainCollectionCursor(self: *Object) void {
+        const payload = self.collectionPayload() orelse return;
+        payload.live_cursors += 1;
+    }
+
+    /// Mirrors `map_decref_record` (quickjs.c:52089-52096). The
+    /// `collectionPayload() orelse return` guard is the zjs form of qjs's
+    /// `JS_IsLiveObject(rt, it->obj)` check in js_map_iterator_finalizer
+    /// (quickjs.c:52521): during a cycle-collector resource pass the target map
+    /// may already have shed its payload, and then there is nothing left to
+    /// unpin.
+    pub fn releaseCollectionCursor(self: *Object) void {
+        const payload = self.collectionPayload() orelse return;
+        if (payload.live_cursors != 0) payload.live_cursors -= 1;
+    }
+
+    pub fn collectionLiveCursors(self: *const Object) usize {
+        if (self.collectionPayloadConst()) |payload| return payload.live_cursors;
+        return 0;
+    }
+
+    /// Park this Map/Set iterator's cursor on its target collection, once.
+    /// Mirrors `mr->ref_count++` in js_map_iterator_next (quickjs.c:52605):
+    /// taken when the iterator settles on a position, not when it is created,
+    /// so an iterator that never stepped pins nothing.
+    pub fn retainCollectionIteratorCursor(self: *Object) void {
+        const payload = self.iteratorPayload() orelse return;
+        if (payload.collection_cursor_held) return;
+        if (self.class_id != class.ids.map_iterator and self.class_id != class.ids.set_iterator) return;
+        const target = payload.target orelse return;
+        const target_object = objectFromValue(target) orelse return;
+        target_object.retainCollectionCursor();
+        payload.collection_cursor_held = true;
+    }
+
+    /// Drop a Map/Set iterator's hold on its target collection: releases the
+    /// entry-array cursor and then the target reference itself. Mirrors
+    /// js_map_iterator_next's end-of-enumeration arm (quickjs.c:52608-52613),
+    /// which decrefs the current record before dropping `it->obj`.
+    pub fn detachCollectionIteratorTarget(self: *Object, rt: *JSRuntime) void {
+        const payload = self.iteratorPayload() orelse return;
+        const target = payload.target orelse return;
+        releaseIteratorCollectionCursor(self.class_id, payload);
+        payload.target = null;
+        target.free(rt);
     }
 
     pub fn ensureCollectionEntryCapacity(self: *Object, rt: *JSRuntime, min_capacity: usize) !void {
@@ -6794,8 +6863,23 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    /// Release the entry-array cursor a Map/Set iterator holds on its target,
+    /// if it still has one. Mirrors js_map_iterator_finalizer
+    /// (quickjs.c:52515-52528): the finalizer decrefs the parked record before
+    /// releasing `it->obj`, guarded by a liveness check because the map's own
+    /// teardown may have run first.
+    fn releaseIteratorCollectionCursor(class_id: class.ClassId, payload: *IteratorPayload) void {
+        if (!payload.collection_cursor_held) return;
+        payload.collection_cursor_held = false;
+        if (class_id != class.ids.map_iterator and class_id != class.ids.set_iterator) return;
+        const target = payload.target orelse return;
+        const target_object = objectFromValue(target) orelse return;
+        target_object.releaseCollectionCursor();
+    }
+
     fn destroyIteratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.iteratorPayload() orelse return;
+        releaseIteratorCollectionCursor(self.class_id, payload);
         self.u.payload = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
