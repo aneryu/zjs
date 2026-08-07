@@ -3686,22 +3686,9 @@ test "strict generator resident frame supports qjs argument counts beyond u16 st
 }
 
 pub const helpers = struct {
-    /// Every TypeScript execution test goes through here. Besides evaluating,
-    /// it asserts the compile took no un-allowlisted legacy emission — that is
-    /// the half of the L3 gate that only a real compile can observe.
+    /// Every TypeScript execution test goes through here.
     pub fn evalTypeScriptChecked(engine_instance: *TestEngine, source: []const u8, options: EvalOptions) RuntimeError!core.JSValue {
-        const observation_start = test_entry.beginObservation();
-        const result = engine_instance.evalWithOptions(source, options) catch |eval_err| {
-            const observation = test_entry.endObservation(observation_start);
-            try test_entry.expectNoUnallowedFallback(observation);
-            return eval_err;
-        };
-        const observation = test_entry.endObservation(observation_start);
-        test_entry.expectNoUnallowedFallback(observation) catch |err| {
-            result.free(engine_instance.runtime);
-            return err;
-        };
-        return result;
+        return engine_instance.evalWithOptions(source, options);
     }
 
     /// Install the standard + host globals on a bare `core.JSRuntime` global for
@@ -4298,7 +4285,7 @@ pub const vm_helpers = struct {
         var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
         try parser_core.parseExpr(&state);
-        try function.appendCode(&.{op.@"return"});
+        try state.v2EmitOp(op.@"return");
 
         // Run the FunctionDef-backed finalize pipeline so locals are lowered
         // to get_loc / put_loc instead of falling back to global get_var /
@@ -4322,7 +4309,7 @@ pub const vm_helpers = struct {
         defer state.deinit(rt);
         state.top_level_functions_as_children = true;
         try parser_core.parseExpr(&state);
-        try function.appendCode(&.{op.@"return"});
+        try state.v2EmitOp(op.@"return");
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
 
@@ -4386,6 +4373,7 @@ pub const vm_helpers = struct {
         // This helper executes global script code and only needs completion
         // capture; enableEvalReturn would incorrectly switch declarations to
         // direct-eval placement. Mirror compileQjsProgram's script setup.
+        try state.beginV2ProgramEmission();
         try state.enableReturnCompletion();
         while (state.token.val != engine.parser.token.TOK_EOF) {
             try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -11566,6 +11554,45 @@ test "Engine heritage closures retain the initialized inner class-name binding" 
         \\  declarationClass = InnerDeclaration;
         \\}
         \\assert.sameValue(declarationProbe(), declarationClass);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine inferred class names precede static initialization across named-evaluation sites" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\  let Assigned;
+        \\  Assigned = class { static { this.observedName = this.name; } };
+        \\  assert.sameValue(Assigned.name, "Assigned");
+        \\  assert.sameValue(Assigned.observedName, "Assigned");
+        \\  const computedKey = Symbol("computed");
+        \\  const holder = { [computedKey]: class { static { this.observedName = this.name; } } };
+        \\  assert.sameValue(holder[computedKey].name, "[computed]");
+        \\  assert.sameValue(holder[computedKey].observedName, "[computed]");
+        \\  class Outer {
+        \\    instance = class { static { this.observedName = this.name; } };
+        \\    static field = class { static { this.observedName = this.name; } };
+        \\  }
+        \\  const outer = new Outer();
+        \\  assert.sameValue(outer.instance.name, "instance");
+        \\  assert.sameValue(outer.instance.observedName, "instance");
+        \\  assert.sameValue(Outer.field.name, "field");
+        \\  assert.sameValue(Outer.field.observedName, "field");
+        \\  const Sequence = (0, class { static { this.observedName = this.name; } });
+        \\  assert.sameValue(Sequence.name, "");
+        \\  assert.sameValue(Sequence.observedName, "");
+        \\  const Override = class {
+        \\    static name = "override";
+        \\    static { this.observedName = this.name; }
+        \\  };
+        \\  assert.sameValue(Override.name, "override");
+        \\  assert.sameValue(Override.observedName, "override");
+        \\})();
     );
     defer result.free(js.runtime);
 
@@ -20083,18 +20110,18 @@ test "native function toString keeps non-ASCII identifier names (qjs js_function
     try std.testing.expectEqual(true, result.asBool().?);
 }
 
-test "switch dispatch trampoline shapes keep legacy identity and semantics" {
-    // QCP-1 dual-mode regression corpus. Under `-Dzjs_compiler=dual` every
-    // source below is compiled by both backends and compared, so this test is
-    // the identity oracle for switch dispatch lowering; under legacy/v2 it
-    // still pins the observable clause-fallthrough semantics.
+test "switch dispatch trampoline shapes keep their identity and semantics" {
+    // QCP-1 switch-dispatch regression corpus. Each source below reproduced a
+    // real divergence while two backends existed; with one backend left they
+    // pin the observable clause-fallthrough semantics of the shapes that
+    // exercise the resolver's dispatch folding.
     //
     // The epilogue dispatch bridge several of these shapes were written
     // against no longer exists: the unmatched-dispatch references now move onto
     // the default identity (`Builder.retargetLabelRefs`), which is what legacy
     // `patchJumpTarget` does. The shapes stay as the corpus that proves it.
     //
-    // Each shape reproduced a distinct v2/legacy divergence:
+    // Each shape reproduced a distinct lowering divergence:
     //   [0] `case a: b(); case c: default: e();` — the branch whose target
     //       resolves to its own fallthrough only after the bridge folds away.
     //   [1] `case a: default: e();` — the empty case falling into a trailing

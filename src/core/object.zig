@@ -320,6 +320,13 @@ pub const IteratorPayload = struct {
     zip_mode: u8 = 0,
     zip_state: u8 = 0,
     executing: bool = false,
+    /// Set while this Map/Set iterator holds a cursor on `target`'s entry
+    /// array. Taken on the first advance and dropped on exhaustion or
+    /// finalization, mirroring qjs's `it->cur_record` reference: an iterator
+    /// that has not stepped yet holds no record (js_map_iterator_next
+    /// quickjs.c:52596 only refs once it has picked one), so it must not pin
+    /// anything either.
+    collection_cursor_held: bool = false,
 
     pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
@@ -351,6 +358,18 @@ pub const CollectionPayload = struct {
     entries_capacity: usize = 0,
     bucket_heads: []usize = &.{},
     active_count: usize = 0,
+    /// Number of cursors currently parked inside `entries`: live Map/Set
+    /// iterators plus in-flight native scans (forEach, the Set-composition
+    /// helpers). This is the zjs form of the per-record `ref_count` an
+    /// enumerator takes in qjs (`JSMapRecord.ref_count`, quickjs.c:1080;
+    /// `mr->ref_count++` in js_map_iterator_next quickjs.c:52605 and
+    /// js_map_forEach quickjs.c:52320): a qjs cursor is a record pointer, so it
+    /// pins one record, while a zjs cursor is an entry index, so it pins the
+    /// whole array layout. Nonzero => deletions keep tombstones exactly like a
+    /// qjs zombie record (`mr->empty = TRUE`, quickjs.c:52082); zero => the
+    /// tombstones can be compacted away, which is what
+    /// `map_delete_record_internal` does when `--ref_count == 0`.
+    live_cursors: usize = 0,
     weak_entries: []WeakCollectionEntry = &.{},
     weak_entries_capacity: usize = 0,
     weak_holder_link: WeakReferenceHolderLink = .{},
@@ -900,7 +919,13 @@ pub const PromisePayload = struct {
     result: ?JSValue = null,
     reaction_callback: ?JSValue = null,
     reaction_arg: ?JSValue = null,
+    /// Live prefix of the subscriber list. qjs threads reaction records onto
+    /// the promise with `list_add_tail` (quickjs.c:54221-54222), so a pending
+    /// promise absorbs N subscribers in O(N); `reactions_capacity` describes
+    /// the backing allocation so the array adaptation grows amortized instead
+    /// of reallocating at the exact length on every subscription.
     reactions: []JSValue = &.{},
+    reactions_capacity: usize = 0,
     is_rejected: bool = false,
     atomics_wait_async: bool = false,
 
@@ -908,7 +933,7 @@ pub const PromisePayload = struct {
         destroyOptionalValue(rt, &self.result);
         destroyOptionalValue(rt, &self.reaction_callback);
         destroyOptionalValue(rt, &self.reaction_arg);
-        destroyValueSlice(rt, &self.reactions);
+        destroyValueSliceWithCapacity(rt, &self.reactions, &self.reactions_capacity);
         self.is_rejected = false;
         self.atomics_wait_async = false;
     }
@@ -1605,7 +1630,6 @@ pub const BytecodeFunctionStorage = extern struct {
 };
 
 pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payload_kind: class.PayloadKind, payload: *class.Payload) void {
-    _ = class_id;
     const ptr = payload.* orelse return;
     payload.* = null;
     switch (payload_kind) {
@@ -1616,6 +1640,7 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         },
         .iterator => {
             const typed: *IteratorPayload = @ptrCast(@alignCast(ptr));
+            Object.releaseIteratorCollectionCursor(class_id, typed);
             typed.destroy(rt);
             rt.memory.destroy(IteratorPayload, typed);
         },
@@ -3866,6 +3891,56 @@ pub const Object = extern struct {
         return 0;
     }
 
+    /// Park a cursor inside this collection's entry array. Mirrors the
+    /// `mr->ref_count++` an enumerator takes on the record it is sitting on
+    /// (js_map_iterator_next quickjs.c:52605, js_map_forEach quickjs.c:52320).
+    pub fn retainCollectionCursor(self: *Object) void {
+        const payload = self.collectionPayload() orelse return;
+        payload.live_cursors += 1;
+    }
+
+    /// Mirrors `map_decref_record` (quickjs.c:52089-52096). The
+    /// `collectionPayload() orelse return` guard is the zjs form of qjs's
+    /// `JS_IsLiveObject(rt, it->obj)` check in js_map_iterator_finalizer
+    /// (quickjs.c:52521): during a cycle-collector resource pass the target map
+    /// may already have shed its payload, and then there is nothing left to
+    /// unpin.
+    pub fn releaseCollectionCursor(self: *Object) void {
+        const payload = self.collectionPayload() orelse return;
+        if (payload.live_cursors != 0) payload.live_cursors -= 1;
+    }
+
+    pub fn collectionLiveCursors(self: *const Object) usize {
+        if (self.collectionPayloadConst()) |payload| return payload.live_cursors;
+        return 0;
+    }
+
+    /// Park this Map/Set iterator's cursor on its target collection, once.
+    /// Mirrors `mr->ref_count++` in js_map_iterator_next (quickjs.c:52605):
+    /// taken when the iterator settles on a position, not when it is created,
+    /// so an iterator that never stepped pins nothing.
+    pub fn retainCollectionIteratorCursor(self: *Object) void {
+        const payload = self.iteratorPayload() orelse return;
+        if (payload.collection_cursor_held) return;
+        if (self.class_id != class.ids.map_iterator and self.class_id != class.ids.set_iterator) return;
+        const target = payload.target orelse return;
+        const target_object = objectFromValue(target) orelse return;
+        target_object.retainCollectionCursor();
+        payload.collection_cursor_held = true;
+    }
+
+    /// Drop a Map/Set iterator's hold on its target collection: releases the
+    /// entry-array cursor and then the target reference itself. Mirrors
+    /// js_map_iterator_next's end-of-enumeration arm (quickjs.c:52608-52613),
+    /// which decrefs the current record before dropping `it->obj`.
+    pub fn detachCollectionIteratorTarget(self: *Object, rt: *JSRuntime) void {
+        const payload = self.iteratorPayload() orelse return;
+        const target = payload.target orelse return;
+        releaseIteratorCollectionCursor(self.class_id, payload);
+        payload.target = null;
+        target.free(rt);
+    }
+
     pub fn ensureCollectionEntryCapacity(self: *Object, rt: *JSRuntime, min_capacity: usize) !void {
         const entries_slot = self.collectionEntriesSlot();
         const capacity_slot = self.collectionEntriesCapacitySlot();
@@ -5285,6 +5360,12 @@ pub const Object = extern struct {
     pub fn promiseReactions(self: *const Object) []JSValue {
         if (self.promisePayloadConst()) |payload| return payload.reactions;
         return &.{};
+    }
+
+    pub fn promiseReactionsCapacitySlot(self: *Object) *usize {
+        if (self.promisePayload()) |payload| return &payload.reactions_capacity;
+        std.debug.assert(self.flags.class_payload_kind == .promise);
+        unreachable;
     }
 
     pub fn promiseIsRejectedSlot(self: *Object) *bool {
@@ -6782,8 +6863,23 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    /// Release the entry-array cursor a Map/Set iterator holds on its target,
+    /// if it still has one. Mirrors js_map_iterator_finalizer
+    /// (quickjs.c:52515-52528): the finalizer decrefs the parked record before
+    /// releasing `it->obj`, guarded by a liveness check because the map's own
+    /// teardown may have run first.
+    fn releaseIteratorCollectionCursor(class_id: class.ClassId, payload: *IteratorPayload) void {
+        if (!payload.collection_cursor_held) return;
+        payload.collection_cursor_held = false;
+        if (class_id != class.ids.map_iterator and class_id != class.ids.set_iterator) return;
+        const target = payload.target orelse return;
+        const target_object = objectFromValue(target) orelse return;
+        target_object.releaseCollectionCursor();
+    }
+
     fn destroyIteratorPayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.iteratorPayload() orelse return;
+        releaseIteratorCollectionCursor(self.class_id, payload);
         self.u.payload = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
@@ -7569,17 +7665,6 @@ pub const Object = extern struct {
             var cursor = garbage.head;
             while (cursor) |h| : (cursor = h.next) {
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
-            }
-        }
-
-        {
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                h.meta().flags.cycle_visited = false;
-            }
-            var cursor = garbage.head;
-            while (cursor) |h| : (cursor = h.next) {
-                h.meta().flags.cycle_visited = true;
             }
         }
 
@@ -10527,6 +10612,24 @@ pub const Object = extern struct {
         if (self.class_id == class.ids.module_ns) return error.ReadOnly;
         if (self.isArray() and atom_id == atom.ids.length) {
             if (!self.flags.length_writable) return error.ReadOnly;
+            // Fast path: fast_array length assignment mirrors qjs set_array_length
+            // (quickjs.c:9447-9455). A fast array's elements live in u.array.values,
+            // NOT in the shape property table, so the generic defineArrayLength
+            // path does two full shape-prop scans (the shrink loop + recomputeArrayStorageMode)
+            // that touch zero relevant entries. This fast path does only:
+            //   1. arrayLengthFromValue (number→uint32, no side effects on pre-coerced values)
+            //   2. truncateArrayElements (free tail values on shrink)
+            //   3. set u.array.length
+            // Non-fast arrays, invalid lengths, and side-effecting coercions fall
+            // through to defineArrayLength unchanged.
+            if (self.flags.fast_array) {
+                if (try arrayLengthFromValue(rt, new_value)) |len| {
+                    self.truncateArrayElements(rt, len);
+                    self.u.array.length = len;
+                    return;
+                }
+                return error.InvalidLength;
+            }
             try self.defineArrayLength(rt, descriptor.Descriptor.data(new_value, true, false, false));
             return;
         }
@@ -11063,7 +11166,14 @@ pub const Object = extern struct {
         }
         self.truncateArrayElements(rt, target_len);
         self.setArrayLength(target_len);
-        self.recomputeArrayStorageMode(rt);
+        // qjs set_array_length never re-densifies: a non-fast array stays
+        // non-fast after a length change. The retired recomputeArrayStorageMode
+        // was a zjs-specific O(prop_count) shape scan on every length
+        // assignment that tried to re-densify arrays whose indexed shape props
+        // were all deleted by the shrink loop — but that scan dominated
+        // pdfjs's `arr.length = n` hot path (16+ samples self-time). qjs pays
+        // zero here; matching it keeps semantics identical (the shrink loop
+        // above already handles non-configurable prop fallback).
         if (desc.writable) |writable| self.flags.length_writable = writable;
     }
 

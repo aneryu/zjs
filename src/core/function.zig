@@ -41,6 +41,11 @@ pub const NativeBuiltinDomain = enum(i32) {
     iterator = 18,
     host = 19,
     promise = 20,
+    /// WeakRef.prototype / FinalizationRegistry.prototype. qjs declares these
+    /// as their own function lists (`js_weakref_proto_funcs` quickjs.c:61197,
+    /// `js_finrec_proto_funcs` quickjs.c:61376) rather than folding them into
+    /// the Map/Set lists, so they get their own id namespace here too.
+    weak_ref = 21,
 };
 
 /// Method ids for the `.host` native-builtin domain: host/web globals and
@@ -108,6 +113,7 @@ pub fn decodeNativeBuiltinId(encoded: i32) ?NativeBuiltinRef {
         18 => .iterator,
         19 => .host,
         20 => .promise,
+        21 => .weak_ref,
         else => return null,
     };
     return .{ .domain = domain, .id = @intCast(local_id) };

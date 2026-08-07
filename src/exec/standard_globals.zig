@@ -22,8 +22,11 @@ const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
 const number_builtin = @import("number_ops.zig");
+const primitive_builtin = @import("primitive_ops.zig");
+const promise_method_ids = core.host_function.builtin_method_ids.promise.PrototypeMethod;
 const promise_ops = @import("promise_ops.zig");
 const uri_builtin = @import("uri_ops.zig");
+const weak_ref_method_ids = core.host_function.builtin_method_ids.weak_ref.PrototypeMethod;
 const std = @import("std");
 
 pub const Flags = struct {
@@ -37,7 +40,15 @@ pub const Flags = struct {
 pub const Method = core.property.AutoInit;
 
 const MethodTableKind = enum {
-    none,
+    /// Descriptor-shaped tables whose entries carry their own explicit id (or
+    /// are on the debt list); the switch below assigns nothing for these, but
+    /// the record gate still applies.
+    global_functions,
+    empty,
+    boolean_prototype,
+    bigint_prototype,
+    symbol_prototype,
+    standalone_auto_init,
     object_static,
     function_prototype,
     array_static,
@@ -48,6 +59,8 @@ const MethodTableKind = enum {
     string_prototype,
     number_static,
     number_prototype,
+    bigint_static,
+    symbol_static,
     proxy_static,
     error_prototype,
     error_static,
@@ -55,14 +68,19 @@ const MethodTableKind = enum {
     date_prototype,
     regexp_prototype,
     promise_static,
+    promise_prototype,
     map_static,
     map_prototype,
     set_prototype,
     weak_map_prototype,
     weak_set_prototype,
+    weak_ref_prototype,
+    finalization_registry_prototype,
     buffer_prototype,
     shared_buffer_prototype,
     array_buffer_static,
+    uint8_array_static,
+    uint8_array_prototype,
     data_view_prototype,
     iterator_static,
     iterator_prototype,
@@ -111,6 +129,146 @@ fn isStringPrototypeNameDispatchMethod(name: []const u8) bool {
         std.mem.eql(u8, name, "sup");
 }
 
+/// Why a standard method may ship without a dispatchable internal record.
+/// Every `native_record_debt` row names one; see the gate in `preparedMethods`.
+const NoRecordReason = enum {
+    /// `eval` must stay id-less: direct-eval is resolved by the compiler from
+    /// the callee's identity, and a record would make it an ordinary builtin.
+    /// qjs keeps `js_global_eval` out of the fast dispatch path the same way.
+    direct_eval,
+    /// `.host` native-builtin domain. `internal_builtins.table` deliberately
+    /// leaves `domains[host]` empty (internal_builtins.zig:8-9), so these ids
+    /// decode but never resolve; they dispatch through
+    /// `call.callHostGlobalNativeFunctionRecord` instead. Not a name cascade.
+    host_domain_switch,
+    /// Dispatched by `typed_array_builtin_marker`, not by record id
+    /// (`preparedMethods`'s `.typed_array_*` arms). DEBT: every call still
+    /// falls out of `nativeMethodFastDispatch` into the name cascade.
+    typed_array_marker_debt,
+    /// Dispatched by `disposable_stack_method` / `async_disposable_stack_method`
+    /// markers via `call_runtime.callNativeCallableByName`. DEBT.
+    disposable_stack_marker_debt,
+    /// No native id at all: resolved by `call_runtime.callNativeCallableByName`'s
+    /// linear `std.mem.eql` cascade. Pure debt, no compensating mechanism.
+    name_cascade_debt,
+};
+
+/// Comptime mirror of `JSRuntime.internalBuiltinRecord` (core/runtime.zig:2291).
+/// The record table is a comptime constant, so "will this id dispatch at
+/// runtime?" is answerable while the method tables are still being built.
+fn comptimeInternalRecordExists(comptime encoded_id: i32) bool {
+    const native_ref = core.function.decodeNativeBuiltinId(encoded_id) orelse return false;
+    const domain_index: usize = @intCast(@intFromEnum(native_ref.domain));
+    if (domain_index >= internal_builtins.table.len) return false;
+    const records = internal_builtins.table[domain_index];
+    if (native_ref.id >= records.len) return false;
+    return records[native_ref.id].hasCallable();
+}
+
+const NoRecordEntry = struct {
+    table: MethodTableKind,
+    name: []const u8,
+    reason: NoRecordReason,
+};
+
+/// THE ALLOW LIST. A standard method that resolves to no internal record must
+/// appear here, with a reason, or `preparedMethods` fails to compile. Two
+/// directions are enforced:
+///   * forward  — an un-listed record-less method is a `@compileError`
+///                (so the WeakRef.deref / BigInt.asIntN / %TypedArray% class of
+///                bug cannot be reintroduced silently);
+///   * backward — a listed method that has since gained a record is also a
+///                `@compileError` (see the `comptime` block at the end of this
+///                file), so the list cannot rot into a rubber stamp.
+/// Rows whose reason ends in `_debt` are known cold-path calls, not design.
+const native_record_debt = [_]NoRecordEntry{
+    // ---- legitimate, not debt -------------------------------------------
+    .{ .table = .global_functions, .name = "eval", .reason = .direct_eval },
+    .{ .table = .global_functions, .name = "btoa", .reason = .host_domain_switch },
+    .{ .table = .global_functions, .name = "atob", .reason = .host_domain_switch },
+    .{ .table = .global_functions, .name = "queueMicrotask", .reason = .host_domain_switch },
+    .{ .table = .global_functions, .name = "gc", .reason = .host_domain_switch },
+
+    // ---- DEBT: %TypedArray% statics + prototype (qjs js_typed_array_base_
+    // proto_funcs, quickjs.c:59765 / js_typed_array_funcs) -----------------
+    .{ .table = .typed_array_static, .name = "from", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_static, .name = "of", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "toString", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "toLocaleString", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "map", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "filter", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "reduce", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "reduceRight", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "forEach", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "some", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "every", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "find", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "findIndex", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "findLast", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "findLastIndex", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "includes", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "indexOf", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "lastIndexOf", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "at", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "copyWithin", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "fill", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "slice", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "join", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "reverse", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "sort", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "toReversed", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "toSorted", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "with", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "keys", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "values", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "entries", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "set", .reason = .typed_array_marker_debt },
+    .{ .table = .typed_array_prototype, .name = "subarray", .reason = .typed_array_marker_debt },
+
+    // ---- DEBT: String.prototype name-cascade methods (qjs js_string_proto_
+    // funcs; these are JS_CFUNC_MAGIC_DEF over js_string_HTML in qjs) -------
+    .{ .table = .string_prototype, .name = "anchor", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "big", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "blink", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "bold", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "fixed", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "fontcolor", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "fontsize", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "italics", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "link", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "small", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "strike", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "sub", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "substr", .reason = .name_cascade_debt },
+    .{ .table = .string_prototype, .name = "sup", .reason = .name_cascade_debt },
+
+    // ---- DEBT: Error.isError (no record, no marker) -----------------------
+    .{ .table = .error_static, .name = "isError", .reason = .name_cascade_debt },
+
+    // ---- DEBT: DisposableStack / AsyncDisposableStack ---------------------
+    .{ .table = .disposable_stack_prototype, .name = "use", .reason = .disposable_stack_marker_debt },
+    .{ .table = .disposable_stack_prototype, .name = "adopt", .reason = .disposable_stack_marker_debt },
+    .{ .table = .disposable_stack_prototype, .name = "defer", .reason = .disposable_stack_marker_debt },
+    .{ .table = .disposable_stack_prototype, .name = "dispose", .reason = .disposable_stack_marker_debt },
+    .{ .table = .disposable_stack_prototype, .name = "move", .reason = .disposable_stack_marker_debt },
+    .{ .table = .async_disposable_stack_prototype, .name = "use", .reason = .disposable_stack_marker_debt },
+    .{ .table = .async_disposable_stack_prototype, .name = "adopt", .reason = .disposable_stack_marker_debt },
+    .{ .table = .async_disposable_stack_prototype, .name = "defer", .reason = .disposable_stack_marker_debt },
+    .{ .table = .async_disposable_stack_prototype, .name = "disposeAsync", .reason = .disposable_stack_marker_debt },
+    .{ .table = .async_disposable_stack_prototype, .name = "move", .reason = .disposable_stack_marker_debt },
+
+    // ---- DEBT: standalone AUTOINIT descriptors ----------------------------
+    .{ .table = .standalone_auto_init, .name = "[Symbol.hasInstance]", .reason = .name_cascade_debt },
+    .{ .table = .standalone_auto_init, .name = "[Symbol.iterator]", .reason = .name_cascade_debt },
+};
+
+fn noRecordReason(comptime table_kind: MethodTableKind, comptime name: []const u8) ?NoRecordReason {
+    for (native_record_debt) |entry| {
+        if (entry.table == table_kind and std.mem.eql(u8, entry.name, name)) return entry.reason;
+    }
+    return null;
+}
+
 /// Build the immutable QJS-style function-list metadata once at comptime.
 /// Bootstrap tagging and lazy materialization consume these fields directly;
 /// neither path needs to recover a descriptor's table or dispatch id by name.
@@ -121,7 +279,13 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
     for (&methods) |*method| {
         const name = method.name;
         switch (table_kind) {
-            .none => {},
+            .global_functions,
+            .empty,
+            .boolean_prototype,
+            .bigint_prototype,
+            .symbol_prototype,
+            .standalone_auto_init,
+            => {},
             .object_static => setRequiredMethodNativeBuiltinId(method, .object, object_builtin.staticMethodId(name)),
             .function_prototype => {
                 const id: ?u32 = if (std.mem.eql(u8, name, "call"))
@@ -185,6 +349,24 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                     setRequiredMethodNativeBuiltinId(method, .number, number_builtin.prototypeMethodId(name));
                 }
             },
+            .bigint_static => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "asIntN"))
+                    primitive_builtin.bigint_asintn_id
+                else if (std.mem.eql(u8, name, "asUintN"))
+                    primitive_builtin.bigint_asuintn_id
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .primitive, id);
+            },
+            .symbol_static => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "for"))
+                    primitive_builtin.symbol_for_id
+                else if (std.mem.eql(u8, name, "keyFor"))
+                    primitive_builtin.symbol_key_for_id
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .primitive, id);
+            },
             .proxy_static => {
                 if (!std.mem.eql(u8, name, "revocable")) @compileError("unexpected Proxy static method");
                 method.native_builtin_id = core.function.nativeBuiltinId(.reflect, @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable));
@@ -204,6 +386,17 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
             .date_prototype => setRequiredMethodNativeBuiltinId(method, .date, date_builtin.prototypeMethodId(name)),
             .regexp_prototype => setRequiredMethodNativeBuiltinId(method, .regexp, regexp_builtin.prototypeMethodId(name)),
             .promise_static => setRequiredMethodNativeBuiltinId(method, .promise, promise_ops.legacyStaticMethodId(name)),
+            .promise_prototype => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "then"))
+                    @intFromEnum(promise_method_ids.then)
+                else if (std.mem.eql(u8, name, "catch"))
+                    @intFromEnum(promise_method_ids.catch_)
+                else if (std.mem.eql(u8, name, "finally"))
+                    @intFromEnum(promise_method_ids.finally)
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .promise, id);
+            },
             .map_static => setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.staticMethodId(name)),
             .map_prototype => {
                 setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.prototypeMethodId(name));
@@ -221,9 +414,27 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                 setRequiredMethodNativeBuiltinId(method, .collection, collection_builtin.prototypeMethodId(name));
                 method.collection_method_owner_class = core.class.ids.weakset;
             },
-            .buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
+            .weak_ref_prototype => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "deref"))
+                    @intFromEnum(weak_ref_method_ids.deref)
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .weak_ref, id);
+            },
+            .finalization_registry_prototype => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "register"))
+                    @intFromEnum(weak_ref_method_ids.finrec_register)
+                else if (std.mem.eql(u8, name, "unregister"))
+                    @intFromEnum(weak_ref_method_ids.finrec_unregister)
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .weak_ref, id);
+            },
+            .buffer_prototype =>setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
             .shared_buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.sharedArrayBufferPrototypeMethodId(name)),
             .array_buffer_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.staticMethodId(name)),
+            .uint8_array_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.uint8ArrayStaticMethodId(name)),
+            .uint8_array_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.uint8ArrayPrototypeMethodId(name)),
             .data_view_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.dataViewPrototypeMethodId(name)),
             .iterator_static => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.staticMethodId(name)),
             .iterator_prototype => setRequiredMethodNativeBuiltinId(method, .iterator, iterator_builtin.prototypeMethodId(name)),
@@ -258,6 +469,24 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                     @compileError("unexpected AsyncDisposableStack prototype method");
             },
         }
+        // NATIVE-RECORD GATE. A standard method whose id does not resolve to a
+        // callable record in `internal_builtins.table` cannot take
+        // `vm_call.nativeMethodFastDispatch` (src/exec/vm_call.zig:614) and
+        // falls into `call_runtime.callNativeCallableByName`'s linear cascade.
+        // That is the WeakRef.deref / BigInt.asIntN / %TypedArray% bug class:
+        // silent at compile time, silent at run time, only visible under a
+        // profiler. Anything without a record must be declared in
+        // `native_record_debt` above, with a reason.
+        if (method.kind == .native_function and !comptimeInternalRecordExists(method.native_builtin_id)) {
+            if (noRecordReason(table_kind, name) == null) {
+                @compileError("standard method '" ++ name ++
+                    "' resolves to no internal builtin record, so every call to it" ++
+                    " leaves nativeMethodFastDispatch and walks the" ++
+                    " callNativeCallableByName name cascade. Give it a record in the" ++
+                    " owning domain's `internal_entries`, or add it to" ++
+                    " `native_record_debt` with a reason.");
+            }
+        }
         std.debug.assert(method.array_builtin_marker != .constructor and
             method.array_builtin_marker != .species_getter);
         std.debug.assert(method.array_iterator_kind <= 3);
@@ -273,6 +502,12 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
         }
     }
     return methods;
+}
+
+/// Single-descriptor form of `preparedMethods`, for AUTOINIT descriptors that
+/// are declared on their own rather than inside a function-list table.
+fn preparedMethod(comptime source: Method, comptime table_kind: MethodTableKind) Method {
+    return preparedMethods([_]Method{source}, table_kind)[0];
 }
 
 const global_function_methods = preparedMethods([_]Method{
@@ -291,7 +526,7 @@ const global_function_methods = preparedMethods([_]Method{
     .{ .name = "atob", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.atob)) },
     .{ .name = "queueMicrotask", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.queue_microtask)) },
     .{ .name = "gc", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.gc)) },
-}, .none);
+}, .global_functions);
 
 const math_namespace_auto_init = Method{ .name = "Math", .length = 0, .kind = .math_namespace };
 const json_namespace_auto_init = Method{ .name = "JSON", .length = 0, .kind = .json_namespace };
@@ -300,22 +535,27 @@ const atomics_namespace_auto_init = Method{ .name = "Atomics", .length = 0, .kin
 const navigator_auto_init = Method{ .name = "navigator", .length = 0, .kind = .navigator };
 const performance_auto_init = Method{ .name = "performance", .length = 0, .kind = .performance };
 const array_unscopables_auto_init = Method{ .name = "[Symbol.unscopables]", .length = 0, .kind = .array_unscopables };
-const symbol_to_primitive_auto_init = Method{ .name = "[Symbol.toPrimitive]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitive_symbol_to_primitive_id) };
-const date_to_primitive_auto_init = Method{ .name = "[Symbol.toPrimitive]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.date, @intFromEnum(date_builtin.PrototypeMethod.to_primitive)) };
-const function_has_instance_auto_init = Method{ .name = "[Symbol.hasInstance]", .length = 1 };
-const iterator_dispose_auto_init = Method{ .name = "[Symbol.dispose]", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.PrototypeMethod.dispose)) };
-const string_iterator_auto_init = Method{ .name = "[Symbol.iterator]", .length = 0 };
-const regexp_escape_auto_init = Method{ .name = "escape", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.StaticMethod.escape)) };
+// Standalone AUTOINIT descriptors. These never lived in a `preparedMethods`
+// table, which is exactly why two of them (`[Symbol.hasInstance]`,
+// `String.prototype[Symbol.iterator]`) went record-less unnoticed. Route them
+// through `preparedMethod` so the `.standalone_auto_init` arm of the
+// native-record gate covers them too.
+const symbol_to_primitive_auto_init = preparedMethod(.{ .name = "[Symbol.toPrimitive]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitive_symbol_to_primitive_id) }, .standalone_auto_init);
+const date_to_primitive_auto_init = preparedMethod(.{ .name = "[Symbol.toPrimitive]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.date, @intFromEnum(date_builtin.PrototypeMethod.to_primitive)) }, .standalone_auto_init);
+const function_has_instance_auto_init = preparedMethod(.{ .name = "[Symbol.hasInstance]", .length = 1 }, .standalone_auto_init);
+const iterator_dispose_auto_init = preparedMethod(.{ .name = "[Symbol.dispose]", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.PrototypeMethod.dispose)) }, .standalone_auto_init);
+const string_iterator_auto_init = preparedMethod(.{ .name = "[Symbol.iterator]", .length = 0 }, .standalone_auto_init);
+const regexp_escape_auto_init = preparedMethod(.{ .name = "escape", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.StaticMethod.escape)) }, .standalone_auto_init);
 
 const regexp_symbol_auto_init = [_]struct {
     symbol: []const u8,
     info: Method,
 }{
-    .{ .symbol = "Symbol.match", .info = .{ .name = "[Symbol.match]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.match]").?) } },
-    .{ .symbol = "Symbol.matchAll", .info = .{ .name = "[Symbol.matchAll]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.matchAll]").?) } },
-    .{ .symbol = "Symbol.replace", .info = .{ .name = "[Symbol.replace]", .length = 2, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.replace]").?) } },
-    .{ .symbol = "Symbol.search", .info = .{ .name = "[Symbol.search]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.search]").?) } },
-    .{ .symbol = "Symbol.split", .info = .{ .name = "[Symbol.split]", .length = 2, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.split]").?) } },
+    .{ .symbol = "Symbol.match", .info = preparedMethod(.{ .name = "[Symbol.match]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.match]").?) }, .standalone_auto_init) },
+    .{ .symbol = "Symbol.matchAll", .info = preparedMethod(.{ .name = "[Symbol.matchAll]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.matchAll]").?) }, .standalone_auto_init) },
+    .{ .symbol = "Symbol.replace", .info = preparedMethod(.{ .name = "[Symbol.replace]", .length = 2, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.replace]").?) }, .standalone_auto_init) },
+    .{ .symbol = "Symbol.search", .info = preparedMethod(.{ .name = "[Symbol.search]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.search]").?) }, .standalone_auto_init) },
+    .{ .symbol = "Symbol.split", .info = preparedMethod(.{ .name = "[Symbol.split]", .length = 2, .native_builtin_id = core.function.nativeBuiltinId(.regexp, regexp_builtin.prototypeMethodId("[Symbol.split]").?) }, .standalone_auto_init) },
 };
 
 const standard_string_auto_init = [_]Method{
@@ -715,6 +955,12 @@ pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, method: Met
     const realm = try bootstrapPropertyRealm(rt, target, null);
     const value = try core.function.nativeFunction(realm, method.name, method.length);
     defer value.free(rt);
+    // Without this the function object carries no native record, so
+    // `nativeMethodFastDispatch` rejects it and every call walks the
+    // `callNativeCallableByName` name cascade instead.
+    if (method.native_builtin_id != 0) {
+        expectObject(value).setNativeBuiltinIdAndRecord(rt, method.native_builtin_id);
+    }
     try defineData(rt, target, method.name, value, method_flags);
 }
 
@@ -1948,17 +2194,20 @@ const typed_array_intrinsic_extra_methods = preparedMethods([_]Method{
     .{ .name = "subarray", .length = 2 },
 }, .typed_array_prototype);
 
+// qjs js_uint8array_funcs (quickjs.c:59820) / js_uint8array_proto_funcs
+// (quickjs.c:59812): ordinary JS_CFUNC_DEF entries, so they carry native
+// builtin ids and dispatch through the record table.
 const uint8_array_constructor_codec_methods = preparedMethods([_]Method{
     .{ .name = "fromBase64", .length = 1 },
     .{ .name = "fromHex", .length = 1 },
-}, .none);
+}, .uint8_array_static);
 
 const uint8_array_prototype_codec_methods = preparedMethods([_]Method{
     .{ .name = "toBase64", .length = 0 },
     .{ .name = "toHex", .length = 0 },
     .{ .name = "setFromBase64", .length = 1 },
     .{ .name = "setFromHex", .length = 1 },
-}, .none);
+}, .uint8_array_prototype);
 
 const string_static = preparedMethods([_]Method{
     .{ .name = "fromCharCode", .length = 1 },
@@ -2026,17 +2275,19 @@ const number_static = preparedMethods([_]Method{
     .{ .name = "isSafeInteger", .length = 1 },
 }, .number_static);
 
+// qjs js_bigint_funcs (quickjs.c:56350): two JS_CFUNC_MAGIC_DEF entries over
+// js_bigint_asUintN, dispatched by js_call_c_function like any other builtin.
 const bigint_static = preparedMethods([_]Method{
     .{ .name = "asIntN", .length = 2 },
     .{ .name = "asUintN", .length = 2 },
-}, .none);
+}, .bigint_static);
 
 const typed_array_static = preparedMethods([_]Method{
     .{ .name = "from", .length = 1 },
     .{ .name = "of", .length = 0 },
 }, .typed_array_static);
 
-const no_methods = preparedMethods([_]Method{}, .none);
+const no_methods = preparedMethods([_]Method{}, .empty);
 
 const proxy_static = preparedMethods([_]Method{
     .{ .name = "revocable", .length = 2 },
@@ -2054,26 +2305,28 @@ const number_prototype = preparedMethods([_]Method{
 const boolean_prototype = preparedMethods([_]Method{
     .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 21) },
     .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 22) },
-}, .none);
+}, .boolean_prototype);
 
 const bigint_prototype = preparedMethods([_]Method{
     .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 31) },
     .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 32) },
-}, .none);
+}, .bigint_prototype);
 
 const symbol_prototype = preparedMethods([_]Method{
     .{ .name = "toString", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 41) },
     .{ .name = "valueOf", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.primitive, 42) },
-}, .none);
+}, .symbol_prototype);
 
 const error_prototype = preparedMethods([_]Method{
     .{ .name = "toString", .length = 0 },
 }, .error_prototype);
 
+// qjs js_symbol_funcs (quickjs.c:51672): plain JS_CFUNC_DEF entries over
+// js_symbol_for / js_symbol_keyFor, dispatched like any other builtin.
 const symbol_static = preparedMethods([_]Method{
     .{ .name = "for", .length = 1 },
     .{ .name = "keyFor", .length = 1 },
-}, .none);
+}, .symbol_static);
 
 const date_static = preparedMethods([_]Method{
     .{ .name = "now", .length = 0 },
@@ -2149,11 +2402,14 @@ const promise_static = preparedMethods([_]Method{
     .{ .name = "withResolvers", .length = 0 },
 }, .promise_static);
 
+// qjs js_promise_proto_funcs (quickjs.c:54376): ordinary JS_CFUNC_DEF entries
+// over js_promise_then / js_promise_catch / js_promise_finally, so they carry
+// native builtin ids and dispatch through the record table.
 const promise_prototype = preparedMethods([_]Method{
     .{ .name = "then", .length = 2 },
     .{ .name = "catch", .length = 1 },
     .{ .name = "finally", .length = 1 },
-}, .none);
+}, .promise_prototype);
 
 const error_static = preparedMethods([_]Method{
     .{ .name = "captureStackTrace", .length = 1 },
@@ -2239,14 +2495,18 @@ const weak_set_prototype = preparedMethods([_]Method{
     .{ .name = "delete", .length = 1 },
 }, .weak_set_prototype);
 
+// qjs js_weakref_proto_funcs (quickjs.c:61197) / js_finrec_proto_funcs
+// (quickjs.c:61376): ordinary JS_CFUNC_DEF entries, so they carry a native
+// builtin id and dispatch through the record table like every other builtin
+// method instead of falling into the compatibility name cascade.
 const weak_ref_prototype = preparedMethods([_]Method{
     .{ .name = "deref", .length = 0 },
-}, .none);
+}, .weak_ref_prototype);
 
 const finalization_registry_prototype = preparedMethods([_]Method{
     .{ .name = "register", .length = 2 },
     .{ .name = "unregister", .length = 1 },
-}, .none);
+}, .finalization_registry_prototype);
 
 const disposable_stack_prototype = preparedMethods([_]Method{
     .{ .name = "use", .length = 1 },
@@ -2422,9 +2682,12 @@ const atomics_methods = preparedMethods([_]Method{
     .{ .name = "xor", .length = 3 },
 }, .atomics);
 
-const performance_methods = preparedMethods([_]Method{
-    .{ .name = "now", .length = 0 },
-}, .none);
+// NOTE: there is deliberately no `performance_methods` function list here. The
+// live `performance.now` descriptor is built lazily by
+// `core/object.zig:materializePerformanceAutoInit`, which stamps
+// `nativeBuiltinId(.performance, 1)` itself. A duplicate id-less table used to
+// sit at this spot; the native-record gate proved it was unreachable dead code
+// (nothing referenced it) and it was removed.
 
 fn installSymbolExtras(rt: *core.JSRuntime, global: *core.Object, symbol_ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, symbol_ctor) orelse return error.InvalidBuiltinRegistry;
@@ -3036,6 +3299,97 @@ comptime {
         core.function.nativeBuiltinId(.math, math_builtin.internal_entries[0].id));
     std.debug.assert(json_methods[0].native_builtin_id ==
         core.function.nativeBuiltinId(.json, json_builtin.internal_entries[0].id));
+}
+
+/// Every gated function-list table, keyed by the `MethodTableKind` it was
+/// prepared with. This is the backward half of the native-record gate: it lets
+/// the `comptime` block below prove that each `native_record_debt` row still
+/// names a real, still-record-less method. Without it the allow list would rot
+/// into a rubber stamp the moment a method gained a record.
+const GatedMethodTable = struct { kind: MethodTableKind, methods: []const Method };
+
+const gated_method_tables = [_]GatedMethodTable{
+    .{ .kind = .global_functions, .methods = &global_function_methods },
+    .{ .kind = .object_static, .methods = &object_static },
+    .{ .kind = .function_prototype, .methods = &function_prototype },
+    .{ .kind = .array_static, .methods = &array_static },
+    .{ .kind = .array_prototype, .methods = &array_prototype },
+    .{ .kind = .typed_array_static, .methods = &typed_array_static },
+    .{ .kind = .typed_array_prototype, .methods = &typed_array_prototype },
+    .{ .kind = .typed_array_prototype, .methods = &typed_array_intrinsic_extra_methods },
+    .{ .kind = .uint8_array_static, .methods = &uint8_array_constructor_codec_methods },
+    .{ .kind = .uint8_array_prototype, .methods = &uint8_array_prototype_codec_methods },
+    .{ .kind = .string_static, .methods = &string_static },
+    .{ .kind = .string_prototype, .methods = &string_prototype },
+    .{ .kind = .number_static, .methods = &number_static },
+    .{ .kind = .number_prototype, .methods = &number_prototype },
+    .{ .kind = .bigint_static, .methods = &bigint_static },
+    .{ .kind = .symbol_static, .methods = &symbol_static },
+    .{ .kind = .proxy_static, .methods = &proxy_static },
+    .{ .kind = .boolean_prototype, .methods = &boolean_prototype },
+    .{ .kind = .bigint_prototype, .methods = &bigint_prototype },
+    .{ .kind = .symbol_prototype, .methods = &symbol_prototype },
+    .{ .kind = .error_prototype, .methods = &error_prototype },
+    .{ .kind = .error_static, .methods = &error_static },
+    .{ .kind = .date_static, .methods = &date_static },
+    .{ .kind = .date_prototype, .methods = &date_prototype },
+    .{ .kind = .regexp_prototype, .methods = &regexp_prototype },
+    .{ .kind = .promise_static, .methods = &promise_static },
+    .{ .kind = .promise_prototype, .methods = &promise_prototype },
+    .{ .kind = .map_static, .methods = &map_static },
+    .{ .kind = .map_prototype, .methods = &map_prototype },
+    .{ .kind = .set_prototype, .methods = &set_prototype },
+    .{ .kind = .weak_map_prototype, .methods = &weak_map_prototype },
+    .{ .kind = .weak_set_prototype, .methods = &weak_set_prototype },
+    .{ .kind = .weak_ref_prototype, .methods = &weak_ref_prototype },
+    .{ .kind = .finalization_registry_prototype, .methods = &finalization_registry_prototype },
+    .{ .kind = .disposable_stack_prototype, .methods = &disposable_stack_prototype },
+    .{ .kind = .async_disposable_stack_prototype, .methods = &async_disposable_stack_prototype },
+    .{ .kind = .buffer_prototype, .methods = &buffer_prototype },
+    .{ .kind = .shared_buffer_prototype, .methods = &shared_buffer_prototype },
+    .{ .kind = .array_buffer_static, .methods = &array_buffer_static },
+    .{ .kind = .data_view_prototype, .methods = &data_view_prototype },
+    .{ .kind = .iterator_static, .methods = &iterator_static },
+    .{ .kind = .iterator_prototype, .methods = &iterator_prototype },
+    .{ .kind = .reflect, .methods = &reflect_methods },
+    .{ .kind = .atomics, .methods = &atomics_methods },
+    .{ .kind = .standalone_auto_init, .methods = &standalone_gated_auto_inits },
+};
+
+const standalone_gated_auto_inits = [_]Method{
+    symbol_to_primitive_auto_init,
+    date_to_primitive_auto_init,
+    function_has_instance_auto_init,
+    iterator_dispose_auto_init,
+    string_iterator_auto_init,
+    regexp_escape_auto_init,
+    regexp_symbol_auto_init[0].info,
+    regexp_symbol_auto_init[1].info,
+    regexp_symbol_auto_init[2].info,
+    regexp_symbol_auto_init[3].info,
+    regexp_symbol_auto_init[4].info,
+};
+
+comptime {
+    @setEvalBranchQuota(200_000);
+    for (native_record_debt) |debt| {
+        var matched = false;
+        for (gated_method_tables) |table| {
+            if (table.kind != debt.table) continue;
+            for (table.methods) |method| {
+                if (!std.mem.eql(u8, method.name, debt.name)) continue;
+                if (comptimeInternalRecordExists(method.native_builtin_id)) {
+                    @compileError("stale `native_record_debt` row: '" ++ debt.name ++
+                        "' now resolves to an internal builtin record. Delete the row.");
+                }
+                matched = true;
+            }
+        }
+        if (!matched) {
+            @compileError("dangling `native_record_debt` row: no method named '" ++ debt.name ++
+                "' exists in the named table. Delete the row.");
+        }
+    }
 }
 
 const standard_global_domains = [_][]const u8{

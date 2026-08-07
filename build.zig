@@ -20,28 +20,11 @@ pub fn build(b: *std.Build) void {
     // the target default.
     const target_default_nan_boxing = target.result.ptrBitWidth() < 64;
     const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse target_default_nan_boxing;
-    // QCP-1 RELEASE (verdict QCP-1A = ACCEPT): compiler selection.
-    //   v2     = the QuickJS-model compiler-v2. THE PRODUCTION DEFAULT, and the
-    //            only supported production configuration.
-    //   legacy = the Phase 1/2/3 pipeline. EXPERIMENTAL FALLBACK ONLY — it is
-    //            retained so a V2 defect has somewhere to fall back to and so
-    //            `dual` still has two compilers to compare, not because it is a
-    //            supported alternative. Do not read it as a second default.
-    //   dual   = compile with both, compare, execute the v2 product; retained
-    //            as the differential oracle.
-    // Legacy's physical removal is verdict QCP-1B = NO-GO, DEFERRED: deleting
-    // the legacy pipelines produced a stable runtime benchmark regression
-    // (crypto ~-4% vs pre-delete V2, geomean ~-0.7%) whose mechanism was never
-    // identified. See docs/qcp1_switch_decision.md §8 for both verdicts and the
-    // gate the default rests on.
-    const zjs_compiler = b.option([]const u8, "zjs_compiler", "Compiler selection: v2 (production default), legacy (experimental fallback, unsupported for production), or dual (differential oracle)") orelse "v2";
-    if (!std.mem.eql(u8, zjs_compiler, "legacy") and
-        !std.mem.eql(u8, zjs_compiler, "v2") and
-        !std.mem.eql(u8, zjs_compiler, "dual"))
-    {
-        std.debug.print("error: invalid -Dzjs_compiler value '{s}': expected legacy, v2, or dual\n", .{zjs_compiler});
-        std.process.exit(1);
-    }
+    // QCP-1: the engine has exactly one compiler. `-Dzjs_compiler` retired with
+    // the legacy production path; the component stays in the configuration
+    // signature so an artifact still NAMES the compiler it was built from and
+    // the negative drift gate still has a component to falsify.
+    const compiler_name = "v2";
     // QCP-1: compiler-v2 final bytecode layout. `short` is part of the release
     // configuration, not an optimization knob: the switch measurements were
     // taken against it. `plain` stays reachable as the A/B diagnostic
@@ -71,24 +54,24 @@ pub fn build(b: *std.Build) void {
 
     // ===== QCP-1 configuration signature =====
     // The defect class this closes is "a gate reports green about a
-    // configuration it never ran". `zig build test-altrepr -Dzjs_compiler=v2`
-    // spawned a child `zig build` that started from the defaults and ran the
-    // *legacy* suite. Forwarding options fixes that one instance; the
-    // signature makes the class unexpressible, because every gate can now
-    // state which configuration its green belongs to.
+    // configuration it never ran". A nested `zig build` used to start from the
+    // defaults and run a different configuration than the parent asked for.
+    // Forwarding options fixes one instance; the signature makes the class
+    // unexpressible, because every gate can now state which configuration its
+    // green belongs to.
     //
     // This is the build graph's BELIEF about the configuration. The compiled
     // code computes the same string independently, in src/config_signature.zig,
     // from the declarations it actually consumes (resolve_labels.default_layout,
-    // Parser.single_backend_is_v2/dual_compare_enabled, core.value.nan_boxing,
-    // builtin.mode, core.memory.force_gc_on_allocation_enabled,
+    // core.value.nan_boxing, builtin.mode,
+    // core.memory.force_gc_on_allocation_enabled,
     // core.atom.ownership_audit_enabled) and fails its own COMPILATION when the
     // two disagree (`config_signature.attest`). `zig build
     // config-signature-check` repeats the comparison at runtime against the
     // shipped binary; `zig build config-drift-gate` proves the compile-time
     // half is still live by requiring a deliberately wrong expectation to fail.
     const config_settings: ConfigSettings = .{
-        .compiler = zjs_compiler,
+        .compiler = compiler_name,
         .layout = zjs_v2_layout,
         .nan_boxing = zjs_nan_boxing,
         .optimize = optimize,
@@ -166,7 +149,6 @@ pub fn build(b: *std.Build) void {
     const engine_option_inputs: EngineOptionInputs = .{
         .enable_opcode_profile = zjs_enable_opcode_profile,
         .nan_boxing = zjs_nan_boxing,
-        .compiler = zjs_compiler,
         .v2_layout = zjs_v2_layout,
         .expect_config = expect_config,
         .oom_coverage = zjs_oom_coverage,
@@ -841,10 +823,24 @@ pub fn build(b: *std.Build) void {
     update_architecture_public_api.addArg("--write");
     update_architecture_public_api.addArg("reports/api/public-symbols.txt");
 
-    const architecture_check_step = b.step("architecture-check", "Check architecture dependency, OOM-panic, borrowed-atom, and public API rules");
+    // Legacy-pipeline eradication: production source must not name the retired
+    // passes, AND `nm` over the SHIPPED ReleaseFast artifact must find exactly
+    // zero of their symbols. At 13b9a655 the entry was unreachable but 70
+    // symbols were still linked, so the source half alone is not the claim.
+    // This is why the step now builds `zjs`: a gate that cannot read the
+    // shipped binary cannot make a statement about it.
+    const run_architecture_legacy_pipelines = b.addSystemCommand(&.{
+        "node",
+        "tools/architecture/check_legacy_pipelines_gone.js",
+    });
+    run_architecture_legacy_pipelines.addArg(b.getInstallPath(.bin, zjs_exe.out_filename));
+    run_architecture_legacy_pipelines.step.dependOn(&install_zjs.step);
+
+    const architecture_check_step = b.step("architecture-check", "Check architecture dependency, OOM-panic, borrowed-atom, legacy-pipeline eradication, and public API rules");
     architecture_check_step.dependOn(&run_architecture_deps.step);
     architecture_check_step.dependOn(&run_architecture_oom_panics.step);
     architecture_check_step.dependOn(&run_architecture_borrowed_atoms.step);
+    architecture_check_step.dependOn(&run_architecture_legacy_pipelines.step);
     architecture_check_step.dependOn(&run_architecture_public_api.step);
 
     const architecture_snapshot_step = b.step("architecture-update-api-snapshot", "Refresh the public API snapshot");
@@ -1099,9 +1095,9 @@ pub fn build(b: *std.Build) void {
     const altrepr_project_seed = b.fmt("-Dzjs_test_seed={d}", .{zjs_test_seed});
     // The nested build is a separate `zig build` process, so it starts from
     // the *defaults* for every option the outer invocation was given unless
-    // they are forwarded explicitly. Before this was forwarded,
-    // `zig build test-altrepr -Dzjs_compiler=v2` silently ran the legacy
-    // compiler: a gate reporting green about a configuration it never ran.
+    // they are forwarded explicitly. Before this was forwarded, a nested gate
+    // silently resolved the defaults and reported green about a configuration
+    // it never ran.
     // Forward the whole user option set rather than an enumerated list, so a
     // newly added -D option cannot silently reopen the same hole. Only the
     // three settings this step determines for itself are substituted:
@@ -1217,8 +1213,6 @@ pub fn build(b: *std.Build) void {
         "config-attest-build-optimize",
         "--expect",
         configSignature(b, config_settings),
-        "--compiler",
-        zjs_compiler,
         "--layout",
         zjs_v2_layout,
         "--nan-boxing",
@@ -1416,7 +1410,6 @@ fn pinnedExpectedConfig(
 const EngineOptionInputs = struct {
     enable_opcode_profile: bool,
     nan_boxing: bool,
-    compiler: []const u8,
     v2_layout: []const u8,
     expect_config: []const u8,
     oom_coverage: bool,
@@ -1436,7 +1429,6 @@ fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.Optio
     const options = b.addOptions();
     options.addOption(bool, "zjs_enable_opcode_profile", in.enable_opcode_profile);
     options.addOption(bool, "zjs_nan_boxing", in.nan_boxing);
-    options.addOption([]const u8, "zjs_compiler", in.compiler);
     options.addOption([]const u8, "zjs_v2_layout", in.v2_layout);
     options.addOption([]const u8, "zjs_expect_config", in.expect_config);
     options.addOption(bool, "zjs_oom_coverage", in.oom_coverage);

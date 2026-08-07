@@ -29,6 +29,7 @@ const reflect_proxy = @import("reflect_proxy_ops.zig");
 const regexp = @import("regexp_ops.zig");
 const string = @import("string_builtin_ops.zig");
 const uri = @import("uri_ops.zig");
+const weak_ref = @import("builtin_glue.zig");
 
 const InternalEntry = core.host_function.InternalEntry;
 const InternalRecord = core.host_function.InternalRecord;
@@ -74,8 +75,12 @@ fn denseRecords(comptime entries: []const InternalEntry) []const InternalRecord 
 
 /// The `.primitive` domain is shared across the five wrapper primitives. Ids are
 /// the `class_tag * 10 + method` encoding from
-/// `exec/object_ops.qjsPrimitivePrototypeMethod`.
-const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries ++ primitive.symbol_entries;
+/// `exec/object_ops.qjsPrimitivePrototypeMethod` for methods 1-5; methods 6+
+/// are the wrapper constructors' static function lists (qjs `js_bigint_funcs`
+/// quickjs.c:56350, `js_symbol_funcs` quickjs.c:51672), which share the domain
+/// but not that handler.
+const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries ++
+    primitive.symbol_entries ++ primitive.bigint_static_entries ++ primitive.symbol_static_entries;
 
 /// The static table `JSRuntime.internal_builtins` points at. Every standard
 /// native domain contributes its record entries here; exec owns both the
@@ -101,6 +106,7 @@ pub const table: [domain_count][]const InternalRecord = build: {
     domains[@intFromEnum(NativeBuiltinDomain.object)] = denseRecords(&object.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.array)] = denseRecords(&array.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.regexp)] = denseRecords(&regexp.internal_entries);
+    domains[@intFromEnum(NativeBuiltinDomain.weak_ref)] = denseRecords(&weak_ref.internal_entries);
     break :build domains;
 };
 

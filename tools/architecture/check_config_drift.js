@@ -62,7 +62,7 @@ function fail(message) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-for (const required of ["zig", "step", "optimize-step", "expect", "compiler", "layout"]) {
+for (const required of ["zig", "step", "optimize-step", "expect", "layout"]) {
   if (!args[required]) fail(`missing required option --${required}`);
 }
 const buildRoot = path.resolve(args["build-root"] || process.cwd());
@@ -93,8 +93,12 @@ if (!expected.startsWith("zjs-config-v2:")) {
 }
 
 // A wrong value must be a DIFFERENT legal value, not nonsense: the point is to
-// simulate a build that resolved the other supported backend/layout, which is
-// the real defect, rather than a build that resolved garbage.
+// simulate a build that resolved the other supported layout, which is the real
+// defect, rather than a build that resolved garbage. `compiler` no longer has a
+// second legal value -- the legacy production path is deleted -- so its wrong
+// value is the retired backend's name: a signature naming a compiler this
+// engine cannot be is exactly the drift the artifact must refuse to compile
+// under.
 const wrongCompiler = componentValue(expected, "compiler") === "legacy" ? "v2" : "legacy";
 const wrongLayout = componentValue(expected, "layout") === "plain" ? "short" : "plain";
 // ReleaseSafe against Debug is the exact pairing the ruling names: same
@@ -107,7 +111,6 @@ const wrongOptimize = componentValue(expected, "optimize") === "Debug" ? "Releas
 // exists to close, so nothing here is inherited.
 function baseOptions(layoutOverride) {
   const options = [
-    `-Dzjs_compiler=${args.compiler}`,
     `-Dzjs_v2_layout=${layoutOverride || args.layout}`,
     `-Dzjs_nan_boxing=${args["nan-boxing"] || "false"}`,
     `-Dzjs_force_gc=${args["force-gc"] || "false"}`,

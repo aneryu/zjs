@@ -257,13 +257,24 @@ function isValuePosition(text, index) {
   return true;
 }
 
+// An immediate identity comparison consumes the id and produces a bool; it
+// does not return or retain the borrowed atom. Keep this deliberately narrow
+// (`==` / `!=` adjacent to the read) so conditional expressions that select
+// and return the atom itself remain findings.
+function isIdentityComparisonOperand(text, start, end) {
+  const before = text.slice(0, start).trimEnd();
+  const after = text.slice(end).trimStart();
+  return /(?:==|!=)$/.test(before) || /^(?:==|!=)/.test(after);
+}
+
 function borrowedReadsIn(text, stats) {
   const found = [];
   borrowed_read_re.lastIndex = 0;
   let match;
   while ((match = borrowed_read_re.exec(text)) !== null) {
     if (stats !== undefined) stats.reads += 1;
-    if (isValuePosition(text, match.index)) {
+    if (isValuePosition(text, match.index) &&
+        !isIdentityComparisonOperand(text, match.index, match.index + match[0].length)) {
       if (stats !== undefined) stats.borrowingReads += 1;
       found.push({ owner: match[1], text: match[0] });
     }

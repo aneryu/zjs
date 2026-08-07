@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const std = @import("std");
+const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 
@@ -23,6 +24,22 @@ pub const ArrayBufferAccessorMethod = core.host_function.builtin_method_ids.buff
 pub const SharedArrayBufferAccessorMethod = core.host_function.builtin_method_ids.buffer.SharedArrayBufferAccessorMethod;
 pub const DataViewAccessorMethod = core.host_function.builtin_method_ids.buffer.DataViewAccessorMethod;
 pub const TypedArrayAccessorMethod = core.host_function.builtin_method_ids.buffer.TypedArrayAccessorMethod;
+pub const Uint8ArrayStaticMethod = core.host_function.builtin_method_ids.buffer.Uint8ArrayStaticMethod;
+pub const Uint8ArrayPrototypeMethod = core.host_function.builtin_method_ids.buffer.Uint8ArrayPrototypeMethod;
+
+pub fn uint8ArrayStaticMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "fromBase64")) return @intFromEnum(Uint8ArrayStaticMethod.from_base64);
+    if (std.mem.eql(u8, name, "fromHex")) return @intFromEnum(Uint8ArrayStaticMethod.from_hex);
+    return null;
+}
+
+pub fn uint8ArrayPrototypeMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "toBase64")) return @intFromEnum(Uint8ArrayPrototypeMethod.to_base64);
+    if (std.mem.eql(u8, name, "toHex")) return @intFromEnum(Uint8ArrayPrototypeMethod.to_hex);
+    if (std.mem.eql(u8, name, "setFromBase64")) return @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64);
+    if (std.mem.eql(u8, name, "setFromHex")) return @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex);
+    return null;
+}
 
 const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
 pub const dataViewGetMethodId = buffer_id_lookup.dataViewGetMethodId;
@@ -141,6 +158,14 @@ pub const internal_entries = bufferEntries: {
         bufferEntry("get byteOffset", 0, @intFromEnum(TypedArrayAccessorMethod.byte_offset)),
         bufferEntry("get length", 0, @intFromEnum(TypedArrayAccessorMethod.length)),
         bufferEntry("get [Symbol.toStringTag]", 0, @intFromEnum(TypedArrayAccessorMethod.to_string_tag)),
+        // Uint8Array base64/hex codecs: qjs js_uint8array_funcs
+        // (quickjs.c:59820) and js_uint8array_proto_funcs (quickjs.c:59812).
+        codecEntry("fromBase64", 1, @intFromEnum(Uint8ArrayStaticMethod.from_base64)),
+        codecEntry("fromHex", 1, @intFromEnum(Uint8ArrayStaticMethod.from_hex)),
+        codecEntry("toBase64", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_base64)),
+        codecEntry("toHex", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_hex)),
+        codecEntry("setFromBase64", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64)),
+        codecEntry("setFromHex", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex)),
     };
 };
 
@@ -169,6 +194,54 @@ fn bufferCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (try builtin_glue.qjsBufferNativeRecord(host_call.ctx, host_call.this_value, host_call.magic, host_call.args)) |value| return value;
     return error.TypeError;
+}
+
+fn codecEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&uint8ArrayCodecCall),
+    };
+}
+
+/// Record handler for the Uint8Array base64/hex codecs. Unlike the rest of the
+/// `.buffer` domain these need the writer/caller-frame context, because
+/// `check_options_object` (quickjs.c:59376) and the `alphabet` /
+/// `lastChunkHandling` / `omitPadding` reads run user getters. The magic only
+/// picks which constant name `qjsUint8ArrayCodecCall` branches on, so each
+/// body -- and with it the qjs-ordered receiver check / string check /
+/// GetOptionsObject / option Get sequence -- is reached unchanged.
+fn uint8ArrayCodecCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const name: []const u8 = switch (host_call.magic) {
+        @intFromEnum(Uint8ArrayStaticMethod.from_base64) => "fromBase64",
+        @intFromEnum(Uint8ArrayStaticMethod.from_hex) => "fromHex",
+        @intFromEnum(Uint8ArrayPrototypeMethod.to_base64) => "toBase64",
+        @intFromEnum(Uint8ArrayPrototypeMethod.to_hex) => "toHex",
+        @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64) => "setFromBase64",
+        @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex) => "setFromHex",
+        else => return error.TypeError,
+    };
+    const result = try array_ops.qjsUint8ArrayCodecCall(
+        realm.realm,
+        host_call.output,
+        realm.global,
+        host_call.this_value,
+        name,
+        host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    );
+    return result orelse error.TypeError;
 }
 
 // The engine-core TypedArray / ArrayBuffer / DataView element-access, coercion,

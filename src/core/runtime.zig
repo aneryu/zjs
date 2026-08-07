@@ -1313,10 +1313,21 @@ pub const JSRuntime = struct {
         self.destroy();
     }
 
+    /// These runtime allocators reach `MemoryAccount.*NoTrigger` and therefore
+    /// carry the threshold check themselves. QuickJS puts no such check in
+    /// `js_malloc_rt` / `js_realloc_rt` (quickjs.c:1799-1812): its single
+    /// allocation-threshold site is `js_trigger_gc` from `JS_NewObjectFromShape`
+    /// (quickjs.c:5619). Gate them on the same comptime rule as the trigger
+    /// callback so both halves of the mechanism stay in one place — see
+    /// `memory.allocation_gc_trigger_enabled` for the full argument.
+    const runtime_allocation_requests_gc = memory.allocation_gc_trigger_enabled;
+
     pub inline fn allocRuntime(self: *JSRuntime, comptime T: type, count: usize) ![]T {
-        if (count != 0) {
-            const bytes = std.math.mul(usize, @sizeOf(T), count) catch std.math.maxInt(usize);
-            self.requestGCForAllocation(bytes);
+        if (comptime runtime_allocation_requests_gc) {
+            if (count != 0) {
+                const bytes = std.math.mul(usize, @sizeOf(T), count) catch std.math.maxInt(usize);
+                self.requestGCForAllocation(bytes);
+            }
         }
         return self.memory.allocNoTrigger(T, count);
     }
@@ -1326,16 +1337,18 @@ pub const JSRuntime = struct {
     }
 
     pub inline fn remapRuntime(self: *JSRuntime, comptime T: type, slice: []T, new_count: usize) !?[]T {
-        if (new_count > slice.len) {
-            const old_bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch std.math.maxInt(usize);
-            const new_bytes = std.math.mul(usize, @sizeOf(T), new_count) catch std.math.maxInt(usize);
-            self.requestGCForAllocation(new_bytes -| old_bytes);
+        if (comptime runtime_allocation_requests_gc) {
+            if (new_count > slice.len) {
+                const old_bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch std.math.maxInt(usize);
+                const new_bytes = std.math.mul(usize, @sizeOf(T), new_count) catch std.math.maxInt(usize);
+                self.requestGCForAllocation(new_bytes -| old_bytes);
+            }
         }
         return self.memory.remap(T, slice, new_count);
     }
 
     pub inline fn createRuntime(self: *JSRuntime, comptime T: type) !*T {
-        self.requestGCForAllocation(@sizeOf(T));
+        if (comptime runtime_allocation_requests_gc) self.requestGCForAllocation(@sizeOf(T));
         return self.memory.createNoTrigger(T);
     }
 
@@ -1344,7 +1357,9 @@ pub const JSRuntime = struct {
     }
 
     pub inline fn allocRuntimeAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
-        if (byte_count != 0) self.requestGCForAllocation(byte_count);
+        if (comptime runtime_allocation_requests_gc) {
+            if (byte_count != 0) self.requestGCForAllocation(byte_count);
+        }
         return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
     }
 
@@ -1355,7 +1370,7 @@ pub const JSRuntime = struct {
     /// before every runtime allocation, so those comptime modes retain the full
     /// request path.
     pub inline fn allocStringAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
-        if (comptime builtin.is_test or memory.force_gc_on_allocation_enabled) {
+        if (comptime runtime_allocation_requests_gc) {
             if (byte_count != 0) self.requestGCForAllocation(byte_count);
         }
         return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
@@ -2693,6 +2708,15 @@ pub const JSRuntime = struct {
     /// cycles before rejecting the replacement object.
     pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) void {
         self.requestGCForAllocation(size);
+        // Scratch allocation can cross the threshold and queue a request, then
+        // fall back below it before the next qjs-style object boundary. The
+        // threshold condition is level-triggered: discard only that ordinary
+        // stale request. Registry request coalescing preserves manual/external/
+        // pressure reasons so they cannot be cancelled here.
+        const prospective = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
+        if (prospective <= self.malloc_gc_threshold) {
+            _ = self.gc.clearStaleAllocationThresholdRequest();
+        }
         if (self.gc_running or self.gc.phase != .none or !self.gc.hasPendingMajorRequest()) return;
         _ = self.pollGC(null, .normal) catch {};
     }
@@ -2830,10 +2854,18 @@ pub const JSRuntime = struct {
     /// Return true if consuming `alloca_size` more native stack would cross the
     /// recursion limit. Direct port of QuickJS `js_check_stack_overflow`
     /// (quickjs.c:2059-2064): `sp = frame_address - alloca_size; sp < limit`.
-    /// Stack grows down, so "below the limit" is overflow. Returns false when the
-    /// limit is unset (0), matching the no-limit build.
+    /// Stack grows down, so "below the limit" is overflow.
+    ///
+    /// The unset limit needs no branch of its own: qjs encodes "no limit" as
+    /// `rt->stack_limit = 0` (`update_stack_limit`, quickjs.c:2841-2846) and
+    /// lets the same unsigned compare answer it, because no stack pointer is
+    /// ever below zero. `native_stack_limit` uses that identical encoding, and
+    /// the saturating subtraction keeps `sp` non-negative, so `sp < 0` is
+    /// already constant-false. An explicit `limit == 0` pre-test is a zjs-only
+    /// extra load-compare-branch on the parser's per-token guard path
+    /// (parser.zig `advance`, mirroring qjs guarding `next_token`,
+    /// quickjs.c:22836) and LLVM does not fold it away.
     pub inline fn checkNativeStackOverflow(self: *const JSRuntime, alloca_size: usize) bool {
-        if (self.hot.native_stack_limit == 0) return false;
         const sp = @frameAddress() -| alloca_size;
         return sp < self.hot.native_stack_limit;
     }

@@ -784,6 +784,8 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
     if (target.class_id != core.class.ids.map and target.class_id != core.class.ids.set) return false;
     const is_set = target.class_id == core.class.ids.set;
 
+    // Same cursor park as the generic collectionIteratorNext (quickjs.c:52605).
+    iterator.retainCollectionIteratorCursor();
     while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().*.len) {
         const index = iterator.iteratorIndexSlot().*;
         iterator.iteratorIndexSlot().* += 1;
@@ -876,7 +878,7 @@ fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.objec
 fn finishMapSetForOfDone(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize, clear_target: bool) !bool {
     if (clear_target) {
         if (objectFromValue(stack.values[iterator_index])) |iterator| {
-            iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
+            iterator.detachCollectionIteratorTarget(ctx.runtime);
         }
     }
     try stack.reserveAdditional(2);

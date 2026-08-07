@@ -1054,6 +1054,35 @@ pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
 
 /// QJS `js_string_rope_compare`: compare flat and rope strings a leaf chunk at
 /// a time. `eq_only` permits the same early length mismatch used by equality.
+/// QJS `js_string_eq` (quickjs.c:4605-4613): length test, pointer identity, then
+/// one body comparison through `js_string_memcmp` (quickjs.c:4586-4603).
+///
+/// Flat strings only. qjs's inline OP_CMP_EQ / OP_CMP_STRICT_EQ arms fire on
+/// `JS_TAG_STRING` (quickjs.c:20321, 20382), and a rope carries the distinct
+/// `JS_TAG_STRING_ROPE`, so ropes never reach `js_string_eq` from the dispatch
+/// loop. Keeping the same restriction here is what lets this stay allocation-,
+/// iterator- and frame-free: `compareStringValues` below must open a 60-slot
+/// `StringValueIterator` pair for the rope case before it can even test the
+/// lengths, which is the cost this bypasses for the flat-flat majority.
+pub fn flatStringsEq(a: *const String, b: *const String) bool {
+    if (a.len_meta.len != b.len_meta.len) return false; // qjs:4607
+    if (a == b) return true; // qjs:4609
+    if (a.len_meta.is_wide == b.len_meta.is_wide) {
+        // qjs `memcmp` / `memcmp16` legs (quickjs.c:4593, 4600). Equality only,
+        // so a single scan settles it -- no ordering pass is needed.
+        if (a.len_meta.is_wide) return std.mem.eql(u16, a.utf16(), b.utf16());
+        return std.mem.eql(u8, a.latin1(), b.latin1());
+    }
+    // Mixed width: qjs's cross-width leg widens the 8-bit side per unit
+    // (quickjs.c:4586-4599).
+    const narrow = if (a.len_meta.is_wide) b else a;
+    const wide = if (a.len_meta.is_wide) a else b;
+    for (narrow.latin1(), wide.utf16()) |n, w| {
+        if (n != w) return false;
+    }
+    return true;
+}
+
 pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
     if (!a.isString() or !b.isString()) return null;
     if (a.same(b)) return 0;

@@ -190,6 +190,19 @@ fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, compti
 inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime mid: u32) HostError!?core.JSValue {
     const string_value = host_call.this_value;
     if (!string_value.isString()) return null;
+    // qjs's js_string_charCodeAt / charAt / codePointAt / at all open with
+    // JS_ToStringCheckObject (quickjs.c:45450), whose JS_ToStringInternal
+    // JS_TAG_STRING_ROPE case linearizes the receiver through
+    // js_linearize_string_rope (quickjs.c:13597-13598 -> 4828). Linearize at the
+    // same boundary: StringRope.flatten caches the flat body into the node and
+    // is O(1) once linearized, exactly like js_linearize_string_rope's
+    // already-linearized check (quickjs.c:4838-4844) and its node rewrite
+    // (quickjs.c:4851-4855). Without this each call re-descends the rope tree
+    // in stringValueCodeUnitAtUnchecked, so scanning a content stream costs
+    // O(depth) per character instead of O(1).
+    if (string_value.ropeBody()) |node| {
+        _ = node.flatten() catch |err| return @as(HostError, @errorCast(err));
+    }
     const args = host_call.args;
     const idx: i64 = if (args.len == 0)
         0

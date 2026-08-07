@@ -83,8 +83,9 @@ zig build config-signature-check --seed 0 # 构建产物自报配置签名并与
 
 ### Compiler configuration
 
-The compiler and its final bytecode layout are build options. **The production
-configuration is compiler-v2 with the short layout, and it is the default:**
+Compiler-v2 is the only compiler. Its final bytecode layout remains selectable
+for diagnostics; **the production configuration uses the short layout and is
+the default:**
 
 ```
 zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
@@ -92,25 +93,18 @@ zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc
 
 ```sh
 zig build test --seed 0 --summary all                        # production default: v2 + short
-zig build test -Dzjs_compiler=legacy --seed 0 --summary all  # EXPERIMENTAL FALLBACK ONLY — not a supported production configuration
-zig build test -Dzjs_compiler=dual --seed 0 --summary all    # differential oracle
 zig build test -Dzjs_v2_layout=plain --seed 0 --summary all  # A/B diagnostic layout
 ```
 
-The legacy pipeline is **retained as a fallback only**. It still builds and
-still passes its suite, but it is not a supported production configuration and
-`-Dzjs_compiler=legacy` must not be read as a second default.
-
-**Legacy's physical removal is deferred, and that is deliberate.** QCP-1 closed
-as two verdicts (`docs/qcp1_switch_decision.md` §8):
-
-- **QCP-1A — make V2 the production compiler: ACCEPT.** Shipped as the default.
-- **QCP-1B — physically delete the legacy pipelines: NO-GO, deferred.** Deleting
-  them produced a stable runtime benchmark regression — crypto about **−4%**
-  against the pre-delete V2 tip, full-suite geomean about **−0.7%** — whose
-  mechanism was never identified. It is not a correctness failure and not an
-  architecture failure. It is re-filed as a separate **runtime layout
-  stability** project; legacy source stays until that question is answered.
+The legacy Phase 1/2/3 passes, `-Dzjs_compiler`, and the dual comparator have
+been removed. QCP-1B was accepted only after deletion bisection isolated its
+former crypto regression to an unused pointer-sized `CompileContext` field:
+removing that word perturbed Zig 0.16 whole-program native layout while emitted
+bytecode and allocation streams stayed identical. The same-sized reserved-word
+control proved the trigger but is not part of the shipped implementation.
+Explicit non-inlined boundaries around V2 lowering and the stack-size walk keep
+those compiler stages out of the packed finalizer and remove the sensitivity.
+See `docs/qcp1_switch_decision.md` §9.
 
 Those settings, plus the JSValue representation, the optimize mode, force-GC and
 the ownership audit, form the build's **configuration signature**
@@ -119,7 +113,7 @@ declarations the engine consumes, and every engine-bearing artifact asserts it
 at compile time, so a gate states which configuration its green belongs to and
 a Debug artifact cannot be mistaken for a ReleaseFast one. `zig build
 config-drift-gate` proves the assertion can still fail. See
-`docs/qcp1_switch_decision.md` §0.1.4 and §0.1.9.
+`docs/qcp1_switch_decision.md` §0.1.4, §0.1.9, and §9.
 
 Focused subsystem steps are available as `test-core`, `test-parser`,
 `test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`, and

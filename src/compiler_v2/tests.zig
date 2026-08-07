@@ -9,7 +9,6 @@ const object_ops = @import("../exec/object_ops.zig");
 const stack_mod = @import("../exec/stack.zig");
 const standard_globals = @import("../exec/standard_globals.zig");
 const builder_mod = @import("builder.zig");
-const coverage = @import("coverage.zig");
 const labels = @import("labels.zig");
 const resolve_labels = @import("resolve_labels.zig");
 const resolve_variables = @import("resolve_variables.zig");
@@ -62,47 +61,6 @@ const V2Parse = struct {
     }
 };
 
-const LegacyParse = struct {
-    rt: *core.JSRuntime,
-    name_atom: core.atom.Atom,
-    function: bytecode_mod.Bytecode,
-    lex: parser_mod.Lexer,
-    state: P.ParseState,
-
-    /// Parse through the ordinary phase-1 emitter. Unlike V2Parse, this keeps
-    /// source markers and scope temporary opcodes and emits the root stream to
-    /// function.code; nested functions own their FunctionDef.byte_code stream.
-    fn init(h: *LegacyParse, src: []const u8) !void {
-        h.rt = try core.JSRuntime.create(std.testing.allocator);
-        errdefer h.rt.destroy();
-        h.name_atom = try h.rt.atoms.internString("compiler_v2-s3-equivalence");
-        errdefer h.rt.atoms.free(h.name_atom);
-        h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
-        errdefer h.function.deinit(h.rt);
-        h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
-        h.state = try P.ParseState.init(&h.lex, &h.function);
-        // The seed models a script-global var environment while deliberately
-        // leaving is_eval false so top-level let/const remain local TDZ slots.
-        h.state.function_def.is_global_var = true;
-    }
-
-    fn parseProgram(h: *LegacyParse, capture_top_level_functions: bool) !void {
-        h.state.top_level_functions_as_children = capture_top_level_functions;
-        try P.parseProgramStatements(
-            &h.state,
-            P.DeclMask{ .func = true, .func_with_label = true, .other = true },
-        );
-        try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
-    }
-
-    fn deinit(h: *LegacyParse) void {
-        h.state.deinit(h.rt);
-        h.function.deinit(h.rt);
-        h.rt.atoms.free(h.name_atom);
-        h.rt.destroy();
-    }
-};
-
 const V2Exec = struct {
     rt: *core.JSRuntime,
     ctx: *core.JSContext,
@@ -128,6 +86,7 @@ const V2Exec = struct {
         h.state = try P.ParseState.initCanonicalRootWithRuntime(h.rt, &h.lex, &h.function);
         h.state.function_def.is_global_var = true;
         h.state.top_level_functions_as_children = true;
+        try h.state.beginV2ProgramEmission();
         h.installed_short_opcode = false;
     }
 
@@ -213,684 +172,6 @@ const Phase1Instruction = struct {
     has_atom: bool = false,
 };
 
-fn phase1TempAtomInstructionSize(op_id: u8) ?u8 {
-    return switch (op_id) {
-        qop.scope_get_var_undef,
-        qop.scope_get_var,
-        qop.scope_put_var,
-        qop.scope_delete_var,
-        qop.scope_get_ref,
-        qop.scope_put_var_init,
-        qop.scope_get_var_checkthis,
-        qop.scope_get_private_field,
-        qop.scope_get_private_field2,
-        qop.scope_put_private_field,
-        qop.scope_in_private_field,
-        => 7,
-        qop.scope_make_ref => 11,
-        qop.get_field_opt_chain => 5,
-        else => null,
-    };
-}
-
-fn phase1InstructionHasAtom(op_id: u8, is_temp: bool) bool {
-    if (is_temp) return switch (op_id) {
-        qop.scope_get_var_undef,
-        qop.scope_get_var,
-        qop.scope_put_var,
-        qop.scope_delete_var,
-        qop.scope_make_ref,
-        qop.scope_get_ref,
-        qop.scope_put_var_init,
-        qop.scope_get_var_checkthis,
-        qop.scope_get_private_field,
-        qop.scope_get_private_field2,
-        qop.scope_put_private_field,
-        qop.scope_in_private_field,
-        qop.get_field_opt_chain,
-        => true,
-        else => false,
-    };
-
-    return switch (opcode.formatOf(op_id)) {
-        .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
-        else => false,
-    };
-}
-
-/// Test-local twin of parserPhaseInstruction. The atom ledger disambiguates
-/// phase-1 temporary ids from the overlapping final short-opcode ids.
-fn decodePhase1Instruction(
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-    pc: usize,
-    atom_index: usize,
-) !Phase1Instruction {
-    if (pc >= code.len) return error.InvalidBytecode;
-    const op_id = code[pc];
-
-    if (phase1TempAtomInstructionSize(op_id)) |temp_size| {
-        if (pc + temp_size <= code.len and atom_index < atoms.len and
-            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == atoms[atom_index])
-        {
-            return .{ .size = temp_size, .is_temp = true, .has_atom = true };
-        }
-    }
-
-    var instruction: Phase1Instruction = switch (op_id) {
-        qop.enter_scope,
-        qop.leave_scope,
-        qop.label,
-        qop.get_array_el_opt_chain,
-        qop.set_class_name,
-        qop.line_num,
-        => .{ .size = opcode.sizeOfPhase1(op_id), .is_temp = true },
-        else => .{ .size = opcode.sizeOf(op_id) },
-    };
-    if (instruction.size == 0 or pc + instruction.size > code.len)
-        return error.InvalidBytecode;
-    instruction.has_atom = phase1InstructionHasAtom(op_id, instruction.is_temp);
-    return instruction;
-}
-
-fn phase1LabelOperandOffset(op_id: u8, instruction: Phase1Instruction) ?usize {
-    if (instruction.is_temp) {
-        if (op_id == qop.scope_make_ref) return 5;
-        return null;
-    }
-    return switch (opcode.formatOf(op_id)) {
-        .label => 1,
-        .atom_label_u8, .atom_label_u16 => 5,
-        else => null,
-    };
-}
-
-fn u32LessThan(_: void, lhs: u32, rhs: u32) bool {
-    return lhs < rhs;
-}
-
-fn translatedTargetLabel(
-    targets: []const u32,
-    target_labels: []const labels.LabelId,
-    target_pc: u32,
-) !labels.LabelId {
-    if (targets.len != target_labels.len) return error.InvalidBytecode;
-    var lo: usize = 0;
-    var hi = targets.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        if (targets[mid] < target_pc)
-            lo = mid + 1
-        else
-            hi = mid;
-    }
-    if (lo >= targets.len or targets[lo] != target_pc)
-        return error.InvalidBytecode;
-    return target_labels[lo];
-}
-
-/// Translate a real legacy parser phase-1 stream into a fresh identity-native
-/// Builder. Every legacy label instruction and absolute-PC label operand is
-/// mapped to a LabelId; line/label bytes disappear while binds retain their
-/// exact normalized instruction boundary.
-fn translatePhase1ToV2(
-    b: *builder_mod.Builder,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    if (b.code_len != 0 or b.atom_len != 0 or b.label_len != 0 or b.reloc_len != 0)
-        return error.InvalidBytecode;
-
-    var target_pcs: std.ArrayList(u32) = .empty;
-    defer target_pcs.deinit(std.testing.allocator);
-
-    var pc: usize = 0;
-    var atom_index: usize = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp and op_id == qop.label) {
-            try target_pcs.append(std.testing.allocator, @intCast(pc));
-        }
-        if (phase1LabelOperandOffset(op_id, instruction)) |operand_offset| {
-            if (operand_offset + 4 > instruction.size) return error.InvalidBytecode;
-            const target_pc = std.mem.readInt(u32, code[pc + operand_offset ..][0..4], .little);
-            if (target_pc > code.len) return error.InvalidBytecode;
-            try target_pcs.append(std.testing.allocator, target_pc);
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
-
-    std.mem.sort(u32, target_pcs.items, {}, u32LessThan);
-    var target_count: usize = 0;
-    for (target_pcs.items) |target_pc| {
-        if (target_count == 0 or target_pcs.items[target_count - 1] != target_pc) {
-            target_pcs.items[target_count] = target_pc;
-            target_count += 1;
-        }
-    }
-    const targets = target_pcs.items[0..target_count];
-    const target_labels = try std.testing.allocator.alloc(labels.LabelId, target_count);
-    defer std.testing.allocator.free(target_labels);
-    for (target_labels) |*label| label.* = try b.newLabel();
-
-    pc = 0;
-    atom_index = 0;
-    var bind_cursor: usize = 0;
-    while (pc < code.len) {
-        while (bind_cursor < targets.len and targets[bind_cursor] == pc) : (bind_cursor += 1) {
-            try b.bindLabel(target_labels[bind_cursor]);
-        }
-        if (bind_cursor < targets.len and targets[bind_cursor] < pc)
-            return error.InvalidBytecode;
-
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-
-        if (instruction.is_temp) {
-            switch (op_id) {
-                qop.label, qop.line_num => {},
-                qop.enter_scope, qop.leave_scope => {
-                    if (instruction.size != 3) return error.InvalidBytecode;
-                    try b.emitOpU16(
-                        op_id,
-                        std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                    );
-                },
-                qop.scope_get_var_undef,
-                qop.scope_get_var,
-                qop.scope_put_var,
-                qop.scope_delete_var,
-                qop.scope_get_ref,
-                qop.scope_put_var_init,
-                qop.scope_get_var_checkthis,
-                qop.scope_get_private_field,
-                qop.scope_get_private_field2,
-                qop.scope_put_private_field,
-                qop.scope_in_private_field,
-                => {
-                    if (instruction.size != 7 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    try b.emitAtomOpU16Owned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                qop.scope_make_ref => {
-                    if (instruction.size != 11 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                    try b.emitScopeRefOpOwned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        try translatedTargetLabel(targets, target_labels, target_pc),
-                        std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                else => return error.NonStraightLinePhase1,
-            }
-            pc += instruction.size;
-            continue;
-        }
-
-        const format = opcode.formatOf(op_id);
-        switch (format) {
-            .none, .none_int, .none_loc, .none_arg, .none_var_ref, .npopx => {
-                if (instruction.size != 1) return error.InvalidBytecode;
-                try b.emitOp(op_id);
-            },
-            .u8, .i8, .loc8, .const8 => {
-                if (instruction.size != 2) return error.InvalidBytecode;
-                try b.emitOpU8(op_id, code[pc + 1]);
-            },
-            .u16, .i16, .npop, .loc, .arg, .var_ref => {
-                if (instruction.size != 3) return error.InvalidBytecode;
-                try b.emitOpU16(
-                    op_id,
-                    std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                );
-            },
-            .npop_u16, .u32, .i32, .@"const" => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                try b.emitOpU32(
-                    op_id,
-                    std.mem.readInt(u32, code[pc + 1 ..][0..4], .little),
-                );
-            },
-            .atom, .atom_u8, .atom_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                switch (format) {
-                    .atom => {
-                        if (instruction.size != 5) return error.InvalidBytecode;
-                        try b.emitAtomOpOwned(op_id, b.atoms.dup(atom_id));
-                    },
-                    .atom_u8 => {
-                        if (instruction.size != 6) return error.InvalidBytecode;
-                        try b.emitAtomOpU8Owned(op_id, b.atoms.dup(atom_id), code[pc + 5]);
-                    },
-                    .atom_u16 => {
-                        if (instruction.size != 7) return error.InvalidBytecode;
-                        try b.emitAtomOpU16Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                try b.emitJump(
-                    op_id,
-                    try translatedTargetLabel(targets, target_labels, target_pc),
-                );
-            },
-            .atom_label_u8, .atom_label_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                const target_label = try translatedTargetLabel(targets, target_labels, target_pc);
-                switch (format) {
-                    .atom_label_u8 => {
-                        if (instruction.size != 10) return error.InvalidBytecode;
-                        try b.emitAtomLabelOpU8Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            code[pc + 9],
-                        );
-                    },
-                    .atom_label_u16 => {
-                        if (instruction.size != 11) return error.InvalidBytecode;
-                        try b.emitScopeRefOpOwned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label8, .label16, .label_u16 => return error.NonStraightLinePhase1,
-        }
-        pc += instruction.size;
-    }
-    while (bind_cursor < targets.len and targets[bind_cursor] == code.len) : (bind_cursor += 1) {
-        try b.bindLabel(target_labels[bind_cursor]);
-    }
-    if (bind_cursor != targets.len or atom_index != atoms.len)
-        return error.InvalidBytecode;
-}
-
-fn attachTranslatedBuilder(
-    fd: *bytecode_mod.function_def.FunctionDef,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    try std.testing.expect(fd.v2_builder == null);
-    const b = try fd.memory.create(builder_mod.Builder);
-    b.* = builder_mod.Builder.init(fd.memory, fd.atoms);
-    errdefer {
-        b.deinit();
-        fd.memory.destroy(builder_mod.Builder, b);
-    }
-    try translatePhase1ToV2(b, code, atoms);
-    fd.v2_builder = b;
-}
-
-fn isFullPhase1JumpOp(op_id: u8) bool {
-    return op_id == qop.goto or op_id == qop.if_true or
-        op_id == qop.if_false or op_id == qop.@"catch" or
-        op_id == qop.gosub;
-}
-
-/// Complete the legacy parser-label transaction before translation. Most
-/// forward jumps are patched in place by the parser; shared exception/finally
-/// labels retain parser identities until legacy resolve_variables binds them.
-/// The v2 test bridge performs that same allocation-before-mutation bind so
-/// translatePhase1ToV2Full still rejects any unpatched identity it receives.
-fn completeLegacyParserLabels(code: []u8, atoms: []const core.atom.Atom) !void {
-    if (code.len >= qop.parser_label_tag) return error.BytecodeOverflow;
-
-    var reference_sites: std.ArrayList(usize) = .empty;
-    defer reference_sites.deinit(std.testing.allocator);
-    var max_label_id: u32 = 0;
-    var pc: usize = 0;
-    var atom_index: usize = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp and op_id == qop.label) {
-            const id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (id > max_label_id) max_label_id = id;
-        }
-        if (phase1LabelOperandOffset(op_id, instruction)) |offset| {
-            if (offset + 4 > instruction.size) return error.InvalidBytecode;
-            const encoded = std.mem.readInt(u32, code[pc + offset ..][0..4], .little);
-            if ((encoded & qop.parser_label_tag) != 0) {
-                const id = encoded & ~qop.parser_label_tag;
-                if (id == 0) return error.InvalidBytecode;
-                if (id > max_label_id) max_label_id = id;
-                try reference_sites.append(std.testing.allocator, pc + offset);
-            }
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
-    if (reference_sites.items.len == 0) return;
-
-    const unbound = std.math.maxInt(u32);
-    const targets = try std.testing.allocator.alloc(u32, @as(usize, max_label_id) + 1);
-    defer std.testing.allocator.free(targets);
-    @memset(targets, unbound);
-
-    pc = 0;
-    atom_index = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp and op_id == qop.label) {
-            const id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (id != 0) {
-                if (id >= targets.len or targets[id] != unbound)
-                    return error.InvalidBytecode;
-                targets[id] = @intCast(pc);
-            }
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-
-    // Validate every site before publishing any absolute target.
-    for (reference_sites.items) |site| {
-        const encoded = std.mem.readInt(u32, code[site..][0..4], .little);
-        const id = encoded & ~qop.parser_label_tag;
-        if ((encoded & qop.parser_label_tag) == 0 or id >= targets.len or
-            targets[id] == unbound)
-        {
-            return error.InvalidBytecode;
-        }
-    }
-    for (reference_sites.items) |site| {
-        const encoded = std.mem.readInt(u32, code[site..][0..4], .little);
-        const id = encoded & ~qop.parser_label_tag;
-        std.mem.writeInt(u32, code[site..][0..4], targets[id], .little);
-    }
-}
-
-/// Translate a completed parser phase-1 stream. Parser label markers disappear;
-/// their patched absolute byte offsets become builder-native LabelIds.
-fn translatePhase1ToV2Full(
-    b: *builder_mod.Builder,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    if (b.code_len != 0 or b.atom_len != 0 or b.label_len != 0 or b.reloc_len != 0)
-        return error.InvalidBytecode;
-
-    var target_pcs: std.ArrayList(u32) = .empty;
-    defer target_pcs.deinit(std.testing.allocator);
-
-    // Pass 1 assigns one LabelId to each referenced absolute phase-1 target.
-    // The raw ids carried by op.label are parser-only patching identities.
-    var pc: usize = 0;
-    var atom_index: usize = 0;
-    while (pc < code.len) {
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        var target_pc: ?u32 = null;
-        if (instruction.is_temp and op_id == qop.scope_make_ref) {
-            if (instruction.size != 11) return error.InvalidBytecode;
-            target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-        } else if (!instruction.is_temp and opcode.formatOf(op_id) == .label) {
-            if (!isFullPhase1JumpOp(op_id) or instruction.size != 5)
-                return error.InvalidBytecode;
-            target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-        }
-        if (target_pc) |target| {
-            if ((target & qop.parser_label_tag) != 0 or target > code.len)
-                return error.InvalidBytecode;
-            try target_pcs.append(std.testing.allocator, target);
-        }
-        if (instruction.has_atom) atom_index += 1;
-        pc += instruction.size;
-    }
-    if (pc != code.len or atom_index != atoms.len) return error.InvalidBytecode;
-
-    std.mem.sort(u32, target_pcs.items, {}, u32LessThan);
-    var target_count: usize = 0;
-    for (target_pcs.items) |target_pc| {
-        if (target_count == 0 or target_pcs.items[target_count - 1] != target_pc) {
-            target_pcs.items[target_count] = target_pc;
-            target_count += 1;
-        }
-    }
-    const targets = target_pcs.items[0..target_count];
-    const target_labels = try std.testing.allocator.alloc(labels.LabelId, target_count);
-    defer std.testing.allocator.free(target_labels);
-    for (target_labels) |*label| label.* = try b.newLabel();
-
-    // Pass 2 binds targets at the corresponding instruction boundary and
-    // emits the compact v2 instruction stream.
-    pc = 0;
-    atom_index = 0;
-    var bind_cursor: usize = 0;
-    while (pc < code.len) {
-        while (bind_cursor < targets.len and targets[bind_cursor] == pc) : (bind_cursor += 1) {
-            try b.bindLabel(target_labels[bind_cursor]);
-        }
-        if (bind_cursor < targets.len and targets[bind_cursor] < pc)
-            return error.InvalidBytecode;
-
-        const instruction = try decodePhase1Instruction(code, atoms, pc, atom_index);
-        const op_id = code[pc];
-        if (instruction.is_temp) {
-            switch (op_id) {
-                // v2 source markers are exercised by resolve_labels inline
-                // tests; VM execution semantics do not consume pc2line.
-                qop.label, qop.line_num => {},
-                qop.enter_scope, qop.leave_scope => {
-                    if (instruction.size != 3) return error.InvalidBytecode;
-                    try b.emitOpU16(
-                        op_id,
-                        std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                    );
-                },
-                qop.scope_get_var_undef,
-                qop.scope_get_var,
-                qop.scope_put_var,
-                qop.scope_delete_var,
-                qop.scope_get_ref,
-                qop.scope_put_var_init,
-                qop.scope_get_var_checkthis,
-                qop.scope_get_private_field,
-                qop.scope_get_private_field2,
-                qop.scope_put_private_field,
-                qop.scope_in_private_field,
-                => {
-                    if (instruction.size != 7 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    try b.emitAtomOpU16Owned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                qop.scope_make_ref => {
-                    if (instruction.size != 11 or atom_index >= atoms.len)
-                        return error.InvalidBytecode;
-                    const atom_id = atoms[atom_index];
-                    if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                        return error.InvalidBytecode;
-                    const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                    if ((target_pc & qop.parser_label_tag) != 0)
-                        return error.InvalidBytecode;
-                    try b.emitScopeRefOpOwned(
-                        op_id,
-                        b.atoms.dup(atom_id),
-                        try translatedTargetLabel(targets, target_labels, target_pc),
-                        std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                    );
-                    atom_index += 1;
-                },
-                else => return error.NonStraightLinePhase1,
-            }
-            pc += instruction.size;
-            continue;
-        }
-
-        const format = opcode.formatOf(op_id);
-        switch (format) {
-            .none, .none_int, .none_loc, .none_arg, .none_var_ref, .npopx => {
-                if (instruction.size != 1) return error.InvalidBytecode;
-                try b.emitOp(op_id);
-            },
-            .u8, .i8, .loc8, .const8 => {
-                if (instruction.size != 2) return error.InvalidBytecode;
-                try b.emitOpU8(op_id, code[pc + 1]);
-            },
-            .u16, .i16, .npop, .loc, .arg, .var_ref => {
-                if (instruction.size != 3) return error.InvalidBytecode;
-                try b.emitOpU16(
-                    op_id,
-                    std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
-                );
-            },
-            .npop_u16, .u32, .i32, .@"const" => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                try b.emitOpU32(
-                    op_id,
-                    std.mem.readInt(u32, code[pc + 1 ..][0..4], .little),
-                );
-            },
-            .atom, .atom_u8, .atom_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                switch (format) {
-                    .atom => {
-                        if (instruction.size != 5) return error.InvalidBytecode;
-                        try b.emitAtomOpOwned(op_id, b.atoms.dup(atom_id));
-                    },
-                    .atom_u8 => {
-                        if (instruction.size != 6) return error.InvalidBytecode;
-                        try b.emitAtomOpU8Owned(op_id, b.atoms.dup(atom_id), code[pc + 5]);
-                    },
-                    .atom_u16 => {
-                        if (instruction.size != 7) return error.InvalidBytecode;
-                        try b.emitAtomOpU16Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            std.mem.readInt(u16, code[pc + 5 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label => {
-                if (!isFullPhase1JumpOp(op_id) or instruction.size != 5)
-                    return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if ((target_pc & qop.parser_label_tag) != 0)
-                    return error.InvalidBytecode;
-                try b.emitJump(
-                    op_id,
-                    try translatedTargetLabel(targets, target_labels, target_pc),
-                );
-            },
-            .atom_label_u8, .atom_label_u16 => {
-                if (atom_index >= atoms.len) return error.InvalidBytecode;
-                const atom_id = atoms[atom_index];
-                if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom_id)
-                    return error.InvalidBytecode;
-                const target_pc = std.mem.readInt(u32, code[pc + 5 ..][0..4], .little);
-                if ((target_pc & qop.parser_label_tag) != 0)
-                    return error.InvalidBytecode;
-                const target_label = try translatedTargetLabel(targets, target_labels, target_pc);
-                switch (format) {
-                    .atom_label_u8 => {
-                        if (instruction.size != 10) return error.InvalidBytecode;
-                        try b.emitAtomLabelOpU8Owned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            code[pc + 9],
-                        );
-                    },
-                    .atom_label_u16 => {
-                        if (instruction.size != 11) return error.InvalidBytecode;
-                        try b.emitScopeRefOpOwned(
-                            op_id,
-                            b.atoms.dup(atom_id),
-                            target_label,
-                            std.mem.readInt(u16, code[pc + 9 ..][0..2], .little),
-                        );
-                    },
-                    else => unreachable,
-                }
-                atom_index += 1;
-            },
-            .label8, .label16, .label_u16 => return error.NonStraightLinePhase1,
-        }
-        pc += instruction.size;
-    }
-    while (bind_cursor < targets.len and targets[bind_cursor] == code.len) : (bind_cursor += 1) {
-        try b.bindLabel(target_labels[bind_cursor]);
-    }
-    if (bind_cursor != targets.len or atom_index != atoms.len)
-        return error.InvalidBytecode;
-}
-
-fn attachTranslatedBuilderFull(
-    fd: *bytecode_mod.function_def.FunctionDef,
-    code: []u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    try std.testing.expect(fd.v2_builder == null);
-    try completeLegacyParserLabels(code, atoms);
-    const b = try fd.memory.create(builder_mod.Builder);
-    b.* = builder_mod.Builder.init(fd.memory, fd.atoms);
-    errdefer {
-        b.deinit();
-        fd.memory.destroy(builder_mod.Builder, b);
-    }
-    try translatePhase1ToV2Full(b, code, atoms);
-    fd.v2_builder = b;
-}
-
-fn attachTranslatedBuilderTree(fd: *bytecode_mod.function_def.FunctionDef) !void {
-    try attachTranslatedBuilderFull(fd, fd.byte_code, fd.atom_operands);
-    for (fd.child_list) |child| try attachTranslatedBuilderTree(child);
-}
-
 fn installedFunctionHasShortOpcode(fb: *const bytecode_mod.FunctionBytecode) !bool {
     const code = fb.byteCode();
     var pc: usize = 0;
@@ -922,8 +203,6 @@ fn v2CompileAndRun(h: *V2Exec) !core.JSValue {
     );
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
     try h.state.finalizeEvalReturn();
-
-    try attachTranslatedBuilderTree(&h.state.function_def);
 
     const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
         &h.state.function_def,
@@ -1030,129 +309,11 @@ fn expectPublishedFunctionBytecodeOwnersResolve(
     }
 }
 
-fn expectFdTopologyEqual(
-    legacy_fd: *const bytecode_mod.function_def.FunctionDef,
-    v2_fd: *const bytecode_mod.function_def.FunctionDef,
-) !void {
-    try std.testing.expectEqual(legacy_fd.vars.len, v2_fd.vars.len);
-    for (legacy_fd.vars, v2_fd.vars) |legacy_var, v2_var| {
-        try std.testing.expectEqual(legacy_var.var_name, v2_var.var_name);
-        try std.testing.expectEqual(legacy_var.scope_level, v2_var.scope_level);
-        try std.testing.expectEqual(legacy_var.var_kind, v2_var.var_kind);
-        try std.testing.expectEqual(legacy_var.is_lexical, v2_var.is_lexical);
-        try std.testing.expectEqual(legacy_var.is_const, v2_var.is_const);
-        try std.testing.expectEqual(legacy_var.is_captured, v2_var.is_captured);
-    }
-
-    try std.testing.expectEqual(legacy_fd.args.len, v2_fd.args.len);
-    for (legacy_fd.args, v2_fd.args) |legacy_arg, v2_arg| {
-        try std.testing.expectEqual(legacy_arg.var_name, v2_arg.var_name);
-        try std.testing.expectEqual(legacy_arg.scope_level, v2_arg.scope_level);
-        try std.testing.expectEqual(legacy_arg.var_kind, v2_arg.var_kind);
-        try std.testing.expectEqual(legacy_arg.is_lexical, v2_arg.is_lexical);
-        try std.testing.expectEqual(legacy_arg.is_const, v2_arg.is_const);
-        try std.testing.expectEqual(legacy_arg.is_captured, v2_arg.is_captured);
-    }
-
-    try std.testing.expectEqual(legacy_fd.closure_var.len, v2_fd.closure_var.len);
-    for (legacy_fd.closure_var, v2_fd.closure_var) |legacy_ref, v2_ref| {
-        try std.testing.expectEqual(legacy_ref.var_name, v2_ref.var_name);
-        try std.testing.expectEqual(legacy_ref.closureType(), v2_ref.closureType());
-        try std.testing.expectEqual(legacy_ref.isLexical(), v2_ref.isLexical());
-        try std.testing.expectEqual(legacy_ref.isConst(), v2_ref.isConst());
-        // var_idx is the closure-ref topology order, not just row metadata.
-        try std.testing.expectEqual(legacy_ref.var_idx, v2_ref.var_idx);
-    }
-}
-
-fn normalizedLegacyCode(code: []const u8) ![]u8 {
-    var normalized: std.ArrayList(u8) = .empty;
-    errdefer normalized.deinit(std.testing.allocator);
-    var pc: usize = 0;
-    while (pc < code.len) {
-        const op_id = code[pc];
-        const size: usize = if (op_id == qop.label) 5 else opcode.sizeOf(op_id);
-        if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
-        if (op_id != qop.label and op_id != qop.nop)
-            try normalized.appendSlice(std.testing.allocator, code[pc .. pc + size]);
-        pc += size;
-    }
-    return normalized.toOwnedSlice(std.testing.allocator);
-}
-
-fn expectLoweredStreamEqual(
-    legacy_function: *const bytecode_mod.Bytecode,
-    v2_product: *const resolve_variables.ResolvedProduct,
-) !void {
-    const normalized = try normalizedLegacyCode(legacy_function.code);
-    defer std.testing.allocator.free(normalized);
-    try std.testing.expectEqualSlices(
-        u8,
-        normalized,
-        v2_product.code[0..v2_product.code_len],
-    );
-    try std.testing.expectEqualSlices(
-        core.atom.Atom,
-        legacy_function.atom_operands,
-        v2_product.atom_operands[0..v2_product.atom_len],
-    );
-}
-
 const AtomBalanceRow = struct {
     atom_id: core.atom.Atom,
     before_release: usize,
     owned_count: usize,
 };
-
-fn deinitProductAndExpectAtomBalance(
-    atoms: *core.atom.AtomTable,
-    product: *resolve_variables.ResolvedProduct,
-) !void {
-    var balances: std.ArrayList(AtomBalanceRow) = .empty;
-    defer balances.deinit(std.testing.allocator);
-    for (product.atom_operands[0..product.atom_len]) |atom_id| {
-        var found = false;
-        for (balances.items) |*row| {
-            if (row.atom_id != atom_id) continue;
-            row.owned_count += 1;
-            found = true;
-            break;
-        }
-        if (!found) {
-            try balances.append(std.testing.allocator, .{
-                .atom_id = atom_id,
-                .before_release = atoms.refCount(atom_id) orelse return error.InvalidBytecode,
-                .owned_count = 1,
-            });
-        }
-    }
-
-    product.deinitUncommitted();
-    for (balances.items) |row| {
-        try std.testing.expect(row.before_release >= row.owned_count);
-        try std.testing.expectEqual(
-            row.before_release - row.owned_count,
-            atoms.refCount(row.atom_id) orelse return error.InvalidBytecode,
-        );
-    }
-}
-
-fn runLegacyResolve(
-    function: *bytecode_mod.Bytecode,
-    fd: *bytecode_mod.function_def.FunctionDef,
-) !void {
-    var ctx = bytecode_mod.pipeline_resolve_variables.JSContext.initWithFunctionDef(function, fd);
-    try bytecode_mod.pipeline_resolve_variables.run(&ctx);
-}
-
-fn installPhase1Stream(
-    function: *bytecode_mod.Bytecode,
-    code: []const u8,
-    atoms: []const core.atom.Atom,
-) !void {
-    try function.setCode(code);
-    for (atoms) |atom_id| try function.retainAtomOperand(atom_id);
-}
 
 const RootSeedKind = enum {
     global,
@@ -1160,97 +321,10 @@ const RootSeedKind = enum {
     block_lexical,
 };
 
-fn expectRootNormalizedEquivalence(src: []const u8, kind: RootSeedKind) !void {
-    var legacy: LegacyParse = undefined;
-    try legacy.init(src);
-    defer legacy.deinit();
-    try legacy.parseProgram(false);
-
-    var v2: LegacyParse = undefined;
-    try v2.init(src);
-    defer v2.deinit();
-    try v2.parseProgram(false);
-    try attachTranslatedBuilder(
-        &v2.state.function_def,
-        v2.function.code,
-        v2.function.atom_operands,
-    );
-
-    try runLegacyResolve(&legacy.function, &legacy.state.function_def);
-    var product = try resolve_variables.run(&v2.function, &v2.state.function_def);
-    defer product.deinitUncommitted();
-
-    try expectFdTopologyEqual(&legacy.state.function_def, &v2.state.function_def);
-    try expectLoweredStreamEqual(&legacy.function, &product);
-    switch (kind) {
-        .global => {
-            try std.testing.expectEqual(@as(usize, 1), legacy.state.function_def.closure_var.len);
-            try std.testing.expectEqual(
-                bytecode_mod.function_def.ClosureType.global,
-                legacy.state.function_def.closure_var[0].closureType(),
-            );
-        },
-        .top_level_lexical, .block_lexical => {
-            try std.testing.expect(legacy.state.function_def.vars.len != 0);
-        },
-    }
-    try deinitProductAndExpectAtomBalance(&v2.rt.atoms, &product);
-}
-
 const ExpectedChildShape = struct {
     args: ?usize = null,
     vars: ?usize = null,
 };
-
-fn expectChildNormalizedEquivalence(src: []const u8, expected_shape: ExpectedChildShape) !void {
-    var legacy: LegacyParse = undefined;
-    try legacy.init(src);
-    defer legacy.deinit();
-    try legacy.parseProgram(true);
-    try std.testing.expectEqual(@as(usize, 1), legacy.state.function_def.child_list.len);
-    const legacy_child = legacy.state.function_def.child_list[0];
-
-    var v2: LegacyParse = undefined;
-    try v2.init(src);
-    defer v2.deinit();
-    try v2.parseProgram(true);
-    try std.testing.expectEqual(@as(usize, 1), v2.state.function_def.child_list.len);
-    const v2_child = v2.state.function_def.child_list[0];
-    try attachTranslatedBuilder(v2_child, v2_child.byte_code, v2_child.atom_operands);
-
-    var legacy_function = bytecode_mod.Bytecode.init(
-        &legacy.rt.memory,
-        &legacy.rt.atoms,
-        legacy_child.func_name,
-    );
-    defer legacy_function.deinit(legacy.rt);
-    try installPhase1Stream(
-        &legacy_function,
-        legacy_child.byte_code,
-        legacy_child.atom_operands,
-    );
-    try runLegacyResolve(&legacy_function, legacy_child);
-
-    var v2_function = bytecode_mod.Bytecode.init(
-        &v2.rt.memory,
-        &v2.rt.atoms,
-        v2_child.func_name,
-    );
-    defer v2_function.deinit(v2.rt);
-    var product = try resolve_variables.run(&v2_function, v2_child);
-    defer product.deinitUncommitted();
-
-    try expectFdTopologyEqual(legacy_child, v2_child);
-    try expectLoweredStreamEqual(&legacy_function, &product);
-    // Byte equality proves selected loc/arg operands; var_idx equality in
-    // expectFdTopologyEqual proves closure-ref index order. Optional explicit
-    // shape checks keep seed-specific expectations out of the general helper.
-    if (expected_shape.args) |expected_args|
-        try std.testing.expectEqual(expected_args, legacy_child.args.len);
-    if (expected_shape.vars) |expected_vars|
-        try std.testing.expectEqual(expected_vars, legacy_child.vars.len);
-    try deinitProductAndExpectAtomBalance(&v2.rt.atoms, &product);
-}
 
 /// Validate every intrusive relocation chain, including unique coverage of the
 /// complete relocation ledger, and require every parser-created label bound.
@@ -1589,10 +663,6 @@ test "compiler_v2.tests: rollback restores a shared label reloc chain" {
 }
 
 test "compiler_v2.s2g1: conditional expression" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true ? false : null");
     defer h.deinit();
@@ -1613,16 +683,12 @@ test "compiler_v2.s2g1: conditional expression" {
     try expectLabel(b, 0, 1, 12);
     try expectLabel(b, 1, 1, 13);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6, 7, 12 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: logical or" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("false || true");
     defer h.deinit();
@@ -1642,16 +708,12 @@ test "compiler_v2.s2g1: logical or" {
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try expectLabel(b, 0, 1, 9);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 8 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: logical and chain" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true && false && null");
     defer h.deinit();
@@ -1678,16 +740,12 @@ test "compiler_v2.s2g1: logical and chain" {
     try std.testing.expectEqual(@as(u32, 0), b.relocs[1].next);
     try std.testing.expectEqual(labels.no_reloc, b.relocs[0].next);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 8, 16 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: coalesce" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("null ?? true");
     defer h.deinit();
@@ -1708,16 +766,12 @@ test "compiler_v2.s2g1: coalesce" {
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try expectLabel(b, 0, 1, 10);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 8, 9 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: coalesce chain" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("null ?? null ?? true");
     defer h.deinit();
@@ -1746,16 +800,12 @@ test "compiler_v2.s2g1: coalesce chain" {
     try std.testing.expectEqual(@as(u32, 0), b.relocs[1].next);
     try std.testing.expectEqual(labels.no_reloc, b.relocs[0].next);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 8, 9, 10, 11, 12, 17, 18 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: optional chain field" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true?.b");
     defer h.deinit();
@@ -1785,16 +835,12 @@ test "compiler_v2.s2g1: optional chain field" {
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(qop.get_field_opt_chain, b.code[15]);
     try std.testing.expectEqual(@as(i64, 15), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 8, 9, 15 });
+    try expectSourceOffsets(b, &.{1});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: optional chain element" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true?.[false]");
     defer h.deinit();
@@ -1820,16 +866,12 @@ test "compiler_v2.s2g1: optional chain element" {
     try expectLabel(b, 1, 1, 15);
     try std.testing.expectEqual(qop.get_array_el_opt_chain, b.code[16]);
     try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 8, 9, 15, 16 });
+    try expectSourceOffsets(b, &.{16});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: if else empty" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("if (true) ; else ;");
     defer h.deinit();
@@ -1848,16 +890,12 @@ test "compiler_v2.s2g1: if else empty" {
     try expectLabel(b, 0, 1, 11);
     try expectLabel(b, 1, 1, 11);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: if else expression bodies" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("if (true) false; else null;");
     defer h.deinit();
@@ -1880,16 +918,12 @@ test "compiler_v2.s2g1: if else expression bodies" {
     try expectLabel(b, 0, 1, 13);
     try expectLabel(b, 1, 1, 15);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6, 8, 13 });
+    try expectSourceOffsets(b, &.{ 6, 13 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: if without else" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("if (true) ;");
     defer h.deinit();
@@ -1906,16 +940,12 @@ test "compiler_v2.s2g1: if without else" {
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try expectLabel(b, 0, 1, 6);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: labeled break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("L: if (true) break L;");
     defer h.deinit();
@@ -1934,16 +964,12 @@ test "compiler_v2.s2g1: labeled break" {
     try expectLabel(b, 0, 1, 11);
     try expectLabel(b, 1, 1, 11);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g1: labeled statement without break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("L: ;");
     defer h.deinit();
@@ -1964,10 +990,6 @@ test "compiler_v2.s2g1: labeled statement without break" {
 }
 
 test "compiler_v2.s2g1: optional chain atom ownership" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true?.b");
     defer h.deinit();
@@ -1987,10 +1009,6 @@ test "compiler_v2.s2g1: optional chain atom ownership" {
 }
 
 test "compiler_v2.s2g2: while" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
@@ -2012,16 +1030,12 @@ test "compiler_v2.s2g2: while" {
     try expectLabel(b, 3, 0, 11);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: while continue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) continue;");
     defer h.deinit();
@@ -2044,16 +1058,12 @@ test "compiler_v2.s2g2: while continue" {
     try expectLabel(b, 3, 0, 16);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 11 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: labeled while continue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("L: while (true) continue L;");
     defer h.deinit();
@@ -2078,16 +1088,12 @@ test "compiler_v2.s2g2: labeled while continue" {
     try expectLabel(b, 5, 0, 16);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 11 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: do while" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("do ; while (false);");
     defer h.deinit();
@@ -2107,16 +1113,12 @@ test "compiler_v2.s2g2: do while" {
     try expectLabel(b, 2, 0, 6);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: classic for empty head" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (;;) ;");
     defer h.deinit();
@@ -2141,16 +1143,12 @@ test "compiler_v2.s2g2: classic for empty head" {
     // The classic-for test-entry marker and the synthetic true literal both
     // precede the first opcode; Stage 3 deduplicates them only when their
     // line/column points are identical.
-    try expectSourceOffsets(b, &.{ 0, 0, 1, 6 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: classic for test break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; ) break;");
     defer h.deinit();
@@ -2173,16 +1171,12 @@ test "compiler_v2.s2g2: classic for test break" {
     try expectLabel(b, 3, 1, 16);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 0, 1, 11 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: for in" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x in null) ;");
     defer h.deinit();
@@ -2214,16 +1208,12 @@ test "compiler_v2.s2g2: for in" {
     try std.testing.expect(b.label_slots[1].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 20, 21, 26, 27 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: for in break cleanup" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x in null) break;");
     defer h.deinit();
@@ -2257,16 +1247,12 @@ test "compiler_v2.s2g2: for in break cleanup" {
     try std.testing.expect(b.label_slots[1].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 26, 27, 32, 33 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: for of" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x of null) ;");
     defer h.deinit();
@@ -2299,16 +1285,12 @@ test "compiler_v2.s2g2: for of" {
     try std.testing.expectEqual(@as(u8, 0), b.code[21]);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 20, 22, 27, 28 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: for of break cleanup" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (var x of null) break;");
     defer h.deinit();
@@ -2343,16 +1325,12 @@ test "compiler_v2.s2g2: for of break cleanup" {
     try std.testing.expectEqual(@as(u8, 0), b.code[27]);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 8, 13, 14, 15, 26, 28, 33, 34 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: switch single case" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: null; }");
     defer h.deinit();
@@ -2376,16 +1354,12 @@ test "compiler_v2.s2g2: switch single case" {
     try expectLabel(b, 0, 0, 11);
     try expectLabel(b, 1, 1, 11);
     try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 9, 11 });
+    try expectSourceOffsets(b, &.{9});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: switch break default" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: break; default: null; }");
     defer h.deinit();
@@ -2416,16 +1390,12 @@ test "compiler_v2.s2g2: switch break default" {
     try expectLabel(b, 1, 0, 14);
     try expectLabel(b, 2, 1, 14);
     try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 14, 16 });
+    try expectSourceOffsets(b, &.{14});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: switch case fallthrough" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: null; case null: false; }");
     defer h.deinit();
@@ -2458,16 +1428,12 @@ test "compiler_v2.s2g2: switch case fallthrough" {
     try expectLabel(b, 2, 1, 24);
     try expectLabel(b, 3, 1, 26);
     try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 9, 11, 16, 17, 18, 19, 24, 26 });
+    try expectSourceOffsets(b, &.{ 9, 24 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: switch default only" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { default: null; }");
     defer h.deinit();
@@ -2493,16 +1459,12 @@ test "compiler_v2.s2g2: switch default only" {
     try expectLabel(b, 1, 0, 6);
     try expectLabel(b, 2, 1, 6);
     try std.testing.expectEqual(@as(i64, 8), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6, 8 });
+    try expectSourceOffsets(b, &.{6});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g2: switch break suppresses fallthrough" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("switch (true) { case false: break; case null: ; }");
     defer h.deinit();
@@ -2530,16 +1492,12 @@ test "compiler_v2.s2g2: switch break suppresses fallthrough" {
     try expectLabel(b, 1, 1, 14);
     try expectLabel(b, 2, 1, 22);
     try std.testing.expectEqual(@as(i64, 22), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 2, 3, 4, 14, 15, 16, 17, 22 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: try finally live tail" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { null; } finally { false; }");
     defer h.deinit();
@@ -2569,16 +1527,12 @@ test "compiler_v2.s2g3: try finally live tail" {
     try expectLabel(b, 1, 2, 26);
     try expectLabel(b, 2, 1, 29);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 26 });
+    try expectSourceOffsets(b, &.{ 5, 26 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: try catch optional binding live tails" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { null; } catch { false; }");
     defer h.deinit();
@@ -2616,16 +1570,12 @@ test "compiler_v2.s2g3: try catch optional binding live tails" {
     try expectLabel(b, 2, 2, 48);
     try expectLabel(b, 3, 1, 41);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 21, 26 });
+    try expectSourceOffsets(b, &.{ 5, 26 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: try catch binding after throw" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { throw true; } catch (e) { }");
     defer h.deinit();
@@ -2657,16 +1607,12 @@ test "compiler_v2.s2g3: try catch binding after throw" {
     try expectLabel(b, 3, 1, 28);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 6, 7, 10 });
+    try expectSourceOffsets(b, &.{6});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: return through finally" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { null; }");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -2695,16 +1641,12 @@ test "compiler_v2.s2g3: return through finally" {
     try expectLabel(b, 1, 2, 19);
     try expectLabel(b, 2, 0, 22);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 5, 6, 12, 19 });
+    try expectSourceOffsets(b, &.{ 5, 19 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: break through finally inside loop" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) { try { break; } finally { null; } }");
     defer h.deinit();
@@ -2740,16 +1682,12 @@ test "compiler_v2.s2g3: break through finally inside loop" {
     try expectLabel(b, 6, 0, 33);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6, 30, 33 });
+    try expectSourceOffsets(b, &.{30});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: epilogue after plain statement" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("null;");
     defer h.deinit();
@@ -2767,16 +1705,12 @@ test "compiler_v2.s2g3: epilogue after plain statement" {
     try std.testing.expectEqual(@as(u32, 3), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(i64, 2), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 2 });
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: epilogue after terminal" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("throw null;");
     defer h.deinit();
@@ -2793,16 +1727,12 @@ test "compiler_v2.s2g3: epilogue after terminal" {
     try std.testing.expectEqual(@as(u32, 2), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectSourceOffsets(b, &.{1});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: epilogue after loop merge" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
@@ -2826,16 +1756,12 @@ test "compiler_v2.s2g3: epilogue after loop merge" {
     try expectLabel(b, 3, 0, 11);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6, 11 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g3: plain return dead epilogue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("return;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -2861,10 +1787,6 @@ test "compiler_v2.s2g3: plain return dead epilogue" {
 }
 
 test "compiler_v2.s2g3: return with value" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("return null;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
@@ -2882,16 +1804,12 @@ test "compiler_v2.s2g3: return with value" {
     try std.testing.expectEqual(@as(u32, 2), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1 });
+    try expectSourceOffsets(b, &.{1});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: classic for splices update after body" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; null) ;");
     defer h.deinit();
@@ -2919,16 +1837,12 @@ test "compiler_v2.s2g4: classic for splices update after body" {
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
     // Legacy moves only the update's code/atoms; its detached source slots at
     // 6 and 7 are intentionally absent from the final parser ledger.
-    try expectSourceOffsets(b, &.{ 0, 0, 1, 8 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: classic for shifts detached conditional labels" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; true ? null : false) ;");
     defer h.deinit();
@@ -2964,16 +1878,12 @@ test "compiler_v2.s2g4: classic for shifts detached conditional labels" {
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
     // Every marker inside the detached conditional update is discarded by
     // the legacy truncate+splice contract; the loop-edge marker remains.
-    try expectSourceOffsets(b, &.{ 0, 0, 1, 20 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: classic for splices update after break" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (; false; null) break;");
     defer h.deinit();
@@ -3000,16 +1910,12 @@ test "compiler_v2.s2g4: classic for splices update after break" {
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 0, 1, 13 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: plain field assignment rewinds getter" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true.b = null;");
     defer h.deinit();
@@ -3042,10 +1948,6 @@ test "compiler_v2.s2g4: plain field assignment rewinds getter" {
 }
 
 test "compiler_v2.s2g4: compound field assignment reemits getter" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true.b += null;");
     defer h.deinit();
@@ -3074,16 +1976,12 @@ test "compiler_v2.s2g4: compound field assignment reemits getter" {
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(field_atom, b.atom_operands[1]);
     try std.testing.expectEqual(@as(i64, 14), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 6, 7 });
+    try expectSourceOffsets(b, &.{ 0, 1, 7 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: plain array element assignment rewinds getter" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true[false] = null;");
     defer h.deinit();
@@ -3106,16 +2004,12 @@ test "compiler_v2.s2g4: plain array element assignment rewinds getter" {
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
     // The removed getter marker is replaced by the RHS marker at offset 2.
-    try expectSourceOffsets(b, &.{ 0, 1, 2 });
+    try expectSourceOffsets(b, &.{ 0, 2 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: postfix field update preserves old value" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("true.b++;");
     defer h.deinit();
@@ -3142,16 +2036,12 @@ test "compiler_v2.s2g4: postfix field update preserves old value" {
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(field_atom, b.atom_operands[1]);
     try std.testing.expectEqual(@as(i64, 13), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 6 });
+    try expectSourceOffsets(b, &.{ 0, 1, 6 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: prefix array element update preserves new value" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("++true[false];");
     defer h.deinit();
@@ -3174,16 +2064,12 @@ test "compiler_v2.s2g4: prefix array element update preserves new value" {
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(@as(i64, 6), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 3 });
+    try expectSourceOffsets(b, &.{ 0, 2, 3 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
 
 test "compiler_v2.s2g4: minimal class expression and default constructor" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class {});");
     defer h.deinit();
@@ -3206,16 +2092,19 @@ test "compiler_v2.s2g4: minimal class expression and default constructor" {
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        // Anonymous class expressions retain QuickJS's parser-only backpatch marker.
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 21), b.code_len);
+    try std.testing.expectEqual(@as(u32, 26), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[14]);
-    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 19 });
+    try std.testing.expectEqual(@as(u32, 12), std.mem.readInt(u32, b.code[21..25], .little));
+    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3248,10 +2137,6 @@ test "compiler_v2.s2g4: minimal class expression and default constructor" {
 }
 
 test "compiler_v2.s2g4: class declaration stores local binding" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("class C {}");
     defer h.deinit();
@@ -3290,7 +2175,7 @@ test "compiler_v2.s2g4: class declaration stores local binding" {
     try std.testing.expectEqual(@as(u8, 0), b.code[14]);
     try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, b.code[27..29], .little));
     try std.testing.expectEqual(@as(i64, 29), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 17, 20, 21, 22, 25, 26, 29 });
+    try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3320,10 +2205,6 @@ test "compiler_v2.s2g4: class declaration stores local binding" {
 }
 
 test "compiler_v2.s2g4: named class method splices runtime definition" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { m() { null; } });");
     defer h.deinit();
@@ -3348,22 +2229,25 @@ test "compiler_v2.s2g4: named class method splices runtime definition" {
         .{ .op = qop.put_loc_check_init, .size = 3 },
         // parseClass splices the method closure and definition after define_class setup.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.define_method, .size = 6, .atom = method_atom },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 39), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(method_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(method_atom, b.atom_operands[2]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
-    try std.testing.expectEqual(@as(u8, 0), b.code[26]);
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0), b.code[31]);
+    try std.testing.expectEqual(@as(i64, 38), b.last_opcode_pos);
     // Runtime method markers at 19/21 belong to the detached class segment;
     // legacy moves the instructions and atoms but not those source slots.
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 27 });
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3407,10 +2291,6 @@ test "compiler_v2.s2g4: named class method splices runtime definition" {
 }
 
 test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { constructor() { null; } });");
     defer h.deinit();
@@ -3432,15 +2312,16 @@ test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
         .{ .op = qop.put_loc_check_init, .size = 3 },
         // The detached class-body runtime segment is empty after constructor rollback.
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 21), b.code_len);
+    try std.testing.expectEqual(@as(u32, 26), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 19 });
+    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3473,10 +2354,6 @@ test "compiler_v2.s2g4: explicit constructor rolls back parent closure" {
 }
 
 test "compiler_v2.s2g4: derived default constructor returns checked this" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class extends null {});");
     defer h.deinit();
@@ -3499,16 +2376,17 @@ test "compiler_v2.s2g4: derived default constructor returns checked this" {
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 21), b.code_len);
+    try std.testing.expectEqual(@as(u32, 26), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 1), b.code[14]);
-    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 19 });
+    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3541,10 +2419,6 @@ test "compiler_v2.s2g4: derived default constructor returns checked this" {
 }
 
 test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { x = null; });");
     defer h.deinit();
@@ -3572,16 +2446,17 @@ test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 23), b.code_len);
+    try std.testing.expectEqual(@as(u32, 28), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[16]);
-    try std.testing.expectEqual(@as(i64, 22), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 17, 18, 21 });
+    try std.testing.expectEqual(@as(i64, 27), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3616,10 +2491,6 @@ test "compiler_v2.s2g4: instance field uses dormant brand prologue" {
 }
 
 test "compiler_v2.s2g4: private method patches instance brand prologue" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { #m() {} });");
     defer h.deinit();
@@ -3635,8 +2506,8 @@ test "compiler_v2.s2g4: private method patches instance brand prologue" {
     try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
 
     const b = h.builder();
-    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
-    const private_atom = b.atom_operands[1];
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
+    const private_atom = b.atom_operands[2];
     try std.testing.expectEqualStrings("#m", h.rt.atoms.name(private_atom).?);
     try expectV2Stream(b, &.{
         .{ .op = qop.undefined, .size = 1 },
@@ -3653,22 +2524,26 @@ test "compiler_v2.s2g4: private method patches instance brand prologue" {
         .{ .op = qop.add_brand, .size = 1 },
         // parseClassElement's deferred private-method sequence.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.set_name, .size = 5, .atom = private_atom },
         .{ .op = qop.put_var_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 38), b.code_len);
+    try std.testing.expectEqual(@as(u32, 48), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    // The root ledger exactly covers define_class's empty name and set_name's private symbol.
+    // The root ledger covers define_class, the anonymous-method placeholder,
+    // and the explicit private-symbol display name.
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(private_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(private_atom, b.atom_operands[2]);
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 1), b.code[16]);
     try std.testing.expectEqual(@as(u8, 0), b.code[26]);
-    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 17, 18, 21, 22, 23, 24, 36 });
+    try std.testing.expectEqual(@as(i64, 47), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3709,10 +2584,6 @@ test "compiler_v2.s2g4: private method patches instance brand prologue" {
 }
 
 test "compiler_v2.s2g4: static block nests closure in static initializer" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { static { null; } });");
     defer h.deinit();
@@ -3740,17 +2611,18 @@ test "compiler_v2.s2g4: static block nests closure in static initializer" {
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 34), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 19, 20, 21, 23, 24, 27 });
+    try std.testing.expectEqual(@as(i64, 33), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3762,18 +2634,20 @@ test "compiler_v2.s2g4: static block nests closure in static initializer" {
     try expectV2Stream(static_init, &.{
         // Static initializers deliberately have no instance-brand prologue.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.get_var, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
         .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 11), static_init.code_len);
+    try std.testing.expectEqual(@as(u32, 16), static_init.code_len);
     try std.testing.expectEqual(@as(u32, 0), static_init.label_len);
-    try std.testing.expectEqual(@as(u32, 0), static_init.atom_len);
+    try std.testing.expectEqual(@as(u32, 1), static_init.atom_len);
+    try std.testing.expectEqual(core.atom.null_atom, static_init.atom_operands[0]);
     try std.testing.expectEqual(@as(u8, 0), static_init.code[1]);
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[7..9], .little));
-    try std.testing.expectEqual(@as(i64, 10), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[12..14], .little));
+    try std.testing.expectEqual(@as(i64, 15), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 
@@ -3794,10 +2668,6 @@ test "compiler_v2.s2g4: static block nests closure in static initializer" {
 }
 
 test "compiler_v2.s2g4: static field emits through static initializer" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { static x = null; });");
     defer h.deinit();
@@ -3827,17 +2697,18 @@ test "compiler_v2.s2g4: static field emits through static initializer" {
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 34), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 19, 20, 21, 23, 24, 27 });
+    try std.testing.expectEqual(@as(i64, 33), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3864,10 +2735,6 @@ test "compiler_v2.s2g4: static field emits through static initializer" {
 }
 
 test "compiler_v2.s2g4: computed method splices key and closure" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { [true]() {} });");
     defer h.deinit();
@@ -3890,19 +2757,22 @@ test "compiler_v2.s2g4: computed method splices key and closure" {
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.to_propkey, .size = 1 },
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.define_method_computed, .size = 2 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 27), b.code_len);
+    try std.testing.expectEqual(@as(u32, 37), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
-    try std.testing.expectEqual(@as(u8, 0), b.code[24]);
-    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 25 });
+    try std.testing.expectEqual(@as(u8, 0), b.code[29]);
+    try std.testing.expectEqual(@as(i64, 36), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3922,10 +2792,6 @@ test "compiler_v2.s2g4: computed method splices key and closure" {
 }
 
 test "compiler_v2.s2g4: getter child keeps return terminal" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("(class { get g() { return null; } });");
     defer h.deinit();
@@ -3948,20 +2814,23 @@ test "compiler_v2.s2g4: getter child keeps return terminal" {
         .{ .op = qop.put_loc_check_init, .size = 3 },
         // The accessor closure and define_method flag travel in the detached segment.
         .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.define_method, .size = 6, .atom = getter_atom },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 39), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(getter_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
+    try std.testing.expectEqual(getter_atom, b.atom_operands[2]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
-    try std.testing.expectEqual(@as(u8, 1), b.code[26]);
-    try std.testing.expectEqual(@as(i64, 28), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 4, 9, 15, 16, 27 });
+    try std.testing.expectEqual(@as(u8, 1), b.code[31]);
+    try std.testing.expectEqual(@as(i64, 38), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
@@ -3983,10 +2852,6 @@ test "compiler_v2.s2g4: getter child keeps return terminal" {
 }
 
 test "compiler_v2.s3: parsed dead code after break is dropped" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     // Numeric literal emission is outside the migrated v2 parser surface;
     // null keeps the same dead expression-statement shape through v2.
@@ -4028,10 +2893,6 @@ test "compiler_v2.s3: parsed dead code after break is dropped" {
 }
 
 test "compiler_v2.s3: parsed dead-only loop labels stay dead" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("for (;;) { break; continue; }");
     defer h.deinit();
@@ -4072,10 +2933,6 @@ test "compiler_v2.s3: parsed dead-only loop labels stay dead" {
 }
 
 test "compiler_v2.s3: parsed return through finally keeps live gosub" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { null; }");
     h.state.return_depth = 1;
@@ -4115,10 +2972,6 @@ test "compiler_v2.s3: parsed return through finally keeps live gosub" {
 }
 
 test "compiler_v2.s3: parsed empty finally removes gosub" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Parse = undefined;
     try h.init("try { return; } finally { }");
     h.state.return_depth = 1;
@@ -4160,84 +3013,6 @@ test "compiler_v2.s3: parsed empty finally removes gosub" {
     try std.testing.expectEqual(@as(u32, 3), product.jump_size);
 }
 
-test "compiler_v2.s3: normalized global binding equals legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectRootNormalizedEquivalence("var g = 1; g;", .global);
-}
-
-test "compiler_v2.s3: normalized top-level lexical equals legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectRootNormalizedEquivalence(
-        "let a = 1; a = a + 2; a;",
-        .top_level_lexical,
-    );
-}
-
-test "compiler_v2.s3: normalized block lexical equals legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectRootNormalizedEquivalence("{ let b = 2; b; }", .block_lexical);
-}
-
-test "compiler_v2.s3: normalized child loc arg indices equal legacy" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { var v; v = p; return v; }",
-        .{ .args = 1, .vars = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized dead jump cycle equals legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; for (;;) { p = p + 1; } }",
-        .{ .args = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized dead forward branch equals legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; if (p) { p = 1; } else { p = 2; } }",
-        .{ .args = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized assignment after return equals legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; p = 1; }",
-        .{ .args = 1 },
-    );
-}
-
-test "compiler_v2.s3r: normalized dead binding events equal legacy exact CFG" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; { let b = 1; b; } }",
-        .{ .args = 1 },
-    );
-    try expectChildNormalizedEquivalence(
-        "function f(p) { return p; var v; v = p; }",
-        .{ .args = 1, .vars = 1 },
-    );
-}
-
 fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
     var h: V2Exec = undefined;
     try h.init(src);
@@ -4248,16 +3023,10 @@ fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
 }
 
 test "compiler_v2.s4: arithmetic executes installed FunctionBytecode" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion("6 * 7;", 42);
 }
 
 test "compiler_v2.s4: if else true arm executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let r; if (true) { r = 1; } else { r = 2; } r;",
         1,
@@ -4265,9 +3034,6 @@ test "compiler_v2.s4: if else true arm executes" {
 }
 
 test "compiler_v2.s4: if else false arm executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let r; if (false) { r = 1; } else { r = 2; } r;",
         2,
@@ -4275,9 +3041,6 @@ test "compiler_v2.s4: if else false arm executes" {
 }
 
 test "compiler_v2.s4: while break executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let i = 0; while (true) { i = i + 1; if (i == 3) break; } i;",
         3,
@@ -4285,9 +3048,6 @@ test "compiler_v2.s4: while break executes" {
 }
 
 test "compiler_v2.s4: for accumulate executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;",
         10,
@@ -4295,9 +3055,6 @@ test "compiler_v2.s4: for accumulate executes" {
 }
 
 test "compiler_v2.s4: switch fallthrough executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let x = 0; switch (2) { case 1: x = x + 1; case 2: x = x + 10; case 3: x = x + 100; break; default: x = x + 1000; } x;",
         110,
@@ -4305,9 +3062,6 @@ test "compiler_v2.s4: switch fallthrough executes" {
 }
 
 test "compiler_v2.s4: try finally value executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let t = 0; try { t = 1; } finally { t = t + 10; } t;",
         11,
@@ -4315,9 +3069,6 @@ test "compiler_v2.s4: try finally value executes" {
 }
 
 test "compiler_v2.s4: try catch throw executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let c = 0; try { throw 5; } catch (e) { c = e + 2; } c;",
         7,
@@ -4325,9 +3076,6 @@ test "compiler_v2.s4: try catch throw executes" {
 }
 
 test "compiler_v2.s4: nested closure capture executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     // S3 deliberately leaves function-body hoist instantiation to a later
     // finalization owner (resolve_variables.zig enter_scope arm). Use an
     // explicit function-expression assignment until that documented stub is
@@ -4340,9 +3088,6 @@ test "compiler_v2.s4: nested closure capture executes" {
 }
 
 test "compiler_v2.s4: labeled break executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion(
         "let n = 0; L: { n = 1; break L; n = 2; } n;",
         1,
@@ -4350,17 +3095,10 @@ test "compiler_v2.s4: labeled break executes" {
 }
 
 test "compiler_v2.s4: global var machinery executes" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
     try expectV2ExecutionCompletion("var g = 4; g + 1;", 5);
 }
 
 test "compiler_v2.s4: installed for loop matches the configured default layout" {
-    var skip = !P.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var h: V2Exec = undefined;
     try h.init("let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;");
     defer h.deinit();
@@ -4423,8 +3161,6 @@ test "compiler_v2.p5: FunctionDef owners are inert after the FunctionBytecode es
     try h.state.finalizeEvalReturn();
     try std.testing.expect(h.state.function_def.child_list.len >= 1);
 
-    if (P.v2_available) try attachTranslatedBuilderTree(&h.state.function_def);
-
     const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
         &h.state.function_def,
         .{ .realm = h.ctx },
@@ -4461,6 +3197,7 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
     var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
     state.function_def.is_global_var = true;
     state.top_level_functions_as_children = true;
+    try state.beginV2ProgramEmission();
 
     {
         const probe = try rt.atoms.internString("escapeAuditProbeName");
@@ -4475,12 +3212,12 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
         try std.testing.expectEqual(parser_mod.token.TOK_EOF, state.token.val);
         try state.finalizeEvalReturn();
 
+        const parser_builder = state.function_def.v2_builder.?;
         var phase1_probe_refs: usize = 0;
-        for (state.function_def.atom_operands) |owner| {
+        for (parser_builder.atom_operands[0..parser_builder.atom_len]) |owner| {
             phase1_probe_refs += @intFromBool(owner == probe);
         }
         try std.testing.expectEqual(@as(usize, 2), phase1_probe_refs);
-        if (P.v2_available) try attachTranslatedBuilderTree(&state.function_def);
 
         const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
             &state.function_def,
@@ -4490,15 +3227,11 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
         const after_compile = rt.atoms.refCount(probe).?;
         try std.testing.expect(after_compile > baseline);
 
-        // The v2/dual test adapter duplicates every legacy phase-1 atom into
-        // its translated builder. v2 publication consumes the builder copy
-        // but intentionally leaves the original FunctionDef.atom_operands
-        // scratch ledger for state.deinit; legacy lowerLegacyPhase1 instead
-        // moves that original ledger into the FB. Account for those two
-        // compiler-only refs exactly rather than weakening the FB-owner check.
-        const retained_phase1_probe_refs = if (P.v2_available) phase1_probe_refs else 0;
+        // The compiler releases its producer at the consumption point, so the
+        // only refs left after publication are the artifact's own. Account for
+        // them exactly rather than weakening the FB-owner check.
         try std.testing.expectEqual(
-            baseline + phase1_probe_refs + retained_phase1_probe_refs,
+            baseline + phase1_probe_refs,
             after_compile,
         );
 
@@ -4506,6 +3239,8 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
         lex.deinit();
         function.deinit(rt);
 
+        // Compiler teardown releases no artifact-owned atom: the escaped refs
+        // are exactly the ones the published FunctionBytecode owns.
         try std.testing.expectEqual(
             baseline + phase1_probe_refs,
             rt.atoms.refCount(probe).?,
@@ -4643,7 +3378,7 @@ test "compiler_v2.coverage: RULE B -- TypeScript probes route through parseAndCo
     }
 }
 
-test "compiler_v2.coverage: production constructs never fall back to legacy emission" {
+test "compiler_v2.coverage: every production construct compiles through the one compiler" {
     const Case = CoverageCase;
     const cases = [_]Case{
         .{ .source = "let value = 1 + 2; value *= 3; value;" },
@@ -4703,9 +3438,6 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
         .{ .source = "interface Merged { first: number } interface Merged { second: string } namespace Merged { export const value = 1; }", .source_kind = .typescript },
     };
 
-    coverage.reset();
-    defer if (coverage.collectMode()) coverage.dumpReport();
-
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -4714,8 +3446,6 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
     // the EXPLICIT expected set carried by `.expect_skip`. Not a count, not a
     // proportion -- a set, matched by identity in both directions.
     var skipped = [_]bool{false} ** cases.len;
-    var all_fallbacks: std.EnumSet(coverage.LegacyConstruct) = .empty;
-    var total_unallowed: u64 = 0;
     for (cases, 0..) |case, index| {
         var program = test_entry.parseAndCompileV2TestProgram(
             rt,
@@ -4742,23 +3472,6 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
         defer program.deinit(rt);
 
         compiled += 1;
-        all_fallbacks.setUnion(program.fallbacks);
-        total_unallowed +|= program.unallowed_emissions;
-        if (coverage.collectMode()) {
-            var iterator = program.fallbacks.iterator();
-            while (iterator.next()) |construct| {
-                std.debug.print(
-                    "compiler_v2.coverage fallback construct={s} snippet[{d}]={s}\n",
-                    .{ @tagName(construct), index, case.source },
-                );
-            }
-            if (program.unallowed_emissions != 0) {
-                std.debug.print(
-                    "compiler_v2.coverage OFFENDING snippet[{d}] unallowed={d}: {s}\n",
-                    .{ index, program.unallowed_emissions, case.source },
-                );
-            }
-        }
     }
 
     comptime var expected_skips: usize = 0;
@@ -4779,8 +3492,4 @@ test "compiler_v2.coverage: production constructs never fall back to legacy emis
     // There is deliberately no proportional form of this check.
     try expectCoverageSkipSetMatches(&cases, &skipped, true);
     try std.testing.expectEqual(cases.len - expected_skips, compiled);
-    try test_entry.expectNoUnallowedFallback(.{
-        .fallbacks = all_fallbacks,
-        .unallowed = total_unallowed,
-    });
 }

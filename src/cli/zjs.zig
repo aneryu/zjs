@@ -1,5 +1,6 @@
 const std = @import("std");
 const engine = @import("zjs");
+const simple_token = engine.simple_token;
 
 // QCP-1: this root is shared by `zjs` (ReleaseFast), `zjs-profile`
 // (ReleaseFast) and `zjs-dev` (Debug), so it proves the effective
@@ -11,7 +12,6 @@ comptime {
 }
 
 const public_api = engine.public_api;
-const unicode = engine.libs.unicode;
 const zjs = public_api;
 const runtime_layer = public_api.runtime;
 
@@ -162,7 +162,6 @@ pub fn main(init: std.process.Init) !void {
     const total_start = monotonicNanos();
     setupHostDispatchStatsExitDump(init.environ_map);
     setupV2OracleReportExitDump(init.environ_map);
-    setupV2EmissionCoverageExitDump();
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
@@ -501,91 +500,14 @@ fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.conte
 fn sourceLooksLikeModule(source: []const u8) bool {
     var pos: usize = 0;
     skipShebang(source, &pos);
-    switch (simpleNextToken(source, &pos)) {
+    switch (simple_token.next(source, &pos, false)) {
         .import_keyword => {
-            const tok = simpleNextToken(source, &pos);
+            const tok = simple_token.next(source, &pos, false);
             return tok != .dot and tok != .left_paren;
         },
         .export_keyword => return true,
         else => return false,
     }
-}
-
-/// Token classes needed by `sourceLooksLikeModule`; the subset of qjs
-/// `simple_next_token` results that `JS_DetectModule` inspects.
-const DetectToken = enum {
-    import_keyword,
-    export_keyword,
-    ident,
-    dot,
-    left_paren,
-    other,
-    eof,
-};
-
-/// Mirrors qjs `simple_next_token` (quickjs.c:23670) for the token classes
-/// `JS_DetectModule` needs: skips whitespace and comments (and a UTF-8 BOM),
-/// then classifies the next token.
-fn simpleNextToken(source: []const u8, pos: *usize) DetectToken {
-    var index = pos.*;
-    while (index < source.len) {
-        const byte = source[index];
-        if (unicode.isAsciiWhitespaceByte(byte)) {
-            index += 1;
-            continue;
-        }
-        if (byte == '/' and index + 1 < source.len) {
-            if (source[index + 1] == '/') {
-                index += 2;
-                while (index < source.len and source[index] != '\n' and source[index] != '\r') index += 1;
-                continue;
-            }
-            if (source[index + 1] == '*') {
-                index += 2;
-                while (index + 1 < source.len and !(source[index] == '*' and source[index + 1] == '/')) index += 1;
-                index = if (index + 1 < source.len) index + 2 else source.len;
-                continue;
-            }
-        }
-        if (byte == 0xef and index + 2 < source.len and source[index + 1] == 0xbb and source[index + 2] == 0xbf) {
-            index += 3;
-            continue;
-        }
-        pos.* = index + 1;
-        switch (byte) {
-            '.' => return .dot,
-            '(' => return .left_paren,
-            'i' => {
-                if (matchIdentifierRest(source, index + 1, "mport")) {
-                    pos.* = index + "import".len;
-                    return .import_keyword;
-                }
-                return .ident;
-            },
-            'e' => {
-                if (matchIdentifierRest(source, index + 1, "xport")) {
-                    pos.* = index + "export".len;
-                    return .export_keyword;
-                }
-                return .ident;
-            },
-            else => {
-                if (isIdentifierStart(byte)) return .ident;
-                return .other;
-            },
-        }
-    }
-    pos.* = index;
-    return .eof;
-}
-
-/// Mirrors qjs `match_identifier`: the remaining keyword bytes must match and
-/// must not be followed by an identifier-continue character.
-fn matchIdentifierRest(source: []const u8, pos: usize, rest: []const u8) bool {
-    if (pos + rest.len > source.len) return false;
-    if (!std.mem.eql(u8, source[pos .. pos + rest.len], rest)) return false;
-    if (pos + rest.len < source.len and isIdentifierContinue(source[pos + rest.len])) return false;
-    return true;
 }
 
 /// Mirrors qjs `skip_shebang` (quickjs.c:23761).
@@ -595,14 +517,6 @@ fn skipShebang(source: []const u8, pos: *usize) void {
         while (index < source.len and source[index] != '\n' and source[index] != '\r') index += 1;
         pos.* = index;
     }
-}
-
-fn isIdentifierStart(byte: u8) bool {
-    return unicode.isAsciiIdentifierStartByte(byte);
-}
-
-fn isIdentifierContinue(byte: u8) bool {
-    return unicode.isAsciiIdentifierPartByte(byte);
 }
 
 fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *Runtime) !void {
@@ -891,17 +805,6 @@ fn writeV2OracleReportAtExit() callconv(.c) void {
     std.debug.print("{s}\n", .{text});
 }
 
-fn setupV2EmissionCoverageExitDump() void {
-    if (comptime !engine.compiler_v2.coverage.enabled) return;
-    if (!engine.compiler_v2.coverage.collectMode()) return;
-    _ = atexit(writeV2EmissionCoverageAtExit);
-}
-
-fn writeV2EmissionCoverageAtExit() callconv(.c) void {
-    if (comptime !engine.compiler_v2.coverage.enabled) return;
-    engine.compiler_v2.coverage.dumpReport();
-}
-
 fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {
     if (lhs.nanos != rhs.nanos) return lhs.nanos > rhs.nanos;
     if (lhs.count != rhs.count) return lhs.count > rhs.count;
@@ -1119,6 +1022,9 @@ test "zjs detects module mode from extension and first token (qjs JS_DetectModul
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "export const value = 1;", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "/* leading */ // comment\nimport 'x';", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "#!/usr/bin/env zjs\nimport value from './dep.mjs';", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "\xC2\xA0import 'x';", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "// \xCF\x80\xE2\x80\xA8export const x = 1;", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "// \xCF\x80\xE2\x80\xA9import 'x';", .script));
     // Only the first token decides (qjs JS_DetectModule quickjs.c:23792):
     // `import.meta` / `import(...)` never promote, and a late export/import
     // is a script-mode SyntaxError rather than a silent module promotion.
@@ -1130,6 +1036,7 @@ test "zjs detects module mode from extension and first token (qjs JS_DetectModul
     try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "console.log(1);\nexport const late = 1;", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "importx.meta", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import\xCF\x80.meta", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "exports.value = 1;", .script));
 }
 

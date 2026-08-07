@@ -284,12 +284,110 @@ artifacts. Its opcode-specific gates are historical-only until profiling is
 restored. Use `--warn-regressions` for noisy exploratory runs and keep strict
 thresholds for evidence attached to a performance-sensitive change.
 
-Linux sampling:
+### Linux sampling and PMU counters
+
+Measured on this host on 2026-08-07 (aarch64 big.LITTLE, Cortex-X925 +
+Cortex-A725, Zig 0.16.0, perf 6.17.9). The generic advice found in most Zig
+profiling write-ups needs four corrections here; each one below is backed by a
+measurement, not by extrapolation.
+
+**Build: use `zig build zjs` as-is. Do not add profiling flags.**
+
+The shipped `zjs` is already `ReleaseFast` with full symbols
+(`file` reports `with debug_info, not stripped`; `nm` finds 6199 symbols), so
+`-fno-strip` is a no-op here.
+
+`-fno-omit-frame-pointer` is actively harmful. `internal_fast_mod` in
+`build.zig` sets `.omit_frame_pointer = true` deliberately, because the
+tail-call threaded dispatcher has one handler per opcode and a frame pointer
+adds a prologue/epilogue to every one of them. Rebuilding with
+`.omit_frame_pointer = false` and comparing interleaved A/B/B/A on pinned CPU
+19:
+
+| workload | instructions | cycles |
+|---|---|---|
+| VM dispatch loop (`s += i`, 60M iters) | 12.173G → 13.614G (**+11.8%**) | 2.272G → 2.831G (**+24.6%**) |
+| code-load payload (parse-only) | 12.19M → 12.72M (**+4.4%**) | within noise |
+
+A profile taken on such a build describes a program that is 24.6% slower in the
+loop you care about, and the added cost lands *uniformly on every handler*,
+which systematically flattens the relative weights you are trying to read.
+
+The premise behind the flag does not hold either: fp unwinding already works
+with `omit_frame_pointer = true`, because handlers never touch `x29`, so the
+unwinder walks out through the enclosing `runWithCallEnv` frame. A `--call-graph
+fp` record against the shipped binary returns complete stacks
+(`op_dup;runWithCallEnvAfterInterruptPoll;runWithCallEnv;eval;...`).
+
+**Pin to one CPU cluster — there are two PMUs.**
+
+Unpinned `perf stat` splits every event across both PMUs at roughly half
+coverage each and reports two unrelated IPC figures (measured: 3.75 and 5.70);
+neither is the program's IPC, and summing them is meaningless because the
+clusters differ in frequency and width.
+
+```text
+armv8_pmuv3_0 -> CPU 0-4,10-14
+armv8_pmuv3_1 -> CPU 5-9,15-19
+```
 
 ```sh
-perf record -F 999 -g -- zig-out/bin/zjs /tmp/case.js
-perf report
+taskset -c 19 perf stat -e cycles,instructions,branches,branch-misses \
+  zig-out/bin/zjs /tmp/case.js
 ```
+
+Pinned, the counters collapse onto a single PMU and IPC becomes real. The rows
+for the other PMU correctly read `<not counted>`.
+
+**Prefer a flat profile; `-g` adds little for the dispatch loop.**
+
+Under tail-call threading the handler-to-handler `musttail` transfer leaves no
+stack record, so every opcode appears flat under `runWithCallEnv` and the
+op-to-op sequence is unrecoverable. `-g` also double-counts;
+`tools/perf/closure_alloc/profile_stages.py` already records flat for this
+reason. Use `-g` when the question is about the call path *into* the VM, not
+about the VM loop itself.
+
+```sh
+taskset -c 19 perf record -F 4999 -o /tmp/case.data zig-out/bin/zjs /tmp/case.js
+perf report -i /tmp/case.data --stdio --no-children -q
+```
+
+Raise `-F` for short cases: `-F 999` on a 47ms case yielded 16 samples total.
+
+**Resolve inlining before trusting any symbol row.**
+
+`ReleaseFast` inlines aggressively, so a hot symbol name is usually the
+*outermost* frame of an inline stack and attributing cost to it is wrong. A
+measured example: `perf report` credits 31.32% to
+`parser.lexer.LexerImpl.nextInto`, but the sampled address resolves to
+
+```text
+parser.lexer.LexerImpl.bump      src/parser.zig:604
+parser.lexer.LexerImpl.lexString src/parser.zig:1141
+parser.lexer.LexerImpl.nextInto  src/parser.zig:499
+```
+
+Always expand the address before reading the assembly. `perf report --inline`
+does *not* expand these in flat mode, so use `addr2line`:
+
+```sh
+perf script -i /tmp/case.data -F ip,sym | grep <symbol> | awk '{print $1}' | sort -u
+addr2line -f -i -e zig-out/bin/zjs 0x<ip>
+```
+
+**Known limits on this host.** `perf_event_paranoid` is `1`, so
+`/proc/kallsyms` is unreadable and kernel samples appear as bare
+`[unknown] [k] 0x…` addresses — in the code-load profile above that was 43% of
+all samples, i.e. the single largest row was unattributable. Account for it
+before concluding that the visible user-space rows are the whole picture.
+
+**Before drawing a conclusion from any two builds**, apply the existing
+discipline: interleaved A/B on fixed binaries (build layout alone moves results
+by up to ±2.8%), and read
+[Zig build bistability](ZIG-BUILD-BISTABILITY-2026-07.md) — independently
+produced binaries alternate between two distinct code states, which contaminates
+any cross-build comparison.
 
 macOS sampling:
 

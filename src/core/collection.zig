@@ -381,22 +381,139 @@ fn linkWeakEntry(object: *core.Object, index: usize) void {
     heads.*[bucket] = index;
 }
 
-fn relinkWeakIndex(object: *core.Object) void {
+/// Splice entry `index` out of its bucket chain. Mirrors `map_delete_record`
+/// (quickjs.c:52177-52201), which walks the one bucket the record hashes to and
+/// re-points the predecessor link; the strong twin is `unlinkStrongEntry`.
+fn unlinkWeakEntry(object: *core.Object, index: usize) void {
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    @memset(heads.*, weak_no_entry);
-    for (object.weakCollectionEntriesSlot().*, 0..) |*entry, index| {
-        entry.hash = weakEntryHash(entry.key_identity);
-        entry.hash_next = weak_no_entry;
-        linkWeakEntry(object, index);
+    const entries = object.weakCollectionEntriesSlot().*;
+    if (index >= entries.len) return;
+    var link = &heads.*[bucketIndex(entries[index].hash, heads.*.len)];
+    while (link.* != weak_no_entry) {
+        const current = link.*;
+        if (current >= entries.len) {
+            link.* = weak_no_entry;
+            return;
+        }
+        if (current == index) {
+            link.* = entries[current].hash_next;
+            return;
+        }
+        link = &entries[current].hash_next;
     }
 }
 
 // === Entry removal / rollback / clear ===
 
+/// Minimum tombstone count before compaction is worth its memmove; below this
+/// the linear rescan a small collection does is already bounded by a handful of
+/// slots.
+const strong_compact_min_tombstones: usize = 4;
+
+/// True when the entry array is at least half tombstones and no cursor is
+/// parked in it. qjs frees a deleted record immediately unless an enumerator
+/// holds it (`map_delete_record_internal`, quickjs.c:52078-52085); zjs cursors
+/// address entries by index, so the whole array has to be pinned instead of one
+/// record, and the reclaim is batched behind a 50% fill test to keep the
+/// per-delete cost amortized O(1).
+fn shouldCompactStrongEntries(object: *core.Object) bool {
+    if (object.collectionLiveCursors() != 0) return false;
+    const len = object.collectionEntriesSlot().*.len;
+    const tombstones = len - object.collectionActiveCount();
+    return tombstones >= strong_compact_min_tombstones and tombstones * 2 >= len;
+}
+
+/// Drop every tombstone from the entry array, preserving insertion order, and
+/// rebuild the bucket chains over the new indices. Allocation-free (it reuses
+/// the existing entry buffer and bucket-head array in place), so it cannot fail
+/// and needs no OOM rollback.
+///
+/// This is the batched form of qjs's per-record `list_del(&mr->link)` +
+/// `js_free_rt(rt, mr)` (quickjs.c:52080-52081). The caller must have checked
+/// `collectionLiveCursors() == 0`: every surviving entry moves to a lower index,
+/// so any parked cursor index would silently change meaning — the qjs analogue
+/// is that a record is only unlinked once its `ref_count` reaches zero.
+fn compactStrongEntries(object: *core.Object) void {
+    const entries_slot = object.collectionEntriesSlot();
+    const old_len = entries_slot.*.len;
+    var write: usize = 0;
+    for (0..old_len) |read| {
+        if (!entries_slot.*[read].active) continue;
+        if (write != read) entries_slot.*[write] = entries_slot.*[read];
+        write += 1;
+    }
+    // Blank the vacated tail so a stale `[]CollectionEntry` slice captured
+    // before the compaction (the Set-composition scans hold one across user
+    // code) sees inactive slots instead of duplicated live entries.
+    for (entries_slot.*[write..old_len]) |*entry| {
+        entry.* = .{
+            .key = core.JSValue.undefinedValue(),
+            .value = core.JSValue.undefinedValue(),
+            .active = false,
+            .hash_next = strong_no_entry,
+        };
+    }
+    entries_slot.* = entries_slot.*.ptr[0..write];
+    std.debug.assert(write == object.collectionActiveCount());
+
+    const heads = object.collectionBucketHeadsSlot();
+    if (heads.*.len == 0) return;
+    @memset(heads.*, strong_no_entry);
+    for (entries_slot.*, 0..) |*entry, index| {
+        // The stored hash is still valid: compaction moves entries, it never
+        // rewrites keys, so no rehash is needed (unlike `rebuildStrongIndex`).
+        const bucket = bucketIndex(entry.hash, heads.*.len);
+        entry.hash_next = heads.*[bucket];
+        heads.*[bucket] = index;
+    }
+}
+
+/// Hand surplus entry/bucket capacity back once a collection has shrunk far
+/// below its high-water mark. qjs releases the memory of every deleted record
+/// on the spot (`js_free_rt(rt, mr)`, quickjs.c:52081), so a map that shed most
+/// of its records also sheds their memory; zjs holds one array, so the
+/// equivalent is re-sizing that array. Best effort: on allocation failure the
+/// existing buffers stay in use, so a delete can never fail or half-apply.
+fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
+    const entries_slot = object.collectionEntriesSlot();
+    const capacity_slot = object.collectionEntriesCapacitySlot();
+    const live = entries_slot.*.len;
+    if (capacity_slot.* >= 32 and live * 4 <= capacity_slot.*) {
+        var next_capacity: usize = 8;
+        while (next_capacity < live * 2) next_capacity *= 2;
+        if (next_capacity < capacity_slot.*) shrink: {
+            const next = rt.allocRuntime(core.object.CollectionEntry, next_capacity) catch break :shrink;
+            @memcpy(next[0..live], entries_slot.*);
+            const old_entries = entries_slot.*;
+            const old_capacity = capacity_slot.*;
+            entries_slot.* = next[0..live];
+            capacity_slot.* = next_capacity;
+            rt.memory.free(core.object.CollectionEntry, old_entries.ptr[0..old_capacity]);
+        }
+    }
+
+    const heads = object.collectionBucketHeadsSlot();
+    if (heads.*.len < 32 or live * 4 > heads.*.len) return;
+    const next_count = bucketCountForActiveCount(live);
+    if (next_count >= heads.*.len) return;
+    const next = rt.memory.alloc(usize, next_count) catch return;
+    @memset(next, strong_no_entry);
+    for (entries_slot.*, 0..) |*entry, index| {
+        const bucket = bucketIndex(entry.hash, next.len);
+        entry.hash_next = next[bucket];
+        next[bucket] = index;
+    }
+    rt.memory.free(usize, heads.*);
+    heads.* = next;
+}
+
 pub fn removeStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
     const removed = takeStrongEntry(object, index) orelse return;
     removed.destroy(rt);
+    if (!shouldCompactStrongEntries(object)) return;
+    compactStrongEntries(object);
+    shrinkStrongStorage(rt, object);
 }
 
 fn rollbackLastStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
@@ -415,29 +532,74 @@ pub fn rollbackStrongEntriesTo(rt: *core.JSRuntime, object: *core.Object, len: u
     object.collectionActiveCountSlot().* = active_count;
 }
 
+/// O(1) weak delete: unchain the victim, then move the tail entry into the hole
+/// and rechain only that one entry.
+///
+/// qjs deletes a record by splicing it out of its bucket chain and its record
+/// list and freeing it (`map_delete_record` quickjs.c:52196-52202 ->
+/// `map_delete_record_internal` quickjs.c:52066-52086) — O(1), no surviving
+/// record is touched. zjs stores weak entries in a dense array, so the faithful
+/// adaptation of "unlink one node" is unlink + swap-remove. Weak collections
+/// have no iterator and no JS-observable order (qjs only walks the list in
+/// `map_delete_weakrefs`, quickjs.c:52099), so reordering is unobservable, and
+/// the O(n) `@memmove` + full `relinkWeakIndex` rehash it replaces had no qjs
+/// counterpart at all.
 pub fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const entries_slot = object.weakCollectionEntriesSlot();
+    const last = entries_slot.*.len - 1;
+    unlinkWeakEntry(object, index);
     const entry = entries_slot.*[index];
-    if (index + 1 < entries_slot.*.len) {
-        @memmove(entries_slot.*[index .. entries_slot.*.len - 1], entries_slot.*[index + 1 ..]);
+    if (index != last) {
+        // Unchain the mover under its old index first: its bucket link stores
+        // the index, so it has to be rewritten after the move.
+        unlinkWeakEntry(object, last);
+        entries_slot.*[index] = entries_slot.*[last];
+        entries_slot.* = entries_slot.*.ptr[0..last];
+        linkWeakEntry(object, index);
+    } else {
+        entries_slot.* = entries_slot.*.ptr[0..last];
     }
-    entries_slot.* = entries_slot.*.ptr[0 .. entries_slot.*.len - 1];
-    relinkWeakIndex(object);
     entry.destroy(rt);
     object.pruneBorrowedReferenceHolderIfEmpty(rt);
 }
 
+/// Mirrors js_map_clear (quickjs.c:52266-52285): wipe the hash table first,
+/// then walk the record list releasing every record. qjs's per-record release
+/// reclaims the record unless an enumerator pinned it, so with no cursor parked
+/// the array is truncated to zero here; with a cursor parked the slots survive
+/// as tombstones, matching qjs's zombie records.
 pub fn clearStrongEntries(rt: *core.JSRuntime, object: *core.Object) void {
-    const active_count = object.collectionActiveCount();
-    if (active_count == 0) return;
-
-    var index: usize = 0;
-    while (index < object.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = takeStrongEntry(object, index) orelse continue;
-        entry.destroy(rt);
+    const entries_slot = object.collectionEntriesSlot();
+    const old_len = entries_slot.*.len;
+    if (old_len == 0) return;
+    const drop_slots = object.collectionLiveCursors() == 0;
+    if (object.collectionActiveCount() == 0) {
+        // Nothing to release; only the tombstone slots are left to reclaim.
+        if (drop_slots) entries_slot.* = entries_slot.*.ptr[0..0];
+        return;
     }
+
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len != 0) @memset(heads.*, strong_no_entry);
+    object.collectionActiveCountSlot().* = 0;
+    if (drop_slots) entries_slot.* = entries_slot.*.ptr[0..0];
+
+    for (0..old_len) |index| {
+        const entry = entries_slot.*.ptr[index];
+        if (!entry.active) continue;
+        entries_slot.*.ptr[index] = .{
+            .key = core.JSValue.undefinedValue(),
+            .value = core.JSValue.undefinedValue(),
+            .active = false,
+            .hash_next = strong_no_entry,
+        };
+        entry.destroy(rt);
+    }
+    // Deliberately not calling `shrinkStrongStorage` here: qjs's clear frees
+    // the records but keeps the hash table, and a cleared map is nearly always
+    // refilled, so releasing the entry buffer only buys a full regrow on the
+    // next fill (measured: +22% instructions on a fill/clear loop). The delete
+    // path releases surplus capacity instead.
 }
 
 fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEntry {

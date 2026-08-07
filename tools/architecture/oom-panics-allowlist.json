@@ -32,12 +32,5 @@
     "contains": "@panic(\"JSRuntime destroyed while execution or root frames are active\")",
     "reason": "execution and root frames borrow Runtime state, so destroying the Runtime before they unwind would make deferred cleanup access freed storage; this is a teardown lifetime invariant",
     "exit_milestone": "retain until execution and root-frame lifetimes become owned or cancellable by Runtime teardown instead of requiring every active frame to unwind before destroy"
-  },
-  {
-    "source": "src/compiler_v2/coverage.zig",
-    "pattern": "@panic",
-    "contains": "@panic(message)",
-    "reason": "QCP-1 L3 migration gate: an ungated legacy emission during a compiler-v2 parse means the v2 backend silently produced a legacy-shaped product, which the dual identity comparison cannot catch. The gate is comptime-disabled unless the build opts into emission coverage, prints the offending construct and its capture stack first, and is unrelated to allocation failure.",
-    "exit_milestone": "delete with the L3 gate itself once the compiler-v2 migration retires the dual legacy/v2 emission split (STOP-E reaches the full production surface and coverage.zig stops tracking legacy_in_v2_scope)"
   }
 ]

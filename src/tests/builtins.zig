@@ -110,7 +110,10 @@ test "dense array writer readers retain their semantic guard class" {
         .{ .class = .qjs_bulk_set, .source = array_ops_source, .needle = ".appendDenseArrayValues(ctx.runtime,", .count = 1 },
         .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataPropertyUnchecked(ctx.runtime,", .count = 1 },
         .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
-        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 2 },
+        // shift, unshift and splice: the three dense bulk relocations that skip
+        // the per-index [[Set]]/[[Delete]] walk and therefore must prove the
+        // prototype chain carries no indexed property first.
+        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 3 },
         .{ .class = .zjs_bulk_set, .source = object_source, .needle = "if (!arrayPrototypeChainAllowsBulkIndexedSet(proto))", .count = 3 },
     };
     for (readers) |reader| {
@@ -1626,6 +1629,30 @@ test "Engine direct eval assignment reference timing follows ECMAScript" {
     // same-named var binding. The eval binding remains undefined/2, while the
     // captured outer binding receives the assignment.
     try std.testing.expectEqualStrings("undefined 1\n2 12\nundefined 1\n", stream.buffered());
+}
+
+test "Engine strict unresolved assignment captures the reference before the RHS" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\"use strict";
+        \\try {
+        \\  strictUnresolvedTarget = (this.strictUnresolvedTarget = 5);
+        \\  print("stored", strictUnresolvedTarget);
+        \\} catch (e) {
+        \\  print(e.name, this.strictUnresolvedTarget);
+        \\}
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    // sec-putvalue: ResolveBinding runs before the RHS, so the Reference is
+    // already unresolvable when PutValue inspects it. The RHS creating the
+    // global property in between does not rescue the strict store.
+    try std.testing.expectEqualStrings("ReferenceError 5\n", stream.buffered());
 }
 
 test "Engine grouped direct eval preserves assignment reference timing" {

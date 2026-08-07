@@ -51,13 +51,49 @@ test "F1.5: every keyword token maps to its predefined atom" {
 
     const cases = .{
         .{ "null", t.TOK_NULL, "null" },
+        .{ "false", t.TOK_FALSE, "false" },
         .{ "true", t.TOK_TRUE, "true" },
         .{ "if", t.TOK_IF, "if" },
+        .{ "else", t.TOK_ELSE, "else" },
         .{ "return", t.TOK_RETURN, "return" },
+        .{ "var", t.TOK_VAR, "var" },
+        .{ "this", t.TOK_THIS, "this" },
+        .{ "delete", t.TOK_DELETE, "delete" },
+        .{ "void", t.TOK_VOID, "void" },
+        .{ "typeof", t.TOK_TYPEOF, "typeof" },
+        .{ "new", t.TOK_NEW, "new" },
+        .{ "in", t.TOK_IN, "in" },
+        .{ "instanceof", t.TOK_INSTANCEOF, "instanceof" },
+        .{ "do", t.TOK_DO, "do" },
+        .{ "while", t.TOK_WHILE, "while" },
+        .{ "for", t.TOK_FOR, "for" },
+        .{ "break", t.TOK_BREAK, "break" },
+        .{ "continue", t.TOK_CONTINUE, "continue" },
+        .{ "switch", t.TOK_SWITCH, "switch" },
+        .{ "case", t.TOK_CASE, "case" },
+        .{ "default", t.TOK_DEFAULT, "default" },
+        .{ "throw", t.TOK_THROW, "throw" },
+        .{ "try", t.TOK_TRY, "try" },
+        .{ "catch", t.TOK_CATCH, "catch" },
+        .{ "finally", t.TOK_FINALLY, "finally" },
         .{ "function", t.TOK_FUNCTION, "function" },
+        .{ "debugger", t.TOK_DEBUGGER, "debugger" },
         .{ "with", t.TOK_WITH, "with" },
         .{ "class", t.TOK_CLASS, "class" },
+        .{ "const", t.TOK_CONST, "const" },
+        .{ "enum", t.TOK_ENUM, "enum" },
+        .{ "export", t.TOK_EXPORT, "export" },
+        .{ "extends", t.TOK_EXTENDS, "extends" },
+        .{ "import", t.TOK_IMPORT, "import" },
         .{ "super", t.TOK_SUPER, "super" },
+        .{ "implements", t.TOK_IMPLEMENTS, "implements" },
+        .{ "interface", t.TOK_INTERFACE, "interface" },
+        .{ "let", t.TOK_LET, "let" },
+        .{ "package", t.TOK_PACKAGE, "package" },
+        .{ "private", t.TOK_PRIVATE, "private" },
+        .{ "protected", t.TOK_PROTECTED, "protected" },
+        .{ "public", t.TOK_PUBLIC, "public" },
+        .{ "static", t.TOK_STATIC, "static" },
         .{ "yield", t.TOK_YIELD, "yield" },
         .{ "await", t.TOK_AWAIT, "await" },
     };
@@ -99,6 +135,26 @@ test "F1: freeToken releases its identifier atom owner" {
 
     lx.freeToken(&tok);
     try std.testing.expectEqual(@as(?usize, null), env.rt.atoms.refCount(atom_id));
+}
+
+test "F1: replacing a token releases its owner and stays safe on lexer error" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("lexer_replace_owned_probe @");
+    var tok = try lx.next();
+    const atom_id = tok.payload.ident.atom;
+    try std.testing.expectEqual(@as(usize, 1), env.rt.atoms.refCount(atom_id).?);
+
+    try std.testing.expectError(error.InvalidIdentifier, lx.nextIntoReplacing(&tok));
+    try std.testing.expectEqual(@as(?usize, null), env.rt.atoms.refCount(atom_id));
+    switch (tok.payload) {
+        .none => {},
+        else => return error.TestUnexpectedResult,
+    }
+    // The failed replacement invalidated the released payload, so ordinary
+    // parser cleanup remains idempotent instead of releasing the atom twice.
+    lx.freeToken(&tok);
 }
 
 test "F1: punctuators use raw ASCII for single-character tokens" {
@@ -691,7 +747,7 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     try parser_core.parseExpr(&state);
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -708,7 +764,7 @@ fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecod
     test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseExpr(&state);
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -727,7 +783,7 @@ fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     state.is_strict = true;
     state.function_def.is_strict_mode = true;
     try parser_core.parseExpr(&state);
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -745,7 +801,7 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -763,7 +819,7 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -781,9 +837,10 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
+    try state.beginV2ProgramEmission();
     try parser_core.parseDirectives(&state);
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -800,7 +857,7 @@ fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.by
     test_entry.configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -818,7 +875,7 @@ fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecod
     defer state.deinit(env.rt);
     test_entry.configureModuleRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -835,8 +892,9 @@ fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureModuleRoot(&state);
+    try state.beginV2ProgramEmission();
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try restoreFinalizedFragmentView(&function);
     return function;
@@ -1042,6 +1100,54 @@ fn countOpcodeRecursive(function: anytype, opcode: u8) usize {
         if (functionBytecodeFromValue(value)) |fb| {
             count += countOpcodeInFunctionBytecode(fb, opcode);
         }
+    }
+    return count;
+}
+
+fn countDefineClassNamedInCode(
+    rt: *core.JSRuntime,
+    code: []const u8,
+    opcode_id: u8,
+    expected_name: []const u8,
+) usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        if (size == 0 or size > code.len - pc) break;
+        if (code[pc] == opcode_id) {
+            const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (std.mem.eql(u8, rt.atoms.name(atom_id) orelse "", expected_name)) count += 1;
+        }
+        pc += size;
+    }
+    return count;
+}
+
+fn countDefineClassNamedInFunctionBytecode(
+    rt: *core.JSRuntime,
+    function: *const engine.bytecode.FunctionBytecode,
+    opcode_id: u8,
+    expected_name: []const u8,
+) usize {
+    var count = countDefineClassNamedInCode(rt, function.byteCode(), opcode_id, expected_name);
+    for (function.cpoolSlice()) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        count += countDefineClassNamedInFunctionBytecode(rt, child, opcode_id, expected_name);
+    }
+    return count;
+}
+
+fn countDefineClassNamedRecursive(
+    function: anytype,
+    rt: *core.JSRuntime,
+    opcode_id: u8,
+    expected_name: []const u8,
+) usize {
+    var count = countDefineClassNamedInCode(rt, rootCode(function), opcode_id, expected_name);
+    for (rootConstants(function)) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        count += countDefineClassNamedInFunctionBytecode(rt, child, opcode_id, expected_name);
     }
     return count;
 }
@@ -1993,7 +2099,7 @@ test "F4: if consumes three-term logical chains with final branch snapshots" {
     try std.testing.expectEqual(or_bc.code.len, readRelTarget32(or_bc.code, 17));
 }
 
-test "F4: logical producer uses one source-less shared parser label" {
+test "F4: logical producer uses one source-less shared merge label" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
@@ -2006,53 +2112,63 @@ test "F4: logical producer uses one source-less shared parser label" {
     };
 
     for (fixtures) |fixture| {
-        var function = try parseRawExprWithRuntime(&env, fixture.source);
+        const name = try env.rt.internAtom("runtime-expression");
+        defer env.rt.atoms.free(name);
+        var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
         defer function.deinit(env.rt);
+        var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, fixture.source);
+        var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
+        defer state.deinit(env.rt);
+        try parser_core.parseExpr(&state);
 
-        var branch_target: ?u32 = null;
+        const b = state.function_def.v2_builder.?;
+        const code = b.code[0..b.code_len];
+
+        var branch_label: ?u32 = null;
         var branch_count: usize = 0;
-        var label_id: ?u32 = null;
-        var label_count: usize = 0;
         var synthetic_count: usize = 0;
         var pc: usize = 0;
-        while (pc < function.code.len) {
-            const opcode_id = function.code[pc];
+        while (pc < code.len) {
+            const opcode_id = code[pc];
             const size: usize = @intCast(engine.bytecode.opcode.sizeOfPhase1(opcode_id));
-            try std.testing.expect(size != 0 and pc + size <= function.code.len);
+            try std.testing.expect(size != 0 and pc + size <= code.len);
 
             const is_synthetic = opcode_id == op.dup or
                 opcode_id == fixture.branch_op or
                 opcode_id == op.drop;
             if (is_synthetic) {
                 synthetic_count += 1;
-                for (function.source_loc_slots) |slot| {
-                    try std.testing.expect(slot.pc != @as(u32, @intCast(pc)));
+                for (b.source_slots[0..b.source_len]) |slot| {
+                    try std.testing.expect(slot.temp_offset != @as(u32, @intCast(pc)));
                 }
             }
 
             if (opcode_id == fixture.branch_op) {
-                const target = readU32(function.code, pc + 1);
-                try std.testing.expect((target & op.parser_label_tag) != 0);
-                if (branch_target) |expected_target| {
-                    try std.testing.expectEqual(expected_target, target);
+                // A jump's 4-byte operand carries the LabelId it relocates to.
+                const target = readU32(code, pc + 1);
+                if (branch_label) |expected_label| {
+                    try std.testing.expectEqual(expected_label, target);
                 } else {
-                    branch_target = target;
+                    branch_label = target;
                 }
                 branch_count += 1;
-            } else if (opcode_id == op.label) {
-                label_id = readU32(function.code, pc + 1);
-                label_count += 1;
             }
             pc += size;
         }
 
         try std.testing.expectEqual(@as(usize, 2), branch_count);
-        try std.testing.expectEqual(@as(usize, 1), label_count);
+        // Six synthetic ops (dup/branch/drop per operand pair), and both
+        // branches share ONE merge label -- which the producer left unbound
+        // until the consumer of the logical expression binds it.
         try std.testing.expectEqual(@as(usize, 6), synthetic_count);
-        try std.testing.expectEqual(
-            op.parser_label_tag | (label_id orelse return error.TestExpectedEqual),
-            branch_target orelse return error.TestExpectedEqual,
-        );
+        const label_index = branch_label orelse return error.TestExpectedEqual;
+        try std.testing.expect(label_index < b.label_len);
+        var referencing: usize = 0;
+        for (b.relocs[0..b.reloc_len]) |reloc| {
+            const operand = readU32(code, reloc.operand_offset);
+            if (operand == label_index) referencing += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 2), referencing);
     }
 }
 
@@ -2071,9 +2187,12 @@ test "F4: collapsed multiline logical branches retain source progression" {
         line_num: i32,
         col_num: i32,
     }{
-        .{ .line_num = 1, .col_num = 4 },
+        // QuickJS does not attach source events to the synthetic logical
+        // branches.  Each branch therefore inherits the identifier source
+        // event for a/b/c (quickjs.c:27969-28008).
+        .{ .line_num = 1, .col_num = 5 },
         .{ .line_num = 2, .col_num = 5 },
-        .{ .line_num = 3, .col_num = 6 },
+        .{ .line_num = 3, .col_num = 5 },
     };
     var branch_count: usize = 0;
     var pc: usize = 0;
@@ -2443,10 +2562,13 @@ test "M3.1 F4: for-await close keeps body statement source location" {
         col_num = slot.col_num;
     }
     try std.testing.expectEqual(@as(i32, 10), line_num);
-    try std.testing.expectEqual(@as(i32, 7), col_num);
+    // QuickJS emits no source event for the synthetic iterator_close.  It
+    // inherits the last body-expression event, the `value` identifier in
+    // `void value` (quickjs.c:28953).
+    try std.testing.expectEqual(@as(i32, 12), col_num);
 }
 
-test "M3.1 F4: parser emits QuickJS line_num temp and finalize strips it" {
+test "M3.1 F4: the program root's scope marker and source authority are stream events" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
@@ -2458,15 +2580,20 @@ test "M3.1 F4: parser emits QuickJS line_num temp and finalize strips it" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
+    try state.beginV2ProgramEmission();
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
-    try std.testing.expectEqual(op.enter_scope, function.code[0]);
-    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, function.code[1..3], .little));
-    const line_pc = (try findPhase1Opcode(function.code, op.line_num, 0)) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, function.code[line_pc + 1 ..][0..4], .little));
+    // qjs push_scope emits the body-scope marker as the program's first
+    // instruction; the source authority is a marker beside the stream rather
+    // than the legacy `line_num` temp opcode inside it.
+    const b = state.function_def.v2_builder.?;
+    try std.testing.expectEqual(op.enter_scope, b.code[0]);
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, b.code[1..3], .little));
+    try std.testing.expect(b.source_len > 0);
+    try std.testing.expectEqual(@as(i32, 1), b.source_slots[0].line);
 
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try std.testing.expect(std.mem.indexOfScalar(u8, function.code, op.line_num) == null);
 }
@@ -3231,6 +3358,33 @@ test "F4: simple template with one substitution uses get_field2 concat + call_me
     try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 18));
 }
 
+test "F4: returned interpolated template carries QuickJS tail-call source provenance" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var parsed = try compileForTest(
+        env.rt,
+        \\function escapeKey(key) {
+        \\  return `[${String(key)}]`;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "returned-template.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const child = findFunctionConstantNamed(&parsed, env.rt, "escapeKey") orelse
+        return error.TestExpectedEqual;
+    const call_pc = firstSemanticOpcodeOffset(child.byteCode(), op.call_method) orelse
+        return error.TestExpectedEqual;
+    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        child.pc2lineBuf(),
+        @intCast(call_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), source_loc.line_num);
+    try std.testing.expectEqual(@as(i32, 3), source_loc.col_num);
+}
+
 test "F4: empty-head template `${b}` skips middle/tail empty strings" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3870,14 +4024,31 @@ test "W5: tagged-int numeric strings use cpool without changing other string pro
         numeric_string.pc2lineBuf(),
         @intCast(string_pc),
     );
-    try std.testing.expectEqual(@as(i32, 2), string_source.line_num);
-    try std.testing.expectEqual(@as(i32, 3), string_source.col_num);
+    // QuickJS literal pushes are source-less.  Until the binary `+` event,
+    // both constants retain the function-entry source coordinate.
+    try std.testing.expectEqual(@as(i32, 1), string_source.line_num);
+    try std.testing.expectEqual(@as(i32, 1), string_source.col_num);
     const number_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
         numeric_string.pc2lineBuf(),
         @intCast(number_pc),
     );
-    try std.testing.expectEqual(@as(i32, 3), number_source.line_num);
-    try std.testing.expectEqual(@as(i32, 5), number_source.col_num);
+    try std.testing.expectEqual(@as(i32, 1), number_source.line_num);
+    try std.testing.expectEqual(@as(i32, 1), number_source.col_num);
+
+    const add_pc = firstSemanticOpcodeOffset(numeric_code, op.add) orelse return error.TestExpectedEqual;
+    const add_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(add_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), add_source.line_num);
+    try std.testing.expectEqual(@as(i32, 16), add_source.col_num);
+    const return_pc = firstSemanticOpcodeOffset(numeric_code, op.@"return") orelse return error.TestExpectedEqual;
+    const return_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(return_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), return_source.line_num);
+    try std.testing.expectEqual(@as(i32, 3), return_source.col_num);
 
     const numeric_template = findFunctionConstantNamed(&parsed, env.rt, "numericTemplate") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), numeric_template.cpoolSlice().len);
@@ -4170,20 +4341,22 @@ test "F5: sloppy var initializer captures dynamic reference before RHS" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
+    try state.beginV2ProgramEmission();
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
+    const code = fdPhase1Code(&state.function_def);
     var make_ref_pc: ?usize = null;
     var rhs_pc: ?usize = null;
     var put_ref_pc: ?usize = null;
     var pc: usize = 0;
-    while (pc < function.code.len) {
-        const opcode_id = function.code[pc];
+    while (pc < code.len) {
+        const opcode_id = code[pc];
         if (opcode_id == op.scope_make_ref and
-            std.mem.readInt(u32, function.code[pc + 1 ..][0..4], .little) == x_atom)
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == x_atom)
         {
             make_ref_pc = pc;
         } else if (opcode_id == op.push_1 or
-            (opcode_id == op.push_i32 and std.mem.readInt(i32, function.code[pc + 1 ..][0..4], .little) == 1))
+            (opcode_id == op.push_i32 and std.mem.readInt(i32, code[pc + 1 ..][0..4], .little) == 1))
         {
             rhs_pc = pc;
         } else if (opcode_id == op.put_ref_value) {
@@ -4196,10 +4369,15 @@ test "F5: sloppy var initializer captures dynamic reference before RHS" {
 
     try std.testing.expect((make_ref_pc orelse return error.TestExpectedEqual) < (rhs_pc orelse return error.TestExpectedEqual));
     try std.testing.expect(rhs_pc.? < (put_ref_pc orelse return error.TestExpectedEqual));
-    const label_target: usize = @intCast(std.mem.readInt(u32, function.code[make_ref_pc.? + 5 ..][0..4], .little));
+    // The make_ref aux operand names the LabelId the reference tail is
+    // published at. It binds on the single instruction that immediately
+    // precedes the consumer, which is the exact tail the legacy absolute
+    // operand used to point at.
+    const label_index = std.mem.readInt(u32, code[make_ref_pc.? + 5 ..][0..4], .little);
+    const label_target: usize = fdLabelOffset(&state.function_def, label_index);
     try std.testing.expect(label_target != 0);
     try std.testing.expectEqual(put_ref_pc.? - 1, label_target);
-    try std.testing.expectEqual(op.nop, function.code[label_target]);
+    try std.testing.expectEqual(@as(usize, 1), engine.bytecode.opcode.sizeOfPhase1(code[label_target]));
 }
 
 test "F5: destructuring dynamic reference publishes an exact long-tail label" {
@@ -4220,40 +4398,43 @@ test "F5: destructuring dynamic reference publishes an exact long-tail label" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
+    try state.beginV2ProgramEmission();
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
+    const code = fdPhase1Code(&state.function_def);
     var make_ref_pc: ?usize = null;
     var pc: usize = 0;
-    while (pc < function.code.len) {
-        const opcode_id = function.code[pc];
+    while (pc < code.len) {
+        const opcode_id = code[pc];
         if (opcode_id == op.scope_make_ref and
-            std.mem.readInt(u32, function.code[pc + 1 ..][0..4], .little) == target_atom)
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == target_atom)
         {
             make_ref_pc = pc;
             break;
         }
         const size = engine.bytecode.opcode.sizeOfPhase1(opcode_id);
-        try std.testing.expect(size != 0 and pc + size <= function.code.len);
+        try std.testing.expect(size != 0 and pc + size <= code.len);
         pc += size;
     }
 
     const make_pc = make_ref_pc orelse return error.TestExpectedEqual;
-    const label_target: usize = @intCast(std.mem.readInt(u32, function.code[make_pc + 5 ..][0..4], .little));
-    try std.testing.expect(label_target > make_pc + 11 and label_target < function.code.len);
+    const label_index = std.mem.readInt(u32, code[make_pc + 5 ..][0..4], .little);
+    const label_target: usize = fdLabelOffset(&state.function_def, label_index);
+    try std.testing.expect(label_target > make_pc + 11 and label_target < code.len);
 
     var gap_pc = make_pc + 11;
     var gap_instructions: usize = 0;
     while (gap_pc < label_target) : (gap_instructions += 1) {
-        const size = engine.bytecode.opcode.sizeOfPhase1(function.code[gap_pc]);
+        const size = engine.bytecode.opcode.sizeOfPhase1(code[gap_pc]);
         try std.testing.expect(size != 0 and gap_pc + size <= label_target);
         gap_pc += size;
     }
     try std.testing.expectEqual(label_target, gap_pc);
     try std.testing.expect(gap_instructions > 16);
 
-    const put_pc = if (function.code[label_target] == op.put_ref_value) label_target else label_target + 1;
-    try std.testing.expect(put_pc < function.code.len);
-    try std.testing.expectEqual(op.put_ref_value, function.code[put_pc]);
+    const put_pc = if (code[label_target] == op.put_ref_value) label_target else label_target + 1;
+    try std.testing.expect(put_pc < code.len);
+    try std.testing.expectEqual(op.put_ref_value, code[put_pc]);
 
     var parsed = try compileForTest(
         env.rt,
@@ -4507,6 +4688,150 @@ test "F6: arrow function with single parameter" {
     try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
     try expectOpcode(child.byteCode(), op.get_arg0);
     try expectOpcode(child.byteCode(), op.@"return");
+}
+
+test "F6: identifier arrow lookahead preserves trivia and line terminators" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const valid_sources = [_][]const u8{
+        "x /* same line */ => x",
+        "x\xC2\xA0=> x",
+        "x /* \xCF\x80 */ => x",
+    };
+    for (valid_sources) |source| {
+        var fn_bc = try parseExprWithTopLevelChildren(&env, source);
+        defer fn_bc.deinit(env.rt);
+        const child = try expectFunctionConstant(&fn_bc, 0);
+        try std.testing.expectEqual(@as(usize, 1), child.argVarDefs().len);
+        try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
+    }
+
+    const lookahead_cases = .{
+        .{ "x /* same line */ => x", @as(?bool, true) },
+        .{ "x\xC2\xA0=> x", @as(?bool, true) },
+        .{ "x\n=> x", @as(?bool, false) },
+        .{ "x /* line\n break */ => x", @as(?bool, false) },
+        // Non-ASCII inside a block comment deliberately selects the full
+        // lexer, which distinguishes ordinary Unicode from LS/PS.
+        .{ "x /* \xCF\x80 */ => x", @as(?bool, null) },
+        .{ "x /* \xE2\x80\xA8 */ => x", @as(?bool, null) },
+    };
+    inline for (lookahead_cases) |case| {
+        var lx = QjsLexer.init(std.testing.allocator, &env.rt.atoms, case[0]);
+        defer lx.deinit();
+        var ident = try lx.next();
+        defer lx.freeToken(&ident);
+        try std.testing.expectEqual(t.TOK_IDENT, ident.val);
+        try std.testing.expectEqual(case[1], lx.simpleNextIsArrowNoLineTerminator());
+    }
+
+    const invalid_sources = [_][]const u8{
+        "const f = x\n=> x;",
+        "const f = x /* line\n break */ => x;",
+        "const f = x /* \xE2\x80\xA8 */ => x;",
+    };
+    for (invalid_sources) |source| {
+        var parsed = try compileForTest(env.rt, source, .{ .mode = .script, .filename = "arrow-lookahead-line.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+}
+
+test "F6: parenthesized arrow lookahead skips only context-free source" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+
+    const fast_cases = .{
+        .{ "(a, (b + c)) => a", true },
+        .{ "(a = ')', /* ) */ b) => b", true },
+        .{ "(a // )\n) => a", true },
+        .{ "(a / b) => a", true },
+        .{ "(a = /\\)/) => a", true },
+        .{ "(a = '\xCF\x80)') => a", true },
+        .{ "(function(){ return /\\)/.test(')'); })()", false },
+        .{ "(a + (b)) * c", false },
+        .{ "(a)\n=> a", false },
+    };
+    inline for (fast_cases) |case| {
+        var lx = QjsLexer.init(std.testing.allocator, &env.rt.atoms, case[0]);
+        defer lx.deinit();
+        var open = try lx.next();
+        defer lx.freeToken(&open);
+        try std.testing.expectEqual(@as(t.TokenKind, '('), open.val);
+        try std.testing.expectEqual(@as(?bool, case[1]), lx.simpleCurrentParenIsArrowHead());
+    }
+
+    const fallback_cases = [_][]const u8{
+        "(`/\\)/`) => 1",
+        "(a\\u0062) => a",
+        "(\xCF\x80) => 1",
+    };
+    for (fallback_cases) |source| {
+        var lx = QjsLexer.init(std.testing.allocator, &env.rt.atoms, source);
+        defer lx.deinit();
+        var open = try lx.next();
+        defer lx.freeToken(&open);
+        try std.testing.expectEqual(@as(t.TokenKind, '('), open.val);
+        try std.testing.expectEqual(@as(?bool, null), lx.simpleCurrentParenIsArrowHead());
+    }
+
+    const valid_sources = [_][]const u8{
+        "const f = (a, b = ')') => a + b;",
+        "const f = (a /* ) */, b) => a + b;",
+        "const x = (a + (b * c));",
+        // Each ambiguous case must remain valid through the full-lexer fallback.
+        "const f = (a = /\\)/) => a;",
+        "const f = (a = '\xCF\x80)') => a;",
+        "const f = (a = `)`) => a;",
+        "const f = (a = `x${1}`) => a;",
+        "const f = async (a = `x${1}`) => a;",
+        "const f = (\xCF\x80) => \xCF\x80;",
+        // The borrowed pattern-topology scan must distinguish plain `=` from
+        // equality tokens after an object/array literal.
+        "({} == undefined);",
+        "({valueOf: function() { return 1; }} == true);",
+        "([] === 0n);",
+    };
+    for (valid_sources) |source| {
+        var parsed = try compileForTest(env.rt, source, .{ .mode = .script, .filename = "paren-arrow-lookahead.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}
+
+test "F6: assignment-entry arrow dispatch preserves primary-expression boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const valid_sources = [_][]const u8{
+        "new (x => x);",
+        "const nested = (((x => x)));",
+        "const single = async x => x; const paren = async (x) => x;",
+        "const pattern = async ({ x, y: [z] }) => x + z; ({ x } = { x: 1 });",
+        "const call = ((x) => x)(1); const member = ((x) => x).name;",
+        "const sloppyYield = yield => yield; const sloppyAwait = await => await;",
+    };
+    for (valid_sources) |source| {
+        var parsed = try parser.compile(env.compileContext(), source, .{ .filename = "arrow-assignment-entry.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+        try std.testing.expect(parsed.hasFeature(.arrow));
+    }
+
+    const invalid_sources = [_][]const u8{
+        "new x => x;",
+        "async\n(x) => x;",
+        "const f = (x)\n=> x;",
+        "function* g() { yield => 1; }",
+        "async function f() { await => 1; }",
+        "const f = \\u0069f => 1;",
+    };
+    for (invalid_sources) |source| {
+        var parsed = try parser.compile(env.compileContext(), source, .{ .filename = "arrow-assignment-entry-negative.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
 }
 
 test "F6: arrow function with multiple parameters" {
@@ -5032,6 +5357,93 @@ test "F7: private field in class" {
     try expectOpcodeRecursive(&fn_bc, op.define_private_field);
 }
 
+test "assignment inferred class name is embedded before static initialization" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var assignment = try compileForTest(
+        env.rt,
+        "let C; C = class { static { globalThis.assignmentSeen = this.name; } };",
+        .{ .mode = .script, .filename = "anonymous-class-assignment.js" },
+    );
+    defer assignment.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countDefineClassNamedRecursive(&assignment, env.rt, op.define_class, "C"),
+    );
+}
+
+test "computed property class name is embedded before static initialization" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var computed_property = try compileForTest(
+        env.rt,
+        "let holder = { ['computed']: class { static { globalThis.computedSeen = this.name; } } };",
+        .{ .mode = .script, .filename = "anonymous-class-computed-property.js" },
+    );
+    defer computed_property.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countDefineClassNamedRecursive(&computed_property, env.rt, op.define_class_computed, ""),
+    );
+}
+
+test "class field inferred names are embedded before static initialization" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var class_fields = try compileForTest(
+        env.rt,
+        "class Outer { instance = class { static { globalThis.instanceSeen = this.name; } }; static field = class { static { globalThis.staticSeen = this.name; } }; }",
+        .{ .mode = .script, .filename = "anonymous-class-fields.js" },
+    );
+    defer class_fields.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countDefineClassNamedRecursive(&class_fields, env.rt, op.define_class, "field") +
+            countDefineClassNamedRecursive(&class_fields, env.rt, op.define_class, "instance"),
+    );
+}
+
+test "comma expression does not infer an anonymous class name" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var function = try compileForTest(
+        env.rt,
+        "let C = (0, class { static { globalThis.commaSeen = this.name; } });",
+        .{ .mode = .script, .filename = "anonymous-class-comma.js" },
+    );
+    defer function.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countDefineClassNamedRecursive(&function, env.rt, op.define_class, ""),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countDefineClassNamedRecursive(&function, env.rt, op.define_class, "C"),
+    );
+}
+
+test "inferred function names do not become named-expression self bindings" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var function = try compileForTest(
+        env.rt,
+        "let inferred = function () { return inferred; }; let explicit = function Inner() { return Inner; };",
+        .{ .mode = .script, .filename = "function-inferred-self-binding.js" },
+    );
+    defer function.deinit();
+
+    const inferred = findFunctionConstantNamed(&function, env.rt, "") orelse return error.TestExpectedEqual;
+    const explicit = findFunctionConstantNamed(&function, env.rt, "Inner") orelse return error.TestExpectedEqual;
+    try std.testing.expect(varDefNamed(inferred, env.rt, "inferred") == null);
+    const self_binding = varDefNamed(explicit, env.rt, "Inner") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(function_def.VarKind.function_name, self_binding.varKind());
+}
+
 test "W1d: finalized private operations have no raw private atom operands" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -5210,14 +5622,14 @@ test "F7: private name in uses scope temp before resolver" {
 
     var saw_temp = false;
     for (state.function_def.child_list) |child| {
-        if (std.mem.indexOfScalar(u8, child.byte_code, op.scope_in_private_field) != null) {
+        if (std.mem.indexOfScalar(u8, fdPhase1Code(child), op.scope_in_private_field) != null) {
             saw_temp = true;
             break;
         }
     }
     try std.testing.expect(saw_temp);
 
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
     try expectOpcodeRecursive(&function, op.private_in);
 }
@@ -5249,7 +5661,7 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
     // resolve_scope_var proves that `missing` crosses those dynamic
     // environments. Run the real finalization pass before asserting that
     // resolution-time chain.
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
@@ -5307,7 +5719,7 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     state.top_level_functions_as_children = true;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try function.appendCode(&.{op.return_undef});
+    try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
 
     try std.testing.expectEqual(@as(usize, 3), state.function_def.child_list.len);
@@ -5342,6 +5754,29 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     try std.testing.expect(eval_state.function_def.has_eval_call);
     try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.var_object_idx);
     try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.arg_var_object_idx);
+}
+
+test "parameter pre-scan balances regexp and template delimiters like QuickJS" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const name = try env.rt.internAtom("parameter-balanced-scan");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
+        \\function regular(a = /[)=}]/, { b = `x${/[}]/.test("}")}` } = {}) {}
+        \\const arrow = (a = /[)]/, b = { x: /[=]/ }) => [a, b];
+    );
+    var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
+    defer state.deinit(env.rt);
+    state.top_level_functions_as_children = true;
+
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 2), state.function_def.child_list.len);
+    try std.testing.expect(state.function_def.child_list[0].has_parameter_expressions);
+    try std.testing.expect(state.function_def.child_list[1].has_parameter_expressions);
 }
 
 test "parameter initializer direct eval emits active global-declaration carriers" {
@@ -5880,6 +6315,33 @@ fn findPhase1Opcode(code: []const u8, opcode_id: u8, start_pc: usize) !?usize {
     return null;
 }
 
+/// The compact phase-1 stream a FunctionDef's Builder holds while the parse
+/// is still live.
+fn fdPhase1Code(fd: *const engine.bytecode.FunctionDef) []const u8 {
+    const b = fd.v2_builder orelse return &.{};
+    return b.code[0..b.code_len];
+}
+
+/// Output offset a parser-created LabelId is bound at, in the compact stream.
+/// The compact encoding stores the LabelId in the jump operand; the target is
+/// the slot's bound offset, which is what the legacy absolute operand used to
+/// carry directly.
+fn fdLabelOffset(fd: *const engine.bytecode.FunctionDef, label_index: u32) u32 {
+    return fd.v2_builder.?.label_slots[label_index].bound_offset;
+}
+
+/// Publish the parser's compact phase-1 stream onto `function` so the
+/// byte-sequence tests below can inspect it after the ParseState — which owns
+/// the Builder the parser emitted into — is torn down.
+fn publishPhase1Stream(function: *engine.bytecode.Bytecode, state: *ParseState) !void {
+    const b = state.function_def.v2_builder orelse return;
+    try function.setCode(b.code[0..b.code_len]);
+    for (b.atom_operands[0..b.atom_len]) |atom_id| try function.retainAtomOperand(atom_id);
+    for (b.source_slots[0..b.source_len]) |slot| {
+        try function.appendSourceLoc(slot.temp_offset, slot.line, slot.col);
+    }
+}
+
 fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("scope-events");
     defer env.rt.atoms.free(name);
@@ -5889,7 +6351,9 @@ fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
+    try state.beginV2ProgramEmission();
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try publishPhase1Stream(&function, &state);
     return function;
 }
 
@@ -5902,6 +6366,7 @@ fn parseRawExprWithRuntime(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
     defer state.deinit(env.rt);
     try parser_core.parseExpr(&state);
+    try publishPhase1Stream(&function, &state);
     return function;
 }
 
@@ -6095,10 +6560,6 @@ test "M-SCOPE event producers: structural body and namespace scopes stay identit
     {
         var program = try parseRawTSProgram(&env, "namespace N { let value = 1; }");
         defer program.deinit(env.rt);
-        try test_entry.expectNoUnallowedFallback(program.observation());
-        // When program.split_stream is true (while ts_namespace is on the L3
-        // allowlist), a v2 build sees only the root marker here: this assertion
-        // is a partial view. L4 migration makes it whole-program again.
         try expectPhase1ScopeEvents(program.phase1Code(), &.{
             .{ .kind = .enter, .scope = 1 },
         });
@@ -6127,24 +6588,24 @@ test "M-SCOPE event producers: structural body and namespace scopes stay identit
         const child_name = env.rt.atoms.name(child.func_name) orelse "";
         if (std.mem.eql(u8, child_name, "body")) {
             saw_body = true;
-            try expectPhase1ScopeEvents(child.byte_code, &.{
+            try expectPhase1ScopeEvents(fdPhase1Code(child), &.{
                 .{ .kind = .enter, .scope = 1 },
             });
         } else if (std.mem.eql(u8, child_name, "params")) {
             saw_params = true;
-            try expectPhase1ScopeEvents(child.byte_code, &.{
+            try expectPhase1ScopeEvents(fdPhase1Code(child), &.{
                 .{ .kind = .enter, .scope = 1 },
                 .{ .kind = .leave, .scope = 1 },
                 .{ .kind = .enter, .scope = 2 },
             });
         } else if (child.func_type == .arrow) {
             saw_concise = true;
-            try expectPhase1ScopeEvents(child.byte_code, &.{
+            try expectPhase1ScopeEvents(fdPhase1Code(child), &.{
                 .{ .kind = .enter, .scope = 1 },
             });
         } else if (child.func_type == .class_constructor or child.func_type == .derived_class_constructor) {
             saw_default_constructor = true;
-            try expectPhase1ScopeEvents(child.byte_code, &.{
+            try expectPhase1ScopeEvents(fdPhase1Code(child), &.{
                 .{ .kind = .enter, .scope = 1 },
             });
         }
@@ -6196,33 +6657,56 @@ test "M-SCOPE abrupt control: classic and for-of continue targets follow the bod
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
-    {
-        var function = try parseRawStatement(&env, "outer: for (;;) { { continue outer; } }");
-        defer function.deinit(env.rt);
-        var storage: [32]Phase1ScopeEvent = undefined;
-        const events = try tracePhase1ScopeEvents(function.code, &storage);
-        try std.testing.expectEqual(@as(usize, 10), events.len);
-        const source_jump_pc = events[5].pc + 3;
-        try std.testing.expectEqual(op.goto, function.code[source_jump_pc]);
-        const continue_target = std.mem.readInt(u32, function.code[source_jump_pc + 1 ..][0..4], .little);
-        try std.testing.expectEqual(@as(u32, @intCast(events[8].pc + 3)), continue_target);
-        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[8].kind);
-        try std.testing.expectEqual(@as(u16, 2), events[8].scope);
-    }
+    try expectContinueTargetFollowsBodyLeave(
+        &env,
+        "outer: for (;;) { { continue outer; } }",
+        10,
+        5,
+        8,
+    );
+    try expectContinueTargetFollowsBodyLeave(
+        &env,
+        "outer: for (const value of []) { { continue outer; } }",
+        12,
+        7,
+        10,
+    );
+}
 
-    {
-        var function = try parseRawStatement(&env, "outer: for (const value of []) { { continue outer; } }");
-        defer function.deinit(env.rt);
-        var storage: [32]Phase1ScopeEvent = undefined;
-        const events = try tracePhase1ScopeEvents(function.code, &storage);
-        try std.testing.expectEqual(@as(usize, 12), events.len);
-        const source_jump_pc = events[7].pc + 3;
-        try std.testing.expectEqual(op.goto, function.code[source_jump_pc]);
-        const continue_target = std.mem.readInt(u32, function.code[source_jump_pc + 1 ..][0..4], .little);
-        try std.testing.expectEqual(@as(u32, @intCast(events[10].pc + 3)), continue_target);
-        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[10].kind);
-        try std.testing.expectEqual(@as(u16, 2), events[10].scope);
-    }
+/// The labelled-continue jump must target the position immediately after the
+/// body scope's leave event, which the compact stream expresses as the bound
+/// offset of the LabelId the jump relocates to.
+fn expectContinueTargetFollowsBodyLeave(
+    env: *TestEnv,
+    source: []const u8,
+    expected_events: usize,
+    jump_event: usize,
+    target_event: usize,
+) !void {
+    const name = try env.rt.internAtom("scope-events");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, source);
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    test_entry.configureScriptRoot(&state);
+    try state.beginV2ProgramEmission();
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    const code = fdPhase1Code(&state.function_def);
+    var storage: [32]Phase1ScopeEvent = undefined;
+    const events = try tracePhase1ScopeEvents(code, &storage);
+    try std.testing.expectEqual(expected_events, events.len);
+    const source_jump_pc = events[jump_event].pc + 3;
+    try std.testing.expectEqual(op.goto, code[source_jump_pc]);
+    const label_index = std.mem.readInt(u32, code[source_jump_pc + 1 ..][0..4], .little);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(events[target_event].pc + 3)),
+        fdLabelOffset(&state.function_def, label_index),
+    );
+    try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[target_event].kind);
+    try std.testing.expectEqual(@as(u16, 2), events[target_event].scope);
 }
 
 test "M-SCOPE abrupt control: crossed finally sees scope leaves before gosub" {
@@ -6272,14 +6756,14 @@ test "M-SCOPE negative contract: return cleanup and throw synthesize no scope le
         try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
         const child = state.function_def.child_list[0];
 
-        const gosub_pc = (try findPhase1Opcode(child.byte_code, op.gosub, 0)) orelse return error.TestExpectedEqual;
-        const iterator_close_pc = (try findPhase1Opcode(child.byte_code, op.iterator_close, gosub_pc)) orelse return error.TestExpectedEqual;
-        const return_pc = (try findPhase1Opcode(child.byte_code, op.@"return", iterator_close_pc)) orelse return error.TestExpectedEqual;
+        const gosub_pc = (try findPhase1Opcode(fdPhase1Code(child), op.gosub, 0)) orelse return error.TestExpectedEqual;
+        const iterator_close_pc = (try findPhase1Opcode(fdPhase1Code(child), op.iterator_close, gosub_pc)) orelse return error.TestExpectedEqual;
+        const return_pc = (try findPhase1Opcode(fdPhase1Code(child), op.@"return", iterator_close_pc)) orelse return error.TestExpectedEqual;
         try std.testing.expect(gosub_pc < iterator_close_pc);
         try std.testing.expect(iterator_close_pc < return_pc);
 
         var storage: [64]Phase1ScopeEvent = undefined;
-        const events = try tracePhase1ScopeEvents(child.byte_code, &storage);
+        const events = try tracePhase1ScopeEvents(fdPhase1Code(child), &storage);
         for (events) |event| {
             try std.testing.expect(!(event.kind == .leave and event.pc > gosub_pc and event.pc < return_pc));
         }
@@ -6945,15 +7429,16 @@ test "F10.1a FunctionDef: for-of lexical head owns one binding" {
     try std.testing.expectEqual(@as(usize, 1), x_count);
 
     const x_scope = state.function_def.vars[0].scope_level;
+    const code = fdPhase1Code(&state.function_def);
     var enter_count: usize = 0;
     var leave_count: usize = 0;
     var pc: usize = 0;
-    while (pc < function.code.len) {
-        const opcode_id = function.code[pc];
+    while (pc < code.len) {
+        const opcode_id = code[pc];
         const size = engine.bytecode.opcode.sizeOfPhase1(opcode_id);
         try std.testing.expect(size != 0);
         if ((opcode_id == op.enter_scope or opcode_id == op.leave_scope) and
-            std.mem.readInt(u16, function.code[pc + 1 ..][0..2], .little) == x_scope)
+            std.mem.readInt(u16, code[pc + 1 ..][0..2], .little) == x_scope)
         {
             if (opcode_id == op.enter_scope) enter_count += 1 else leave_count += 1;
         }
@@ -7034,14 +7519,15 @@ test "F10.1a FunctionDef: with scope emits its enter event" {
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
+    const code = fdPhase1Code(&state.function_def);
     var enter_count: usize = 0;
     var pc: usize = 0;
-    while (pc < function.code.len) {
-        const opcode_id = function.code[pc];
+    while (pc < code.len) {
+        const opcode_id = code[pc];
         const size = engine.bytecode.opcode.sizeOfPhase1(opcode_id);
         try std.testing.expect(size != 0);
         if (opcode_id == op.enter_scope and
-            std.mem.readInt(u16, function.code[pc + 1 ..][0..2], .little) == 2)
+            std.mem.readInt(u16, code[pc + 1 ..][0..2], .little) == 2)
         {
             enter_count += 1;
         }
@@ -8462,13 +8948,16 @@ test "F10.1c Nested function: bytecode dual-buffering" {
 
     try parser_core.parseExpr(&state);
 
-    try std.testing.expect(countOpcode(state.function.code, op.fclosure) + countOpcode(state.function.code, op.fclosure8) > 0);
+    // This is the unresolved phase-1 stream. Its temporary opcode ids overlap
+    // the final short-opcode range, so it must use the phase-1 decoder.
+    const root_code = fdPhase1Code(&state.function_def);
+    try std.testing.expect((try findPhase1Opcode(root_code, op.fclosure, 0)) != null);
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
     const child = state.function_def.child_list[0];
     try std.testing.expect(child.parent_cpool_idx >= 0);
-    try expectOpcode(child.byte_code, op.push_i32);
-    try expectOpcode(child.byte_code, op.return_undef);
+    try expectOpcode(fdPhase1Code(child), op.push_i32);
+    try expectOpcode(fdPhase1Code(child), op.return_undef);
 
     // Verify emit_to_function_def flag is false after parsing
     try std.testing.expectEqual(false, state.emit_to_function_def);
@@ -9658,6 +10147,8 @@ test "for-of contextual async lookahead follows QuickJS grammar" {
         "var async; for ((async) of [1]) ;",
         "var i = 0; for (async of => {}; i < 1; ++i) {}",
         "async function f() { var async; for await (async of [1]) ; }",
+        "async function f() { for await ([value = 10] of [[2]]) {} }",
+        "async function f() { for await ({ value = 10 } of [{ value: 2 }]) {} }",
     };
     for (valid_cases) |source| {
         var parsed = try compileForTest(
@@ -11819,32 +12310,7 @@ test "flow-tail summary: label/patch/move/truncate corpus compiles under the Deb
 
 // ===== QCP-1 stage 2P: compiler-v2 emission scaffolding =====
 
-test "QCP-1 S2P: legacy builds keep emit_v2 comptime-dead and v2 modes report availability" {
-    try std.testing.expectEqual(
-        engine.parser.Parser.compiler_mode != .legacy,
-        engine.parser.Parser.v2_available,
-    );
-    var env = try LexerTestEnv.init();
-    defer env.deinit();
-    const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
-    var lex = env.lexer("1");
-    var state = try ParseState.init(&lex, &function);
-    defer state.deinit(env.rt);
-    try std.testing.expect(!state.emit_v2);
-    try std.testing.expect(state.function_def.v2_builder == null);
-}
-
 test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit releases it" {
-    // Runtime-opaque gate (a mutable local defeats comptime branch
-    // elimination): keeps this body semantically analyzed in legacy builds
-    // so compile breakage cannot hide behind the skip.
-    var skip = !engine.parser.Parser.v2_available;
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-
     var env = try LexerTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
@@ -11856,7 +12322,6 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     defer state.deinit(env.rt);
 
     try state.beginV2EmissionForTest();
-    try std.testing.expect(state.emit_v2);
     try std.testing.expect(state.function_def.v2_builder != null);
 
     const b = state.v2Builder();
@@ -11875,10 +12340,12 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     try std.testing.expect(b.label_slots[label.index()].flags.bound);
     try std.testing.expectEqual(@as(u32, 11), b.label_slots[label.index()].bound_offset);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos); // bind invalidates
-    // Marker precedes each opcode (appendBytesAt order): first marker's
-    // temp offset is the jump's offset 0.
-    try std.testing.expect(b.source_len >= 1);
-    try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
+    // Ordinary builder writes are source-less, exactly like QuickJS emit_op.
+    // Only the explicit grammar marker above is retained at the code tail.
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(@as(u32, 11), b.source_slots[0].temp_offset);
+    try std.testing.expectEqual(@as(i32, 3), b.source_slots[0].line);
+    try std.testing.expectEqual(@as(i32, 7), b.source_slots[0].col);
     // state.deinit -> function_def.deinit releases the builder; the
     // testing allocator turns any leak into a test failure.
 }
@@ -12281,6 +12748,12 @@ pub const phase_ownership = struct {
         for (fd.args) |row| count += atomSlotCount(rt, row.var_name);
         for (fd.global_vars) |row| count += atomSlotCount(rt, row.var_name);
         for (fd.atom_operands) |atom_id| count += atomSlotCount(rt, atom_id);
+        // The compact Builder owns the parser's atom operands until
+        // resolve_variables consumes it; Builder.deinit releases exactly this
+        // prefix, so it is an owner slot the census must see.
+        if (fd.v2_builder) |b| {
+            for (b.atom_operands[0..b.atom_len]) |atom_id| count += atomSlotCount(rt, atom_id);
+        }
         for (fd.cpool) |value| {
             if (value.asSymbolAtom()) |atom_id| count += atomSlotCount(rt, atom_id);
         }
@@ -12371,12 +12844,19 @@ pub const phase_ownership = struct {
         return count;
     }
 
-    fn expectNoLegacyParserRelocs(fd: *const engine.bytecode.FunctionDef) !void {
-        // No parser code writes FunctionDef.label_slots/RelocEntry. The live
-        // parser path is OP_label plus State break/continue fixups; keep this
-        // assertion beside the derived census so a future producer is visible.
-        try std.testing.expectEqual(@as(usize, 0), fd.label_slots.len);
-        for (fd.child_list) |child| try expectNoLegacyParserRelocs(child);
+    /// Relocations the parser produced, over the whole FunctionDef tree: the
+    /// live population the resolver must consume before the artifact exists.
+    fn builderRelocCount(fd: *const engine.bytecode.FunctionDef) usize {
+        var count: usize = if (fd.v2_builder) |b| b.reloc_len else 0;
+        for (fd.child_list) |child| count += builderRelocCount(child);
+        return count;
+    }
+
+    /// Source markers the parser produced, over the whole FunctionDef tree.
+    fn builderSourceCount(fd: *const engine.bytecode.FunctionDef) usize {
+        var count: usize = if (fd.v2_builder) |b| b.source_len else 0;
+        for (fd.child_list) |child| count += builderSourceCount(child);
+        return count;
     }
 
     pub const Window = struct {
@@ -12434,7 +12914,7 @@ pub const phase_ownership = struct {
             }
             try parser_core.parseDirectives(&self.state);
             try parser_core.parseProgramStatements(&self.state, .{ .func = true, .func_with_label = true, .other = true });
-            try self.function.appendCode(&.{op.return_undef});
+            try self.state.emitReturnUndefined();
             try std.testing.expectEqual(t.TOK_EOF, self.state.token.val);
         }
 
@@ -12461,11 +12941,8 @@ pub const phase_ownership = struct {
         }
 
         pub fn sampleB1(self: *Window) !Snapshot {
-            try expectNoLegacyParserRelocs(&self.state.function_def);
-            const census = censusCode(self.function.code, .phase1);
-            try std.testing.expect(census.valid);
-            self.b1_reloc_created = census.label_markers;
-            self.b1_source_created = self.function.source_loc_slots.len;
+            self.b1_reloc_created = builderRelocCount(&self.state.function_def);
+            self.b1_source_created = builderSourceCount(&self.state.function_def);
             return self.sample(.phase1, null);
         }
 
@@ -12495,7 +12972,14 @@ pub const phase_ownership = struct {
             else
                 0;
 
-            const code_census = if (self.artifact_live) censusCode(self.function.code, phase) else CodeCensus{};
+            const code_census = switch (phase) {
+                // Before lowering the relocation population lives in the
+                // Builder, not in any byte stream.
+                .phase1 => CodeCensus{
+                    .label_markers = if (self.state_live) builderRelocCount(&self.state.function_def) else 0,
+                },
+                .final => if (self.artifact_live) censusCode(self.function.code, .final) else CodeCensus{},
+            };
             try std.testing.expect(code_census.valid);
             const fixups = if (self.state_live) pendingFixupCount(&self.state) else 0;
             // Bound subtracts the State fixup lists that Parser.State.deinit
@@ -12520,7 +13004,10 @@ pub const phase_ownership = struct {
             // BytecodeImpl.deinit releases source_loc_slots and pc2line_buf.
             // Slots are attached only when pc < code.len; discarded is the B1
             // slot census minus the slots retained by lowering.
-            const source_created = if (self.artifact_live) self.function.source_loc_slots.len else 0;
+            const source_created = switch (phase) {
+                .phase1 => if (self.state_live) builderSourceCount(&self.state.function_def) else 0,
+                .final => if (self.artifact_live) self.function.source_loc_slots.len else 0,
+            };
             const source_discarded = if (self.b1_source_created >= source_created)
                 self.b1_source_created - source_created
             else
@@ -12550,7 +13037,10 @@ pub const phase_ownership = struct {
                 },
                 .source = .{
                     .created = source_created,
-                    .attached = if (self.artifact_live) attachedSourceCount(&self.function) else 0,
+                    .attached = switch (phase) {
+                        .phase1 => source_created,
+                        .final => if (self.artifact_live) attachedSourceCount(&self.function) else 0,
+                    },
                     .committed = if (self.artifact_live) self.function.pc2line_buf.len else 0,
                     .discarded = source_discarded,
                     .outstanding = source_created,
@@ -12779,8 +13269,14 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
         try std.testing.expectEqual(b4.atom.created, b4.atom.transferred);
         try std.testing.expectEqual(b4.builder.owned, b4.builder.committed);
         try std.testing.expect(b4.builder.owned <= before_discard.builder.owned);
-        try std.testing.expectEqual(b1.reloc.created, b4.reloc.outstanding);
-        try std.testing.expectEqual(b1.source.created, b4.source.outstanding);
+        // The parser's relocations and source markers are owned by the compact
+        // Builder, which is a TEMPORARY: discarding temporaries discards them
+        // whole. Nothing may survive into the artifact, because parsing alone
+        // publishes no artifact.
+        try std.testing.expectEqual(@as(usize, 0), b4.reloc.outstanding);
+        try std.testing.expectEqual(b1.reloc.created, b4.reloc.discarded);
+        try std.testing.expectEqual(@as(usize, 0), b4.source.outstanding);
+        try std.testing.expectEqual(b1.source.created, b4.source.discarded);
         try std.testing.expectEqual(@as(usize, 0), b4.source.committed);
 
         phase_ownership.dump(shape.*, "parse-only", "B1-after-parse", b1);

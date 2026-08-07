@@ -862,28 +862,42 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     try std.testing.expect(rt.atoms.name(state_symbol) == null);
 }
 
+/// qjs `list_add_tail(&rd->link, &s->promise_reactions[is_reject])`
+/// (quickjs.c:54221-54222) links the reaction record onto the pending promise
+/// in O(1) with no allocation of its own. The array adaptation keeps a
+/// capacity alongside the live prefix and grows by doubling, so subscribing N
+/// handlers to one pending promise costs O(N) rather than the O(N^2) that an
+/// exact-size realloc per subscription used to pay.
 pub fn qjsAppendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reaction: core.JSValue) !void {
-    const current = promise.promiseReactions();
-    const next = try rt.memory.alloc(core.JSValue, current.len + 1);
-    errdefer rt.memory.free(core.JSValue, next);
-    var rooted_next: []core.JSValue = next[0..0];
-    var next_root = ValueSliceRoot{};
-    next_root.init(rt, &rooted_next);
-    defer next_root.deinit();
+    const slot = promise.promiseReactionsSlot();
+    const capacity_slot = promise.promiseReactionsCapacitySlot();
+    if (slot.*.len == capacity_slot.*) {
+        const current = slot.*;
+        const old_capacity = capacity_slot.*;
+        const next_capacity = if (old_capacity == 0) @as(usize, 4) else old_capacity * 2;
+        const next = try rt.memory.alloc(core.JSValue, next_capacity);
+        var rooted_next: []core.JSValue = next[0..0];
+        var next_root = ValueSliceRoot{};
+        next_root.init(rt, &rooted_next);
+        defer next_root.deinit();
 
-    @memcpy(next[0..current.len], current);
-    rooted_next = next[0..current.len];
-    next[current.len] = reaction.dup();
-    rooted_next = next[0 .. current.len + 1];
-    var reaction_owned = true;
-    errdefer if (reaction_owned) {
-        next[current.len].free(rt);
-        next[current.len] = core.JSValue.undefinedValue();
+        @memcpy(next[0..current.len], current);
         rooted_next = next[0..current.len];
-    };
-    reaction_owned = false;
-    promise.promiseReactionsSlot().* = next;
-    if (current.len != 0) rt.memory.free(core.JSValue, current);
+        slot.* = next[0..current.len];
+        capacity_slot.* = next_capacity;
+        if (old_capacity != 0) {
+            rt.memory.free(core.JSValue, current.ptr[0..old_capacity]);
+        } else if (current.len != 0) {
+            rt.memory.free(core.JSValue, current);
+        }
+    }
+
+    // Past the last fallible step: the append itself is a no-fail publish into
+    // reserved storage, so the promise is never observed in a torn state.
+    const len = slot.*.len;
+    std.debug.assert(len < capacity_slot.*);
+    slot.*.ptr[len] = reaction.dup();
+    slot.* = slot.*.ptr[0 .. len + 1];
 }
 
 pub fn qjsPromiseReactionRecord(
@@ -1066,9 +1080,16 @@ pub const PreparedPromiseReactionJobs = struct {
         }
         std.debug.assert(self.reserved_entries == self.initialized);
 
+        const capacity_slot = promise.promiseReactionsCapacitySlot();
+        const capacity = capacity_slot.*;
         promise.promiseReactionsSlot().* = &.{};
+        capacity_slot.* = 0;
         for (reactions) |reaction| reaction.free(ctx.runtime);
-        ctx.runtime.memory.free(core.JSValue, reactions);
+        if (capacity != 0) {
+            ctx.runtime.memory.free(core.JSValue, reactions.ptr[0..capacity]);
+        } else {
+            ctx.runtime.memory.free(core.JSValue, reactions);
+        }
 
         for (self.jobs[0..self.initialized]) |job| {
             ctx.runtime.job_queue.enqueueReserved(job);
@@ -3243,7 +3264,7 @@ pub fn atomicsRunAsyncWaiterCompletion(
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     if (promise_object.class_id != core.class.ids.promise) return error.TypeError;
     if (promise_object.promiseResultSlot().* != null) {
-        ctx.runtime.job_queue.releaseReservedEntries(1);
+        ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
         return;
     }
     const result = if (waiter.completion == .notified) "ok" else "timed-out";
@@ -3287,7 +3308,7 @@ pub fn atomicsRunAsyncWaiterCompletion(
         reaction_arg_value = null;
         if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
-    ctx.runtime.job_queue.enqueueReserved(prepared_job);
+    ctx.runtime.job_queue.enqueueUnlinkedEntrySlot(prepared_job);
     prepared_job_owned = false;
 }
 
@@ -4624,83 +4645,83 @@ pub fn drainOnePendingJob(
             }
         },
         .promise_reaction => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = qjsPromiseReactionJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
                 if (err == error.OutOfMemory and promiseReactionInternalSettleCanRetry(payload)) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .promise_thenable => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = qjsPromiseThenableJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
                 if (err == error.OutOfMemory) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .promise_settlement => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             qjsPromiseSettlementJobCall(job_ctx, job_global, payload) catch |err| {
                 if (err == error.OutOfMemory) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .dynamic_import => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = payload.runner(job_ctx, output, payload) catch |err| {
                 if (err == error.OutOfMemory) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .atomics_waiter => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             payload.runner(job_ctx, payload) catch |err| {
-                std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                 ctx.runtime.job_queue.prependReserved(entry);
                 entry_owned = false;
                 return err;
             };
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .finalization => |*payload| {
             result = callValueOrBytecodeRoot(job_ctx, output, job_global, core.JSValue.undefinedValue(), payload.callback, &.{payload.held_value}, null, null) catch |err| {

@@ -261,12 +261,24 @@ const Instruction = struct {
 fn decodeInstruction(code: []const u8, position: u32) Error!Instruction {
     if (position >= code.len) return error.InvalidBytecode;
     const op_id = code[position];
-    const size = opcode.sizeOf(op_id);
-    if (size == 0) return error.InvalidBytecode;
-    const end = std.math.add(u32, position, size) catch
+    // qjs:34900 reads ONE `opcode_info[op]` row and takes both `.size` and
+    // `.fmt` out of it. `sizeOf`/`formatOf` each re-derive the short-opcode
+    // index and then stride the 24-byte diagnostic `Info` row separately, so
+    // every S4 decode paid two address computations and two loads into a table
+    // six times larger than it needs to be. `compact_opcode_info` is the
+    // four-byte production row QuickJS actually compiles (bytecode.zig
+    // `CompactInfo`, "do not make each verifier instruction stride across a
+    // 24-byte row just to read these four fields"). Take both fields from it.
+    const info = opcode.finalCompactInfo(op_id) orelse return error.InvalidBytecode;
+    const size = info.size;
+    // `position < code.len` makes the subtraction well-defined, and this
+    // comparison proves the caller's subsequent `position + size` is within
+    // the u32-sized product stream. Do not encode the same proof again as a
+    // checked add in every S4 decode (QuickJS uses pos + len after its table
+    // lookup for the same reason).
+    if (size == 0 or size > code.len - position)
         return error.InvalidBytecode;
-    if (end > code.len) return error.InvalidBytecode;
-    return .{ .op_id = op_id, .size = size, .format = opcode.formatOf(op_id) };
+    return .{ .op_id = op_id, .size = size, .format = info.fmt };
 }
 
 fn isJumpOp(op_id: u8) bool {
@@ -304,7 +316,10 @@ fn readI32(code: []const u8, position: u32) Error!i32 {
     return std.mem.readInt(i32, code[start..][0..4], .little);
 }
 
-fn validateProduct(product: *const resolve_variables.ResolvedProduct) Error!void {
+/// Cheap structural preflight needed before constructing slices and the
+/// offset-primary bind/source cursors.  Keep this proof on every entry path:
+/// the main walk relies on sorted sources and coherent bound-label metadata.
+fn validateProductMetadata(product: *const resolve_variables.ResolvedProduct) Error!void {
     if (product.code_len > product.code.len or
         product.atom_len > product.atom_operands.len or
         product.label_len > product.label_slots.len or
@@ -332,7 +347,17 @@ fn validateProduct(product: *const resolve_variables.ResolvedProduct) Error!void
             return error.InvalidBytecode;
         }
     }
+}
 
+/// Full S3 byte-stream proof for standalone callers.  The production packed
+/// path receives this stream directly from resolve_variables, whose output
+/// walk already emits opcode-sized instructions and parallel atom/label
+/// ledgers.  resolve_labels then decodes those same bytes while consuming
+/// them, and the packed finalizer validates the resulting S4 stream in its
+/// fused owner/var-ref walk.  QuickJS likewise trusts the internal bytecode
+/// handed from resolve_variables to resolve_labels (quickjs.c:34796) instead
+/// of running an extra validation traversal between the two passes.
+fn validateProductCode(product: *const resolve_variables.ResolvedProduct) Error!void {
     const code = product.code[0..product.code_len];
     var atom_index: u32 = 0;
     var position: u32 = 0;
@@ -400,9 +425,12 @@ const PatternToken = struct {
 
 const SeqMatch = struct {
     end: u32,
-    count: u8,
-    positions: [8]u32 = [_]u32{0} ** 8,
-    ops: [8]u8 = [_]u8{0} ** 8,
+    // Every consumer needs at most the first two operand positions. The
+    // matched opcode is already present at code[position], so returning a
+    // second eight-byte opcode ledger merely inflated every successful and
+    // failed matcher result. QuickJS's code_match likewise publishes only
+    // the few fields its caller asks for through CodeContext.
+    positions: [2]u32,
 };
 
 const Resolver = struct {
@@ -430,12 +458,25 @@ const Resolver = struct {
     output_atoms: []core.atom.Atom = &.{},
     output_atom_capacity: usize = 0,
     output_atom_len: u32 = 0,
+    /// False while the S4 output ledger borrows the S3 owners. It becomes true
+    /// only after a successful walk transfers the retained subsequence out of
+    /// `product`; error paths therefore leave the input ledger owning every
+    /// atom and free only the uncommitted output backing.
+    output_atoms_owned: bool = false,
 
     output_sources: []SourceLocSlot = &.{},
     output_source_capacity: usize = 0,
     output_source_len: u32 = 0,
 
     bind_cursor: usize = 0,
+    /// Product offset of `binds[bind_cursor]`, or `maxInt` once the sorted
+    /// bind side table is exhausted. QuickJS reaches OP_label as an ordinary
+    /// switch arm of the same walk (qjs:34911), so an instruction that carries
+    /// no identity pays nothing at all for the label machinery. V2 keeps
+    /// identities out of band; this frontier gives them the same zero cost,
+    /// and is the idiom `resolve_variables` already uses for both of its side
+    /// tables (`refreshBindFrontier` / `refreshSourceFrontier` there).
+    next_bind_offset: u64 = std.math.maxInt(u64),
     jump_count: u32 = 0,
     atom_cursor: u32 = 0,
     source_cursor: u32 = 0,
@@ -443,8 +484,10 @@ const Resolver = struct {
     last_attached_source: ?SourcePoint = null,
 
     fn deinit(self: *Resolver) void {
-        for (self.output_atoms[0..self.output_atom_len]) |atom_id|
-            self.atoms.free(atom_id);
+        if (self.output_atoms_owned) {
+            for (self.output_atoms[0..self.output_atom_len]) |atom_id|
+                self.atoms.free(atom_id);
+        }
         if (self.output_atom_capacity != 0)
             self.memory.free(core.atom.Atom, self.output_atoms);
         if (self.output_capacity != 0) self.memory.free(u8, self.output);
@@ -458,6 +501,7 @@ const Resolver = struct {
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
+        self.output_atoms_owned = false;
         self.output = &.{};
         self.output_capacity = 0;
         self.output_len = 0;
@@ -472,14 +516,41 @@ const Resolver = struct {
         self.jump_slots = &.{};
     }
 
-    fn releaseConsumedProduct(self: *Resolver) void {
+    fn releaseConsumedProduct(self: *Resolver) Error!void {
+        // QuickJS copies atom ids between its resolve_labels DynBufs without
+        // changing their reference counts: the new buffer inherits the old
+        // buffer's owners. S4 never invents or reorders atom-bearing values;
+        // its output atom ledger is a retained subsequence of S3. Prove that
+        // invariant before changing either owner's state, then move those
+        // references and let releaseConsumedStreams free only discarded ones.
+        var input_index: usize = 0;
+        var output_index: usize = 0;
+        while (output_index < self.output_atom_len) : (output_index += 1) {
+            const output_atom = self.output_atoms[output_index];
+            while (input_index < self.input_atoms.len and
+                self.input_atoms[input_index] != output_atom) : (input_index += 1)
+            {}
+            if (input_index == self.input_atoms.len)
+                return error.InvalidBytecode;
+            input_index += 1;
+        }
+
+        input_index = 0;
+        output_index = 0;
+        while (output_index < self.output_atom_len) : (output_index += 1) {
+            const output_atom = self.output_atoms[output_index];
+            while (self.input_atoms[input_index] != output_atom) : (input_index += 1) {}
+            self.product.atom_operands[input_index] = core.atom.null_atom;
+            input_index += 1;
+        }
+        self.output_atoms_owned = true;
         self.code = &.{};
         self.input_atoms = &.{};
         self.input_sources = &.{};
         self.product.releaseConsumedStreams();
     }
 
-    fn initScratch(self: *Resolver) Error!void {
+    fn initScratch(self: *Resolver, comptime layout: LayoutMode) Error!void {
         if (self.product.label_len != 0) {
             self.addr = self.memory.alloc(u32, self.product.label_len) catch
                 return error.OutOfMemory;
@@ -509,14 +580,72 @@ const Resolver = struct {
             }
             std.mem.sort(BindEntry, self.binds, {}, bindLessThan);
         }
+        self.refreshBindFrontier();
 
         if (self.product.jump_size != 0) {
             self.jump_slots = self.memory.alloc(JumpSlot, self.product.jump_size) catch
                 return error.OutOfMemory;
         }
+
+        // Stage 4's ordinary rewrites copy or shrink the S3 stream; only the
+        // function prologue grows it.  Size that prologue exactly and reserve
+        // the common output once.  Keep the cold growth path below because a
+        // future rewrite is allowed to expand without turning this sizing
+        // observation into a memory-safety contract.
+        const initial_output_capacity = std.math.add(
+            u32,
+            self.product.code_len,
+            try self.functionPrologueSize(layout),
+        ) catch return error.BytecodeOverflow;
+        if (initial_output_capacity != 0) {
+            try reserve(
+                u8,
+                self.memory,
+                &self.output,
+                &self.output_capacity,
+                0,
+                initial_output_capacity,
+                32,
+            );
+        }
+
+        // Every final source slot comes from exactly one entry in the S3
+        // source ledger.  Peepholes may discard entries, coalesce equal
+        // coordinates, or defer a consumed subrange, but they never invent
+        // another source event.  Reserve that hard upper bound once so the
+        // per-instruction source path only publishes into contiguous storage.
+        // Keep ensureOutputSources' cold growth path as a defensive contract
+        // for future rewrites that may legitimately synthesize an event.
+        if (self.input_sources.len != 0) {
+            try reserve(
+                SourceLocSlot,
+                self.memory,
+                &self.output_sources,
+                &self.output_source_capacity,
+                0,
+                self.input_sources.len,
+                8,
+            );
+        }
+
+        // resolve_labels only drops or retains atom-bearing instructions; it
+        // never synthesizes another atom owner. Reserve the exact hard upper
+        // bound once, then publish borrowed ids in the hot walk without a
+        // retain and without geometric ledger growth.
+        if (self.input_atoms.len != 0) {
+            try reserve(
+                core.atom.Atom,
+                self.memory,
+                &self.output_atoms,
+                &self.output_atom_capacity,
+                0,
+                self.input_atoms.len,
+                8,
+            );
+        }
     }
 
-    fn ensureOutput(self: *Resolver, need: usize) Error!void {
+    noinline fn growOutput(self: *Resolver, need: usize) Error!void {
         if (need > std.math.maxInt(u32)) return error.BytecodeOverflow;
         _ = std.math.add(u32, self.output_len, @as(u32, @intCast(need))) catch
             return error.BytecodeOverflow;
@@ -531,13 +660,42 @@ const Resolver = struct {
         );
     }
 
-    fn appendByte(self: *Resolver, value: u8) Error!void {
+    inline fn ensureOutput(self: *Resolver, need: usize) Error!void {
+        const used: usize = @intCast(self.output_len);
+        std.debug.assert(used <= self.output_capacity);
+        if (need <= self.output_capacity - used) return;
+        return self.growOutput(need);
+    }
+
+    noinline fn growOutputSources(self: *Resolver, need: usize) Error!void {
+        if (need > std.math.maxInt(u32)) return error.BytecodeOverflow;
+        _ = std.math.add(u32, self.output_source_len, @as(u32, @intCast(need))) catch
+            return error.BytecodeOverflow;
+        try reserve(
+            SourceLocSlot,
+            self.memory,
+            &self.output_sources,
+            &self.output_source_capacity,
+            self.output_source_len,
+            need,
+            8,
+        );
+    }
+
+    inline fn ensureOutputSources(self: *Resolver, need: usize) Error!void {
+        const used: usize = @intCast(self.output_source_len);
+        std.debug.assert(used <= self.output_source_capacity);
+        if (need <= self.output_source_capacity - used) return;
+        return self.growOutputSources(need);
+    }
+
+    inline fn appendByte(self: *Resolver, value: u8) Error!void {
         try self.ensureOutput(1);
         self.output[self.output_len] = value;
         self.output_len += 1;
     }
 
-    fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
+    inline fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
         if (bytes.len == 0) return;
         try self.ensureOutput(bytes.len);
         const start: usize = @intCast(self.output_len);
@@ -545,28 +703,28 @@ const Resolver = struct {
         self.output_len += @intCast(bytes.len);
     }
 
-    fn appendU16(self: *Resolver, value: u16) Error!void {
+    inline fn appendU16(self: *Resolver, value: u16) Error!void {
         try self.ensureOutput(2);
         const start: usize = @intCast(self.output_len);
         std.mem.writeInt(u16, self.output[start..][0..2], value, .little);
         self.output_len += 2;
     }
 
-    fn appendI16(self: *Resolver, value: i16) Error!void {
+    inline fn appendI16(self: *Resolver, value: i16) Error!void {
         try self.ensureOutput(2);
         const start: usize = @intCast(self.output_len);
         std.mem.writeInt(i16, self.output[start..][0..2], value, .little);
         self.output_len += 2;
     }
 
-    fn appendU32(self: *Resolver, value: u32) Error!void {
+    inline fn appendU32(self: *Resolver, value: u32) Error!void {
         try self.ensureOutput(4);
         const start: usize = @intCast(self.output_len);
         std.mem.writeInt(u32, self.output[start..][0..4], value, .little);
         self.output_len += 4;
     }
 
-    fn appendI32(self: *Resolver, value: i32) Error!void {
+    inline fn appendI32(self: *Resolver, value: i32) Error!void {
         try self.ensureOutput(4);
         const start: usize = @intCast(self.output_len);
         std.mem.writeInt(i32, self.output[start..][0..4], value, .little);
@@ -576,16 +734,9 @@ const Resolver = struct {
     fn appendOutputAtom(self: *Resolver, atom_id: core.atom.Atom) Error!void {
         if (self.output_atom_len == std.math.maxInt(u32))
             return error.BytecodeOverflow;
-        try reserve(
-            core.atom.Atom,
-            self.memory,
-            &self.output_atoms,
-            &self.output_atom_capacity,
-            self.output_atom_len,
-            1,
-            8,
-        );
-        self.output_atoms[self.output_atom_len] = self.atoms.dup(atom_id);
+        if (self.output_atom_len >= self.output_atom_capacity)
+            return error.InvalidBytecode;
+        self.output_atoms[self.output_atom_len] = atom_id;
         self.output_atom_len += 1;
     }
 
@@ -601,8 +752,7 @@ const Resolver = struct {
         var kept = false;
         while (position < end) {
             const instruction = try decodeInstruction(self.code, position);
-            const position_next = std.math.add(u32, position, instruction.size) catch
-                return error.InvalidBytecode;
+            const position_next = position + instruction.size;
             if (position_next > end) return error.InvalidBytecode;
             if (hasAtomFormat(instruction.format)) {
                 if (self.atom_cursor >= self.input_atoms.len)
@@ -620,6 +770,28 @@ const Resolver = struct {
         }
         if (position != end or (keep_atom_position != null and !kept))
             return error.InvalidBytecode;
+    }
+
+    /// Consume the atom ledger entry for an instruction the main S4 walk has
+    /// already decoded.  The range form above is still required for skipped
+    /// peephole tails, but using it for the ordinary one-instruction case
+    /// decoded every non-atom opcode a second time merely to discover that it
+    /// had no atom.  QuickJS's atom operand is carried by that same bytecode
+    /// instruction, so its resolve_labels walk pays no corresponding rescan.
+    fn consumeInstructionAtom(
+        self: *Resolver,
+        position: u32,
+        instruction: Instruction,
+        keep: bool,
+    ) Error!void {
+        if (!hasAtomFormat(instruction.format)) return;
+        if (self.atom_cursor >= self.input_atoms.len)
+            return error.InvalidBytecode;
+        const encoded = try readU32At(self.code, position, 1);
+        const ledger_atom = self.input_atoms[self.atom_cursor];
+        if (encoded != ledger_atom) return error.InvalidBytecode;
+        if (keep) try self.appendOutputAtom(ledger_atom);
+        self.atom_cursor += 1;
     }
 
     fn absorbSources(self: *Resolver, limit: u32) void {
@@ -657,22 +829,42 @@ const Resolver = struct {
     /// across a peephole match at the replacement instruction's PC, exactly
     /// like the legacy old-PC relocation table. Consecutive equal coordinates
     /// still dedupe before pc2line encoding.
-    fn attachSource(self: *Resolver) Error!void {
+    inline fn attachSource(self: *Resolver) Error!void {
+        if (self.source_attach_cursor == self.source_cursor) return;
         if (self.source_attach_cursor > self.source_cursor)
             return error.InvalidBytecode;
+
+        // The normal walk consumes one instruction's source event and emits
+        // it immediately.  Keep that overwhelmingly common case inline; only
+        // peepholes spanning several instructions need the outlined range
+        // loop below.
+        if (self.source_attach_cursor == self.source_cursor - 1) {
+            const source = self.input_sources[self.source_attach_cursor];
+            const pending = SourcePoint{ .line = source.line, .col = source.col };
+            if (self.last_attached_source) |last| {
+                if (sourcePointEqual(last, pending)) {
+                    self.source_attach_cursor += 1;
+                    return;
+                }
+            }
+            try self.ensureOutputSources(1);
+            self.output_sources[self.output_source_len] = .{
+                .pc = self.output_len,
+                .line_num = pending.line,
+                .col_num = pending.col,
+            };
+            self.output_source_len += 1;
+            self.source_attach_cursor += 1;
+            self.last_attached_source = pending;
+            return;
+        }
+        return self.attachSourceSlow();
+    }
+
+    noinline fn attachSourceSlow(self: *Resolver) Error!void {
         const pending_count = self.source_cursor - self.source_attach_cursor;
-        if (pending_count == 0) return;
-        _ = std.math.add(u32, self.output_source_len, pending_count) catch
-            return error.BytecodeOverflow;
-        try reserve(
-            SourceLocSlot,
-            self.memory,
-            &self.output_sources,
-            &self.output_source_capacity,
-            self.output_source_len,
-            @intCast(pending_count),
-            8,
-        );
+        std.debug.assert(pending_count != 0);
+        try self.ensureOutputSources(pending_count);
         while (self.source_attach_cursor < self.source_cursor) {
             const source = self.input_sources[self.source_attach_cursor];
             self.source_attach_cursor += 1;
@@ -709,17 +901,7 @@ const Resolver = struct {
             return error.InvalidBytecode;
         }
         const pending_count = end - start;
-        _ = std.math.add(u32, self.output_source_len, pending_count) catch
-            return error.BytecodeOverflow;
-        try reserve(
-            SourceLocSlot,
-            self.memory,
-            &self.output_sources,
-            &self.output_source_capacity,
-            self.output_source_len,
-            @intCast(pending_count),
-            8,
-        );
+        try self.ensureOutputSources(pending_count);
         var index = start;
         while (index < end) : (index += 1) {
             const source = self.input_sources[index];
@@ -789,25 +971,38 @@ const Resolver = struct {
         tokens: []const PatternToken,
     ) Error!?SeqMatch {
         if (tokens.len > 8) return error.InvalidBytecode;
-        var result: SeqMatch = .{ .end = start, .count = @intCast(tokens.len) };
+        var result: SeqMatch = undefined;
         var position = start;
         for (tokens, 0..) |token, token_index| {
             if (token.options.len == 0 or position >= self.product.code_len)
                 return null;
             const instruction = try decodeInstruction(self.code, position);
-            var selected = false;
-            for (token.options) |candidate| {
-                if (instruction.op_id == candidate) {
-                    selected = true;
-                    break;
+            if (token.options.len == 1) {
+                if (instruction.op_id != token.options[0]) return null;
+            } else {
+                var selected = false;
+                for (token.options) |candidate| {
+                    if (instruction.op_id == candidate) {
+                        selected = true;
+                        break;
+                    }
                 }
+                if (!selected) return null;
             }
-            if (!selected) return null;
             if (token.idx) |expected| {
-                if (try self.readIndex(position) != expected) return null;
+                // The instruction was decoded immediately above. Reuse its
+                // format instead of paying a second metadata lookup and a
+                // second bounds proof for every indexed pattern.
+                const actual: u16 = switch (instruction.format) {
+                    .u8, .i8, .loc8, .const8 => self.code[position + 1],
+                    .u16, .npop, .loc, .arg, .var_ref => try readU16(self.code, position),
+                    else => return error.InvalidBytecode,
+                };
+                if (actual != expected) return null;
             }
-            result.positions[token_index] = position;
-            result.ops[token_index] = instruction.op_id;
+            if (token_index < result.positions.len) {
+                result.positions[token_index] = position;
+            }
             position += instruction.size;
         }
         if (self.hasBindInRange(start, position)) return null;
@@ -895,10 +1090,29 @@ const Resolver = struct {
             self.binds[self.bind_cursor].dead_skipped = true;
             self.bind_cursor += 1;
         }
+        self.refreshBindFrontier();
+    }
+
+    inline fn refreshBindFrontier(self: *Resolver) void {
+        self.next_bind_offset = if (self.bind_cursor < self.binds.len)
+            self.binds[self.bind_cursor].bound_offset
+        else
+            std.math.maxInt(u64);
     }
 
     /// qjs:34911-34939 OP_label, represented by the sorted bind side table.
-    fn processBindsAt(self: *Resolver, position: u32) Error!void {
+    /// `binds` is sorted by product offset and `bind_cursor` only moves
+    /// forward, so a frontier strictly past `position` proves BOTH loops below
+    /// would find nothing: every unconsumed bind is at or past the frontier,
+    /// hence none is `< position` for `retireSpannedDeadBinds` and none is
+    /// `== position` for the pass-over loop. That compare is then the whole
+    /// per-instruction cost of the out-of-band identity table.
+    inline fn processBindsAt(self: *Resolver, position: u32) Error!void {
+        if (position < self.next_bind_offset) return;
+        return self.processBindsAtCold(position);
+    }
+
+    noinline fn processBindsAtCold(self: *Resolver, position: u32) Error!void {
         try self.retireSpannedDeadBinds(position);
         while (self.bind_cursor < self.binds.len and
             self.binds[self.bind_cursor].bound_offset == position)
@@ -926,6 +1140,7 @@ const Resolver = struct {
             }
             slot.first_reloc = labels.no_reloc;
         }
+        self.refreshBindFrontier();
     }
 
     fn appendJumpSlot(
@@ -1031,10 +1246,9 @@ const Resolver = struct {
     /// qjs:34633 code_has_label. Side-table binds replace adjacent OP_label
     /// bytes; the immediately following goto case remains bytecode-native.
     fn codeHasLabel(self: *const Resolver, position: u32, label_index: u32) Error!bool {
-        var index = self.lowerBoundBind(position);
-        while (index < self.binds.len and self.binds[index].bound_offset == position) : (index += 1) {
-            if (self.binds[index].label_index == label_index) return true;
-        }
+        if (label_index >= self.product.label_len) return error.InvalidBytecode;
+        const slot = self.product.label_slots[label_index];
+        if (slot.flags.bound and slot.bound_offset == position) return true;
         if (position < self.product.code_len) {
             const instruction = try decodeInstruction(self.code, position);
             if (instruction.op_id == op.goto)
@@ -1219,6 +1433,7 @@ const Resolver = struct {
             if (has_live_bind) return position;
             for (self.binds[bind_start..bind_end]) |*entry| entry.dead_skipped = true;
             self.bind_cursor = bind_end;
+            self.refreshBindFrontier();
             if (position == self.product.code_len) return position;
 
             const instruction = try decodeInstruction(self.code, position);
@@ -1277,6 +1492,71 @@ const Resolver = struct {
             };
         }
         return null;
+    }
+
+    fn putShortCodeSize(comptime layout: LayoutMode, op_id: u8, idx: u16) u32 {
+        if (layout == .short) {
+            if (shortSlotOp(op_id, idx)) |short_op| {
+                return if (short_op == op.get_loc8 or short_op == op.put_loc8 or
+                    short_op == op.set_loc8)
+                    2
+                else
+                    1;
+            }
+        }
+        return 3;
+    }
+
+    fn specialObjectSize(comptime layout: LayoutMode, slot: i32) Error!u32 {
+        return 2 + putShortCodeSize(
+            layout,
+            op.put_loc,
+            try checkedSlotIndex(slot),
+        );
+    }
+
+    /// Exact byte count emitted by emitFunctionPrologue.  Keeping this beside
+    /// the short-op selector makes the initial output reservation track the
+    /// same layout decisions as emission instead of relying on a loose magic
+    /// headroom constant.
+    fn functionPrologueSize(self: *const Resolver, comptime layout: LayoutMode) Error!u32 {
+        const fd = self.fd orelse return 0;
+        var size: u32 = 0;
+        if (fd.home_object_var_idx >= 0)
+            size += try specialObjectSize(layout, fd.home_object_var_idx);
+        if (fd.this_active_func_var_idx >= 0)
+            size += try specialObjectSize(layout, fd.this_active_func_var_idx);
+        if (fd.new_target_var_idx >= 0)
+            size += try specialObjectSize(layout, fd.new_target_var_idx);
+        if (fd.this_var_idx >= 0) {
+            const idx = try checkedSlotIndex(fd.this_var_idx);
+            size += if (fd.is_derived_class_constructor)
+                3
+            else
+                1 + putShortCodeSize(layout, op.put_loc, idx);
+        }
+        if (fd.arguments_var_idx >= 0) {
+            size += 2;
+            if (fd.arguments_arg_idx >= 0) {
+                size += putShortCodeSize(
+                    layout,
+                    op.set_loc,
+                    try checkedSlotIndex(fd.arguments_arg_idx),
+                );
+            }
+            size += putShortCodeSize(
+                layout,
+                op.put_loc,
+                try checkedSlotIndex(fd.arguments_var_idx),
+            );
+        }
+        if (fd.func_var_idx >= 0)
+            size += try specialObjectSize(layout, fd.func_var_idx);
+        if (fd.var_object_idx >= 0)
+            size += try specialObjectSize(layout, fd.var_object_idx);
+        if (fd.arg_var_object_idx >= 0)
+            size += try specialObjectSize(layout, fd.arg_var_object_idx);
+        return size;
     }
 
     /// qjs:34737 put_short_code plus the zjs legacy call0..3 lowering.
@@ -1548,11 +1828,7 @@ const Resolver = struct {
         } else {
             try self.appendRaw(self.code[position..position_next]);
         }
-        try self.consumeAtomsRange(
-            position,
-            position_next,
-            if (hasAtomFormat(instruction.format)) position else null,
-        );
+        try self.consumeInstructionAtom(position, instruction, true);
     }
 
     fn emitRawInstruction(
@@ -1563,11 +1839,7 @@ const Resolver = struct {
         try self.attachSource();
         const position_next = position + instruction.size;
         try self.appendRaw(self.code[position..position_next]);
-        try self.consumeAtomsRange(
-            position,
-            position_next,
-            if (hasAtomFormat(instruction.format)) position else null,
-        );
+        try self.consumeInstructionAtom(position, instruction, true);
     }
 
     fn handleGoto(
@@ -1615,7 +1887,7 @@ const Resolver = struct {
         match: SeqMatch,
     ) Error!u32 {
         self.absorbSources(match.end);
-        const branch_op = match.ops[0];
+        const branch_op = self.code[match.positions[0]];
         const label_index = try readU32At(
             self.code,
             match.positions[0],
@@ -1847,7 +2119,7 @@ const Resolver = struct {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.is_null);
-                        const inverted = if (match.ops[1] == op.if_false)
+                        const inverted = if (self.code[match.positions[1]] == op.if_false)
                             op.if_true
                         else
                             op.if_false;
@@ -2063,7 +2335,7 @@ const Resolver = struct {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.is_undefined);
-                        const inverted = if (match.ops[1] == op.if_false)
+                        const inverted = if (self.code[match.positions[1]] == op.if_false)
                             op.if_true
                         else
                             op.if_false;
@@ -2146,7 +2418,7 @@ const Resolver = struct {
                         op.put_var_ref,
                     } },
                 })) |put_match| {
-                    const family = putFamily(put_match.ops[0]) orelse
+                    const family = putFamily(self.code[put_match.positions[0]]) orelse
                         return error.InvalidBytecode;
                     const idx = try self.readIndex(put_match.positions[0]);
                     self.absorbSources(put_match.end);
@@ -2197,7 +2469,7 @@ const Resolver = struct {
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
-                    try self.appendByte(if (match.ops[0] == op.post_inc)
+                    try self.appendByte(if (self.code[match.positions[0]] == op.post_inc)
                         op.inc_loc
                     else
                         op.dec_loc);
@@ -2211,7 +2483,7 @@ const Resolver = struct {
                 })) |match| {
                     self.absorbSources(match.end);
                     try self.attachSource();
-                    try self.appendByte(if (match.ops[0] == op.inc)
+                    try self.appendByte(if (self.code[match.positions[0]] == op.inc)
                         op.inc_loc
                     else
                         op.dec_loc);
@@ -2267,7 +2539,7 @@ const Resolver = struct {
                     try self.attachSource();
                     try self.putShortCode(
                         layout,
-                        match.ops[0],
+                        self.code[match.positions[0]],
                         try self.readIndex(match.positions[0]),
                     );
                     try self.appendByte(op.add_loc);
@@ -2319,7 +2591,7 @@ const Resolver = struct {
                     .{ .options = &.{ op.put_loc, op.put_arg, op.put_var_ref } },
                     .{ .options = &.{op.drop} },
                 })) |store_match| {
-                    const family = putFamily(store_match.ops[0]) orelse
+                    const family = putFamily(self.code[store_match.positions[0]]) orelse
                         return error.InvalidBytecode;
                     const idx = try self.readIndex(store_match.positions[0]);
                     var store_op = family.put;
@@ -2388,7 +2660,7 @@ const Resolver = struct {
                     else
                         null;
                     if (test_op) |selected_test| {
-                        const compare_op = compare_match.ops[1];
+                        const compare_op = self.code[compare_match.positions[1]];
                         if (compare_op == op.strict_eq or compare_op == op.eq) {
                             // Legacy old-PC relocation places the marker on
                             // push_atom_value after the one-byte replacement,
@@ -2834,6 +3106,18 @@ const Resolver = struct {
         cfg.recordFinalBoundaryHops(live_group_count);
     }
 
+    fn validateFinalSources(self: *const Resolver) Error!void {
+        var previous_pc: u32 = 0;
+        for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
+            if (source.pc >= self.output_len or
+                (index != 0 and source.pc < previous_pc))
+            {
+                return error.InvalidBytecode;
+            }
+            previous_pc = source.pc;
+        }
+    }
+
     fn validateFinalOutput(self: *const Resolver) Error!void {
         const code = self.output[0..self.output_len];
         var position: u32 = 0;
@@ -2852,16 +3136,7 @@ const Resolver = struct {
         }
         if (position != self.output_len or atom_index != self.output_atom_len)
             return error.InvalidBytecode;
-
-        var previous_pc: u32 = 0;
-        for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
-            if (source.pc >= self.output_len or
-                (index != 0 and source.pc < previous_pc))
-            {
-                return error.InvalidBytecode;
-            }
-            previous_pc = source.pc;
-        }
+        try self.validateFinalSources();
     }
 
     fn installSourceLocsNoFail(
@@ -2896,6 +3171,7 @@ const Resolver = struct {
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
         self.output_atom_len = 0;
+        self.output_atoms_owned = false;
         for (self.function.atom_operands) |old_atom|
             self.atoms.free(old_atom);
         self.function.installAtomOperandsWithCapacity(owned_atoms, owned_atom_capacity);
@@ -2913,7 +3189,8 @@ const Resolver = struct {
 /// first_reloc heads are mutated in place qjs-style. All fallible output work
 /// finishes before the Bytecode's single allocation-free ownership-transfer
 /// commit point.
-pub fn run(
+fn runImpl(
+    comptime packed_finalize_validates_code: bool,
     comptime layout: LayoutMode,
     function: *bytecode.Bytecode,
     fd: ?*const bytecode.function_def.FunctionDef,
@@ -2925,7 +3202,9 @@ pub fn run(
         if (function_def.memory != product.memory or function_def.atoms != product.atoms)
             return error.InvalidBytecode;
     }
-    try validateProduct(product);
+    try validateProductMetadata(product);
+    if (comptime !packed_finalize_validates_code)
+        try validateProductCode(product);
 
     var resolver: Resolver = .{
         .function = function,
@@ -2938,9 +3217,9 @@ pub fn run(
         .input_sources = product.source_slots[0..product.source_len],
     };
     defer resolver.deinit();
-    try resolver.initScratch();
+    try resolver.initScratch(layout);
     try resolver.walk(layout);
-    resolver.releaseConsumedProduct();
+    try resolver.releaseConsumedProduct();
     if (layout == .short) {
         // F3: relaxJumps is the one pass that moves source events and label
         // addresses after they are both fixed. Snapshot which events sit on an
@@ -2952,10 +3231,39 @@ pub fn run(
         resolver.reportAnchorCoincidence(&stability);
     }
     if (comptime cfg.audit_oracles) try resolver.auditFinalBoundaryIdentity();
-    try resolver.validateFinalOutput();
+    if (comptime packed_finalize_validates_code) {
+        // The packed FunctionBytecode choke point immediately validates final
+        // code, atom-owner sequence, and var-ref bounds in one fused walk.
+        // Source slots are consumed before that point, so retain their proof
+        // here while avoiding a duplicate code traversal.
+        try resolver.validateFinalSources();
+    } else {
+        try resolver.validateFinalOutput();
+    }
     resolver.commit();
     std.debug.assert(resolver.output_capacity == 0 and
         resolver.output_atom_capacity == 0 and resolver.output_source_capacity == 0);
+}
+
+pub fn run(
+    comptime layout: LayoutMode,
+    function: *bytecode.Bytecode,
+    fd: ?*const bytecode.function_def.FunctionDef,
+    product: *resolve_variables.ResolvedProduct,
+) Error!void {
+    return runImpl(false, layout, function, fd, product);
+}
+
+/// Packed-finalize variant.  Its caller must perform the fused final-code,
+/// atom-owner, and var-ref validation before publishing the FunctionBytecode.
+/// All other callers use `run`, which keeps the self-contained full proof.
+pub fn runForPackedFinalize(
+    comptime layout: LayoutMode,
+    function: *bytecode.Bytecode,
+    fd: ?*const bytecode.function_def.FunctionDef,
+    product: *resolve_variables.ResolvedProduct,
+) Error!void {
+    return runImpl(true, layout, function, fd, product);
 }
 
 const ResolveLabelsTestHarness = struct {
@@ -3002,14 +3310,7 @@ const ResolveLabelsTestHarness = struct {
     }
 };
 
-fn requireCompilerV2() !void {
-    var skip = std.mem.eql(u8, @import("build_options").zjs_compiler, "legacy");
-    _ = &skip;
-    if (skip) return error.SkipZigTest;
-}
-
 test "compiler_v2.resolve_labels: straight-line slot shortening and source dedupe" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3066,7 +3367,6 @@ test "compiler_v2.resolve_labels: straight-line slot shortening and source dedup
 }
 
 test "compiler_v2.resolve_labels: plain layout keeps slot families wide" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3106,7 +3406,6 @@ test "compiler_v2.resolve_labels: plain layout keeps slot families wide" {
 }
 
 test "compiler_v2.resolve_labels: put-get fold preserves both source transitions" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3134,7 +3433,6 @@ test "compiler_v2.resolve_labels: put-get fold preserves both source transitions
 }
 
 test "compiler_v2.resolve_labels: dup put drop get delays getter source" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3172,7 +3470,6 @@ test "compiler_v2.resolve_labels: dup put drop get delays getter source" {
 }
 
 test "compiler_v2.resolve_labels: discarded field store delays tail sources" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3209,7 +3506,6 @@ test "compiler_v2.resolve_labels: discarded field store delays tail sources" {
 }
 
 test "compiler_v2.resolve_labels: typeof string fold preserves legacy source relocation order" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3252,7 +3548,6 @@ test "compiler_v2.resolve_labels: typeof string fold preserves legacy source rel
 }
 
 test "compiler_v2.resolve_labels: typeof branch keeps equal next-op source" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3297,8 +3592,6 @@ test "compiler_v2.resolve_labels: typeof branch keeps equal next-op source" {
 }
 
 test "compiler_v2.resolve_labels: backward goto selects exact i8 and i16 encodings" {
-    try requireCompilerV2();
-
     {
         var harness: ResolveLabelsTestHarness = undefined;
         try harness.init(std.testing.allocator);
@@ -3343,7 +3636,6 @@ test "compiler_v2.resolve_labels: backward goto selects exact i8 and i16 encodin
 }
 
 test "compiler_v2.resolve_labels: plain layout keeps backward goto wide" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3364,7 +3656,6 @@ test "compiler_v2.resolve_labels: plain layout keeps backward goto wide" {
 }
 
 test "compiler_v2.resolve_labels: forward goto uses a one-byte relocation" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3390,7 +3681,6 @@ test "compiler_v2.resolve_labels: forward goto uses a one-byte relocation" {
 }
 
 test "compiler_v2.resolve_labels: goto16 relaxes after body shortening and moves sources" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3428,8 +3718,6 @@ test "compiler_v2.resolve_labels: goto16 relaxes after body shortening and moves
 }
 
 test "compiler_v2.resolve_labels: next conditional drops and adjacent goto inverts" {
-    try requireCompilerV2();
-
     {
         var harness: ResolveLabelsTestHarness = undefined;
         try harness.init(std.testing.allocator);
@@ -3481,7 +3769,6 @@ test "compiler_v2.resolve_labels: next conditional drops and adjacent goto inver
 }
 
 test "compiler_v2.resolve_labels: unreferenced compact bind does not block drop return fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3503,7 +3790,6 @@ test "compiler_v2.resolve_labels: unreferenced compact bind does not block drop 
 }
 
 test "compiler_v2.resolve_labels: peephole consumes a spanned dead compact bind" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3525,7 +3811,6 @@ test "compiler_v2.resolve_labels: peephole consumes a spanned dead compact bind"
 }
 
 test "compiler_v2.resolve_labels: referenced compact bind blocks drop return fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3550,7 +3835,6 @@ test "compiler_v2.resolve_labels: referenced compact bind blocks drop return fol
 }
 
 test "compiler_v2.resolve_labels: consumed refcount remains a target barrier" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3577,7 +3861,6 @@ test "compiler_v2.resolve_labels: consumed refcount remains a target barrier" {
 }
 
 test "compiler_v2.resolve_labels: goto terminal fold skips live S3 fallthrough edges" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3606,7 +3889,6 @@ test "compiler_v2.resolve_labels: goto terminal fold skips live S3 fallthrough e
 }
 
 test "compiler_v2.resolve_labels: source after target drop blocks goto terminal fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3638,7 +3920,6 @@ test "compiler_v2.resolve_labels: source after target drop blocks goto terminal 
 }
 
 test "compiler_v2.resolve_labels: folded typeof branch threads through dead goto" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3695,7 +3976,6 @@ test "compiler_v2.resolve_labels: folded typeof branch threads through dead goto
 }
 
 test "compiler_v2.resolve_labels: folded nullish branches thread through dead goto" {
-    try requireCompilerV2();
     const cases = [_]struct { literal: u8, test_op: u8 }{
         .{ .literal = op.null, .test_op = op.is_null },
         .{ .literal = op.undefined, .test_op = op.is_undefined },
@@ -3754,7 +4034,6 @@ test "compiler_v2.resolve_labels: folded nullish branches thread through dead go
 }
 
 test "compiler_v2.resolve_labels: zero-ref parser label blocks nullish branch fold" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3792,7 +4071,6 @@ test "compiler_v2.resolve_labels: zero-ref parser label blocks nullish branch fo
 }
 
 test "compiler_v2.resolve_labels: ret discards an unreachable tail" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3808,7 +4086,6 @@ test "compiler_v2.resolve_labels: ret discards an unreachable tail" {
 }
 
 test "compiler_v2.resolve_labels: two-hop goto threading targets the final label" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3837,7 +4114,6 @@ test "compiler_v2.resolve_labels: two-hop goto threading targets the final label
 }
 
 test "compiler_v2.resolve_labels: goto over dead switch trampoline becomes fallthrough" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3871,7 +4147,6 @@ test "compiler_v2.resolve_labels: goto over dead switch trampoline becomes fallt
 }
 
 test "compiler_v2.resolve_labels: sourceful constant-false loop keeps legacy goto edge" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3899,7 +4174,6 @@ test "compiler_v2.resolve_labels: sourceful constant-false loop keeps legacy got
 }
 
 test "compiler_v2.resolve_labels: variable pass removes forward-only dead tail" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3925,8 +4199,6 @@ test "compiler_v2.resolve_labels: variable pass removes forward-only dead tail" 
 }
 
 test "compiler_v2.resolve_labels: boolean constant tests become goto or nothing" {
-    try requireCompilerV2();
-
     {
         var harness: ResolveLabelsTestHarness = undefined;
         try harness.init(std.testing.allocator);
@@ -3970,7 +4242,6 @@ test "compiler_v2.resolve_labels: boolean constant tests become goto or nothing"
 }
 
 test "compiler_v2.resolve_labels: dup put and local update peepholes use short forms" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3997,7 +4268,6 @@ test "compiler_v2.resolve_labels: dup put and local update peepholes use short f
 }
 
 test "compiler_v2.resolve_labels: post-update tails publish sources afterward" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4068,7 +4338,6 @@ test "compiler_v2.resolve_labels: post-update tails publish sources afterward" {
 }
 
 test "compiler_v2.resolve_labels: integer negation and short constants are byte exact" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4089,7 +4358,6 @@ test "compiler_v2.resolve_labels: integer negation and short constants are byte 
 }
 
 test "compiler_v2.resolve_labels: dropped atom and length field balance ownership" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4117,7 +4385,6 @@ test "compiler_v2.resolve_labels: dropped atom and length field balance ownershi
 }
 
 test "compiler_v2.resolve_labels: shared with probes resolve operand-relative done label" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4182,7 +4449,6 @@ test "compiler_v2.resolve_labels: shared with probes resolve operand-relative do
 }
 
 test "compiler_v2.resolve_labels: strict this and arguments prologue is exact" {
-    try requireCompilerV2();
     var harness: ResolveLabelsTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -4277,7 +4543,6 @@ fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void {
 }
 
 test "compiler_v2.resolve_labels: allocation failure sweep is transactional" {
-    try requireCompilerV2();
     try resolveLabelsOomScript(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,

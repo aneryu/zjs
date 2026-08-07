@@ -210,13 +210,25 @@ pub fn compareAt(
         op.strict_eq => value_ops.strictEqual(lhs, rhs),
         op.strict_neq => value_ops.strictNotEqual(lhs, rhs),
         else => blk: {
-            const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-            defer lhs_primitive.free(ctx.runtime);
-            if (lhs_primitive.isSymbol()) return error.TypeError;
-            const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-            defer rhs_primitive.free(ctx.runtime);
-            if (rhs_primitive.isSymbol()) return error.TypeError;
-            break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
+            // qjs JS_ToPrimitiveFree on a non-object returns it as-is with no
+            // refcount change (move semantics). zjs's toPrimitiveForNumber is
+            // borrow-in/owned-out, so it dups — costing 2 retain + 2 release
+            // per string comparison that qjs doesn't pay. For non-object
+            // operands (the common case: string/string, string/number),
+            // ToPrimitive is identity, so skip it and pass the already-owned
+            // operands directly to compare. Objects still need the full
+            // ToPrimitive path (valueOf/toString can run user code).
+            if (lhs.isObject() or rhs.isObject()) {
+                const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
+                defer lhs_primitive.free(ctx.runtime);
+                if (lhs_primitive.isSymbol()) return error.TypeError;
+                const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
+                defer rhs_primitive.free(ctx.runtime);
+                if (rhs_primitive.isSymbol()) return error.TypeError;
+                break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
+            }
+            if (lhs.isSymbol() or rhs.isSymbol()) return error.TypeError;
+            break :blk try value_ops.compare(ctx.runtime, cmp, lhs, rhs);
         },
     };
 }

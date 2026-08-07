@@ -359,12 +359,12 @@ pub const BlockFlags = packed struct(u8) {
     in_cycle_list: bool = false,
     finalizing: bool = false,
     is_pinned: bool = false,
-    /// Cycle-removal garbage flag (valid only during destroyRuntimeCyclesWithValueRoots;
-    /// unconditionally re-initialized at the start of every cycle-removal round).
-    /// `cycle_visited` = object is condemned garbage in the current round (it was still
-    /// `mark`ed after gc_scan, i.e. not resurrected). Resurrection is carried purely by
-    /// the `mark` bit (ScanIncrefVisitor clears `mark` on reachable objects, so they
-    /// never get `cycle_visited` set); there is no separate "preserved" bit.
+    /// Cycle-removal temporary-list membership. `detachCycleCandidate` sets it
+    /// when trial RC moves a header to the garbage list and
+    /// `restoreCycleCandidate` clears it when gc_scan revives that header. It is
+    /// therefore also the condemned-garbage flag after gc_scan completes. This
+    /// mirrors qjs deriving the same state from gc_obj_list/tmp_obj_list
+    /// membership instead of rescanning both lists to publish it afterwards.
     cycle_visited: bool = false,
 };
 
@@ -1084,6 +1084,15 @@ pub const Registry = struct {
             slot.reason = reason;
             return;
         }
+        // An allocation-threshold request is level-triggered: the live-byte
+        // condition may disappear before the next scheduler boundary. Do not
+        // let that weak request hide an independently requested same-urgency
+        // collection, because the allocation boundary may later discard only
+        // the stale threshold request.
+        if (slot.reason == .allocation_threshold and reason != .allocation_threshold) {
+            slot.reason = reason;
+            return;
+        }
         if (slot.reason == null) slot.reason = reason;
     }
 
@@ -1104,6 +1113,13 @@ pub const Registry = struct {
         const request = self.major_request;
         self.major_request = .{};
         return request;
+    }
+
+    pub fn clearStaleAllocationThresholdRequest(self: *Registry) bool {
+        const request = self.pendingMajorRequest() orelse return false;
+        if (request.reason != .allocation_threshold or request.urgency != .soon) return false;
+        self.major_request = .{};
+        return true;
     }
 
     pub fn sliceBudgetNs(self: Registry, point: SchedulerPoint) u64 {
@@ -1653,11 +1669,15 @@ pub const Registry = struct {
 
     pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(header.meta().flags.in_cycle_list);
+        std.debug.assert(!header.meta().flags.cycle_visited);
         self.removeGcObject(header);
+        header.meta().flags.cycle_visited = true;
     }
 
     pub fn restoreCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(!header.meta().flags.in_cycle_list);
+        std.debug.assert(header.meta().flags.cycle_visited);
+        header.meta().flags.cycle_visited = false;
         self.appendGcObject(header);
     }
 

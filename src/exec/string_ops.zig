@@ -3918,8 +3918,9 @@ pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSV
     if (ctor_value.isObject()) {
         const ctor = property_ops.expectObject(ctor_value) catch null;
         if (ctor) |ctor_object| {
-            const name = try call_mod.nativeFunctionNameForVm(rt, ctor_object);
-            defer rt.memory.allocator.free(name);
+            const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(rt, ctor_object);
+            defer dispatch_name.deinit(rt);
+            const name = dispatch_name.name;
             if (std.mem.eql(u8, name, expected_name)) return true;
         }
     }
@@ -3949,8 +3950,9 @@ pub fn qjsArraySearchCall(
             else => return null,
         }
     else blk: {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
+        const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
+        defer dispatch_name.deinit(ctx.runtime);
+        const name = dispatch_name.name;
         break :blk if (std.mem.eql(u8, name, "lastIndexOf"))
             .last_index_of
         else if (std.mem.eql(u8, name, "indexOf"))
@@ -4103,9 +4105,7 @@ pub fn qjsArrayConcatCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.concat))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "concat")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "concat")) return null;
         if (function_object.arrayBuiltinMarker() != .concat) return null;
     }
 

@@ -1183,12 +1183,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "sumPrecise")) {
         return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "register")) {
-        return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
-    }
-    if (std.mem.eql(u8, name, "unregister")) {
-        return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
-    }
     if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
         return value;
     }
@@ -1241,8 +1235,6 @@ noinline fn callNativeCallableByName(
         }
     }
     if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-    if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
     if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
@@ -1258,9 +1250,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
     if (std.mem.eql(u8, name, "isFinite")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
-    if (core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode(name)) |unsigned| {
-        return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
-    }
     if (std.mem.eql(u8, name, "RegExp")) {
         var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
         native_scope.push();
@@ -1292,7 +1281,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "set")) {
         if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
     }
-    if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
     if (std.mem.eql(u8, name, "next")) {
         if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
@@ -1380,9 +1368,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "set")) {
         if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
     }
-    if (std.mem.eql(u8, name, "deref")) {
-        return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
-    }
     if (std.mem.eql(u8, name, "join")) {
         if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
     }
@@ -1414,6 +1399,11 @@ noinline fn callNativeCallableByName(
     if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
     if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
     if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    // Retained even though `Promise.prototype.{then,catch,finally}` now carry
+    // native records: `core.promise.constructWithPrototype` (src/core/promise.zig:29)
+    // still installs recordless own `then`/`catch` data functions on a
+    // prototype-less promise, which `call.zig`'s capability path can produce
+    // whenever `Promise.prototype` is not (yet) an own data property.
     if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
         if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
     }
@@ -2530,9 +2520,18 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             break :blk owned_name.?;
         };
         const is_native_array_constructor = function_object.arrayBuiltinMarker() == .constructor;
-        if (isBuiltinConstructorName(name) and
-            (!std.mem.eql(u8, name, "Array") or is_native_array_constructor) and
-            !new_target.sameValue(func))
+        // Order matters, not just the predicate: this whole gate only fires for
+        // subclass `super(...)` / `Reflect.construct` with a foreign new.target
+        // (qjs `js_create_from_ctor`, quickjs.c:8117, is likewise only consulted
+        // when new.target differs). `isBuiltinConstructorName` is a ~30-way
+        // string cascade (including the error-name and typed-array-name sets),
+        // and `and` short-circuits left to right, so testing it first made every
+        // direct `new Map()`/`new Date()`/`new WeakRef()` pay the full scan to
+        // reach a branch it can never take. The three operands are pure, so
+        // hoisting the one-word new.target comparison is behavior-identical.
+        if (!new_target.sameValue(func) and
+            isBuiltinConstructorName(name) and
+            (!std.mem.eql(u8, name, "Array") or is_native_array_constructor))
         {
             if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
                 return constructed;

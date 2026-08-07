@@ -49,10 +49,12 @@ pub const ids = struct {
     pub const empty_string: Atom = 47;
     pub const length: Atom = 50;
     pub const name: Atom = 55;
+    pub const eval_: Atom = 59;
     pub const prototype: Atom = 60;
     pub const constructor: Atom = 61;
     pub const value: Atom = 65;
     pub const get: Atom = 66;
+    pub const of: Atom = 68;
     pub const done: Atom = 106;
     pub const undefined_: Atom = 70;
     // `typeof` result strings — predefined string atoms, so OP_typeof returns
@@ -72,12 +74,14 @@ pub const ids = struct {
     pub const arg_var_object: Atom = 84;
     pub const with_object: Atom = 85;
     pub const lastIndex: Atom = 86;
+    pub const target: Atom = 87;
     pub const source: Atom = 109;
     pub const rawJSON: Atom = 114;
     pub const new_target: Atom = 115;
     pub const this_active_func: Atom = 116;
     pub const home_object: Atom = 117;
     pub const class_fields_init: Atom = 120;
+    pub const async_: Atom = 136;
     pub const toJSON: Atom = 147;
     pub const Object: Atom = 151;
     pub const Array: Atom = 152;
@@ -800,10 +804,6 @@ fn makePredefinedMapEntries(comptime kind: AtomKind) [predefinedKindCount(kind)]
     return entries;
 }
 
-const predefined_string_map = blk: {
-    @setEvalBranchQuota(10000);
-    break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.string));
-};
 const predefined_symbol_map = blk: {
     @setEvalBranchQuota(10000);
     break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.symbol));
@@ -812,6 +812,41 @@ const predefined_private_map = blk: {
     @setEvalBranchQuota(10000);
     break :blk std.StaticStringMap(Atom).initComptime(makePredefinedMapEntries(.private));
 };
+
+// QuickJS puts its predefined and dynamically-created atoms behind the same
+// hash lookup. Keep the immutable predefined half in static storage, but use
+// the same hash as `string_index`: a miss must not linearly compare every
+// predefined spelling of the same length before probing the dynamic table.
+// 640 string atoms in 2048 buckets leave the table at 31.25% load.
+const predefined_string_hash_capacity = 2048;
+const predefined_string_hash_mask = predefined_string_hash_capacity - 1;
+const predefined_string_hash_table = blk: {
+    @setEvalBranchQuota(100000);
+    var slots = [_]Atom{null_atom} ** predefined_string_hash_capacity;
+    for (predefined_atoms) |entry| {
+        if (entry.kind != .string) continue;
+        std.debug.assert(parseArrayIndex(entry.name) == null);
+        const hash = std.hash.Wyhash.hash(0, entry.name);
+        var index: usize = @intCast(hash & predefined_string_hash_mask);
+        while (slots[index] != null_atom) {
+            index = (index + 1) & predefined_string_hash_mask;
+        }
+        slots[index] = entry.id;
+    }
+    break :blk slots;
+};
+
+inline fn predefinedStringIdHashed(bytes: []const u8, hash: u64) ?Atom {
+    var index: usize = @intCast(hash & predefined_string_hash_mask);
+    var remaining: usize = predefined_string_hash_capacity;
+    while (remaining != 0) : (remaining -= 1) {
+        const id = predefined_string_hash_table[index];
+        if (id == null_atom) return null;
+        if (std.mem.eql(u8, predefined_atoms[id - 1].name, bytes)) return id;
+        index = (index + 1) & predefined_string_hash_mask;
+    }
+    unreachable;
+}
 
 pub const DynamicAtom = struct {
     id: Atom,
@@ -826,6 +861,14 @@ pub const DynamicAtom = struct {
     /// Link in the table's free-slot list, only meaningful while the entry
     /// is dead (`ref_count == 0`). `no_free_slot` terminates the list.
     next_free: EntryIndex = no_free_slot,
+    /// qjs `JSString.hash` (set at quickjs.c:3314): the full spelling hash of
+    /// this atom, stored so a chain walk rejects a non-match without reading
+    /// the bytes and so the unlink never has to re-hash the spelling. Only
+    /// meaningful for the chained kinds (`.string` / `.global_symbol`).
+    hash: u32 = 0,
+    /// qjs `JSString.hash_next` (spliced at quickjs.c:3318): next atom id in
+    /// this atom's bucket, `null_atom` at the end of the chain.
+    hash_next: Atom = null_atom,
     kind: AtomKind,
     ref_count: usize,
     gc_managed_symbol: bool = false,
@@ -860,24 +903,73 @@ const EntryIndex = u32;
 /// Sentinel terminating the free-slot list.
 const no_free_slot: EntryIndex = std.math.maxInt(EntryIndex);
 
-/// Hash-map context for live string-kind entries. The key is the bytes
-/// slice; the value is an entry index. Equality dereferences into
-/// `entries` to compare bytes — this is safe because we update the map
-/// whenever the entry's bytes / kind / liveness change.
-const InternKey = struct {
-    bytes: []const u8,
+// ---------------------------------------------------------------------------
+// Atom hash: QuickJS's chained table, mirrored.
+//
+// QuickJS keeps every interned atom in one chained hash. `rt->atom_hash` holds
+// the bucket heads (atom indices), each atom stores the full spelling hash in
+// `JSString.hash` and the next atom of its bucket in `JSString.hash_next`:
+//
+//   lookup  quickjs.c:3196-3212 (`__JS_NewAtom`) and 3348-3375 (`__JS_FindAtom`)
+//   insert  quickjs.c:3317-3322 (splice at the bucket head, then resize check)
+//   unlink  quickjs.c:3387-3409 (`JS_FreeAtomStruct`)
+//   resize  quickjs.c:3055-3072 (`JS_ResizeAtomHash`)
+//
+// Two properties matter and are reproduced exactly:
+//   * the *stored full hash* gates the byte comparison, so a chain step that is
+//     not the answer never reads the spelling (quickjs.c:3363 `p->hash == h`);
+//   * insert and unlink are O(1)/O(chain) pointer splices, never a probe to a
+//     free slot, so intern/free churn cannot degrade the table.
+//
+// QuickJS's atom hash stores atom ids for both predefined and dynamic atoms.
+// Use the same value here so the chain can hold predefined atoms and answer the
+// steady-state lookup with one bucket load regardless of atom lifetime; the
+// predefined half lives in comptime storage (`predefined_atoms`), so its
+// mutable chain links live in `AtomTable.predefined_hash_next` instead of in an
+// entry record.
+// ---------------------------------------------------------------------------
+
+/// qjs seeds the spelling hash with the atom type (quickjs.c:3200
+/// `hash_string(str, atom_type)`), so one table can hold the same spelling
+/// interned as a string and as a global symbol without them colliding, and the
+/// kind check at quickjs.c:3364 stays a cheap confirmation rather than the
+/// separator. Unique symbols and private names are never chained (qjs keeps
+/// `JS_ATOM_TYPE_SYMBOL` out of `atom_hash`, quickjs.c:3316).
+fn atomHashSeed(kind: AtomKind) u64 {
+    return switch (kind) {
+        .string => 0,
+        .global_symbol => 1,
+        .symbol, .private => 2,
+    };
+}
+
+/// The spelling hash stored in the atom. qjs keeps 30 bits (`JS_ATOM_HASH_MASK`,
+/// quickjs.c:580) because it packs `hash` into a bitfield next to `atom_type`;
+/// zjs has a whole word, so it keeps all 32.
+fn spellingHash(bytes: []const u8, kind: AtomKind) u32 {
+    // qjs `hash_string8` (quickjs.c:2941): `h = h * 263 + c`, seeded with the
+    // atom type and `static inline`, so the lookup never pays a call to hash
+    // its own key.
+    var h: u32 = @intCast(atomHashSeed(kind));
+    for (bytes) |c| h = h *% 263 +% c;
+    return h;
+}
+
+/// Stored hash of every predefined atom, indexed by `id - 1`. This is the
+/// comptime half of `JSString.hash`.
+const predefined_hash = blk: {
+    @setEvalBranchQuota(200000);
+    var out: [predefined_count]u32 = undefined;
+    for (predefined_atoms, 0..) |entry, i| out[i] = spellingHash(entry.name, entry.kind);
+    break :blk out;
 };
 
-const InternContext = struct {
-    pub fn hash(_: InternContext, key: InternKey) u64 {
-        return std.hash.Wyhash.hash(0, key.bytes);
-    }
-    pub fn eql(_: InternContext, a: InternKey, b: InternKey) bool {
-        return std.mem.eql(u8, a.bytes, b.bytes);
-    }
-};
-
-const InternMap = std.HashMapUnmanaged(InternKey, EntryIndex, InternContext, std.hash_map.default_max_load_percentage);
+/// qjs sizes the bucket array once for the predefined set — `JS_ResizeAtomHash(rt, 512)`
+/// with the comment "there are at least 504 predefined atoms" (quickjs.c:3089) —
+/// and doubles it whenever the atom count reaches `JS_ATOM_COUNT_RESIZE`
+/// (quickjs.c:2875, `2 * size`). zjs has 640 predefined string atoms, so the
+/// same rule ("next power of two that holds the predefined set") gives 1024.
+const atom_hash_initial_size: u32 = 1024;
 
 pub const AtomTable = struct {
     /// Extra table state carried only by `-Dzjs_ownership_audit` builds.
@@ -919,11 +1011,22 @@ pub const AtomTable = struct {
     /// is the live count; the backing buffer extends to `entries_capacity`.
     entries_capacity: usize = 0,
     next_id: Atom = first_dynamic_atom,
-    /// Live string interns indexed by bytes. Lookup is O(1) average.
-    string_index: InternMap = .{},
-    /// Global registry symbols indexed by bytes. Ordinary unique symbols and
-    /// private names intentionally do not enter this map.
-    symbol_index: InternMap = .{},
+    /// qjs `JSRuntime.atom_hash` (quickjs.c:3067): bucket heads of the chained
+    /// atom hash, a power-of-two array shared by string and global-symbol
+    /// atoms. `null_atom` terminates a bucket. Empty until the first intern;
+    /// `AtomTable.init` stays infallible for the allocation-free callers.
+    atom_hash: []Atom = &.{},
+    /// qjs `JSRuntime.atom_count` (quickjs.c:3322), restricted to the atoms
+    /// that are actually chained — qjs also counts its unchained unique
+    /// symbols, but only the chained population drives the resize rule.
+    atom_hash_count: u32 = 0,
+    /// qjs `JSRuntime.atom_count_resize` (quickjs.c:3073) = 2 * bucket count.
+    atom_count_resize: u32 = 0,
+    /// Chain links for the predefined atoms. QuickJS keeps predefined atoms in
+    /// `atom_array` next to the dynamic ones and threads them through the same
+    /// `hash_next` field; zjs holds the predefined half in comptime storage, so
+    /// only their mutable link lives here. Indexed by `id - 1`.
+    predefined_hash_next: [predefined_count]Atom = @splat(null_atom),
     /// Head of the dead-slot free list threaded through
     /// `DynamicAtom.next_free`. Slots (and therefore ids) are recycled
     /// only after their ref count reached zero, so no live holder can be
@@ -950,8 +1053,9 @@ pub const AtomTable = struct {
         const backing: []DynamicAtom = if (self.entries_capacity != 0) self.entries.ptr[0..self.entries_capacity] else self.entries[0..0];
         self.entries = &.{};
         self.entries_capacity = 0;
-        self.string_index.deinit(account.persistent_allocator);
-        self.symbol_index.deinit(account.persistent_allocator);
+        const buckets = self.atom_hash;
+        self.atom_hash = &.{};
+        if (buckets.len != 0) account.free(Atom, buckets);
         for (&self.predefined_str) |slot| std.debug.assert(slot == null);
         for (entries) |*entry| {
             // Cached strings/symbol bodies must have been released through `free` or
@@ -1005,23 +1109,177 @@ pub const AtomTable = struct {
         }
     }
 
+    /// Mutable chain link of any atom id, the `p->hash_next` of quickjs.c:3318.
+    /// Predefined ids read from the table-owned side array, dynamic ids from
+    /// their entry; both are plain `Atom` slots, so this is an address select.
+    inline fn hashNextPtr(self: *AtomTable, id: Atom) *Atom {
+        return if (id < first_dynamic_atom)
+            &self.predefined_hash_next[id - 1]
+        else
+            &self.entries[id - first_dynamic_atom].hash_next;
+    }
+
+    /// Stored spelling hash of any atom id, the `p->hash` of quickjs.c:3363.
+    inline fn storedHash(self: *const AtomTable, id: Atom) u32 {
+        return if (id < first_dynamic_atom)
+            predefined_hash[id - 1]
+        else
+            self.entries[id - first_dynamic_atom].hash;
+    }
+
+    /// qjs `JS_InitAtoms` (quickjs.c:3078-3089): size the bucket array once and
+    /// enter every predefined *string* atom into the chain the dynamic atoms
+    /// share. Predefined unique symbols and private names stay out, exactly as
+    /// qjs keeps `JS_ATOM_TYPE_SYMBOL` out of `atom_hash` (quickjs.c:3316).
+    fn initAtomHash(self: *AtomTable) !void {
+        std.debug.assert(self.atom_hash.len == 0);
+        const buckets = try self.memory.alloc(Atom, atom_hash_initial_size);
+        @memset(buckets, null_atom);
+        self.atom_hash = buckets;
+        self.atom_count_resize = atom_hash_initial_size * 2;
+        self.atom_hash_count = 0;
+        const mask = atom_hash_initial_size - 1;
+        for (predefined_atoms, 0..) |entry, i| {
+            if (entry.kind != .string) continue;
+            const id: Atom = @intCast(i + 1);
+            const bucket = &buckets[predefined_hash[i] & mask];
+            self.predefined_hash_next[i] = bucket.*;
+            bucket.* = id;
+            self.atom_hash_count += 1;
+        }
+    }
+
+    inline fn ensureAtomHash(self: *AtomTable) !void {
+        if (self.atom_hash.len == 0) try self.initAtomHash();
+    }
+
+    /// qjs `JS_ResizeAtomHash` (quickjs.c:3055-3072): allocate the new bucket
+    /// array and re-splice every chain into it using the stored hashes — no
+    /// spelling is re-hashed and no atom moves.
+    fn resizeAtomHash(self: *AtomTable, new_size: u32) !void {
+        std.debug.assert(std.math.isPowerOfTwo(new_size));
+        const new_hash = try self.memory.alloc(Atom, new_size);
+        @memset(new_hash, null_atom);
+        const new_mask = new_size - 1;
+        for (self.atom_hash) |head| {
+            var i = head;
+            while (i != null_atom) {
+                const next_ptr = self.hashNextPtr(i);
+                const following = next_ptr.*;
+                const j = self.storedHash(i) & new_mask;
+                next_ptr.* = new_hash[j];
+                new_hash[j] = i;
+                i = following;
+            }
+        }
+        const old = self.atom_hash;
+        self.atom_hash = new_hash;
+        self.memory.free(Atom, old);
+        self.atom_count_resize = new_size *| 2;
+    }
+
+    /// qjs `__JS_FindAtom` (quickjs.c:3348-3375) and the lookup arm of
+    /// `__JS_NewAtom` (quickjs.c:3196-3212). The stored hash, the atom kind and
+    /// the length gate the byte comparison, so a chain step that is not the
+    /// answer never touches the spelling.
+    inline fn findAtom(self: *const AtomTable, bytes: []const u8, atom_kind: AtomKind, h: u32) Atom {
+        if (self.atom_hash.len == 0) return null_atom;
+        var i = self.atom_hash[h & (self.atom_hash.len - 1)];
+        while (i != null_atom) {
+            if (i < first_dynamic_atom) {
+                const p = &predefined_atoms[i - 1];
+                if (predefined_hash[i - 1] == h and p.kind == atom_kind and
+                    p.name.len == bytes.len and std.mem.eql(u8, p.name, bytes))
+                {
+                    return i;
+                }
+                i = self.predefined_hash_next[i - 1];
+            } else {
+                const entry = &self.entries[i - first_dynamic_atom];
+                if (entry.hash == h and entry.kind == atom_kind and
+                    entry.bytes.len == bytes.len and std.mem.eql(u8, entry.bytes, bytes))
+                {
+                    return i;
+                }
+                i = entry.hash_next;
+            }
+        }
+        return null_atom;
+    }
+
+    /// qjs `__JS_NewAtom` insert (quickjs.c:3317-3322): splice the atom at the
+    /// head of its bucket, then double the table once the chained population
+    /// reaches `atom_count_resize`. A failed resize is ignored exactly as qjs
+    /// ignores `JS_ResizeAtomHash`'s return value — the table stays correct,
+    /// only its chains get longer.
+    fn chainInsert(self: *AtomTable, id: Atom, h: u32) void {
+        const bucket = &self.atom_hash[h & (self.atom_hash.len - 1)];
+        self.hashNextPtr(id).* = bucket.*;
+        bucket.* = id;
+        self.atom_hash_count += 1;
+        if (self.atom_hash_count >= self.atom_count_resize) {
+            const next_size = self.atom_hash.len * 2;
+            if (next_size <= std.math.maxInt(u32)) {
+                self.resizeAtomHash(@intCast(next_size)) catch {};
+            }
+        }
+    }
+
+    /// qjs `JS_FreeAtomStruct`'s unlink (quickjs.c:3387-3409): walk the bucket
+    /// from its head and splice the atom out. The stored hash means the dying
+    /// atom's spelling is never re-hashed and never compared.
+    fn chainUnlink(self: *AtomTable, id: Atom, h: u32) void {
+        std.debug.assert(self.atom_hash.len != 0);
+        const bucket = &self.atom_hash[h & (self.atom_hash.len - 1)];
+        var i = bucket.*;
+        std.debug.assert(i != null_atom);
+        if (i == id) {
+            bucket.* = self.hashNextPtr(id).*;
+        } else {
+            while (true) {
+                const link = self.hashNextPtr(i);
+                const following = link.*;
+                std.debug.assert(following != null_atom);
+                if (following == id) {
+                    link.* = self.hashNextPtr(id).*;
+                    break;
+                }
+                i = following;
+            }
+        }
+        self.hashNextPtr(id).* = null_atom;
+        self.atom_hash_count -= 1;
+    }
+
     pub fn internString(self: *AtomTable, bytes: []const u8) !Atom {
-        if (predefinedId(bytes, .string)) |id| return id;
+        // Match JS_NewAtomLen's digit gate: integer atoms do not need a
+        // string hash at all (quickjs.c:3465 `is_digit(*str)`).
         if (parseArrayIndex(bytes)) |n| return atomFromUInt32(n);
-        return self.internDynamic(bytes, .string, true, false, false);
+        try self.ensureAtomHash();
+        const hash = spellingHash(bytes, .string);
+        const found = self.findAtom(bytes, .string, hash);
+        if (found != null_atom) {
+            // qjs:3207 / 3370: `__JS_AtomIsConst` atoms carry no ref count.
+            if (isConst(found)) return found;
+            const entry = &self.entries[found - first_dynamic_atom];
+            std.debug.assert(entry.isLive() and entry.kind == .string);
+            entry.ref_count += 1;
+            return found;
+        }
+        return self.internDynamic(bytes, .string, true, false, false, hash);
     }
 
     pub fn newSymbol(self: *AtomTable, description: []const u8, atom_kind: AtomKind) !Atom {
         std.debug.assert(atom_kind == .symbol or atom_kind == .private);
-        return self.internDynamic(description, atom_kind, false, false, false);
+        return self.internDynamic(description, atom_kind, false, false, false, 0);
     }
 
     pub fn newValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internDynamic(description, .symbol, false, true, false);
+        return self.internDynamic(description, .symbol, false, true, false, 0);
     }
 
     pub fn newValueSymbolNoDescription(self: *AtomTable) !Atom {
-        return self.internDynamic("", .symbol, false, true, true);
+        return self.internDynamic("", .symbol, false, true, true, 0);
     }
 
     pub fn internSymbol(self: *AtomTable, description: []const u8) !Atom {
@@ -1029,26 +1287,32 @@ pub const AtomTable = struct {
     }
 
     pub fn internGlobalSymbol(self: *AtomTable, description: []const u8) !Atom {
-        if (self.symbol_index.get(.{ .bytes = description })) |idx| {
-            const entry = &self.entries[idx];
+        try self.ensureAtomHash();
+        const hash = spellingHash(description, .global_symbol);
+        const found = self.findAtom(description, .global_symbol, hash);
+        if (found != null_atom) {
+            const entry = self.findDynamic(found).?;
             std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
             self.retainValueSymbolEntry(entry);
-            return entry.id;
+            return found;
         }
-        return self.internDynamic(description, .global_symbol, true, false, false);
+        return self.internDynamic(description, .global_symbol, true, false, false, hash);
     }
 
     pub fn internRegisteredValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        if (self.symbol_index.get(.{ .bytes = description })) |idx| {
-            const entry = &self.entries[idx];
+        try self.ensureAtomHash();
+        const hash = spellingHash(description, .global_symbol);
+        const found = self.findAtom(description, .global_symbol, hash);
+        if (found != null_atom) {
+            const entry = self.findDynamic(found).?;
             std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
             if (!entry.registry_managed_symbol) {
                 self.retainValueSymbolEntry(entry);
                 entry.registry_managed_symbol = true;
             }
-            return entry.id;
+            return found;
         }
-        const id = try self.internDynamic(description, .global_symbol, true, false, false);
+        const id = try self.internDynamic(description, .global_symbol, true, false, false, hash);
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
         return id;
@@ -1059,8 +1323,7 @@ pub const AtomTable = struct {
         if (idx >= self.entries.len) return false;
         const entry = self.entries[idx];
         if (!entry.hasLiveValue() or entry.kind != .global_symbol) return false;
-        const indexed = self.symbol_index.get(.{ .bytes = entry.bytes }) orelse return false;
-        return indexed == idx;
+        return self.findAtom(entry.bytes, .global_symbol, entry.hash) == atom_id;
     }
 
     pub fn dup(self: *AtomTable, atom: Atom) Atom {
@@ -1432,25 +1695,14 @@ pub const AtomTable = struct {
         return body;
     }
 
-    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool) !Atom {
-        // Fast path: interning lookup via hash map. The map is keyed by
-        // bytes, indexed per-kind (string vs symbol/private) so a string
-        // `"foo"` and a symbol description `"foo"` map to distinct atoms.
-        if (atom_kind == .string) {
-            if (self.string_index.get(.{ .bytes = bytes })) |idx| {
-                const entry = &self.entries[idx];
-                std.debug.assert(entry.isLive() and entry.kind == .string);
-                entry.ref_count += 1;
-                return entry.id;
-            }
-        } else if (atom_kind == .global_symbol) {
-            if (self.symbol_index.get(.{ .bytes = bytes })) |idx| {
-                const entry = &self.entries[idx];
-                std.debug.assert(entry.hasLiveValue() and entry.kind == .global_symbol);
-                self.retainValueSymbolEntry(entry);
-                return entry.id;
-            }
-        }
+    /// `lookup_hash` is the spelling hash the caller already computed while
+    /// missing in the chain; it is only read for the chained kinds. Every
+    /// `index_entry` caller has just proved the atom is absent, mirroring
+    /// `__JS_NewAtom`, where the create path is the fall-through of the same
+    /// function that did the chain walk (quickjs.c:3196-3320).
+    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
+        std.debug.assert(!index_entry or atom_kind == .string or atom_kind == .global_symbol);
+        std.debug.assert(!index_entry or self.atom_hash.len != 0);
 
         const owned: []u8 = if (bytes.len == 0) &.{} else try self.memory.alloc(u8, bytes.len);
         errdefer if (owned.len != 0) self.memory.free(u8, owned);
@@ -1487,7 +1739,7 @@ pub const AtomTable = struct {
                 entry.next_free = self.free_slot_head;
                 self.free_slot_head = idx;
             }
-            if (index_entry) try self.indexEntry(idx);
+            if (index_entry) self.indexEntry(idx, lookup_hash);
             if (atom_kind == .private and entry.id < self.first_private_dynamic_atom) {
                 self.first_private_dynamic_atom = entry.id;
             }
@@ -1506,7 +1758,7 @@ pub const AtomTable = struct {
             .no_symbol_description = no_symbol_description,
         });
         errdefer self.entries = self.entries[0..idx];
-        if (index_entry) try self.indexEntry(idx);
+        if (index_entry) self.indexEntry(idx, lookup_hash);
         if (atom_kind == .private and id < self.first_private_dynamic_atom) {
             self.first_private_dynamic_atom = id;
         }
@@ -1539,21 +1791,23 @@ pub const AtomTable = struct {
         return idx;
     }
 
-    fn indexEntry(self: *AtomTable, idx: EntryIndex) !void {
+    /// Store the spelling hash in the new atom and splice it into its bucket —
+    /// the `p->hash = h; p->hash_next = atom_hash[h1]; atom_hash[h1] = i;` of
+    /// quickjs.c:3314-3319. Unlike the open-addressed table it replaces this
+    /// cannot fail and cannot probe: a create is one head splice.
+    fn indexEntry(self: *AtomTable, idx: EntryIndex, hash: u32) void {
         const entry = &self.entries[idx];
-        switch (entry.kind) {
-            .string => try self.string_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
-            .global_symbol => try self.symbol_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
-            .symbol => {},
-            .private => {},
-        }
+        std.debug.assert(entry.kind == .string or entry.kind == .global_symbol);
+        entry.hash = hash;
+        self.chainInsert(entry.id, hash);
     }
 
+    /// qjs `JS_FreeAtomStruct` (quickjs.c:3387-3409). Symbols and private names
+    /// were never chained, so they have nothing to unlink (quickjs.c:3385).
     fn unindexEntry(self: *AtomTable, idx: EntryIndex) void {
         const entry = &self.entries[idx];
         switch (entry.kind) {
-            .string => _ = self.string_index.remove(.{ .bytes = entry.bytes }),
-            .global_symbol => _ = self.symbol_index.remove(.{ .bytes = entry.bytes }),
+            .string, .global_symbol => self.chainUnlink(entry.id, entry.hash),
             .symbol, .private => {},
         }
     }
@@ -1652,9 +1906,9 @@ pub fn predefinedById(id: Atom) ?PredefinedAtom {
 }
 
 pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
-    @setEvalBranchQuota(10000);
+    @setEvalBranchQuota(100000);
     return switch (kind) {
-        .string => predefined_string_map.get(bytes),
+        .string => predefinedStringIdHashed(bytes, std.hash.Wyhash.hash(0, bytes)),
         .symbol => predefined_symbol_map.get(bytes),
         .global_symbol => null,
         .private => predefined_private_map.get(bytes),

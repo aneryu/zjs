@@ -1509,9 +1509,7 @@ pub fn qjsArrayForEachCall(
     if (!object.isArray()) return null;
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.for_each))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "forEach")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "forEach")) return null;
     }
 
     const callback_this = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -1537,9 +1535,7 @@ pub fn qjsArrayAtCall(
     const function_object = callableObjectFromValue(func) orelse return null;
     const typed_array_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.at))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "at")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "at")) return null;
     }
 
     if (receiver.isNull() or receiver.isUndefined()) {
@@ -1643,8 +1639,9 @@ pub fn qjsArrayIterationCall(
     const mode: ArrayIterationMode = if (arrayPrototypeRecordId(function_object)) |record_id|
         arrayIterationModeFromRecordId(record_id) orelse return null
     else blk: {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
+        const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
+        defer dispatch_name.deinit(ctx.runtime);
+        const name = dispatch_name.name;
         break :blk if (std.mem.eql(u8, name, "forEach"))
             .for_each
         else if (std.mem.eql(u8, name, "map"))
@@ -1948,9 +1945,7 @@ pub fn qjsArrayReduceCall(
     else
         @intFromEnum(method_ids.array.PrototypeMethod.reduce);
     if (!isArrayPrototypeRecord(function_object, expected_id)) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, if (from_right) "reduceRight" else "reduce")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, if (from_right) "reduceRight" else "reduce")) return null;
     }
 
     if (receiver.isNull() or receiver.isUndefined()) {
@@ -2457,9 +2452,7 @@ pub fn qjsArraySliceCall(
     const function_object = callableObjectFromValue(func) orelse return null;
     if (getStringPrototypeMethodId(ctx.runtime, function_object) != null) return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.slice))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "slice")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "slice")) return null;
     }
 
     if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
@@ -2568,8 +2561,9 @@ pub fn qjsTypedArraySliceSubarrayCall(
     args: []const core.JSValue,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
-    const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-    defer ctx.runtime.memory.allocator.free(name);
+    const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
+    defer dispatch_name.deinit(ctx.runtime);
+    const name = dispatch_name.name;
     const is_slice = std.mem.eql(u8, name, "slice");
     const is_subarray = std.mem.eql(u8, name, "subarray");
     if (!is_slice and !is_subarray) return null;
@@ -2696,6 +2690,155 @@ pub fn typedArraySpeciesConstructorForObject(
     return species_value;
 }
 
+/// Dense fast path for Array.prototype.splice, mirroring the fast_array case of
+/// quickjs js_array_splice (quickjs.c:43040-43082): when the species constructor
+/// is the default and the receiver is an ordinary dense fast array whose
+/// affected range lies inside the dense extent, the removed elements are
+/// bulk-copied into a fresh dense array (js_create_array, quickjs.c:9601) and the
+/// tail is relocated with one bulk move (quickjs.c:43064/43072) instead of the
+/// spec-literal per-element HasProperty/Get/Set loop.
+///
+/// Returns the removed array on success, or null to fall through to the generic
+/// path for anything not provably an ordinary dense array. Every argument
+/// coercion has already run in the caller, so the dense extent is re-read here:
+/// a user `valueOf` may have mutated the receiver meanwhile, which is exactly
+/// why qjs re-reads p->u.array.count at its own gate (quickjs.c:43033).
+fn qjsFastDenseArraySplice(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    receiver: core.JSValue,
+    object: *core.Object,
+    length: usize,
+    actual_start: usize,
+    actual_delete_count: usize,
+    insert_items: []const core.JSValue,
+    new_length: usize,
+) !?core.JSValue {
+    const rt = ctx.runtime;
+    // Receiver must BE the array (no primitive wrapper / proxy indirection), and
+    // an ordinary, extensible, length-writable dense fast array with no exotic
+    // [[Set]]/[[DefineOwnProperty]]/[[Delete]] behaviour.
+    if (objectFromValue(receiver) != object) return null;
+    if (!object.isArray() or !object.isFastArray()) return null;
+    if (object.hasExoticMethods() or object.proxyTarget() != null) return null;
+    if (!object.flags.length_writable or !object.flags.extensible) return null;
+    // qjs `can_extend_fast_array` (quickjs.c:9935-9944), the same term its splice
+    // gate carries at quickjs.c:43046.
+    if (!object.canExtendFastArray()) return null;
+    // Any inherited indexed property would make the generic [[Set]]/[[Delete]] of
+    // a moved slot observe a prototype accessor; the bulk move skips the
+    // prototype chain, so only proceed when the chain has no indexed props.
+    if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+
+    // Re-read the dense extent AFTER the coercions. Requiring count == length
+    // covers both a holey tail (whose holes the generic path must preserve via
+    // per-index HasProperty) and any coercion-time mutation of the receiver:
+    // actual_start / actual_delete_count were derived from the pre-coercion
+    // length, so they are only in bounds while the extent still agrees with it.
+    const count32: usize = @intCast(object.fastArrayCount());
+    if (count32 != length) return null;
+    if (count32 != @as(usize, @intCast(object.arrayLength()))) return null;
+    if (actual_start + actual_delete_count > count32) return null;
+    const new_count = count32 - actual_delete_count + insert_items.len;
+    if (new_count != new_length) return null;
+    if (new_count > core.array.max_array_length) return null;
+    const new_count_u32 = std.math.cast(u32, new_count) orelse return null;
+
+    const array_proto = (try arrayHasDefaultSpecies(rt, global, object)) orelse return null;
+
+    // Removed elements: js_create_array mirror (quickjs.c:43048 -> 9601), the
+    // same bulk-dup construction slice already uses above.
+    const removed = try core.Object.createArray(rt, array_proto);
+    var removed_value = removed.value();
+    errdefer removed_value.free(rt);
+
+    // memory.alloc and fastArrayEnsureCapacity below can GC; root the fresh
+    // array across both.
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &removed_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    if (actual_delete_count > 0) {
+        const elements = try rt.memory.alloc(core.JSValue, actual_delete_count);
+        const src = object.arrayElements()[actual_start .. actual_start + actual_delete_count];
+        for (src, 0..) |v, i| elements[i] = v.dup();
+        removed.adoptDenseArrayElementsAssumingEmpty(elements);
+        removed.flags.may_have_indexed_properties = true;
+    }
+
+    // From here on nothing allocates, so no GC can observe the half-moved
+    // element window. Every deleted reference is already duplicated into
+    // `removed`, so each free below is a pure refcount decrement.
+    const tail_src = actual_start + actual_delete_count;
+    const tail_len = count32 - tail_src;
+    const tail_dst = actual_start + insert_items.len;
+    if (insert_items.len < actual_delete_count) {
+        const values = object.fastArrayValuesMut();
+        // qjs frees the deleted slots the inserts will not overwrite
+        // (quickjs.c:43061-43062) before moving the tail down (quickjs.c:43064).
+        for (values[tail_dst..tail_src]) |v| v.free(rt);
+        if (tail_len > 0) {
+            std.mem.copyForwards(
+                core.JSValue,
+                values[tail_dst .. tail_dst + tail_len],
+                values[tail_src .. tail_src + tail_len],
+            );
+        }
+        // Slots past the new extent still hold aliases of references that now
+        // live in their moved-down positions; dropping the count is what
+        // retires them, exactly as qjs assigns p->u.array.count directly.
+        object.setFastArrayCountAssumeCapacity(new_count_u32);
+    } else if (insert_items.len > actual_delete_count) {
+        try object.fastArrayEnsureCapacity(rt, new_count_u32);
+        // Growth may reallocate the backing buffer, so publish the new extent
+        // first and only then take the window (qjs re-assigns arrp for the same
+        // reason at quickjs.c:43069). Count and length must move together to
+        // preserve the `length >= count` invariant that arrayElementsMut
+        // asserts; the array was fully dense on entry, so the new dense extent
+        // IS the new logical length. This is the idiom qjsFastDenseArrayUnshift
+        // already relies on.
+        object.setFastArrayCountAssumeCapacity(new_count_u32);
+        object.setArrayLength(new_count_u32);
+        const values = object.fastArrayValuesMut();
+        if (tail_len > 0) {
+            std.mem.copyBackwards(
+                core.JSValue,
+                values[tail_dst .. tail_dst + tail_len],
+                values[tail_src .. tail_src + tail_len],
+            );
+        }
+        // The widened gap still holds aliases of the references that just moved
+        // up; blank it so the insert loop's free() cannot drop a live tail
+        // reference (qjs fills the same range with JS_UNDEFINED,
+        // quickjs.c:43073-43074).
+        for (values[tail_src..tail_dst]) |*slot| slot.* = core.JSValue.undefinedValue();
+    }
+
+    // Insert loop: qjs set_value(&arrp[start + i], JS_DupValue(argv[i + 2]))
+    // (quickjs.c:43080-43081). Each overwritten slot is either a deleted
+    // original (already duplicated into `removed`) or the undefined filler
+    // above, so no destructor can run here.
+    if (insert_items.len > 0) {
+        const values = object.fastArrayValuesMut();
+        for (insert_items, 0..) |item, offset| {
+            const slot = &values[actual_start + offset];
+            const old = slot.*;
+            slot.* = item.dup();
+            old.free(rt);
+        }
+    }
+
+    object.setArrayLength(new_count_u32);
+    object.markIndexedProperties(rt);
+    return removed_value;
+}
+
 pub fn qjsArraySpliceCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2706,9 +2849,7 @@ pub fn qjsArraySpliceCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.splice))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "splice")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "splice")) return null;
     }
 
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
@@ -2751,6 +2892,25 @@ pub fn qjsArraySpliceCall(
     const max_safe_length: usize = 9007199254740991;
     const new_length = length - actual_delete_count + insert_count;
     if (new_length > max_safe_length) return error.TypeError;
+
+    // qjs js_array_splice takes its fast_array branch here, after every argument
+    // coercion and before allocating the result via the species constructor
+    // (quickjs.c:43040). Placing the arm at the same point keeps the observable
+    // order identical: a user `valueOf` in the arguments still runs first, and
+    // the arm re-validates the receiver against the post-coercion state.
+    if (try qjsFastDenseArraySplice(
+        ctx,
+        global,
+        receiver,
+        object,
+        length,
+        actual_start,
+        actual_delete_count,
+        if (args.len > 2) args[2..] else &.{},
+        new_length,
+    )) |removed_fast| {
+        return removed_fast;
+    }
 
     const removed_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, actual_delete_count, null, null);
     errdefer removed_value.free(ctx.runtime);
@@ -2840,9 +3000,7 @@ pub fn qjsArrayCopyWithinCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.copy_within))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "copyWithin")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "copyWithin")) return null;
     }
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
 
@@ -2962,9 +3120,7 @@ pub fn qjsArrayFillCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.fill))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "fill")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "fill")) return null;
     }
 
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
@@ -3084,9 +3240,7 @@ pub fn qjsArrayPushCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.push))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "push")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "push")) return null;
     }
 
     return qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame);
@@ -3159,9 +3313,7 @@ pub fn qjsArrayPopCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.pop))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "pop")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "pop")) return null;
     }
 
     return qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame);
@@ -3259,9 +3411,7 @@ pub fn qjsArrayShiftCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.shift))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "shift")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "shift")) return null;
     }
 
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
@@ -3397,9 +3547,7 @@ pub fn qjsArrayUnshiftCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.unshift))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "unshift")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "unshift")) return null;
     }
 
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
@@ -3458,9 +3606,7 @@ pub fn qjsArrayReverseCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.reverse))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "reverse")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "reverse")) return null;
     }
     if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
 
@@ -3848,9 +3994,7 @@ pub fn qjsArrayFromCall(
         return try qjsTypedArrayFromStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     }
     if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.from))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "from")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "from")) return null;
     }
     if (args.len < 1 or args[0].isNull() or args[0].isUndefined()) return error.TypeError;
     const map_fn: ?core.JSValue = if (args.len >= 2 and !args[1].isUndefined()) blk: {
@@ -4019,9 +4163,7 @@ pub fn qjsArrayFromAsyncCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.from_async))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "fromAsync")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "fromAsync")) return null;
     }
     var capability = try promise_ops.qjsDefaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
     errdefer capability.deinit(ctx.runtime);
@@ -4794,9 +4936,7 @@ pub fn qjsArrayOfCall(
         return try qjsTypedArrayOfStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     }
     if (!isArrayStaticRecord(function_object, @intFromEnum(method_ids.array.StaticMethod.of))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "of")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "of")) return null;
     }
     if (args.len > @as(usize, @intCast(std.math.maxInt(i32)))) return error.RangeError;
 
@@ -4929,8 +5069,9 @@ pub fn isConstructorForArrayOf(rt: *core.JSRuntime, value: core.JSValue) !bool {
         return isConstructorForArrayOf(rt, target);
     }
     if (object.class_id == core.class.ids.c_function) {
-        const native_name = try call_mod.nativeFunctionNameForVm(rt, object);
-        defer rt.memory.allocator.free(native_name);
+        const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(rt, object);
+        defer dispatch_name.deinit(rt);
+        const native_name = dispatch_name.name;
         return isBuiltinConstructorName(native_name);
     }
     return object.class_id == core.class.ids.c_closure;
@@ -4949,9 +5090,7 @@ pub fn qjsArrayMapCall(
     if (!object.isArray()) return null;
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.map))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "map")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "map")) return null;
     }
 
     const mapped = try core.Object.createArray(ctx.runtime, null);
@@ -4995,9 +5134,7 @@ pub fn qjsArraySortCall(
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.sort))) {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
-        if (!std.mem.eql(u8, name, "sort")) return null;
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "sort")) return null;
     }
     const comparator = if (args.len >= 1 and !args[0].isUndefined()) args[0] else core.JSValue.undefinedValue();
     if (!comparator.isUndefined() and !isCallableValue(comparator)) return error.TypeError;
@@ -5187,8 +5324,9 @@ pub fn qjsArrayByCopyCall(
             else => return null,
         }
     else blk: {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
+        const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
+        defer dispatch_name.deinit(ctx.runtime);
+        const name = dispatch_name.name;
         break :blk if (std.mem.eql(u8, name, "toReversed"))
             .to_reversed
         else if (std.mem.eql(u8, name, "toSorted"))
@@ -5454,8 +5592,9 @@ pub fn qjsArrayFlatCall(
             else => return null,
         }
     else blk: {
-        const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-        defer ctx.runtime.memory.allocator.free(name);
+        const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
+        defer dispatch_name.deinit(ctx.runtime);
+        const name = dispatch_name.name;
         break :blk if (std.mem.eql(u8, name, "flatMap"))
             true
         else if (std.mem.eql(u8, name, "flat"))
@@ -5755,8 +5894,9 @@ pub fn arrayUsesDefaultIterator(
     defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) return error.TypeError;
     const function_object = callableObjectFromValue(iterator_method) orelse return false;
-    const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-    defer ctx.runtime.memory.allocator.free(name);
+    const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
+    defer dispatch_name.deinit(ctx.runtime);
+    const name = dispatch_name.name;
     return std.mem.eql(u8, name, "values");
 }
 

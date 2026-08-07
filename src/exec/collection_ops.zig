@@ -675,6 +675,10 @@ fn collectionIterator(
     const iterator = try core.Object.create(rt, iterator_class, prototype.object);
     errdefer core.Object.destroyFromHeader(rt, &iterator.header);
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), target_value.dup());
+    // No entry-array cursor yet: qjs's fresh iterator has `cur_record == NULL`
+    // and holds no record reference (js_map_iterator_new quickjs.c:52556). The
+    // cursor is taken on the first advance and released on exhaustion or in the
+    // iterator payload teardown.
     iterator.iteratorIndexSlot().* = 0;
     iterator.iteratorKindSlot().* = @intFromEnum(kind);
     return iterator.value();
@@ -774,6 +778,9 @@ fn collectionIteratorNext(rt: *core.JSRuntime, iterator: *core.Object) !core.JSV
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return error.TypeError;
     const target_value = (iterator.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const target = try expectObject(target_value);
+    // Park the cursor before reading a position out of the entry array
+    // (quickjs.c:52605 `mr->ref_count++`); the done arm below detaches it.
+    iterator.retainCollectionIteratorCursor();
     while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().*.len) {
         const index = (iterator.iteratorIndexSlot().*);
         iterator.iteratorIndexSlot().* += 1;
@@ -782,7 +789,7 @@ fn collectionIteratorNext(rt: *core.JSRuntime, iterator: *core.Object) !core.JSV
         return iteratorResult(rt, try iteratorValue(rt, target.class_id, entry, @enumFromInt((iterator.iteratorKindSlot().*))), false);
     }
     const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
-    iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
+    iterator.detachCollectionIteratorTarget(rt);
     return done_result;
 }
 
@@ -938,15 +945,24 @@ fn collectionForEach(
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1 or !isCallableObject(args[0])) return error.TypeError;
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    // js_map_forEach (quickjs.c:52318-52332) locks the current record for the
+    // duration of the callback and only then advances. zjs walks by index, so
+    // the lock is on the entry array: the callback may delete entries, but the
+    // slots must not shift under the cursor.
+    object.retainCollectionCursor();
+    defer object.releaseCollectionCursor();
     var index: usize = 0;
     while (index < object.collectionEntriesSlot().*.len) {
         const entry = object.collectionEntriesSlot().*[index];
         index += 1;
         if (!entry.active) continue;
-        var callback_args = if (object.class_id == core.class.ids.set)
-            [_]core.JSValue{ entry.key, entry.key, object.value() }
-        else
-            [_]core.JSValue{ entry.value, entry.key, object.value() };
+        // "must duplicate in case the record is deleted" (quickjs.c:52322): the
+        // callback can delete this entry, which frees the stored key/value.
+        const key = entry.key.dup();
+        defer key.free(rt);
+        const value = if (object.class_id == core.class.ids.set) key.dup() else entry.value.dup();
+        defer value.free(rt);
+        var callback_args = [_]core.JSValue{ value, key, object.value() };
         const result = try host.callWithThis(rt, args[0], this_arg, &callback_args);
         result.free(rt);
     }
@@ -1113,6 +1129,12 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
     const other_record = try setLikeRecord(rt, other);
+    // These arms walk the receiver's entry array while calling into the
+    // set-like `has`/`keys` methods, i.e. across arbitrary user code that may
+    // delete from the receiver. Same contract as js_map_forEach's record lock
+    // (quickjs.c:52320): the walked slots must not shift.
+    object.retainCollectionCursor();
+    defer object.releaseCollectionCursor();
     const result_value = try constructWithPrototype(rt, 2, object.getPrototype());
     errdefer result_value.free(rt);
     const result = try expectObject(result_value);
@@ -1214,6 +1236,9 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
     const other_record = try setLikeRecord(rt, other);
+    // Same entry-array lock as `setComposition`: `setLikeHas` runs user code.
+    object.retainCollectionCursor();
+    defer object.releaseCollectionCursor();
 
     switch (operation) {
         .is_disjoint_from => {
@@ -1742,14 +1767,21 @@ pub fn qjsCollectionForEachCall(
         caller_function,
         caller_frame,
     );
+    // js_map_forEach (quickjs.c:52318-52332) locks the current record across the
+    // callback and only then advances; zjs walks by index, so the lock covers
+    // the whole entry array.
+    receiver.retainCollectionCursor();
+    defer receiver.releaseCollectionCursor();
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
-        const callback_args = if (receiver.class_id == core.class.ids.set)
-            [_]core.JSValue{ entry.key, entry.key, receiver.value() }
-        else
-            [_]core.JSValue{ entry.value, entry.key, receiver.value() };
+        // "must duplicate in case the record is deleted" (quickjs.c:52322).
+        const key = entry.key.dup();
+        defer key.free(ctx.runtime);
+        const value = if (receiver.class_id == core.class.ids.set) key.dup() else entry.value.dup();
+        defer value.free(ctx.runtime);
+        const callback_args = [_]core.JSValue{ value, key, receiver.value() };
         const result = try callback_call.call(&callback_args);
         result.free(ctx.runtime);
     }
@@ -1775,6 +1807,11 @@ pub fn qjsSetMethodCall(
     const other_value = if (args.len >= 1) args[0] else return error.TypeError;
     var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
     defer other_record.deinit(ctx.runtime);
+    // The receiver's entry array is walked by index across the set-like
+    // `has`/`keys` user calls; park a cursor so the slots cannot shift (same
+    // contract as js_map_forEach's record lock, quickjs.c:52320).
+    receiver.retainCollectionCursor();
+    defer receiver.releaseCollectionCursor();
     return switch (mode) {
         .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
         .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
@@ -1903,14 +1940,19 @@ fn qjsCollectionForEachRecord(
         caller_function,
         caller_frame,
     );
+    // Same record lock + argument duplication as js_map_forEach
+    // (quickjs.c:52318-52332).
+    receiver.retainCollectionCursor();
+    defer receiver.releaseCollectionCursor();
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
-        const callback_args = if (receiver.class_id == core.class.ids.set)
-            [_]core.JSValue{ entry.key, entry.key, this_value }
-        else
-            [_]core.JSValue{ entry.value, entry.key, this_value };
+        const key = entry.key.dup();
+        defer key.free(ctx.runtime);
+        const value = if (receiver.class_id == core.class.ids.set) key.dup() else entry.value.dup();
+        defer value.free(ctx.runtime);
+        const callback_args = [_]core.JSValue{ value, key, this_value };
         const result = try callback_call.call(&callback_args);
         result.free(ctx.runtime);
     }
@@ -1932,6 +1974,9 @@ fn qjsSetMethodRecord(
     var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
     defer other_record.deinit(ctx.runtime);
     const mode = qjsSetMethodModeFromRecord(method) orelse return error.TypeError;
+    // Same entry-array lock as `qjsSetMethodCall`.
+    receiver.retainCollectionCursor();
+    defer receiver.releaseCollectionCursor();
     return switch (mode) {
         .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
         .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),

@@ -25,7 +25,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const coverage = @import("coverage.zig");
 const labels = @import("labels.zig");
 const core = @import("../core/root.zig");
 
@@ -42,6 +41,22 @@ pub const SourceSlot = struct {
     col: i32,
 };
 
+/// Sparse events needed by exact-CFG construction that are not already
+/// represented by LabelSlot/RelocEntry.  Real parser offsets are below 2 GiB
+/// (the same invariant as `opcode.op.parser_label_tag`), leaving one bit for
+/// the event kind and keeping each row to four bytes.
+pub const ControlKind = enum(u1) {
+    terminal,
+    direct_eval,
+};
+
+pub const ControlSlot = packed struct(u32) {
+    temp_offset: u31,
+    kind: ControlKind,
+};
+
+const inline_control_capacity: u32 = 4;
+
 /// A detached tail segment. Owns its backings and the atom refs moved out of
 /// the builder ledger until spliceSegment (which consumes it) or
 /// discardSegment (which releases it). Offsets are segment-relative.
@@ -50,6 +65,7 @@ pub const DetachedSegment = struct {
     atoms: []core.atom.Atom = &.{},
     /// operand_offset is segment-relative; kind is preserved (jump32/aux32).
     relocs: []labels.RelocEntry = &.{},
+    controls: []ControlSlot = &.{},
     /// Labels whose bind sits inside the segment, as (label, rel offset).
     binds: []Bind = &.{},
     sources: []SourceSlot = &.{},
@@ -69,7 +85,7 @@ pub const Error = error{
 /// Grow a backing without changing its initialized-prefix length. The visible
 /// slice always spans the full allocation; `used` alone identifies readable
 /// entries.
-fn reserve(
+inline fn reserve(
     comptime T: type,
     mem: *core.memory.MemoryAccount,
     slice: *[]T,
@@ -81,6 +97,24 @@ fn reserve(
     const required = std.math.add(usize, @as(usize, used), need) catch
         return error.OutOfMemory;
     if (required <= capacity.*) return;
+
+    return reserveSlow(T, mem, slice, capacity, used, required, min_cap);
+}
+
+/// QuickJS keeps the DynBuf capacity check in its inline `dbuf_put*` helpers
+/// and enters an outlined allocator only when the backing must grow.  Keep the
+/// same call shape here: ordinary emission pays a compare, while the uncommon
+/// allocation/copy/free path remains shared and recoverable.
+noinline fn reserveSlow(
+    comptime T: type,
+    mem: *core.memory.MemoryAccount,
+    slice: *[]T,
+    capacity: *usize,
+    used: u32,
+    required: usize,
+    comptime min_cap: usize,
+) Error!void {
+    std.debug.assert(required > capacity.*);
 
     const doubled = std.math.mul(usize, capacity.*, 2) catch std.math.maxInt(usize);
     const new_capacity = @max(@max(required, doubled), min_cap);
@@ -99,6 +133,7 @@ pub const Snapshot = struct {
     atom_len: u32,
     label_len: u32,
     reloc_len: u32,
+    control_len: u32,
     source_len: u32,
     last_opcode_pos: i64,
 };
@@ -125,6 +160,17 @@ pub const Builder = struct {
     reloc_capacity: usize = 0,
     reloc_len: u32 = 0,
 
+    /// Consumer-proportional CFG side table. Relocation-bearing control flow
+    /// already lives in `relocs`; this contains only non-reloc terminals and
+    /// direct eval. Parser-owned builders enable it before their first emit.
+    /// Four inline rows cover the common one-return function without another
+    /// allocation; uncommon additional rows spill into a growable backing.
+    control_index_enabled: bool = false,
+    inline_controls: [inline_control_capacity]ControlSlot = undefined,
+    control_spill: []ControlSlot = &.{},
+    control_spill_capacity: usize = 0,
+    control_len: u32 = 0,
+
     source_slots: []SourceSlot = &.{},
     source_capacity: usize = 0,
     source_len: u32 = 0,
@@ -137,6 +183,86 @@ pub const Builder = struct {
         return .{ .memory = memory, .atoms = atoms };
     }
 
+    /// Enable the sparse control index before the first emitted byte. Test
+    /// harnesses that construct arbitrary byte streams can leave it disabled;
+    /// cfg.build then uses its self-validating decode fallback.
+    pub fn enableControlIndex(self: *Builder) Error!void {
+        if (self.code_len != 0 or self.control_len != 0)
+            return error.InvalidBytecode;
+        self.control_index_enabled = true;
+    }
+
+    pub fn hasControlIndex(self: *const Builder) bool {
+        return self.control_index_enabled;
+    }
+
+    pub fn controlCount(self: *const Builder) u32 {
+        return self.control_len;
+    }
+
+    pub fn controlAt(self: *const Builder, index: u32) ControlSlot {
+        std.debug.assert(index < self.control_len);
+        if (index < inline_control_capacity)
+            return self.inline_controls[index];
+        return self.control_spill[index - inline_control_capacity];
+    }
+
+    fn ensureControlCapacity(self: *Builder, additional: usize) Error!void {
+        const required = std.math.add(usize, @intCast(self.control_len), additional) catch
+            return error.OutOfMemory;
+        if (required > std.math.maxInt(u32)) return error.BytecodeOverflow;
+        if (required <= inline_control_capacity) return;
+
+        const spill_required = required - inline_control_capacity;
+        const spill_used: u32 = if (self.control_len > inline_control_capacity)
+            self.control_len - inline_control_capacity
+        else
+            0;
+        const need = spill_required - @as(usize, spill_used);
+        try reserve(
+            ControlSlot,
+            self.memory,
+            &self.control_spill,
+            &self.control_spill_capacity,
+            spill_used,
+            need,
+            4,
+        );
+    }
+
+    fn appendControlAssumeCapacity(self: *Builder, slot: ControlSlot) void {
+        std.debug.assert(self.control_len < std.math.maxInt(u32));
+        if (self.control_len < inline_control_capacity) {
+            self.inline_controls[self.control_len] = slot;
+        } else {
+            const spill_index = self.control_len - inline_control_capacity;
+            std.debug.assert(spill_index < self.control_spill_capacity);
+            self.control_spill[spill_index] = slot;
+        }
+        self.control_len += 1;
+    }
+
+    /// Record a terminal/direct-eval instruction just emitted through the
+    /// parser facade. The opcode bytes remain the semantic authority; this is
+    /// only the sparse index that lets cfg.build avoid decoding unrelated ops.
+    pub fn recordControl(self: *Builder, kind: ControlKind) Error!void {
+        if (!self.control_index_enabled) return;
+        if (self.last_opcode_pos < 0) return error.InvalidBytecode;
+        const offset: u32 = @intCast(self.last_opcode_pos);
+        if (offset >= self.code_len or offset > std.math.maxInt(u31))
+            return error.BytecodeOverflow;
+        if (self.control_len != 0 and
+            self.controlAt(self.control_len - 1).temp_offset >= offset)
+        {
+            return error.InvalidBytecode;
+        }
+        try self.ensureControlCapacity(1);
+        self.appendControlAssumeCapacity(.{
+            .temp_offset = @intCast(offset),
+            .kind = kind,
+        });
+    }
+
     /// Item-wise release of the owned atom prefix, then every backing freed
     /// by full capacity. Idempotent.
     pub fn deinit(self: *Builder) void {
@@ -146,6 +272,8 @@ pub const Builder = struct {
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
         if (self.label_capacity != 0) self.memory.free(labels.LabelSlot, self.label_slots);
         if (self.reloc_capacity != 0) self.memory.free(labels.RelocEntry, self.relocs);
+        if (self.control_spill_capacity != 0)
+            self.memory.free(ControlSlot, self.control_spill);
         if (self.source_capacity != 0) self.memory.free(SourceSlot, self.source_slots);
 
         self.code = &.{};
@@ -160,6 +288,10 @@ pub const Builder = struct {
         self.relocs = &.{};
         self.reloc_capacity = 0;
         self.reloc_len = 0;
+        self.control_index_enabled = false;
+        self.control_spill = &.{};
+        self.control_spill_capacity = 0;
+        self.control_len = 0;
         self.source_slots = &.{};
         self.source_capacity = 0;
         self.source_len = 0;
@@ -655,6 +787,117 @@ pub const Builder = struct {
         return self.atom_operands[self.atom_len];
     }
 
+    /// QuickJS `get_lvalue` takes the trailing atom operand back while it
+    /// rewinds the getter opcode. Validate both ledgers first, then publish
+    /// the owner transfer and truncation as one allocation-free transaction.
+    pub fn takeTrailingAtomOpcodeOwned(
+        self: *Builder,
+        opcode_offset: u32,
+        expected_opcode: u8,
+        expected_atom: core.atom.Atom,
+    ) Error!core.atom.Atom {
+        const offset: usize = @intCast(opcode_offset);
+        if (self.last_opcode_pos < 0 or
+            @as(u32, @intCast(self.last_opcode_pos)) != opcode_offset or
+            opcode_offset > self.code_len or self.code_len - opcode_offset < 5 or
+            self.code[offset] != expected_opcode or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            self.atom_len == 0 or
+            self.atom_operands[self.atom_len - 1] != expected_atom)
+        {
+            return error.InvalidBytecode;
+        }
+        if (self.reloc_len != 0 and
+            self.relocs[self.reloc_len - 1].operand_offset + 4 > opcode_offset)
+        {
+            return error.InvalidBytecode;
+        }
+        for (self.label_slots[0..self.label_len]) |slot| {
+            if (slot.flags.bound and slot.bound_offset > opcode_offset)
+                return error.InvalidBytecode;
+        }
+
+        self.atom_len -= 1;
+        while (self.source_len > 0 and
+            self.source_slots[self.source_len - 1].temp_offset > opcode_offset)
+        {
+            self.source_len -= 1;
+        }
+        while (self.control_len > 0 and
+            self.controlAt(self.control_len - 1).temp_offset >= opcode_offset)
+        {
+            self.control_len -= 1;
+        }
+        self.code_len = opcode_offset;
+        self.last_opcode_pos = -1;
+        return expected_atom;
+    }
+
+    /// Replace one already-owned atom operand in place. The caller supplies
+    /// the exact compact opcode and ledger positions captured when the
+    /// instruction was emitted; validating both keeps bytecode and the
+    /// lockstep ownership ledger from drifting. `replacement` is borrowed:
+    /// this method retains it before releasing the previous owner and cannot
+    /// fail after validation.
+    pub fn replaceAtomOperand(
+        self: *Builder,
+        opcode_offset: u32,
+        atom_index: u32,
+        expected_opcode: u8,
+        expected_atom: core.atom.Atom,
+        replacement: core.atom.Atom,
+    ) Error!void {
+        const offset: usize = @intCast(opcode_offset);
+        const index: usize = @intCast(atom_index);
+        const code_len: usize = @intCast(self.code_len);
+        if (offset > code_len or code_len - offset < 5 or
+            index >= @as(usize, @intCast(self.atom_len)))
+            return error.InvalidBytecode;
+        if (self.code[offset] != expected_opcode or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            self.atom_operands[index] != expected_atom)
+        {
+            return error.InvalidBytecode;
+        }
+
+        const retained = self.atoms.dup(replacement);
+        self.atom_operands[index] = retained;
+        std.mem.writeInt(u32, self.code[offset + 1 ..][0..4], replacement, .little);
+        self.atoms.free(expected_atom);
+    }
+
+    /// Rewrite the trailing atom opcode as a one-byte plain opcode while
+    /// preserving source events at its start. This is the compact-builder
+    /// form of QuickJS truncating `OP_set_name(NULL)` and re-emitting
+    /// `OP_set_name_computed`. The existing five-byte capacity makes the
+    /// replacement allocation-free; the removed ledger owner is released
+    /// exactly once.
+    pub fn rewriteTrailingAtomOpAsPlain(
+        self: *Builder,
+        expected_opcode: u8,
+        expected_atom: core.atom.Atom,
+        replacement_opcode: u8,
+    ) Error!void {
+        if (self.last_opcode_pos < 0 or self.atom_len == 0)
+            return error.InvalidBytecode;
+        const opcode_offset: u32 = @intCast(self.last_opcode_pos);
+        const offset: usize = @intCast(opcode_offset);
+        if (opcode_offset > self.code_len or self.code_len - opcode_offset != 5 or
+            self.code[offset] != expected_opcode or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            self.atom_operands[self.atom_len - 1] != expected_atom)
+        {
+            return error.InvalidBytecode;
+        }
+
+        try self.truncateLastOpcodePreserveSources(opcode_offset);
+        const removed = try self.takeLastAtomOwned();
+        self.atoms.free(removed);
+        self.code[offset] = replacement_opcode;
+        self.code_len = std.math.add(u32, opcode_offset, 1) catch return error.InvalidBytecode;
+        self.last_opcode_pos = @intCast(opcode_offset);
+    }
+
     pub fn addSourceMarker(self: *Builder, line: i32, col: i32) Error!void {
         if (line <= 0 or col <= 0) return;
         if (builtin.mode == .Debug) {
@@ -685,6 +928,7 @@ pub const Builder = struct {
             .atom_len = self.atom_len,
             .label_len = self.label_len,
             .reloc_len = self.reloc_len,
+            .control_len = self.control_len,
             .source_len = self.source_len,
             .last_opcode_pos = self.last_opcode_pos,
         };
@@ -740,6 +984,7 @@ pub const Builder = struct {
         self.code_len = snap.code_len;
         self.label_len = snap.label_len;
         self.reloc_len = snap.reloc_len;
+        self.control_len = snap.control_len;
         self.source_len = snap.source_len;
         self.last_opcode_pos = snap.last_opcode_pos;
     }
@@ -766,6 +1011,11 @@ pub const Builder = struct {
             self.source_slots[self.source_len - 1].temp_offset >= new_code_len)
         {
             self.source_len -= 1;
+        }
+        while (self.control_len > 0 and
+            self.controlAt(self.control_len - 1).temp_offset >= new_code_len)
+        {
+            self.control_len -= 1;
         }
         self.code_len = new_code_len;
         self.last_opcode_pos = -1;
@@ -799,6 +1049,47 @@ pub const Builder = struct {
         }
 
         self.source_len -= 1;
+        while (self.control_len > 0 and
+            self.controlAt(self.control_len - 1).temp_offset >= new_code_len)
+        {
+            self.control_len -= 1;
+        }
+        self.code_len = new_code_len;
+        self.last_opcode_pos = -1;
+    }
+
+    /// QuickJS `fd->byte_code.size = fd->last_opcode_pos`: remove the trailing
+    /// opcode while preserving every source event physically emitted before
+    /// it. In the compact v2 ledger those events have `temp_offset ==
+    /// new_code_len`; they describe the replacement emitted at that same
+    /// boundary and must not be discarded. Unlike the historical
+    /// marker-coupled helper above, this also accepts a source-less opcode.
+    pub fn truncateLastOpcodePreserveSources(self: *Builder, new_code_len: u32) Error!void {
+        if (new_code_len > self.code_len or
+            self.last_opcode_pos < 0 or
+            @as(u32, @intCast(self.last_opcode_pos)) != new_code_len)
+        {
+            return error.InvalidBytecode;
+        }
+        if (self.reloc_len != 0 and
+            self.relocs[self.reloc_len - 1].operand_offset + 4 > new_code_len)
+        {
+            return error.InvalidBytecode;
+        }
+        for (self.label_slots[0..self.label_len]) |slot| {
+            if (slot.flags.bound and slot.bound_offset > new_code_len)
+                return error.InvalidBytecode;
+        }
+        while (self.source_len > 0 and
+            self.source_slots[self.source_len - 1].temp_offset > new_code_len)
+        {
+            self.source_len -= 1;
+        }
+        while (self.control_len > 0 and
+            self.controlAt(self.control_len - 1).temp_offset >= new_code_len)
+        {
+            self.control_len -= 1;
+        }
         self.code_len = new_code_len;
         self.last_opcode_pos = -1;
     }
@@ -821,6 +1112,7 @@ pub const Builder = struct {
             mark.atom_len <= self.atom_len and
             mark.label_len <= self.label_len and
             mark.reloc_len <= self.reloc_len and
+            mark.control_len <= self.control_len and
             mark.source_len <= self.source_len;
         std.debug.assert(lengths_valid);
         if (!lengths_valid) return error.InvalidBytecode;
@@ -842,6 +1134,14 @@ pub const Builder = struct {
             std.debug.assert(slot_valid);
             if (!slot_valid) return error.InvalidBytecode;
         }
+        var control_index = mark.control_len;
+        while (control_index < self.control_len) : (control_index += 1) {
+            const slot = self.controlAt(control_index);
+            const slot_valid = slot.temp_offset >= mark.code_len and
+                slot.temp_offset < self.code_len;
+            std.debug.assert(slot_valid);
+            if (!slot_valid) return error.InvalidBytecode;
+        }
 
         var bind_count: usize = 0;
         for (self.label_slots[0..self.label_len]) |slot| {
@@ -855,6 +1155,7 @@ pub const Builder = struct {
         const code_count: usize = @intCast(self.code_len - mark.code_len);
         const atom_count: usize = @intCast(self.atom_len - mark.atom_len);
         const reloc_count: usize = @intCast(self.reloc_len - mark.reloc_len);
+        const control_count: usize = @intCast(self.control_len - mark.control_len);
         const source_count: usize = @intCast(self.source_len - mark.source_len);
         var seg: DetachedSegment = .{};
 
@@ -873,6 +1174,11 @@ pub const Builder = struct {
         }
         errdefer if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
 
+        if (control_count != 0) {
+            seg.controls = self.memory.alloc(ControlSlot, control_count) catch return error.OutOfMemory;
+        }
+        errdefer if (seg.controls.len != 0) self.memory.free(ControlSlot, seg.controls);
+
         if (bind_count != 0) {
             seg.binds = self.memory.alloc(DetachedSegment.Bind, bind_count) catch return error.OutOfMemory;
         }
@@ -888,6 +1194,14 @@ pub const Builder = struct {
         for (self.relocs[mark.reloc_len..self.reloc_len], seg.relocs) |entry, *detached| {
             detached.* = entry;
             detached.operand_offset -= mark.code_len;
+        }
+        control_index = mark.control_len;
+        var detached_control_index: usize = 0;
+        while (control_index < self.control_len) : (control_index += 1) {
+            var detached = self.controlAt(control_index);
+            detached.temp_offset = @intCast(@as(u32, detached.temp_offset) - mark.code_len);
+            seg.controls[detached_control_index] = detached;
+            detached_control_index += 1;
         }
         for (self.source_slots[mark.source_len..self.source_len], seg.sources) |slot, *detached| {
             detached.* = slot;
@@ -920,6 +1234,7 @@ pub const Builder = struct {
         self.code_len = mark.code_len;
         self.atom_len = mark.atom_len;
         self.reloc_len = mark.reloc_len;
+        self.control_len = mark.control_len;
         self.source_len = mark.source_len;
         self.last_opcode_pos = -1;
         return seg;
@@ -952,6 +1267,16 @@ pub const Builder = struct {
             if (self.label_slots[bind.label_index].flags.bound) return error.InvalidBytecode;
             if (@as(u64, bind.rel_offset) > seg.code.len) return error.InvalidBytecode;
         }
+        var previous_control_offset: ?u31 = null;
+        for (seg.controls) |slot| {
+            if (@as(u64, slot.temp_offset) >= seg.code.len) return error.InvalidBytecode;
+            if (@as(u64, self.code_len) + slot.temp_offset > std.math.maxInt(u31))
+                return error.BytecodeOverflow;
+            if (previous_control_offset) |previous| {
+                if (slot.temp_offset <= previous) return error.InvalidBytecode;
+            }
+            previous_control_offset = slot.temp_offset;
+        }
         var previous_source_offset: ?u32 = null;
         for (seg.sources) |slot| {
             if (@as(u64, slot.temp_offset) > seg.code.len) return error.InvalidBytecode;
@@ -962,6 +1287,7 @@ pub const Builder = struct {
         }
 
         if (seg.relocs.len > @as(usize, std.math.maxInt(u32) - self.reloc_len) or
+            seg.controls.len > @as(usize, std.math.maxInt(u32) - self.control_len) or
             seg.sources.len > @as(usize, std.math.maxInt(u32) - self.source_len) or
             seg.atoms.len > @as(usize, std.math.maxInt(u32) - self.atom_len))
         {
@@ -978,6 +1304,7 @@ pub const Builder = struct {
             seg.relocs.len,
             8,
         );
+        try self.ensureControlCapacity(seg.controls.len);
         try reserve(
             SourceSlot,
             self.memory,
@@ -1022,6 +1349,14 @@ pub const Builder = struct {
             self.source_len += 1;
         }
 
+        for (seg.controls) |control| {
+            const shifted_offset = @as(u64, new_base) + control.temp_offset;
+            self.appendControlAssumeCapacity(.{
+                .temp_offset = @intCast(shifted_offset),
+                .kind = control.kind,
+            });
+        }
+
         for (seg.relocs) |entry| {
             const relative_operand: usize = @intCast(entry.operand_offset);
             const label_index = std.mem.readInt(u32, seg.code[relative_operand..][0..4], .little);
@@ -1063,16 +1398,16 @@ pub const Builder = struct {
         if (seg.code.len != 0) self.memory.free(u8, seg.code);
         if (seg.atoms.len != 0) self.memory.free(core.atom.Atom, seg.atoms);
         if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
+        if (seg.controls.len != 0) self.memory.free(ControlSlot, seg.controls);
         if (seg.binds.len != 0) self.memory.free(DetachedSegment.Bind, seg.binds);
         if (seg.sources.len != 0) self.memory.free(SourceSlot, seg.sources);
         seg.* = .{};
     }
 
-    fn reserveCode(self: *Builder, need: usize) Error!void {
+    inline fn reserveCode(self: *Builder, need: usize) Error!void {
         // One event per emitted instruction, plus one per spliced segment.
         // Legacy counts its byte-append events, so the measures are comparable
         // emission funnels rather than byte-identical totals.
-        if (comptime coverage.enabled) coverage.noteV2Emission();
         const required = @as(u64, self.code_len) + @as(u64, @intCast(need));
         if (required > std.math.maxInt(u32)) return error.BytecodeOverflow;
         try reserve(
@@ -1411,6 +1746,43 @@ test "compiler_v2.builder: s2g4 take atom and truncate speculative tail" {
     try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
 }
 
+test "compiler_v2.builder: lvalue atom take and opcode rewind are one transaction" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const atom_id = try table.internString("lvalue_transaction_atom");
+    defer table.free(atom_id);
+    const base_ref_count = table.refCount(atom_id).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    try b.emitOp(0x20);
+    const op_start = b.code_len;
+    try b.addSourceMarker(2, 2);
+    try b.emitAtomOpU16Owned(0xd5, table.dup(atom_id), 7);
+    try b.addSourceMarker(3, 3);
+
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        b.takeTrailingAtomOpcodeOwned(op_start, 0xd4, atom_id),
+    );
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(op_start + 7, b.code_len);
+
+    const owned = try b.takeTrailingAtomOpcodeOwned(op_start, 0xd5, atom_id);
+    try std.testing.expectEqual(atom_id, owned);
+    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try std.testing.expectEqual(op_start, b.code_len);
+    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(op_start, b.source_slots[0].temp_offset);
+
+    table.free(owned);
+    try std.testing.expectEqual(base_ref_count, table.refCount(atom_id).?);
+}
+
 test "compiler_v2.builder: marked opcode rewind preserves older same-offset source" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
@@ -1713,4 +2085,45 @@ test "compiler_v2.builder: snapshot rollback restores chains, atoms, markers" {
     try b.emitJump(0x21, l0);
     b.deinit();
     b.deinit();
+}
+
+test "compiler_v2.builder: inferred-name patches keep code and atom ownership in lockstep" {
+    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
+    var table = core.atom.AtomTable.init(&acct);
+    defer table.deinit();
+
+    const placeholder = try table.internString("builder-name-placeholder");
+    defer table.free(placeholder);
+    const inferred = try table.internString("builder-inferred-name");
+    defer table.free(inferred);
+    const placeholder_base = table.refCount(placeholder).?;
+    const inferred_base = table.refCount(inferred).?;
+
+    var b = Builder.init(&acct, &table);
+    defer b.deinit();
+
+    try b.emitAtomOpOwned(0x40, table.dup(placeholder));
+    try std.testing.expectEqual(placeholder_base + 1, table.refCount(placeholder).?);
+    try b.replaceAtomOperand(0, 0, 0x40, placeholder, inferred);
+    try std.testing.expectEqual(placeholder_base, table.refCount(placeholder).?);
+    try std.testing.expectEqual(inferred_base + 1, table.refCount(inferred).?);
+    try std.testing.expectEqual(inferred, std.mem.readInt(u32, b.code[1..5], .little));
+    try std.testing.expectEqual(inferred, b.atom_operands[0]);
+
+    try b.addSourceMarker(7, 3);
+    try b.emitAtomOpOwned(0x41, core.atom.null_atom);
+    try std.testing.expectEqual(@as(u32, 10), b.code_len);
+    try std.testing.expectEqual(@as(u32, 2), b.atom_len);
+    try b.rewriteTrailingAtomOpAsPlain(0x41, core.atom.null_atom, 0x42);
+    try std.testing.expectEqual(@as(u32, 6), b.code_len);
+    try std.testing.expectEqual(@as(u8, 0x40), b.code[0]);
+    try std.testing.expectEqual(inferred, std.mem.readInt(u32, b.code[1..5], .little));
+    try std.testing.expectEqual(@as(u8, 0x42), b.code[5]);
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.source_len);
+    try std.testing.expectEqual(@as(u32, 5), b.source_slots[0].temp_offset);
+
+    b.deinit();
+    try std.testing.expectEqual(inferred_base, table.refCount(inferred).?);
 }

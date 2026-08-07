@@ -473,6 +473,30 @@ pub const builtin_method_ids = struct {
             length = 464,
             to_string_tag = 465,
         };
+
+        /// qjs `js_uint8array_funcs` (quickjs.c:59820): the Uint8Array
+        /// constructor's base64/hex decoders. Its own JSCFunctionListEntry
+        /// array, so it takes its own id block in the shared `.buffer` domain,
+        /// exactly like the ArrayBuffer / SharedArrayBuffer / DataView /
+        /// %TypedArray% lists already do.
+        pub const Uint8ArrayStaticMethod = enum(u32) {
+            /// qjs `js_uint8array_from_base64` (quickjs.c:59553).
+            from_base64 = 501,
+            /// qjs `js_uint8array_from_hex` (quickjs.c:59610).
+            from_hex = 502,
+        };
+
+        /// qjs `js_uint8array_proto_funcs` (quickjs.c:59812).
+        pub const Uint8ArrayPrototypeMethod = enum(u32) {
+            /// qjs `js_uint8array_to_base64` (quickjs.c:59467).
+            to_base64 = 521,
+            /// qjs `js_uint8array_to_hex` (quickjs.c:59525).
+            to_hex = 522,
+            /// qjs `js_uint8array_set_from_base64` (quickjs.c:59666).
+            set_from_base64 = 523,
+            /// qjs `js_uint8array_set_from_hex` (quickjs.c:59723).
+            set_from_hex = 524,
+        };
     };
 
     pub const reflect = struct {
@@ -705,6 +729,22 @@ pub const builtin_method_ids = struct {
         };
     };
 
+    /// `.weak_ref` domain: WeakRef.prototype + FinalizationRegistry.prototype.
+    /// qjs keeps these in their own JSCFunctionListEntry arrays
+    /// (`js_weakref_proto_funcs` quickjs.c:61197,
+    /// `js_finrec_proto_funcs` quickjs.c:61376), so they share one id
+    /// namespace here rather than borrowing the Map/Set `.collection` ids.
+    pub const weak_ref = struct {
+        pub const PrototypeMethod = enum(u32) {
+            /// qjs `js_weakref_deref` (quickjs.c:61186).
+            deref = 1,
+            /// qjs `js_finrec_register` (quickjs.c:61318).
+            finrec_register = 2,
+            /// qjs `js_finrec_unregister` (quickjs.c:61348).
+            finrec_unregister = 3,
+        };
+    };
+
     pub const promise = struct {
         pub const LegacyStaticMethod = enum(u32) {
             resolve = 1,
@@ -717,6 +757,19 @@ pub const builtin_method_ids = struct {
             with_resolvers = 8,
             all_keyed = 9,
             all_settled_keyed = 10,
+        };
+
+        /// qjs `js_promise_proto_funcs` (quickjs.c:54376). Its own
+        /// JSCFunctionListEntry array, distinct from the statics, so it takes
+        /// its own id block in the shared `.promise` domain (same layering the
+        /// `.regexp` and `.buffer` domains use for static vs prototype).
+        pub const PrototypeMethod = enum(u32) {
+            /// qjs `js_promise_then` (quickjs.c:54246).
+            then = 101,
+            /// qjs `js_promise_catch` (quickjs.c:54275).
+            catch_ = 102,
+            /// qjs `js_promise_finally` (quickjs.c:54329).
+            finally = 103,
         };
     };
 
@@ -1465,17 +1518,10 @@ pub const builtin_method_id_lookup = struct {
         }
     };
 
-    pub const bigint = struct {
-        /// `BigInt.asIntN`/`asUintN` signedness selector: false => signed
-        /// (asIntN), true => unsigned (asUintN). Pure name->bool dispatch;
-        /// relocated to engine core in Phase 6b-3 STEP 2. `core.bigint`
-        /// consumes it directly.
-        pub fn staticUnsignedMode(name: []const u8) ?bool {
-            if (std.mem.eql(u8, name, "asIntN")) return false;
-            if (std.mem.eql(u8, name, "asUintN")) return true;
-            return null;
-        }
-    };
+    // `bigint.staticUnsignedMode` retired: `BigInt.asIntN`/`asUintN` now carry
+    // native builtin ids (`.primitive` domain, BigInt class-tag block) and
+    // select their signedness from the record magic, mirroring qjs's
+    // `JS_CFUNC_MAGIC_DEF` entries in `js_bigint_funcs` (quickjs.c:56350).
 };
 
 test "builtin method-id helpers preserve load-bearing id values" {

@@ -18,8 +18,6 @@
 #   RULE B  TS PROBES    TypeScript probes route through
 #                        parseAndCompileV2TestProgram(); `zjs -e '<ts>'` is banned
 #                        because it answers SyntaxError for every construct.
-#   RULE C  L3 COLLECT   `v2_construct_emitted > 0` is asserted BEFORE
-#                        `legacy_in_v2_unallowed == 0` is believed.
 #   RULE D  CORPUS SKIPS the actual skipped set is compared against an EXPLICIT
 #                        per-case allowlist, by identity. No proportional tolerance.
 #   RULE E  STRICT SHELL scripts are shellcheck-clean, and abort LOUDLY rather
@@ -267,16 +265,6 @@ else
     bad B3 "src/compiler_v2/tests.zig no longer pins the parseAndCompileV2TestProgram route"
 fi
 
-# B5. The TypeScript L3 workload reaches the compiler as a FILE (the engine
-# strips by path), and migration_gates.sh checks the workload's exit status --
-# otherwise a TypeScript workload that SyntaxErrors would look like a collect
-# that merely emitted nothing, which is the same false negative in a new place.
-if [ -f "$HERE/l3_workload.ts" ] && grep -q 'run_rc' "$HERE/migration_gates.sh"; then
-    pass B5 "the .ts workload is a file, and its exit status is checked, not just its report"
-else
-    bad B5 "migration_gates.sh no longer checks the workload's exit status (or l3_workload.ts is gone)"
-fi
-
 if [ "$WITH_ENGINE" = 1 ]; then
     if [ ! -x "$ZJS" ]; then
         bad B2 "engine binary not found at $ZJS -- run 'zig build zjs', or pass --no-engine and say so"
@@ -303,53 +291,6 @@ if [ "$WITH_ENGINE" = 1 ]; then
     fi
 else
     printf '  SKIP  B2/B4          --no-engine: the dynamic half of RULE B did NOT run\n'
-fi
-
-# ==========================================================================
-# RULE C -- L3 COLLECT.
-#
-# Gate A's first collect invoked the binary with --print-config-signature,
-# which compiles nothing, and produced `v2_construct_emitted=0 ...
-# legacy_in_v2_unallowed=0` -- a vacuous zero that reads exactly like a pass.
-# ==========================================================================
-fs_say "RULE C -- emitted>0 is asserted BEFORE unallowed==0 is believed"
-
-# C1. The historical defect, verbatim: the exact line the vacuous run printed.
-VACUOUS='QCP-1 L3 emission coverage: v2_construct_emitted=0 legacy_construct_emitted=0 legacy_in_v2_scope=0 legacy_in_v2_unallowed=0 sites_dropped=0'
-REAL='QCP-1 L3 emission coverage: v2_construct_emitted=387 legacy_construct_emitted=0 legacy_in_v2_scope=0 legacy_in_v2_unallowed=0 sites_dropped=0'
-DIRTY='QCP-1 L3 emission coverage: v2_construct_emitted=387 legacy_construct_emitted=4 legacy_in_v2_scope=4 legacy_in_v2_unallowed=4 sites_dropped=0'
-
-verdict="$(fs_l3_verdict "$VACUOUS")" && vrc=0 || vrc=$?
-case "$verdict:$vrc" in
-    VACUOUS*:1) pass C1 "the historical vacuous report is reported VACUOUS, not PASS" ;;
-    *)          bad  C1 "vacuous report gave '$verdict' rc=$vrc; the defect would land again" ;;
-esac
-
-verdict="$(fs_l3_verdict "$REAL")" && vrc=0 || vrc=$?
-case "$verdict:$vrc" in
-    PASS*:0) pass C2 "a real collect (emitted=387, unallowed=0) passes" ;;
-    *)       bad  C2 "a real collect was rejected: '$verdict' rc=$vrc" ;;
-esac
-
-verdict="$(fs_l3_verdict "$DIRTY")" && vrc=0 || vrc=$?
-case "$verdict:$vrc" in
-    FAIL*:1) pass C3 "unallowed>0 over emitted>0 fails" ;;
-    *)       bad  C3 "unallowed=4 was not rejected: '$verdict' rc=$vrc" ;;
-esac
-
-verdict="$(fs_l3_verdict "")" && vrc=0 || vrc=$?
-case "$verdict:$vrc" in
-    NOREPORT*:1) pass C4 "no coverage line at all fails (a silent collect is not a pass)" ;;
-    *)           bad  C4 "an absent report gave '$verdict' rc=$vrc" ;;
-esac
-
-# C5. One implementation. An open-coded comparison in the gate could be right
-# here and wrong there.
-if grep -q 'fs_l3_verdict' "$HERE/migration_gates.sh" \
-   && ! grep -qE 'v2_construct_emitted=\[0-9\]\+.*cut -d= -f2' "$HERE/migration_gates.sh"; then
-    pass C5 "migration_gates.sh routes through fs_l3_verdict rather than open-coding it"
-else
-    bad C5 "migration_gates.sh open-codes the emission assertion; it can drift from this test"
 fi
 
 # ==========================================================================

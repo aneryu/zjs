@@ -6,17 +6,15 @@ thrown away. This directory is that orchestration promoted to a maintained set,
 with the defects that were found the hard way fixed in the committed version
 rather than carried forward as folklore.
 
-| script | lane | needs both compilers? |
+| script | lane | needed a second compiler? |
 | --- | --- | --- |
 | `preflight.sh` | host + toolchain checks, shared helpers, the standing rules (sourced by all others) | no |
 | `selftest.sh` | **fault-inject every standing rule** — `zig build final-switch-selftest` | no |
-| `build_artifacts.sh` | two cold builds per side, manifest with sha256 + signature | yes (`--no-legacy` after deletion) |
+| `build_artifacts.sh` | two cold builds of the candidate, manifest with sha256 + signature | no (there is no baseline side left) |
 | `correctness_default.sh` | correctness on **true production defaults** | no |
 | `correctness_variants.sh` | altrepr, OOM, force-GC, ownership-audit, ReleaseSafe, `.plain` | no |
-| `migration_gates.sh` | dual comparator (Zig corpus + full test262), L3 emission | **yes — delete with the legacy path** |
-| `performance.sh` | zoo × 4 + codeload micro × 4, then the join | yes |
-| `join_results.py` | arbitrate: all four pairings, gates, noise floors | no |
-| `l3_workload.js` / `.ts` | real source for the L3 emission collect | no |
+| `performance.sh` | historical zoo × 4 + codeload micro × 4 switch comparison | yes; requires preserved legacy artifacts |
+| `join_results.py` | historical four-pairing switch arbitration | yes; consumes legacy-side results |
 
 Suggested order on a single host, never overlapping:
 
@@ -26,14 +24,16 @@ tools/final-switch/preflight.sh
 tools/final-switch/build_artifacts.sh
 tools/final-switch/correctness_default.sh
 tools/final-switch/correctness_variants.sh
-tools/final-switch/migration_gates.sh
-tools/final-switch/performance.sh     # quiet host: nothing else may run
 ```
 
-`performance.sh` must run **alone**. The correctness lanes may not overlap it,
-not even pinned to other cores.
+`performance.sh` and `join_results.py` remain as historical analyzers for the
+recorded compiler-switch experiment. Current source cannot produce their
+`legacy-a1` / `legacy-a2` inputs; run them only with explicitly preserved
+legacy artifacts. No current production gate invokes them. If used,
+`performance.sh` must run **alone**: correctness lanes may not overlap it, not
+even pinned to other cores.
 
-## The five standing rules
+## The four standing rules
 
 Each of these is a **regression test, not a style preference**: each one names a
 process defect that produced a wrong or vacuous result on a real Gate A run.
@@ -45,7 +45,6 @@ passing is a comment.
 | --- | --- | --- |
 | **A · AFFINITY** — the orchestrator SETS `taskset -c $FS_CPU` and verifies the pin INDEPENDENTLY; a runner's self-report is corroborated, never trusted alone | `fs_pinned()`, `fs_verify_affinity()`, `join_results.py` | `selftest.sh` A1–A8 |
 | **B · TS PROBES** — a TypeScript probe routes through `parseAndCompileV2TestProgram()`, never `zjs -e '<ts source>'` | ban scan over `tools/` + `docs/`; a named test in `src/compiler_v2/tests.zig` | `selftest.sh` B1–B4 |
-| **C · L3 COLLECT** — `v2_construct_emitted > 0` is asserted BEFORE `legacy_in_v2_unallowed == 0` is believed | `fs_l3_verdict()`, called by `migration_gates.sh` | `selftest.sh` C1–C5 |
 | **D · CORPUS SKIPS** — the actual skipped set is compared against an EXPLICIT per-case allowlist, by identity, both ways. No proportional tolerance in any form | `expectCoverageSkipSetMatches()` in `src/compiler_v2/tests.zig` | `selftest.sh` D1–D4 + a Zig self-test |
 | **E · STRICT SHELL** — scripts are shellcheck-clean and ABORT LOUDLY rather than silently emitting nothing | `fs_strict()` / `fs_finish()` + the abort banner | `selftest.sh` E1–E6 |
 
@@ -98,8 +97,7 @@ annotation, all of them — which is indistinguishable from an engine failure an
 reads as a finding. A TypeScript probe must instead route through
 `parseAndCompileV2TestProgram()` with `.source_kind = .typescript`, which is what
 the coverage corpus and the named RULE B test in `src/compiler_v2/tests.zig` do.
-The `.ts` **file** route works too (the engine strips by path), which is why
-`l3_workload.ts` is a file.
+The `.ts` **file** route works too (the engine strips by path).
 
 `selftest.sh` bans the `-e` formulation statically over `tools/` and `docs/`
 (a plain recursive grep, not `git grep`: an untracked scratch script is exactly
@@ -107,26 +105,6 @@ where this gets written), and grounds the ban dynamically — B2 requires the
 `-e` form to still report `SyntaxError`, and B4 requires the same construct to
 compile when the source kind is known, so the failure is demonstrably a property
 of the probe and not of the construct.
-
-### C · The L3 emission collect must run over a real workload
-
-The first attempt invoked the binary with `--print-config-signature`, which
-compiles nothing. It reported
-
-```
-QCP-1 L3 emission coverage: v2_construct_emitted=0 legacy_construct_emitted=0 \
-  legacy_in_v2_scope=0 legacy_in_v2_unallowed=0 sites_dropped=0
-```
-
-— a vacuous zero that reads exactly like a pass. `legacy_in_v2_unallowed == 0`
-is a claim about constructs that were emitted; over zero emitted constructs it
-is not a weak pass, it is not a measurement. `migration_gates.sh` runs the
-collector over `l3_workload.js` and `l3_workload.ts` and **asserts
-`v2_construct_emitted > 0` before believing `legacy_in_v2_unallowed == 0`**; an
-emitted count of zero is reported as `VACUOUS`, not as a pass. The assertion is
-`fs_l3_verdict()` in `preflight.sh` — one implementation, shared by the gate and
-by `selftest.sh`, which feeds it the **verbatim** historical vacuous line on
-every run and requires the verdict `VACUOUS`.
 
 ### D · The corpus skip set is an allowlist, not a tolerance
 
@@ -179,8 +157,8 @@ like a run still in progress, not like a run that died.
 ## Also fixed here: a variant gate must prove it ran the variant
 
 **With the build, not a grep.**
-`correctness_default.sh` refuses to accept `-Dzjs_compiler` / `-Dzjs_v2_layout`
-in any of its own gate lines, because the predecessor gate was green about a
+`correctness_default.sh` refuses to accept `-Dzjs_v2_layout` in any of its own
+gate lines, because the predecessor gate was green about a
 configuration it had never run: every line carried an explicit flag, so the
 default build was never the thing tested. The mirror-image risk is a variant
 gate that silently ran the *default*.
@@ -285,6 +263,9 @@ the gate needs to exclude them explicitly — silently tolerating it would put a
 50%-tolerance-shaped hole back into the matrix.
 
 ## CLOSED: the dual test262 divergence
+
+> HISTORICAL. `-Dzjs_compiler` was retired with the legacy production path;
+> the runs below are the record of the last moment both backends coexisted.
 
 The full dual-comparator test262 run — deliberately deferred to the last moment
 both compilers coexisted — did **not** match the single-backend runs at

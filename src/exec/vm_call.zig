@@ -596,6 +596,83 @@ pub noinline fn tailCall(
     return .{ .return_value = core.JSValue.undefinedValue() };
 }
 
+/// Result of `nativeMethodFastDispatch` — the outlined native c_function arm
+/// of `op_call_method` (Phase 2a). `hit`/`caught` re-dispatch via `coldNext`;
+/// `miss` falls through to the forwarding arm / `callMethod`.
+pub const NativeFastDispatchResult = enum { hit, caught, miss };
+
+/// Outlined native c_function fast dispatch for `op_call_method`. Mirrors
+/// `callMethod`'s native leg exactly (pollInterrupt → fastNativeMethodCall →
+/// popOwnedStackRegion → dropUnusedCallResult → push) but skips callMethod's
+/// call boundary for the ~85% native-method case (Phase 1 measurement). The
+/// caller has already verified `method_obj.class_id == c_function`, so this
+/// helper skips the `expectObject` + `class_id` re-check that `callMethod` →
+/// `fastNativeMethodCall` would repeat. `forwards_call` records
+/// (Function.prototype.call) return `.miss` so the forwarding arm in
+/// `op_call_method` keeps its fused-frame optimization. On `.miss`, `frame.pc`
+/// is restored to the argc operand so the fallthrough paths read it correctly.
+pub noinline fn nativeMethodFastDispatch(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.FunctionBytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    method_obj: *core.Object,
+    argc: u16,
+) !NativeFastDispatchResult {
+    const total: usize = @as(usize, argc) + 2;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
+    const receiver = stack.values[region_base];
+    const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
+    // Resolve the native record BEFORE polling or advancing pc. The record
+    // resolution is side-effect-free (memoization is not user-observable), so
+    // it is safe to do before the interrupt poll. On miss, no poll was done
+    // and pc is untouched, so the fallthrough to callMethod sees the exact
+    // same state as if this arm never ran — no double-poll hazard.
+    const rec = method_obj.nativeRecord() orelse blk: {
+        const native_id = method_obj.nativeFunctionId();
+        const nref = core.function.decodeNativeBuiltinId(native_id) orelse return .miss;
+        const r = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return .miss;
+        method_obj.nativeRecordSlot().* = r;
+        break :blk r;
+    };
+    // Protect the forwarding optimization: Function.prototype.call's record
+    // has forwards_call=true. Return miss so the forwarding arm in
+    // op_call_method handles it with the fused-frame optimization.
+    if (rec.forwards_call) return .miss;
+    // Committed to native dispatch: advance pc and poll interrupts before
+    // entering user-observable code (mirrors callMethod's poll-then-call).
+    frame.pc += 2; // consume argc operand
+    exception_ops.pollInterrupt(ctx, global) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .caught;
+        return err;
+    };
+    const result = builtin_dispatch.callInternalRecordDirect(
+        ctx,
+        output,
+        global,
+        &.{},
+        method_obj,
+        receiver,
+        rec,
+        args,
+        function,
+        frame,
+    ) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .caught;
+        return err;
+    };
+    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+    if (dropUnusedCallResult(ctx, function, frame, result)) return .hit;
+    stack.pushOwnedAssumeCapacity(result);
+    return .hit;
+}
+
 pub noinline fn callMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

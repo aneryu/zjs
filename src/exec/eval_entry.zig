@@ -60,7 +60,11 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         .script_or_module = if (module_name != core.atom.null_atom) module_name else null,
         .source_kind = parserSourceKind(options.source_kind),
         .strict = options.parse_strict,
-        .return_completion = options.mode == .script and options.return_completion,
+        // QuickJS `js_parse_program` always materializes the hidden `<ret>`
+        // completion slot for scripts (quickjs.c:37095-37121). Whether an
+        // embedding caller wants that value is a host-result policy, not a
+        // different parser/CFG mode; apply that policy after execution below.
+        .return_completion = options.mode == .script,
     });
     if (options.timing) |timing| {
         const compile_ns = elapsedNanosSince(compile_start);
@@ -216,7 +220,9 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     try zjs_vm.drainPendingPromiseJobs(ctx, options.output, global_object);
     if (options.timing) |timing| timing.promise_jobs_ns += elapsedNanosSince(jobs_start);
 
-    if (options.mode == .script and options.discard_script_result) {
+    if (options.mode == .script and
+        (options.discard_script_result or !options.return_completion))
+    {
         result.free(rt);
         return core.JSValue.undefinedValue();
     }

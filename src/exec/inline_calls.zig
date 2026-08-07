@@ -138,6 +138,16 @@ pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?R
     // generator/async function classes fall to the slow path here instead of
     // passing the four-class set test only to be rejected by the kind check.
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
+    return resolveInlineFunctionFromObject(global, function_object);
+}
+
+/// Same as `resolveInlineFunction` but accepts a pre-unpacked `*Object` whose
+/// `class_id == bytecode_function` the caller has already verified. Used by
+/// `op_call_method`'s shared-unpacking dispatch: the caller does
+/// `objectFromValue(method)` once, then branches on `class_id` to either this
+/// resolver (bytecode_function) or the native c_function fast arm — avoiding
+/// a redundant `objectFromValue` for the ~85% native-method case.
+pub inline fn resolveInlineFunctionFromObject(global: *core.Object, function_object: *core.Object) ?ResolvedInlineFunction {
     const function_data = function_object.bytecodeFunctionStoragePtr();
     const fb = function_data.function_bytecode orelse return null;
     // Raw one-word capture-array load, deferring the empty-sentinel/len

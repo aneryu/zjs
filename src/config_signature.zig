@@ -3,9 +3,10 @@
 //! assertion every engine-bearing artifact runs against it.
 //!
 //! WHY THIS EXISTS. The defect class it closes is "a gate reports green about
-//! a configuration it never ran". `zig build test-altrepr -Dzjs_compiler=v2`
-//! spawned a child `zig build` that started from the *defaults*, so it ran the
-//! legacy compiler and reported green for v2. Forwarding the option set fixes
+//! a configuration it never ran". A nested-gate `zig build` spawned a child
+//! that started from the *defaults*, so it resolved a different configuration
+//! than the parent asked for and reported green for the parent's.
+//! Forwarding the option set fixes
 //! that one instance; a signature makes the whole class unexpressible, because
 //! every artifact can now state which configuration it was compiled for and
 //! that statement is checked, at compile time, against the configuration the
@@ -15,9 +16,13 @@
 //! from the declaration the ENGINE ITSELF CONSUMES, never from the `-D` string
 //! sitting next to it.
 //!
-//!   * `compiler` is derived from `Parser.dual_compare_enabled` and
-//!     `Parser.single_backend_is_v2` — the exact two declarations
-//!     `Parser.compile` branches on to pick its backend.
+//!   * `compiler` NAMES the engine's one compiler. It was derived from the
+//!     backend-dispatch declarations `Parser.compile` branched on until the
+//!     legacy production path was deleted; with a single backend there is no
+//!     longer a decision to read, so the component records identity rather
+//!     than a choice. It is retained because a build artifact must still state
+//!     which compiler produced it, and because the negative drift gate needs
+//!     a component whose falsification it can prove.
 //!   * `layout` is `resolve_labels.default_layout` — the exact comptime
 //!     constant `compiler_v2.compileFunctionV2` hands to `resolve_labels.run`
 //!     (compiler_v2/root.zig).
@@ -57,7 +62,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const parser = @import("parser.zig");
 const resolve_labels = @import("compiler_v2/resolve_labels.zig");
 const core_atom = @import("core/atom.zig");
 const core_memory = @import("core/memory.zig");
@@ -87,13 +91,10 @@ pub const component_order = [_][]const u8{
     "ownership_audit",
 };
 
-/// Compiler mode, read off the dispatch decision `Parser.compile` makes.
-pub const compiler: []const u8 = if (parser.Parser.dual_compare_enabled)
-    "dual"
-else if (parser.Parser.single_backend_is_v2)
-    "v2"
-else
-    "legacy";
+/// The engine's one compiler. See the header: this names the backend rather
+/// than reading a dispatch decision, because the legacy production path is
+/// gone and there is no decision left to read.
+pub const compiler: []const u8 = "v2";
 
 /// Final bytecode layout, read off the constant compiler-v2 lowers with.
 pub const layout: []const u8 = @tagName(resolve_labels.default_layout);

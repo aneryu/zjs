@@ -2,9 +2,11 @@
 //! plus collections (Map/Set), weak refs/FinalizationRegistry, Symbol registry and DataView.
 
 const call_mod = @import("call.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const bytecode = @import("../bytecode.zig");
 const collection_vm = @import("array_ops.zig");
 const core = @import("../core/root.zig");
+const HostError = @import("exceptions.zig").HostError;
 const method_ids = core.host_function.builtin_method_ids;
 const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
 const date_vm = @import("date_ops.zig");
@@ -413,6 +415,56 @@ pub fn qjsErrorIsError(args: []const core.JSValue) core.JSValue {
     if (args.len < 1) return core.JSValue.boolean(false);
     const object = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
     return core.JSValue.boolean(object.class_id == core.class.ids.error_);
+}
+
+const WeakRefPrototypeMethod = method_ids.weak_ref.PrototypeMethod;
+
+/// Declaration + dispatch table for the `.weak_ref` native-builtin domain:
+/// qjs `js_weakref_proto_funcs` (quickjs.c:61197) and `js_finrec_proto_funcs`
+/// (quickjs.c:61376). In qjs these are ordinary `JS_CFUNC_DEF` entries reached
+/// by `js_call_c_function` like any other builtin method; without records here
+/// they were the only weak-collection methods left on zjs's compatibility
+/// name-cascade (`call_runtime.callNativeCallableByName`), which made
+/// `WeakRef.prototype.deref` an order of magnitude more expensive per call than
+/// `Date.prototype.getTime`. One shared handler switches on the per-record
+/// `magic` (== domain-local id), mirroring the other domain tables.
+pub const internal_entries = [_]core.host_function.InternalEntry{
+    weakRefEntry("deref", 0, @intFromEnum(WeakRefPrototypeMethod.deref)),
+    weakRefEntry("register", 2, @intFromEnum(WeakRefPrototypeMethod.finrec_register)),
+    weakRefEntry("unregister", 1, @intFromEnum(WeakRefPrototypeMethod.finrec_unregister)),
+};
+
+fn weakRefEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&weakRefCall),
+    };
+}
+
+/// Shared record handler for the `.weak_ref` domain. The bodies below keep
+/// their existing receiver-class checks, so a stolen method applied to a
+/// foreign receiver still throws TypeError exactly as the name cascade did
+/// (qjs `JS_GetOpaque2`, quickjs.c:61188).
+fn weakRefCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const ctx = host_call.ctx;
+    const this_value = host_call.this_value;
+    const args = host_call.args;
+    return switch (host_call.magic) {
+        @intFromEnum(WeakRefPrototypeMethod.deref) => try qjsWeakRefDeref(ctx.runtime, this_value),
+        @intFromEnum(WeakRefPrototypeMethod.finrec_register) => try qjsFinalizationRegistryRegister(ctx, this_value, args),
+        @intFromEnum(WeakRefPrototypeMethod.finrec_unregister) => try qjsFinalizationRegistryUnregister(ctx, this_value, args),
+        else => error.TypeError,
+    };
 }
 
 pub fn qjsWeakRefDeref(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
