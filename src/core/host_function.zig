@@ -1481,17 +1481,10 @@ pub const builtin_method_id_lookup = struct {
         }
     };
 
-    pub const bigint = struct {
-        /// `BigInt.asIntN`/`asUintN` signedness selector: false => signed
-        /// (asIntN), true => unsigned (asUintN). Pure name->bool dispatch;
-        /// relocated to engine core in Phase 6b-3 STEP 2. `core.bigint`
-        /// consumes it directly.
-        pub fn staticUnsignedMode(name: []const u8) ?bool {
-            if (std.mem.eql(u8, name, "asIntN")) return false;
-            if (std.mem.eql(u8, name, "asUintN")) return true;
-            return null;
-        }
-    };
+    // `bigint.staticUnsignedMode` retired: `BigInt.asIntN`/`asUintN` now carry
+    // native builtin ids (`.primitive` domain, BigInt class-tag block) and
+    // select their signedness from the record magic, mirroring qjs's
+    // `JS_CFUNC_MAGIC_DEF` entries in `js_bigint_funcs` (quickjs.c:56350).
 };
 
 test "builtin method-id helpers preserve load-bearing id values" {

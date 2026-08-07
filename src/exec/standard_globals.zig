@@ -22,6 +22,7 @@ const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
 const number_builtin = @import("number_ops.zig");
+const primitive_builtin = @import("primitive_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const uri_builtin = @import("uri_ops.zig");
 const weak_ref_method_ids = core.host_function.builtin_method_ids.weak_ref.PrototypeMethod;
@@ -49,6 +50,7 @@ const MethodTableKind = enum {
     string_prototype,
     number_static,
     number_prototype,
+    bigint_static,
     proxy_static,
     error_prototype,
     error_static,
@@ -187,6 +189,15 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                 } else {
                     setRequiredMethodNativeBuiltinId(method, .number, number_builtin.prototypeMethodId(name));
                 }
+            },
+            .bigint_static => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "asIntN"))
+                    primitive_builtin.bigint_asintn_id
+                else if (std.mem.eql(u8, name, "asUintN"))
+                    primitive_builtin.bigint_asuintn_id
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .primitive, id);
             },
             .proxy_static => {
                 if (!std.mem.eql(u8, name, "revocable")) @compileError("unexpected Proxy static method");
@@ -2045,10 +2056,12 @@ const number_static = preparedMethods([_]Method{
     .{ .name = "isSafeInteger", .length = 1 },
 }, .number_static);
 
+// qjs js_bigint_funcs (quickjs.c:56350): two JS_CFUNC_MAGIC_DEF entries over
+// js_bigint_asUintN, dispatched by js_call_c_function like any other builtin.
 const bigint_static = preparedMethods([_]Method{
     .{ .name = "asIntN", .length = 2 },
     .{ .name = "asUintN", .length = 2 },
-}, .none);
+}, .bigint_static);
 
 const typed_array_static = preparedMethods([_]Method{
     .{ .name = "from", .length = 1 },

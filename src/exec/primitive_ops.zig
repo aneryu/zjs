@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
+const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 
@@ -18,11 +19,14 @@ pub fn toString(value: bool) []const u8 {
 /// `exec/object_ops.qjsPrimitivePrototypeMethod`). Method 1 is toString, 2
 /// valueOf, 3 the constructor-called-as-function path; the Symbol-only getter
 /// (4 description) and method (5 [Symbol.toPrimitive]) also live here because
-/// they share the same QuickJS primitive wrapper dispatch domain.
+/// they share the same QuickJS primitive wrapper dispatch domain. Methods 6+
+/// are the wrapper *constructor* statics (qjs's separate `js_<class>_funcs`
+/// lists), which do not route through `qjsPrimitivePrototypeMethod`.
 const Tag = enum(u32) {
     number = 1,
     boolean = 2,
     bigint = 3,
+    symbol = 4,
     string = 5,
 };
 
@@ -66,6 +70,22 @@ pub const symbol_entries = [_]core.host_function.InternalEntry{
     primitiveEntry("[Symbol.toPrimitive]", 1, 45),
 };
 
+/// `BigInt.asIntN` / `BigInt.asUintN`: qjs `js_bigint_funcs`
+/// (quickjs.c:56350), a two-entry `JS_CFUNC_MAGIC_DEF` list over the single
+/// body `js_bigint_asUintN` whose magic selects the signedness (0 unsigned,
+/// 1 signed). They stay in the `.primitive` domain rather than getting one of
+/// their own because that domain already *is* the wrapper-primitive class
+/// family; `.buffer` sets the same precedent by holding the ArrayBuffer,
+/// SharedArrayBuffer, DataView and %TypedArray% lists in separate id blocks.
+/// Ids continue BigInt's class-tag-3 block past the prototype methods.
+pub const bigint_asintn_id: u32 = primitiveId(.bigint, 6);
+pub const bigint_asuintn_id: u32 = primitiveId(.bigint, 7);
+
+pub const bigint_static_entries = [_]core.host_function.InternalEntry{
+    primitiveStaticEntry("asIntN", 2, bigint_asintn_id),
+    primitiveStaticEntry("asUintN", 2, bigint_asuintn_id),
+};
+
 fn primitiveEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
@@ -101,4 +121,54 @@ pub fn primitiveCall(
         builtin_dispatch.callerBytecode(host_call),
         builtin_dispatch.callerFrame(host_call),
     );
+}
+
+fn primitiveStaticEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&primitiveStaticCall),
+    };
+}
+
+/// Shared record handler for the wrapper-primitive *constructor* statics
+/// (method ids 6+). These are ordinary `JS_CFUNC_*_DEF` entries in qjs, so
+/// they belong on the record path like every other builtin; before this they
+/// were the last `.none`-tagged bigint/symbol tables and fell through to
+/// `call_runtime.callNativeCallableByName`'s name cascade.
+fn primitiveStaticCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
+    return switch (host_call.magic) {
+        // qjs js_bigint_asUintN (quickjs.c:56322) with magic 1 == signed.
+        bigint_asintn_id => builtin_glue.qjsBigIntAsN(
+            ctx,
+            host_call.output,
+            realm.global,
+            host_call.args,
+            false,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        ),
+        // qjs js_bigint_asUintN (quickjs.c:56322) with magic 0 == unsigned.
+        bigint_asuintn_id => builtin_glue.qjsBigIntAsN(
+            ctx,
+            host_call.output,
+            realm.global,
+            host_call.args,
+            true,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        ),
+        else => error.TypeError,
+    };
 }

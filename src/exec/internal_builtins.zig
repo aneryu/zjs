@@ -75,8 +75,11 @@ fn denseRecords(comptime entries: []const InternalEntry) []const InternalRecord 
 
 /// The `.primitive` domain is shared across the five wrapper primitives. Ids are
 /// the `class_tag * 10 + method` encoding from
-/// `exec/object_ops.qjsPrimitivePrototypeMethod`.
-const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries ++ primitive.symbol_entries;
+/// `exec/object_ops.qjsPrimitivePrototypeMethod` for methods 1-5; methods 6+
+/// are the wrapper constructors' static function lists (qjs `js_bigint_funcs`
+/// quickjs.c:56350), which share the domain but not that handler.
+const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries ++
+    primitive.symbol_entries ++ primitive.bigint_static_entries;
 
 /// The static table `JSRuntime.internal_builtins` points at. Every standard
 /// native domain contributes its record entries here; exec owns both the
