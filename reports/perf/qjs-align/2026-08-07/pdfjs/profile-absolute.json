@@ -1,0 +1,3263 @@
+{
+ "note": "absolute Mcycles over the same N=8 deterministic pdfjs workload; percentages have different denominators so only mcyc is comparable",
+ "totals_cycles": {
+  "zjs": 6673739479,
+  "qjs": 3546659058
+ },
+ "zjs": [
+  {
+   "pct": 3.92,
+   "mcyc": 261.61,
+   "dso": "zjs",
+   "sym": "exec.vm_call.nativeMethodFastDispatch"
+  },
+  {
+   "pct": 3.29,
+   "mcyc": 219.57,
+   "dso": "zjs",
+   "sym": "compiler_rt.memcpy.memcpyFast"
+  },
+  {
+   "pct": 3.19,
+   "mcyc": 212.89,
+   "dso": "zjs",
+   "sym": "core.object.Object.getDenseArrayElementValue"
+  },
+  {
+   "pct": 2.76,
+   "mcyc": 184.2,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsArraySpliceCall"
+  },
+  {
+   "pct": 2.69,
+   "mcyc": 179.52,
+   "dso": "zjs",
+   "sym": "core.object.Object.existsOwnProperty"
+  },
+  {
+   "pct": 2.53,
+   "mcyc": 168.85,
+   "dso": "zjs",
+   "sym": "exec.object_ops.setValuePropertyWithThrow"
+  },
+  {
+   "pct": 2.52,
+   "mcyc": 168.18,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_field2"
+  },
+  {
+   "pct": 2.49,
+   "mcyc": 166.18,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_compare_cold"
+  },
+  {
+   "pct": 2.27,
+   "mcyc": 151.49,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_array_el"
+  },
+  {
+   "pct": 1.84,
+   "mcyc": 122.8,
+   "dso": "zjs",
+   "sym": "exec.string_builtin_ops.stringCharCodeAtCall"
+  },
+  {
+   "pct": 1.76,
+   "mcyc": 117.46,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116466.h"
+  },
+  {
+   "pct": 1.7,
+   "mcyc": 113.45,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_if_false8"
+  },
+  {
+   "pct": 1.63,
+   "mcyc": 108.78,
+   "dso": "zjs",
+   "sym": "core.object.Object.setOwnWritableDataProperty"
+  },
+  {
+   "pct": 1.62,
+   "mcyc": 108.11,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_call_method"
+  },
+  {
+   "pct": 1.56,
+   "mcyc": 104.11,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116647.hnd"
+  },
+  {
+   "pct": 1.55,
+   "mcyc": 103.44,
+   "dso": "libc.so.6",
+   "sym": "_int_malloc"
+  },
+  {
+   "pct": 1.53,
+   "mcyc": 102.11,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_field"
+  },
+  {
+   "pct": 1.46,
+   "mcyc": 97.44,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.allocAlignedBytesNoTrigger"
+  },
+  {
+   "pct": 1.44,
+   "mcyc": 96.1,
+   "dso": "zjs",
+   "sym": "exec.object_ops.getValueProperty"
+  },
+  {
+   "pct": 1.29,
+   "mcyc": 86.09,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_put_array_el"
+  },
+  {
+   "pct": 1.24,
+   "mcyc": 82.75,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_field2_primitive"
+  },
+  {
+   "pct": 1.23,
+   "mcyc": 82.09,
+   "dso": "zjs",
+   "sym": "core.string.compareStringValues"
+  },
+  {
+   "pct": 1.13,
+   "mcyc": 75.41,
+   "dso": "zjs",
+   "sym": "exec.value_ops.valuesEqual"
+  },
+  {
+   "pct": 1.11,
+   "mcyc": 74.08,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_push_atom_value"
+  },
+  {
+   "pct": 1.06,
+   "mcyc": 70.74,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_return"
+  },
+  {
+   "pct": 1.05,
+   "mcyc": 70.07,
+   "dso": "zjs",
+   "sym": "exec.object_ops.propertyAtomFromLengthIndex"
+  },
+  {
+   "pct": 1.0,
+   "mcyc": 66.74,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_var"
+  },
+  {
+   "pct": 0.99,
+   "mcyc": 66.07,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_arg_short"
+  },
+  {
+   "pct": 0.97,
+   "mcyc": 64.74,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_dup"
+  },
+  {
+   "pct": 0.92,
+   "mcyc": 61.4,
+   "dso": "zjs",
+   "sym": "exec.value_ops.stringAddStringsOwned"
+  },
+  {
+   "pct": 0.91,
+   "mcyc": 60.73,
+   "dso": "zjs",
+   "sym": "exec.string_builtin_ops.stringCall"
+  },
+  {
+   "pct": 0.9,
+   "mcyc": 60.06,
+   "dso": "zjs",
+   "sym": "exec.vm_property_field.field"
+  },
+  {
+   "pct": 0.88,
+   "mcyc": 58.73,
+   "dso": "zjs",
+   "sym": "core.object.Object.getOwnProperty"
+  },
+  {
+   "pct": 0.87,
+   "mcyc": 58.06,
+   "dso": "zjs",
+   "sym": "exec.builtin_dispatch.callTypedInternalRecordDirect"
+  },
+  {
+   "pct": 0.85,
+   "mcyc": 56.73,
+   "dso": "zjs",
+   "sym": "core.object.Object.appendPreparedPropertyEntry"
+  },
+  {
+   "pct": 0.78,
+   "mcyc": 52.06,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_put_field"
+  },
+  {
+   "pct": 0.77,
+   "mcyc": 51.39,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opCompare__struct_116749.h"
+  },
+  {
+   "pct": 0.74,
+   "mcyc": 49.39,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114908.h"
+  },
+  {
+   "pct": 0.71,
+   "mcyc": 47.38,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116510.h"
+  },
+  {
+   "pct": 0.71,
+   "mcyc": 47.38,
+   "dso": "zjs",
+   "sym": "exec.object_ops.ordinaryHasValueProperty"
+  },
+  {
+   "pct": 0.71,
+   "mcyc": 47.38,
+   "dso": "zjs",
+   "sym": "core.object.Object.getOwnDataPropertyValue"
+  },
+  {
+   "pct": 0.69,
+   "mcyc": 46.05,
+   "dso": "zjs",
+   "sym": "core.typed_array.readNumericElement"
+  },
+  {
+   "pct": 0.67,
+   "mcyc": 44.71,
+   "dso": "zjs",
+   "sym": "exec.vm_property_field.putTypedArrayElementFast"
+  },
+  {
+   "pct": 0.63,
+   "mcyc": 42.04,
+   "dso": "zjs",
+   "sym": "core.string.compareResolved"
+  },
+  {
+   "pct": 0.62,
+   "mcyc": 41.38,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.freeAlignedBytes"
+  },
+  {
+   "pct": 0.59,
+   "mcyc": 39.38,
+   "dso": "zjs",
+   "sym": "exec.value_ops.concatFlatStringBodiesOwned"
+  },
+  {
+   "pct": 0.58,
+   "mcyc": 38.71,
+   "dso": "zjs",
+   "sym": "core.object.Object.destroyFromHeader"
+  },
+  {
+   "pct": 0.52,
+   "mcyc": 34.7,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_if_true8"
+  },
+  {
+   "pct": 0.5,
+   "mcyc": 33.37,
+   "dso": "zjs",
+   "sym": "exec.object_ops.indexedExoticHasProperty"
+  },
+  {
+   "pct": 0.49,
+   "mcyc": 32.7,
+   "dso": "zjs",
+   "sym": "exec.object_ops.hasValueProperty"
+  },
+  {
+   "pct": 0.47,
+   "mcyc": 31.37,
+   "dso": "zjs",
+   "sym": "core.property.Slot.destroy__anon_178304"
+  },
+  {
+   "pct": 0.46,
+   "mcyc": 30.7,
+   "dso": "zjs",
+   "sym": "exec.vm_arith.binaryVm"
+  },
+  {
+   "pct": 0.42,
+   "mcyc": 28.03,
+   "dso": "zjs",
+   "sym": "mem.eqlBytes"
+  },
+  {
+   "pct": 0.41,
+   "mcyc": 27.36,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116450.h"
+  },
+  {
+   "pct": 0.4,
+   "mcyc": 26.69,
+   "dso": "zjs",
+   "sym": "exec.property_ic.fastImmediatePrototypeDataPropertyLookupForObject"
+  },
+  {
+   "pct": 0.4,
+   "mcyc": 26.69,
+   "dso": "zjs",
+   "sym": "core.object.Object.setProperty"
+  },
+  {
+   "pct": 0.4,
+   "mcyc": 26.69,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opCall__struct_113849.h"
+  },
+  {
+   "pct": 0.39,
+   "mcyc": 26.03,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_goto8"
+  },
+  {
+   "pct": 0.37,
+   "mcyc": 24.69,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116442.h"
+  },
+  {
+   "pct": 0.37,
+   "mcyc": 24.69,
+   "dso": "zjs",
+   "sym": "exec.array_ops.setValuePropertyOrThrow"
+  },
+  {
+   "pct": 0.36,
+   "mcyc": 24.03,
+   "dso": "zjs",
+   "sym": "exec.string_ops.appendStringValueUnits"
+  },
+  {
+   "pct": 0.36,
+   "mcyc": 24.03,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_update_loc"
+  },
+  {
+   "pct": 0.36,
+   "mcyc": 24.03,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116489.h"
+  },
+  {
+   "pct": 0.36,
+   "mcyc": 24.03,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116482.h"
+  },
+  {
+   "pct": 0.36,
+   "mcyc": 24.03,
+   "dso": "zjs",
+   "sym": "core.array.arrayIndexFromAtom__anon_74217"
+  },
+  {
+   "pct": 0.35,
+   "mcyc": 23.36,
+   "dso": "zjs",
+   "sym": "core.string.decodeUtf8"
+  },
+  {
+   "pct": 0.34,
+   "mcyc": 22.69,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114875.h"
+  },
+  {
+   "pct": 0.34,
+   "mcyc": 22.69,
+   "dso": "zjs",
+   "sym": "array_list.Aligned(u16,null).ensureTotalCapacity"
+  },
+  {
+   "pct": 0.33,
+   "mcyc": 22.02,
+   "dso": "zjs",
+   "sym": "exec.object_ops.createBytecodeFunctionObjectInternal"
+  },
+  {
+   "pct": 0.33,
+   "mcyc": 22.02,
+   "dso": "zjs",
+   "sym": "exec.value_ops.toIntegerOrInfinity"
+  },
+  {
+   "pct": 0.33,
+   "mcyc": 22.02,
+   "dso": "zjs",
+   "sym": "exec.vm_property_field.getArrayElement"
+  },
+  {
+   "pct": 0.33,
+   "mcyc": 22.02,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_push_small"
+  },
+  {
+   "pct": 0.32,
+   "mcyc": 21.36,
+   "dso": "zjs",
+   "sym": "core.object.Object.defineOrdinaryOwnProperty"
+  },
+  {
+   "pct": 0.32,
+   "mcyc": 21.36,
+   "dso": "libc.so.6",
+   "sym": "unlink_chunk.isra.0"
+  },
+  {
+   "pct": 0.3,
+   "mcyc": 20.02,
+   "dso": "libc.so.6",
+   "sym": "malloc"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 19.35,
+   "dso": "zjs",
+   "sym": "core.object.Object.defineOwnProperty"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 19.35,
+   "dso": "zjs",
+   "sym": "exec.frame.Frame.captureLocal__anon_107615"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 19.35,
+   "dso": "zjs",
+   "sym": "core.value.JSValue.destroyZeroRef__anon_58570"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 19.35,
+   "dso": "zjs",
+   "sym": "core.object.Object.adoptShapeForNewProperty"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 19.35,
+   "dso": "zjs",
+   "sym": "core.string.String.createRopeOwned"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 19.35,
+   "dso": "zjs",
+   "sym": "core.string.String.createUtf8"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 19.35,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_length"
+  },
+  {
+   "pct": 0.28,
+   "mcyc": 18.69,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Machine.setupSimpleInlineEntry__anon_112650"
+  },
+  {
+   "pct": 0.28,
+   "mcyc": 18.69,
+   "dso": "zjs",
+   "sym": "core.object.Object.appendDenseArrayIndex"
+  },
+  {
+   "pct": 0.28,
+   "mcyc": 18.69,
+   "dso": "zjs",
+   "sym": "exec.object_ops.attachFunctionCaptures"
+  },
+  {
+   "pct": 0.27,
+   "mcyc": 18.02,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_add_loc"
+  },
+  {
+   "pct": 0.26,
+   "mcyc": 17.35,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116687.hnd"
+  },
+  {
+   "pct": 0.25,
+   "mcyc": 16.68,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116719.hnd"
+  },
+  {
+   "pct": 0.25,
+   "mcyc": 16.68,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.allocInternal__anon_53455"
+  },
+  {
+   "pct": 0.25,
+   "mcyc": 16.68,
+   "dso": "zjs",
+   "sym": "exec.string_ops.qjsStringFromCharCode"
+  },
+  {
+   "pct": 0.24,
+   "mcyc": 16.02,
+   "dso": "zjs",
+   "sym": "simple_token.balancedAfterOpen"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 15.35,
+   "dso": "zjs",
+   "sym": "core.atom.AtomTable.kind"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 15.35,
+   "dso": "zjs",
+   "sym": "core.string.String.destroyFromHeader"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 15.35,
+   "dso": "zjs",
+   "sym": "core.object.destroyOptionalVarRefCellSlice"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 15.35,
+   "dso": "zjs",
+   "sym": "exec.open_bindings.Table.acquire__anon_107678"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 15.35,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opCompare__struct_116773.h"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 15.35,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116434.h"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 15.35,
+   "dso": "zjs",
+   "sym": "exec.vm_arith.addLocalStringAt"
+  },
+  {
+   "pct": 0.22,
+   "mcyc": 14.68,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.warmExactArgsLeafOutline__anon_135860"
+  },
+  {
+   "pct": 0.22,
+   "mcyc": 14.68,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.free__anon_179959"
+  },
+  {
+   "pct": 0.22,
+   "mcyc": 14.68,
+   "dso": "zjs",
+   "sym": "exec.vm_value.logicalNot"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "core.string.StringValueIterator.next"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "exec.stack.Stack.reserveAdditional"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Machine.pushFrame__anon_113600"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "exec.array_builtin_ops.arrayPushCall"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "exec.array_ops.putDenseArrayElementOverwriteOwnedFast"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_115147.h"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116458.h"
+  },
+  {
+   "pct": 0.21,
+   "mcyc": 14.01,
+   "dso": "zjs",
+   "sym": "core.object.Object.createInternal"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 13.35,
+   "dso": "zjs",
+   "sym": "core.typed_array.writeTruncatingIntegerElement"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 13.35,
+   "dso": "zjs",
+   "sym": "exec.object_ops.findPropertyDescriptor"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 13.35,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116711.hnd"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 13.35,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116655.hnd"
+  },
+  {
+   "pct": 0.19,
+   "mcyc": 12.68,
+   "dso": "zjs",
+   "sym": "core.shape.Registry.createObjectRoot"
+  },
+  {
+   "pct": 0.19,
+   "mcyc": 12.68,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsArrayPushCallImpl"
+  },
+  {
+   "pct": 0.18,
+   "mcyc": 12.01,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116695.hnd"
+  },
+  {
+   "pct": 0.16,
+   "mcyc": 10.68,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_push_this"
+  },
+  {
+   "pct": 0.16,
+   "mcyc": 10.68,
+   "dso": "zjs",
+   "sym": "core.object.Object.traceChildren__anon_108603"
+  },
+  {
+   "pct": 0.16,
+   "mcyc": 10.68,
+   "dso": "zjs",
+   "sym": "exec.value_ops.binary"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "zjs",
+   "sym": "exec.vm_arith.looseEqualOp"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opGetVarRef__struct_116853.h"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "libc.so.6",
+   "sym": "_int_free_create_chunk"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.allocInternal__anon_107527"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_post_inc_dec"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "zjs",
+   "sym": "core.gc.destroyZeroRef__anon_79613"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "zjs",
+   "sym": "exec.vm_property_field.fastStringIndexValue"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 10.01,
+   "dso": "zjs",
+   "sym": "exec.builtin_dispatch.callInternalRecord"
+  },
+  {
+   "pct": 0.14,
+   "mcyc": 9.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_field_primitive"
+  },
+  {
+   "pct": 0.14,
+   "mcyc": 9.34,
+   "dso": "zjs",
+   "sym": "exec.array_ops.typedArrayPrototypeSet"
+  },
+  {
+   "pct": 0.14,
+   "mcyc": 9.34,
+   "dso": "libc.so.6",
+   "sym": "_int_free_merge_chunk"
+  },
+  {
+   "pct": 0.14,
+   "mcyc": 9.34,
+   "dso": "zjs",
+   "sym": "exec.vm_property_field.inOrInstanceof"
+  },
+  {
+   "pct": 0.14,
+   "mcyc": 9.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116553.h"
+  },
+  {
+   "pct": 0.14,
+   "mcyc": 9.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.defineArrayLength"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 8.68,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.functionNameValueFromAtom"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 8.68,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_115212.h"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 8.68,
+   "dso": "zjs",
+   "sym": "core.shape.Registry.relocateShape"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 8.68,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116503.h"
+  },
+  {
+   "pct": 0.12,
+   "mcyc": 8.01,
+   "dso": "zjs",
+   "sym": "core.gc.destroyZeroRefNow__anon_110282"
+  },
+  {
+   "pct": 0.12,
+   "mcyc": 8.01,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Machine.setupFallbackInlineEntry"
+  },
+  {
+   "pct": 0.12,
+   "mcyc": 8.01,
+   "dso": "zjs",
+   "sym": "exec.regexp_ops.createStringValue"
+  },
+  {
+   "pct": 0.12,
+   "mcyc": 8.01,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.allocInternal__anon_117110"
+  },
+  {
+   "pct": 0.12,
+   "mcyc": 8.01,
+   "dso": "zjs",
+   "sym": "core.memory.SmallObjectSlab.addArena"
+  },
+  {
+   "pct": 0.12,
+   "mcyc": 8.01,
+   "dso": "zjs",
+   "sym": "libs.number_format.jsDtoaImpl"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.createWithFamInternal__anon_54291"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.defineModuleNamespaceProperty"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opCall__struct_113857.h"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "libc.so.6",
+   "sym": "cfree@GLIBC_2.17"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.appendDenseArrayValues"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "libc.so.6",
+   "sym": "_int_free"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114097.h"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 7.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116663.hnd"
+  },
+  {
+   "pct": 0.1,
+   "mcyc": 6.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.parseExprBinary"
+  },
+  {
+   "pct": 0.1,
+   "mcyc": 6.67,
+   "dso": "zjs",
+   "sym": "parser.lexer.LexerImpl.nextInto"
+  },
+  {
+   "pct": 0.1,
+   "mcyc": 6.67,
+   "dso": "zjs",
+   "sym": "core.atom.AtomTable.internString"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 6.01,
+   "dso": "zjs",
+   "sym": "core.string.appendRopeTail"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 6.01,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_field_property_tail"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 6.01,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_return_undef"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 6.01,
+   "dso": "zjs",
+   "sym": "core.value.JSValue.asStringBody"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 6.01,
+   "dso": "zjs",
+   "sym": "core.object.Object.traceChildren__anon_108615"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 6.01,
+   "dso": "zjs",
+   "sym": "exec.array_ops.arrayHasDefaultSpecies"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 6.01,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.createInternal__anon_54595"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "exec.object_ops.primitivePrototypeForAccess"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.defineNewOwnDataPropertyForSimpleSet"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.invalidateStandardArrayPrototypeForTaggedIndexMutation"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsArraySliceCall"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "core.number.parseIntValue"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.callNativeCallableByName"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "exec.construct.constructTypedArrayValue"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "exec.value_ops.toNumberValue"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.destroyRuntimeCyclesWithValueRoots"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.callNativeCallableObject"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_115638.h"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "bytecode.pipeline_finalize.computeStackSizeForCurrentBytecode"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.getProperty"
+  },
+  {
+   "pct": 0.08,
+   "mcyc": 5.34,
+   "dso": "zjs",
+   "sym": "array_list.Aligned(u8,null).append"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.State.expectSemicolon"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_drop_fast"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.ensureArrayBufferCapacity"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "core.object.arrayLengthNumber"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "exec.value_ops.startAccumulatorRope"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116496.h"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_push_i8"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "exec.coercion_ops.toPrimitiveForNumber"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "exec.vm_call.closure"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 4.67,
+   "dso": "zjs",
+   "sym": "parser.lexer.LexerImpl.finishNumber"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "parser.lexer.LexerImpl.lexPunctuator"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.vm_value.pushConst8"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "core.descriptor.Descriptor.destroy__anon_74186"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "core.object.Object.mappedArgumentsBindingIndexFromAtom"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.object_ops.getPrimitiveProperty"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.object_ops.bytecodeFunctionPrototypeForRealm"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "core.shape.Registry.destroyShape"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114791.h"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "core.runtime.JSRuntime.collectBeforeObjectAllocation"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "core.object.Object.updateMappedArgumentsBinding"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_push_i16"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "libs.number_format.mpbShrRound"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "libs.number_format.mulPow"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_get_array_el_cached_string"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.array_ops.arrayConstructorFromGlobal"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.object_ops.toPropertyKeyAtom"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "core.string.String.createBalancedRopeOwned"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_define_field"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "compiler_rt.memset"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "compiler_v2.resolve_variables.Resolver.run"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.string_ops.qjsStringSearchPositionMethod"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "libc.so.6",
+   "sym": "__memcpy_generic"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.string_ops.qjsStringPrototypeMethod"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.string_builtin_ops.stringIndexOfUnits"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.allocInternal__anon_117725"
+  },
+  {
+   "pct": 0.06,
+   "mcyc": 4.0,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.callAccessorSetter"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114644.h"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.createArrayFromInitialShape"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.array_ops.arraySpeciesCreate"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.call.nativeFunctionDispatchNameRef"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opLoc__struct_116532.h"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.array_builtin_ops.arrayCall"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.object_ops.installOrdinaryFunctionPrototype"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opGetVarRef__struct_116885.h"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "core.object.Object.materializeMappedArgumentsProperty"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "core.atom.predefinedId"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114924.h"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.string_ops.qjsStringNumericArgsMethod"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.string_ops.callStringBody"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "compiler_v2.resolve_labels.Resolver.walk__anon_157651"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "exec.string_builtin_ops.methodCall"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 3.34,
+   "dso": "zjs",
+   "sym": "core.value_semantics.toBoolean"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "parser.lexer.LexerImpl.emitIdentifierOrKeyword"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.parsePrimary"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "fmt.parse_float.parseFloat__anon_74364"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.create"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.appendDenseArrayDefineIndex"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.string.StringRope.flatten"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.arrayLengthAssignmentValue"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.setFunctionBytecodeValue"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsCreateArrayDataOrTypedArrayElement"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.arrayBuiltinMarker"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.property_ops.propertyKeyAtom"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.property_ic.ordinaryDataPropertyLookup"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_add_loc_cold"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.arrayPrototypeRecordId"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "heap.c_allocator_impl.free"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "array_list.Aligned(u8,null).ensureUnusedCapacity"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.object_ops.getPrototypeMethod"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.atom.AtomTable.toStringValue__anon_81563"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opGetVarRef__struct_116861.h"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.builtin_glue.qjsGlobalParseInt"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.number.parseIntLatin1Bytes"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opCompare__struct_116767.h"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.value_ops.appendValueString"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.arrayRelativeIndex"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opGetVarRef__struct_116869.h"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.string.String.internAtom"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "bytecode.function_bytecode.FunctionBytecodeImpl.deinitWithLayout__anon_109469"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.string.freeRopeTail"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "compiler_v2.resolve_labels.Resolver.matchSeq"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "core.string.decodeOne"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 2.67,
+   "dso": "zjs",
+   "sym": "exec.vm_value.typeOf"
+  },
+  {
+   "pct": 0.03,
+   "mcyc": 2.0,
+   "dso": "zjs",
+   "sym": "exec.vm_value.typeOfIsUndefined"
+  },
+  {
+   "pct": 0.03,
+   "mcyc": 2.0,
+   "dso": "zjs",
+   "sym": "core.object.Object.definePlainDataPropertyKnownFast"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "parser.lexer.LexerImpl.lexNumber"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.typed_array.writeElement"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_array_from"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.array_ops.ensureSettableForArrayBuiltin"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.object.Object.defineOrdinaryOwnPropertyKnownNoOwn"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.vm_property_field.fastCollectionPrototypeMethodValue"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114483.h"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsArrayPopCallImpl"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.ordinaryHasInstance"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.SyncInternalCallSite.call"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.array_ops.putDenseArrayElementAppendOwnedFast"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.object.Object.descriptorFromOwnPropertySlot"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.vm_property_locals.arg"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.string.String.createUtf16"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.value_format.trimJsWhitespace"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.accountedAllocatorAlloc"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.string.ropeTailEnsureNarrow"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Machine.pushExactSimpleFrame__anon_113598"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Machine.setupSimpleInlineEntry__anon_112651"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.value_ops.appendRawString"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.array_ops.materializeArgsFromArrayLike"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.createInternal__anon_113039"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opBinary__struct_116727.hnd"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsFastDensePrimitiveArrayJoin"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.execCall"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.number_ops.numberCall"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.destroyWithFam__anon_54510"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "core.typed_array.typedArrayGetIndex"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.object_builtin_ops.objectCallForNativeRecord"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "compiler_v2.resolve_variables.Resolver.lowerScopeVar"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Machine.pushExactArgsLeafFrame__anon_135519"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.property_ic.functionOwnDataPropertyValueForFastPath"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "bytecode.function_def.FunctionDefImpl.validateFinalScopeLinks"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "exec.string_builtin_ops.charAtValue"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 1.33,
+   "dso": "zjs",
+   "sym": "parser.parser_core.parseLhsExpr"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.v2FEmitOpI32"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.parseAssignExpr2"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.object_ops.firstProxyInPrototypeSetPath"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_call_constructor"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.value_format.parseJsNumber"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "mem.findScalarPos__anon_87395"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.OwnedArrayLikeArgs.deinit"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.value_ops.valuesStrictEqual"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.memory.SmallObjectSlab.releaseEmptyArena"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.allocClassPayload"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_115940.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "hash.wyhash.Wyhash.hash"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_null_fast"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.allocInternalSlow__anon_117117"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opPutVarRef__struct_116895.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.object_ops.functionCallerArgumentsProperty"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opCall__struct_113865.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opCompare__struct_116761.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.vm_literal.specialObject"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsArrayReverseCall"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Machine.pushExactSimpleFrame__anon_113592"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "realloc@plt"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.number.toNumber"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.vm_property_field.fastRegExpPrototypeMethodValue"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.string_ops.qjsArraySearchCall"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114731.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.function_ops.functionCall"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "libc.so.6",
+   "sym": "_int_realloc"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114054.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114698.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.arrayPrototypeFromGlobal"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114743.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.vm_literal.defineField"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.call.nativeFunctionNameForVm"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.value_ops.length"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.value_ops.compare"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.callValueOrBytecodeRoot"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.op_object"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "libc.so.6",
+   "sym": "alloc_perturb"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.appendUninitializedFastArraySlot"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.regexp_fastpath.isRegExpObservable"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.collectionPrototypeMethodByName"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_115621.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.opGetVarRef__struct_116877.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.string_ops.getFastStringPrimitiveDataProperty"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_115844.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.frame.ensureVarRefsCapacity"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsArrayByCopyCall"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Entry.deinitGeneral"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.call_runtime.qjsFunctionApplyCall"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.inline_calls.Entry.deinitGeneralResources"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.object_ops.getValuePropertyObjectMiss"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_114370.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.value.JSValue.sameValue"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "compiler_v2.resolve_variables.Resolver.copyInputInstruction"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.vm_value.pushEmptyString"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.tailcall_dispatch.coldStd__struct_116333.h"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.object_ops.getPrototypeMethodWithFallback"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "compiler_v2.resolve_labels.Resolver.copyDefault__anon_158105"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.slot_ops.execGetArg"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.shape.Registry.cloneShape"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "malloc@plt"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "compiler_v2.resolve_labels.Resolver.relaxJumps"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "bytecode.pipeline_finalize.prepareCurrentBeforeChildren"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "compiler_v2.builder.Builder.deinit"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.parseFunctionParamsAndBody"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.drainCycleDeferredFrees"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.putLValue"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.atom.AtomTable.finalizeDeadEntry"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.object_ops.getValuePropertyNonObject"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.memory.MemoryAccount.allocInternal__anon_59201"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "bytecode.pipeline_finalize.installChildFunctionBytecodes"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.object.Object.convertDenseArrayElementsToSparseProperties"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "array_list.Aligned(usize,null).append"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "compiler_v2.root.compileFunctionV2ForPackedFinalize"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.array_ops.qjsArrayAtCall"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "core.atom.AtomTable.indexEntry"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.parseLogicalAndOr"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "exec.string_ops.toStringForAnnexB"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.lexer.parseNumber"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.State.emitScopeGetVar"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.v2FEmitOpNoSource"
+  },
+  {
+   "pct": 0.01,
+   "mcyc": 0.67,
+   "dso": "zjs",
+   "sym": "parser.parser_core.State.defineVar"
+  }
+ ],
+ "qjs": [
+  {
+   "pct": 48.71,
+   "mcyc": 1727.58,
+   "dso": "qjs",
+   "sym": "JS_CallInternal"
+  },
+  {
+   "pct": 6.36,
+   "mcyc": 225.57,
+   "dso": "libc.so.6",
+   "sym": "__memcpy_sve"
+  },
+  {
+   "pct": 4.7,
+   "mcyc": 166.69,
+   "dso": "qjs",
+   "sym": "__js_malloc"
+  },
+  {
+   "pct": 3.23,
+   "mcyc": 114.56,
+   "dso": "qjs",
+   "sym": "JS_GetPropertyInternal"
+  },
+  {
+   "pct": 2.02,
+   "mcyc": 71.64,
+   "dso": "libc.so.6",
+   "sym": "_int_malloc"
+  },
+  {
+   "pct": 1.83,
+   "mcyc": 64.9,
+   "dso": "qjs",
+   "sym": "__js_free"
+  },
+  {
+   "pct": 1.8,
+   "mcyc": 63.84,
+   "dso": "qjs",
+   "sym": "__JS_AtomToValue"
+  },
+  {
+   "pct": 1.61,
+   "mcyc": 57.1,
+   "dso": "qjs",
+   "sym": "js_call_c_function"
+  },
+  {
+   "pct": 1.23,
+   "mcyc": 43.62,
+   "dso": "qjs",
+   "sym": "JS_SetPropertyValue"
+  },
+  {
+   "pct": 1.19,
+   "mcyc": 42.21,
+   "dso": "qjs",
+   "sym": "__JS_FreeValueRT"
+  },
+  {
+   "pct": 1.17,
+   "mcyc": 41.5,
+   "dso": "qjs",
+   "sym": "add_property"
+  },
+  {
+   "pct": 0.86,
+   "mcyc": 30.5,
+   "dso": "qjs",
+   "sym": "free_gc_object"
+  },
+  {
+   "pct": 0.84,
+   "mcyc": 29.79,
+   "dso": "qjs",
+   "sym": "JS_FreeValue"
+  },
+  {
+   "pct": 0.81,
+   "mcyc": 28.73,
+   "dso": "qjs",
+   "sym": "JS_GetPropertyValue"
+  },
+  {
+   "pct": 0.81,
+   "mcyc": 28.73,
+   "dso": "qjs",
+   "sym": "js_string_eq.isra.0"
+  },
+  {
+   "pct": 0.77,
+   "mcyc": 27.31,
+   "dso": "qjs",
+   "sym": "JS_ConcatString2"
+  },
+  {
+   "pct": 0.66,
+   "mcyc": 23.41,
+   "dso": "qjs",
+   "sym": "js_string_charCodeAt"
+  },
+  {
+   "pct": 0.62,
+   "mcyc": 21.99,
+   "dso": "qjs",
+   "sym": "get_line_col_cached"
+  },
+  {
+   "pct": 0.59,
+   "mcyc": 20.93,
+   "dso": "qjs",
+   "sym": "js_string_fromCharCode"
+  },
+  {
+   "pct": 0.57,
+   "mcyc": 20.22,
+   "dso": "qjs",
+   "sym": "get_var_ref"
+  },
+  {
+   "pct": 0.56,
+   "mcyc": 19.86,
+   "dso": "qjs",
+   "sym": "next_token"
+  },
+  {
+   "pct": 0.55,
+   "mcyc": 19.51,
+   "dso": "qjs",
+   "sym": "JS_ToStringInternal"
+  },
+  {
+   "pct": 0.55,
+   "mcyc": 19.51,
+   "dso": "qjs",
+   "sym": "JS_ConcatStringInPlace"
+  },
+  {
+   "pct": 0.55,
+   "mcyc": 19.51,
+   "dso": "libc.so.6",
+   "sym": "unlink_chunk.isra.0"
+  },
+  {
+   "pct": 0.55,
+   "mcyc": 19.51,
+   "dso": "qjs",
+   "sym": "JS_ConcatString"
+  },
+  {
+   "pct": 0.49,
+   "mcyc": 17.38,
+   "dso": "qjs",
+   "sym": "parse_ident"
+  },
+  {
+   "pct": 0.48,
+   "mcyc": 17.02,
+   "dso": "qjs",
+   "sym": "string_buffer_end"
+  },
+  {
+   "pct": 0.44,
+   "mcyc": 15.61,
+   "dso": "qjs",
+   "sym": "js_atod"
+  },
+  {
+   "pct": 0.42,
+   "mcyc": 14.9,
+   "dso": "qjs",
+   "sym": "js_string_indexOf"
+  },
+  {
+   "pct": 0.42,
+   "mcyc": 14.9,
+   "dso": "libc.so.6",
+   "sym": "malloc"
+  },
+  {
+   "pct": 0.4,
+   "mcyc": 14.19,
+   "dso": "qjs",
+   "sym": "js_alloc_string"
+  },
+  {
+   "pct": 0.35,
+   "mcyc": 12.41,
+   "dso": "qjs",
+   "sym": "JS_CreateProperty"
+  },
+  {
+   "pct": 0.35,
+   "mcyc": 12.41,
+   "dso": "libc.so.6",
+   "sym": "__malloc_usable_size"
+  },
+  {
+   "pct": 0.33,
+   "mcyc": 11.7,
+   "dso": "qjs",
+   "sym": "JS_ToInt32Free"
+  },
+  {
+   "pct": 0.31,
+   "mcyc": 10.99,
+   "dso": "qjs",
+   "sym": "JS_DefineProperty"
+  },
+  {
+   "pct": 0.31,
+   "mcyc": 10.99,
+   "dso": "libc.so.6",
+   "sym": "_int_free"
+  },
+  {
+   "pct": 0.31,
+   "mcyc": 10.99,
+   "dso": "qjs",
+   "sym": "js_array_push"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 10.29,
+   "dso": "qjs",
+   "sym": "__js_realloc"
+  },
+  {
+   "pct": 0.29,
+   "mcyc": 10.29,
+   "dso": "qjs",
+   "sym": "js_create_array"
+  },
+  {
+   "pct": 0.27,
+   "mcyc": 9.58,
+   "dso": "qjs",
+   "sym": "js_atof"
+  },
+  {
+   "pct": 0.26,
+   "mcyc": 9.22,
+   "dso": "libc.so.6",
+   "sym": "_int_free_merge_chunk"
+  },
+  {
+   "pct": 0.26,
+   "mcyc": 9.22,
+   "dso": "libc.so.6",
+   "sym": "memcmp"
+  },
+  {
+   "pct": 0.24,
+   "mcyc": 8.51,
+   "dso": "qjs",
+   "sym": "mul_pow"
+  },
+  {
+   "pct": 0.24,
+   "mcyc": 8.51,
+   "dso": "qjs",
+   "sym": "js_create_function"
+  },
+  {
+   "pct": 0.24,
+   "mcyc": 8.51,
+   "dso": "qjs",
+   "sym": "string_buffer_init2"
+  },
+  {
+   "pct": 0.24,
+   "mcyc": 8.51,
+   "dso": "qjs",
+   "sym": "js_array_finalizer"
+  },
+  {
+   "pct": 0.24,
+   "mcyc": 8.51,
+   "dso": "qjs",
+   "sym": "js_array_mark"
+  },
+  {
+   "pct": 0.23,
+   "mcyc": 8.16,
+   "dso": "qjs",
+   "sym": "__JS_FindAtom.constprop.0"
+  },
+  {
+   "pct": 0.22,
+   "mcyc": 7.8,
+   "dso": "qjs",
+   "sym": "mpb_shr_round.part.0"
+  },
+  {
+   "pct": 0.22,
+   "mcyc": 7.8,
+   "dso": "qjs",
+   "sym": "mark_children"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 7.09,
+   "dso": "qjs",
+   "sym": "js_parse_expr_binary"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 7.09,
+   "dso": "libc.so.6",
+   "sym": "_int_free_create_chunk"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 7.09,
+   "dso": "libc.so.6",
+   "sym": "__memmove_sve"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 7.09,
+   "dso": "qjs",
+   "sym": "js_closure"
+  },
+  {
+   "pct": 0.2,
+   "mcyc": 7.09,
+   "dso": "qjs",
+   "sym": "__JS_NewAtom"
+  },
+  {
+   "pct": 0.18,
+   "mcyc": 6.38,
+   "dso": "qjs",
+   "sym": "js_parse_postfix_expr"
+  },
+  {
+   "pct": 0.18,
+   "mcyc": 6.38,
+   "dso": "qjs",
+   "sym": "js_free_shape"
+  },
+  {
+   "pct": 0.18,
+   "mcyc": 6.38,
+   "dso": "qjs",
+   "sym": "free_property"
+  },
+  {
+   "pct": 0.18,
+   "mcyc": 6.38,
+   "dso": "qjs",
+   "sym": "js_closure2.isra.0"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 5.32,
+   "dso": "qjs",
+   "sym": "JS_NewObjectFromShape"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 5.32,
+   "dso": "qjs",
+   "sym": "js_new_shape2.constprop.0"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 5.32,
+   "dso": "qjs",
+   "sym": "JS_SetPropertyInternal"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 5.32,
+   "dso": "qjs",
+   "sym": "JS_NewObjectProtoClass"
+  },
+  {
+   "pct": 0.15,
+   "mcyc": 5.32,
+   "dso": "qjs",
+   "sym": "js_new_string_rope"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 4.61,
+   "dso": "qjs",
+   "sym": "add_shape_property"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 4.61,
+   "dso": "qjs",
+   "sym": "round_to_d.constprop.0"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 4.61,
+   "dso": "qjs",
+   "sym": "JS_FreeContext"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 4.61,
+   "dso": "qjs",
+   "sym": "JS_ToNumberHintFree"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 4.61,
+   "dso": "libc.so.6",
+   "sym": "cfree@GLIBC_2.17"
+  },
+  {
+   "pct": 0.13,
+   "mcyc": 4.61,
+   "dso": "qjs",
+   "sym": "js_def_free"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 3.9,
+   "dso": "qjs",
+   "sym": "js_new_string8_len"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 3.9,
+   "dso": "qjs",
+   "sym": "code_match"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 3.9,
+   "dso": "qjs",
+   "sym": "JS_ToInt32Sat"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 3.9,
+   "dso": "qjs",
+   "sym": "js_dtoa"
+  },
+  {
+   "pct": 0.11,
+   "mcyc": 3.9,
+   "dso": "qjs",
+   "sym": "JS_CallFree"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "js_parse_skip_parens_token"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "libc.so.6",
+   "sym": "__memset_zva64"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "JS_ToCStringLen2"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "free_var_ref"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "free_bytecode_atoms"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "js_bytecode_function_finalizer"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "skip_spaces"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "resize_properties"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "__js_malloc_usable_size"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "js_parse_string"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "js_binary_logic_slow"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "js_malloc_large"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "JS_ToObject"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "js_array_splice"
+  },
+  {
+   "pct": 0.09,
+   "mcyc": 3.19,
+   "dso": "qjs",
+   "sym": "js_string_memcmp"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "qjs",
+   "sym": "free_token"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "qjs",
+   "sym": "JS_GetPrototypePrimitive.isra.0"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "qjs",
+   "sym": "JS_GetOwnPropertyInternal"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "qjs",
+   "sym": "js_function_set_properties"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "qjs",
+   "sym": "malloc@plt"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "qjs",
+   "sym": "JS_DefinePropertyValue"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "qjs",
+   "sym": "js_array_join"
+  },
+  {
+   "pct": 0.07,
+   "mcyc": 2.48,
+   "dso": "libc.so.6",
+   "sym": "__memcpy_generic"
+  },
+  {
+   "pct": 0.05,
+   "mcyc": 1.77,
+   "dso": "qjs",
+   "sym": "JS_NewAtomLen"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "resolve_labels"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "resolve_scope_var"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "ss_check"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "string_rope_get"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "js_string_charAt"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "emit_atom"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "expand_fast_array"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "malloc_usable_size@plt"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "JS_ToPrimitiveFree"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "find_var.isra.0"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "string_buffer_write8"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "dbuf_put"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "mp_div1norm.constprop.0"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "memcpy@plt"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "js_strict_eq2.isra.0"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "gc_scan_incref_child"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "JS_ToInt64Clamp"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "js_parse_unary"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "js_parse_logical_and_or"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "memcmp@plt"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "gc_decref_child"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "string_buffer_concat_value_free"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "JS_ToBoolFree"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "JS_DefineAutoInitProperty"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "build_arg_list"
+  },
+  {
+   "pct": 0.04,
+   "mcyc": 1.42,
+   "dso": "qjs",
+   "sym": "js_malloc_new_arena"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_parse_statement_or_decl"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "mpb_mul1_base"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "code_has_label.isra.0"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "libc.so.6",
+   "sym": "realloc"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "emit_goto"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_parse_property_name"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_operator_typeof"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "string_buffer_putc16_slow"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_mallocz"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_parseInt"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "__js_poll_interrupts"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_HasProperty"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "i32toa"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "push_short_int"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "emit_source_pos"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_clone_shape"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "libc.so.6",
+   "sym": "_int_realloc"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "set_array_length"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "gc_decref"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_get_this"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_parse_object_literal"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_IsArray"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_DefinePropertyValueValue"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_NewStringLen"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_GetFunctionRealm"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_relational_slow"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_IsInstanceOf"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_FreeAtomStruct"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_ValueToAtom"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "lre_compile"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "output_digits"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "string_buffer_putc8"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_get_atom_index"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_bytecode_function_mark"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_get_length64"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_parseFloat"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "JS_AtomIsArrayIndex"
+  },
+  {
+   "pct": 0.02,
+   "mcyc": 0.71,
+   "dso": "qjs",
+   "sym": "js_def_malloc"
+  }
+ ]
+}
