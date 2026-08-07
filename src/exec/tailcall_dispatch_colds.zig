@@ -291,7 +291,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // publishing h_compare path internally at the generator parameter/body stop. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used
     // (direct routing would perturb the int32 fast-path codegen).
-    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare_cold;
+    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompareCold(o);
     inline for ([_]u8{ op.neg, op.plus, op.inc, op.dec }) |o| t[o] = h_unary;
     t[op.in] = h(struct {
         fn b(vm: *Vm) HostError!void {
