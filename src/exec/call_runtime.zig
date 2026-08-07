@@ -1235,8 +1235,6 @@ noinline fn callNativeCallableByName(
         }
     }
     if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-    if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
     if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);

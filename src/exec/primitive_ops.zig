@@ -86,6 +86,20 @@ pub const bigint_static_entries = [_]core.host_function.InternalEntry{
     primitiveStaticEntry("asUintN", 2, bigint_asuintn_id),
 };
 
+/// `Symbol.for` / `Symbol.keyFor`: qjs `js_symbol_funcs` (quickjs.c:51672),
+/// two plain `JS_CFUNC_DEF` entries over `js_symbol_for` (quickjs.c:51648)
+/// and `js_symbol_keyFor` (quickjs.c:51659). Same domain rationale as the
+/// BigInt statics above; ids continue Symbol's class-tag-4 block past its
+/// prototype methods, the `Symbol(...)`-as-function path and the two
+/// Symbol-only accessors (41-45).
+pub const symbol_for_id: u32 = primitiveId(.symbol, 6);
+pub const symbol_key_for_id: u32 = primitiveId(.symbol, 7);
+
+pub const symbol_static_entries = [_]core.host_function.InternalEntry{
+    primitiveStaticEntry("for", 1, symbol_for_id),
+    primitiveStaticEntry("keyFor", 1, symbol_key_for_id),
+};
+
 fn primitiveEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
@@ -169,6 +183,17 @@ fn primitiveStaticCall(
             builtin_dispatch.callerBytecode(host_call),
             builtin_dispatch.callerFrame(host_call),
         ),
+        // qjs js_symbol_for (quickjs.c:51648).
+        symbol_for_id => builtin_glue.qjsSymbolFor(
+            ctx,
+            host_call.output,
+            realm.global,
+            host_call.args,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        ),
+        // qjs js_symbol_keyFor (quickjs.c:51659).
+        symbol_key_for_id => builtin_glue.qjsSymbolKeyFor(ctx.runtime, host_call.args),
         else => error.TypeError,
     };
 }

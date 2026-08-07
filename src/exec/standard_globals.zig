@@ -51,6 +51,7 @@ const MethodTableKind = enum {
     number_static,
     number_prototype,
     bigint_static,
+    symbol_static,
     proxy_static,
     error_prototype,
     error_static,
@@ -195,6 +196,15 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                     primitive_builtin.bigint_asintn_id
                 else if (std.mem.eql(u8, name, "asUintN"))
                     primitive_builtin.bigint_asuintn_id
+                else
+                    null;
+                setRequiredMethodNativeBuiltinId(method, .primitive, id);
+            },
+            .symbol_static => {
+                const id: ?u32 = if (std.mem.eql(u8, name, "for"))
+                    primitive_builtin.symbol_for_id
+                else if (std.mem.eql(u8, name, "keyFor"))
+                    primitive_builtin.symbol_key_for_id
                 else
                     null;
                 setRequiredMethodNativeBuiltinId(method, .primitive, id);
@@ -2102,10 +2112,12 @@ const error_prototype = preparedMethods([_]Method{
     .{ .name = "toString", .length = 0 },
 }, .error_prototype);
 
+// qjs js_symbol_funcs (quickjs.c:51672): plain JS_CFUNC_DEF entries over
+// js_symbol_for / js_symbol_keyFor, dispatched like any other builtin.
 const symbol_static = preparedMethods([_]Method{
     .{ .name = "for", .length = 1 },
     .{ .name = "keyFor", .length = 1 },
-}, .none);
+}, .symbol_static);
 
 const date_static = preparedMethods([_]Method{
     .{ .name = "now", .length = 0 },
