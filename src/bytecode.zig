@@ -2990,6 +2990,19 @@ pub const function_def = struct {
         use_short_opcodes: bool = false,
         has_await: bool = false,
         is_indirect_eval: bool = false,
+        /// QuickJS reaches `var_object_test` (qjs:32973) only from binding-walk
+        /// events: a `<with>` row on the current chain (qjs:33037-33042), the
+        /// current function's var_object/arg_var_object (qjs:33180-33192), a
+        /// parent-chain environment (qjs:33217-33267), or an eval closure row
+        /// (qjs:33307).  It never asks "may this function need dynamic-env
+        /// probes" once per operand.  This monotone flag records that a
+        /// runtime-var-ref closure row naming a dynamic-env object atom was
+        /// appended (see `addClosureVar`, the single closure-row growth path),
+        /// so resolve_variables can gate its per-op probe qualification on one
+        /// load.  Never cleared: rows are never removed, so a true value stays
+        /// an exact "such a row exists" fact for the def's lifetime, and a
+        /// false value proves no probe walk can ever be required.
+        closure_var_may_have_dynamic_env: bool = false,
 
         func_kind: FunctionKind = .normal,
         func_type: ParseFunctionKind = .statement,
@@ -3545,6 +3558,15 @@ pub const function_def = struct {
             tail[0] = ClosureVar.init(init_value);
             tail[0].var_name = self.atoms.dup(init_value.var_name);
             self.closure_var_count = @intCast(self.closure_var.len);
+            // Maintain the dynamic-env possibility flag at the single growth
+            // point (qjs:32973 var_object_test precondition; see the field
+            // doc).  The predicate mirrors the resolver's per-row test in
+            // `closureVarRangeHasDynamicEnvObjects` exactly.
+            if (binding_rules.closureVarIsRuntimeVarRef(tail[0]) and
+                binding_rules.isDynamicEnvObjectAtom(tail[0].var_name))
+            {
+                self.closure_var_may_have_dynamic_env = true;
+            }
             return @intCast(self.closure_var.len - 1);
         }
 

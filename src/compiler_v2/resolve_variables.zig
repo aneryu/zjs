@@ -251,6 +251,26 @@ const Resolver = struct {
         return self.has_dynamic_env_objects;
     }
 
+    /// QuickJS never runs a per-operand probe-qualification chain: reaching
+    /// `var_object_test` (qjs:32973) requires an actual walk event — a `<with>`
+    /// row (qjs:33037-33042), the current var_object/arg_var_object
+    /// (qjs:33180-33192), a parent-chain environment (qjs:33217-33267), or an
+    /// eval closure row (qjs:33307).  Collapse V2's equivalent question to one
+    /// per-function predicate: the static sources are fixed before this pass
+    /// (`has_dynamic_env_objects` at init), and every closure row growth is
+    /// recorded by `FunctionDef.closure_var_may_have_dynamic_env` at its single
+    /// append point.  `false` therefore proves `needsDynamicEnvProbes` would
+    /// return false for every (atom, level); `true` merely opens the precise
+    /// existing chain.  Audit builds run the full chain regardless and assert
+    /// the gate never suppresses a required probe walk (see callers).
+    inline fn dynamicEnvProbesPossible(self: *const Resolver) bool {
+        if (self.has_dynamic_env_objects) return true;
+        // Fail closed: a missing FunctionDef opens the gate so the full chain
+        // keeps reporting error.NoFunctionDef exactly as before.
+        const fd = self.ctx.function_def orelse return true;
+        return fd.closure_var_may_have_dynamic_env;
+    }
+
     /// `replacement_product` is the PRODUCT offset the replacement is written
     /// at, captured by the caller at the instant of the replacing emission
     /// (`labels.unbound` for a fold whose replacement is emitted later; the
@@ -1660,29 +1680,41 @@ const Resolver = struct {
         }
 
         var label_done: ?u32 = null;
-        if (rules.scopeVarProbeKind(op_id, scope_operand.no_dynamic_env)) |kind| {
-            const oracle_plan = if (comptime audit_oracles)
-                rules.evalVarObjectProbePlan(
-                    self.ctx,
+        // Gate the whole qualification chain on the per-function predicate
+        // (qjs:32973 is only reached from walk events, never per op).  Audit
+        // builds still run the full chain so the oracle coverage inside
+        // `needsDynamicEnvProbes`/`emitDynamicEnvProbes` is unchanged.
+        const probes_possible = self.dynamicEnvProbesPossible();
+        if (audit_oracles or probes_possible) {
+            if (rules.scopeVarProbeKind(op_id, scope_operand.no_dynamic_env)) |kind| {
+                const oracle_plan = if (comptime audit_oracles)
+                    rules.evalVarObjectProbePlan(
+                        self.ctx,
+                        atom_id,
+                        scope_operand.level,
+                        op_id,
+                        kind,
+                    )
+                else
+                    null;
+                if (try self.needsDynamicEnvProbes(
                     atom_id,
                     scope_operand.level,
-                    op_id,
-                    kind,
-                )
-            else
-                null;
-            if (try self.needsDynamicEnvProbes(
-                atom_id,
-                scope_operand.level,
-                oracle_plan,
-            )) {
-                label_done = try self.emitDynamicEnvProbes(
-                    atom_id,
-                    scope_operand.level,
-                    rules.scopeVarProbeOpcode(kind),
-                    rules.resolvedScopeVarPlanBinding(plan),
                     oracle_plan,
-                );
+                )) {
+                    if (comptime audit_oracles) {
+                        // Fail closed: the gate claimed no probe walk can be
+                        // required, but the precise chain disagrees.
+                        if (!probes_possible) return error.InvalidBytecode;
+                    }
+                    label_done = try self.emitDynamicEnvProbes(
+                        atom_id,
+                        scope_operand.level,
+                        rules.scopeVarProbeOpcode(kind),
+                        rules.resolvedScopeVarPlanBinding(plan),
+                        oracle_plan,
+                    );
+                }
             }
         }
         try self.writeResolvedScopeVarPlan(atom_id, plan);
@@ -1709,30 +1741,39 @@ const Resolver = struct {
             .get_ref
         else
             return error.InvalidBytecode;
-        const oracle_plan = if (comptime audit_oracles)
-            rules.evalVarObjectProbePlan(
-                self.ctx,
+        // Same per-function gate as `lowerScopeVar`: qjs:32973 is only reached
+        // from walk events.  Audit builds keep the full chain plus a fail-
+        // closed gate/oracle agreement check.
+        const probes_possible = self.dynamicEnvProbesPossible();
+        var label_done: ?u32 = null;
+        if (audit_oracles or probes_possible) {
+            const oracle_plan = if (comptime audit_oracles)
+                rules.evalVarObjectProbePlan(
+                    self.ctx,
+                    atom_id,
+                    scope_operand.level,
+                    op_id,
+                    probe_kind,
+                )
+            else
+                null;
+            if (try self.needsDynamicEnvProbes(
                 atom_id,
                 scope_operand.level,
-                op_id,
-                probe_kind,
-            )
-        else
-            null;
-        const label_done = if (try self.needsDynamicEnvProbes(
-            atom_id,
-            scope_operand.level,
-            oracle_plan,
-        ))
-            try self.emitDynamicEnvProbes(
-                atom_id,
-                scope_operand.level,
-                rules.scopeVarProbeOpcode(probe_kind),
-                binding,
                 oracle_plan,
-            )
-        else
-            null;
+            )) {
+                if (comptime audit_oracles) {
+                    if (!probes_possible) return error.InvalidBytecode;
+                }
+                label_done = try self.emitDynamicEnvProbes(
+                    atom_id,
+                    scope_operand.level,
+                    rules.scopeVarProbeOpcode(probe_kind),
+                    binding,
+                    oracle_plan,
+                );
+            }
+        }
 
         if (op_id == op.scope_delete_var) {
             try self.writeLoweredScopeDeleteVar(atom_id, scope_operand.level);
