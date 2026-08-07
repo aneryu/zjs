@@ -3243,7 +3243,7 @@ pub fn atomicsRunAsyncWaiterCompletion(
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     if (promise_object.class_id != core.class.ids.promise) return error.TypeError;
     if (promise_object.promiseResultSlot().* != null) {
-        ctx.runtime.job_queue.releaseReservedEntries(1);
+        ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
         return;
     }
     const result = if (waiter.completion == .notified) "ok" else "timed-out";
@@ -3287,7 +3287,7 @@ pub fn atomicsRunAsyncWaiterCompletion(
         reaction_arg_value = null;
         if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
-    ctx.runtime.job_queue.enqueueReserved(prepared_job);
+    ctx.runtime.job_queue.enqueueUnlinkedEntrySlot(prepared_job);
     prepared_job_owned = false;
 }
 
@@ -4624,83 +4624,83 @@ pub fn drainOnePendingJob(
             }
         },
         .promise_reaction => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = qjsPromiseReactionJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
                 if (err == error.OutOfMemory and promiseReactionInternalSettleCanRetry(payload)) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .promise_thenable => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = qjsPromiseThenableJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
                 if (err == error.OutOfMemory) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .promise_settlement => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             qjsPromiseSettlementJobCall(job_ctx, job_global, payload) catch |err| {
                 if (err == error.OutOfMemory) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .dynamic_import => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = payload.runner(job_ctx, output, payload) catch |err| {
                 if (err == error.OutOfMemory) {
-                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;
                     return err;
                 }
-                ctx.runtime.job_queue.releaseReservedEntries(1);
+                ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
-            ctx.runtime.job_queue.releaseReservedEntries(1);
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .atomics_waiter => |*payload| {
-            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             payload.runner(job_ctx, payload) catch |err| {
-                std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                 ctx.runtime.job_queue.prependReserved(entry);
                 entry_owned = false;
                 return err;
             };
-            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+            std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
         },
         .finalization => |*payload| {
             result = callValueOrBytecodeRoot(job_ctx, output, job_global, core.JSValue.undefinedValue(), payload.callback, &.{payload.held_value}, null, null) catch |err| {
