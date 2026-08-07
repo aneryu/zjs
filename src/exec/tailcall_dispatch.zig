@@ -237,6 +237,7 @@ const PropertyTailSlot = enum(usize) {
     get_length_property,
     get_field_typed_property,
     get_field_release_receiver,
+    get_field_absent,
     put_field_release_old,
     put_field_release_receiver,
 };
@@ -2962,6 +2963,20 @@ fn op_get_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: 
     return cont(pc + 5, sp, var_buf, vm);
 }
 
+/// Definite-absence tail for op_get_field: the inline shape walk ran the whole
+/// prototype chain and every link was absence-authoritative, so the result is
+/// `undefined` (qjs GET_FIELD_INLINE, quickjs.c:19141-19143). Previously this
+/// case fell through to the out-of-line resolver, which re-walked the identical
+/// chain from the receiver, re-running the proxy/exotic/array/class
+/// qualification at every depth. Ownership is the ordinary get_field contract:
+/// `undefined` needs no dup, the receiver is consumed.
+fn op_get_field_absent_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    (sp - 1)[0] = JSValue.undefinedValue();
+    receiver.free(vm.ctx.runtime);
+    return cont(pc + 5, sp, var_buf, vm);
+}
+
 fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
@@ -3003,7 +3018,8 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // qjs's own hit is an integer load pair straight off pr->u.value
     // (quickjs.c:19131).
     const rt = vm.ctx.runtime;
-    if (vm_property_field.qjsGetFieldFastSlot(rt, receiver, atom_id)) |slot| {
+    var absent = false;
+    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         // dup() returns `value` bitwise (it only bumps the refcount when the
         // tag requires one); discarding the result keeps the pushed value a
@@ -3023,6 +3039,13 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         }
         return cont(pc + 5, sp, var_buf, vm);
     }
+    // Chain exhausted with every link absence-authoritative: the answer is
+    // `undefined` and no resolver can say otherwise — qjs GET_FIELD_INLINE ends
+    // the same walk with `p = p->shape->proto; if (!p) { val = JS_UNDEFINED;
+    // break; }` (quickjs.c:19141-19143). Routed to a tail so the receiver
+    // release (which needs the destroy call) stays out of this leaf handler's
+    // frame, exactly like the hit path's get_field_release_receiver.
+    if (absent) return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
     if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
         if (vm_property_field.typedArrayReceiverForFastPath(receiver)) |object| {
             vm.property_holder = object;
@@ -3066,10 +3089,19 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // path's `pushAssumeCapacity` does; the receiver stays beneath as `this`.
     // Integer-pair slot reload + split push for the same forwarding reasons as
     // op_get_field (dup() returns the value bitwise; see that handler's note).
-    if (vm_property_field.qjsGetFieldFastSlot(vm.ctx.runtime, receiver, atom_id)) |slot| {
+    var absent = false;
+    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         _ = value.dup();
         storeValueAsIntPair(&sp[0], value);
+        return cont(pc + 5, sp + 1, var_buf, vm);
+    }
+    // Same definite-absence termination as op_get_field (quickjs.c:19141-19143).
+    // get_field2 keeps the receiver beneath, so there is nothing to release and
+    // no tail is needed: push a bare `undefined`, which is exactly what the cold
+    // path's ordinaryDataPropertyValueOrUndefinedForFastPath leg pushes.
+    if (absent) {
+        sp[0] = JSValue.undefinedValue();
         return cont(pc + 5, sp + 1, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -4298,7 +4330,7 @@ fn profiledHandler(comptime profiled_op: u8, comptime real: Handler) Handler {
         }
     }.dispatch;
 }
-const property_tail_table = [13]Handler{
+const property_tail_table = [14]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_cached_string,
@@ -4310,6 +4342,7 @@ const property_tail_table = [13]Handler{
     op_get_length_property_tail,
     op_get_field_typed_property_tail,
     op_get_field_release_receiver_tail,
+    op_get_field_absent_tail,
     op_put_field_release_old_tail,
     op_put_field_release_receiver_tail,
 };
