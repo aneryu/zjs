@@ -1177,9 +1177,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "raw")) {
         return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
-        return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
     if (std.mem.eql(u8, name, "sumPrecise")) {
         return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
     }

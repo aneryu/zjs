@@ -13,15 +13,20 @@ pub const PrototypeMethod = enum(u32) {
     bind = 2,
     call = 3,
     apply = 4,
+    has_instance = 5,
 };
 
 /// Declaration + dispatch table for the `.function` native-builtin domain
-/// (QuickJS `js_function_proto_funcs` analogue).
+/// (QuickJS `js_function_proto_funcs` analogue, quickjs.c:41390).
 pub const internal_entries = [_]core.host_function.InternalEntry{
     functionCallEntry(),
     functionEntry("apply", 2, @intFromEnum(PrototypeMethod.apply)),
     functionEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
     functionEntry("bind", 1, @intFromEnum(PrototypeMethod.bind)),
+    // qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`.
+    // Every `instanceof` whose RHS does not override `Symbol.hasInstance` lands
+    // here, so it must resolve by record id rather than by name cascade.
+    functionEntry("[Symbol.hasInstance]", 1, @intFromEnum(PrototypeMethod.has_instance)),
 };
 
 fn functionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
@@ -89,6 +94,22 @@ fn functionCall(
             const realm = try builtin_dispatch.callableRealm(host_call);
             std.debug.assert(realm.realm == ctx);
             return call.qjsFunctionBindCall(ctx, host_call.output, realm.global, &.{}, host_call.this_value, host_call.args);
+        },
+        // qjs:41379 `js_function_hasInstance` -> `JS_OrdinaryIsInstanceOf(ctx,
+        // argv[0], this_val)`. The receiver is the constructor, the first
+        // argument the probed value.
+        @intFromEnum(PrototypeMethod.has_instance) => {
+            const realm = try builtin_dispatch.callableRealm(host_call);
+            std.debug.assert(realm.realm == ctx);
+            return call_runtime.qjsFunctionHasInstanceCall(
+                ctx,
+                host_call.output,
+                realm.global,
+                host_call.this_value,
+                host_call.args,
+                builtin_dispatch.callerBytecode(host_call),
+                builtin_dispatch.callerFrame(host_call),
+            );
         },
         @intFromEnum(PrototypeMethod.apply) => {
             const realm = try builtin_dispatch.callableRealm(host_call);
