@@ -1308,7 +1308,6 @@ pub const function_bytecode = struct {
     const std = @import("std");
     const builtin = @import("builtin");
     const build_options = @import("build_options");
-    const simple_ctor_memo_enabled = std.mem.eql(u8, build_options.zjs_dossier_simple_ctor, "a");
 
     const atom = @import("core/atom.zig");
     const bulk_memory = @import("core/bulk_memory.zig");
@@ -1628,10 +1627,56 @@ pub const function_bytecode = struct {
         }
     };
 
+    /// Widest `this.f = arg` field run the simple-field constructor fast path
+    /// accepts. It bounds `SimpleCtorFacts`, so it is also the memo's width.
+    pub const max_simple_ctor_fields = 8;
+
+    /// Tri-state of the lazily-classified simple-field constructor pattern.
+    /// `unknown` must be the zero value: `createRaw` zero-fills the whole
+    /// packed payload, so a fresh FunctionBytecode starts unclassified without
+    /// a seeding write.
+    pub const SimpleCtorState = enum(u8) {
+        unknown = 0,
+        not_simple = 1,
+        simple = 2,
+    };
+
+    /// Memoized classification of the zjs-only simple-field constructor fast
+    /// path (a `this.f = arg` body whose stores the constructor writes
+    /// directly instead of entering JS_CallInternal). The answer is a pure
+    /// function of the FunctionBytecode's immutable published bytecode, so it
+    /// is computed once on the first `new F()` and kept HERE, inside the FB
+    /// allocation itself.
+    ///
+    /// QuickJS has no counterpart (js_call_c_function/JS_CallInternal always
+    /// run the body), so this record lives entirely in the zjs hot extension
+    /// and cannot perturb any `JSFunctionBytecode` core offset.
+    pub const SimpleCtorFacts = extern struct {
+        /// Field atom ids, in store order (borrowed from the code bytes, which
+        /// own them for the FB's whole life — the memo takes no reference).
+        atoms: [max_simple_ctor_fields]atom.Atom = @splat(atom.null_atom),
+        /// Parameter index feeding each field; `>= argc` stores undefined.
+        arg_indices: [max_simple_ctor_fields]u16 = @splat(0),
+        state: SimpleCtorState = .unknown,
+        field_count: u8 = 0,
+        _padding: [6]u8 = @splat(0),
+
+        comptime {
+            std.debug.assert(@sizeOf(@This()) == 56);
+            std.debug.assert(@offsetOf(@This(), "atoms") == 0x00);
+            std.debug.assert(@offsetOf(@This(), "arg_indices") == 0x20);
+            std.debug.assert(@offsetOf(@This(), "state") == 0x30);
+            std.debug.assert(@offsetOf(@This(), "field_count") == 0x31);
+        }
+    };
+
     /// Hot zjs-only state placed immediately after the exact code bytes. Code
     /// has byte alignment, so canonical access must use `*align(1)`. The
     /// execution snapshot is two bytes; explicit padding preserves the
     /// four-byte ScriptOrModule offset.
+    ///
+    /// The total stays a multiple of eight: `LegacyExecutionAdapter` places its
+    /// aligned back-pointer at `base + 96 + @sizeOf(@This())`.
     pub const FunctionBytecodeHotExtension = extern struct {
         call_facts: function_bytecode.CallFacts,
         /// Preserve ScriptOrModule's aligned offset without widening CallFacts
@@ -1639,12 +1684,16 @@ pub const function_bytecode = struct {
         _call_facts_padding: u16 = 0,
         /// Stable ScriptOrModule identity used as the dynamic-import referrer.
         script_or_module: atom.Atom,
+        /// Lazily published; see `SimpleCtorFacts`.
+        simple_ctor: SimpleCtorFacts = .{},
 
         comptime {
-            std.debug.assert(@sizeOf(@This()) == 8);
+            std.debug.assert(@sizeOf(@This()) == 64);
+            std.debug.assert(@sizeOf(@This()) % 8 == 0);
             std.debug.assert(@offsetOf(@This(), "call_facts") == 0x00);
             std.debug.assert(@offsetOf(@This(), "_call_facts_padding") == 0x02);
             std.debug.assert(@offsetOf(@This(), "script_or_module") == 0x04);
+            std.debug.assert(@offsetOf(@This(), "simple_ctor") == 0x08);
         }
     };
 
@@ -1948,6 +1997,18 @@ pub const function_bytecode = struct {
         pub inline fn callFacts(self: *const FunctionBytecodeImpl) function_bytecode.CallFacts {
             const hot = self.hotExtension() orelse return .{};
             return hot.call_facts;
+        }
+        /// Writable simple-field-constructor memo, or null when this record has
+        /// no zjs tail (extension-less fixtures). `const` is dropped on purpose:
+        /// the memo answers a pure function of the immutable published
+        /// bytecode, so filling it publishes no new state — it only stops the
+        /// construct path from recomputing the same answer. Because the memo
+        /// lives INSIDE the FB allocation it dies with it, so a recycled
+        /// address cannot be read through a stale key (`createRaw` zero-fills
+        /// the packed payload, which is exactly `SimpleCtorState.unknown`).
+        pub inline fn simpleCtorMemoMut(self: *const FunctionBytecodeImpl) ?*align(1) function_bytecode.SimpleCtorFacts {
+            const hot = self.hotExtension() orelse return null;
+            return &@constCast(hot).simple_ctor;
         }
         pub inline fn legacyBytecodeAdapter(self: *const FunctionBytecodeImpl) ?*const function_mod.BytecodeImpl {
             // The negative length is the complete representation
@@ -2731,13 +2792,6 @@ pub const function_bytecode = struct {
 
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
-        // Candidate A drops this FB from the simple-field-constructor pattern
-        // memo before its storage is reused, so a later FB at the same address
-        // cannot read a stale pointer-keyed match. B/C compile this memo reader
-        // away together with the rest of the memo mechanism.
-        if (comptime simple_ctor_memo_enabled) {
-            if (rt.simple_ctor_memo.fb == @intFromPtr(self)) rt.simple_ctor_memo.fb = 0;
-        }
         const layout_value = self.layout();
         self.deinitWithLayout(rt, layout_value);
         // Cycle removal and runtime deinit both defer the struct-free until all
@@ -9862,7 +9916,7 @@ const function_mod = struct {
         comptime {
             std.debug.assert(@offsetOf(@This(), "hot_extension") == @sizeOf(FunctionBytecode));
             std.debug.assert(@offsetOf(@This(), "legacy_bytecode_adapter") == @sizeOf(FunctionBytecode) + @sizeOf(function_bytecode_mod.FunctionBytecodeHotExtension));
-            std.debug.assert(@sizeOf(@This()) == 112);
+            std.debug.assert(@sizeOf(@This()) == 168);
             std.debug.assert(@alignOf(@This()) == 8);
         }
 
