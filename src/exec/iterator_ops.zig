@@ -876,7 +876,7 @@ fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.objec
 fn finishMapSetForOfDone(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize, clear_target: bool) !bool {
     if (clear_target) {
         if (objectFromValue(stack.values[iterator_index])) |iterator| {
-            iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
+            iterator.detachCollectionIteratorTarget(ctx.runtime);
         }
     }
     try stack.reserveAdditional(2);
