@@ -5090,19 +5090,6 @@ pub const Object = extern struct {
         return cell.pvalue.*.dup();
     }
 
-    /// Write twin of `mappedArgumentsElementDup` — qjs JS_SetPropertyValue's
-    /// JS_CLASS_MAPPED_ARGUMENTS arm (quickjs.c:9979-9982), which stores through
-    /// the cell so the aliased parameter observes the write. `new_value` is
-    /// borrowed; the cell takes its own reference.
-    pub fn setMappedArgumentsElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
-        if (self.class_id != class.ids.mapped_arguments) return false;
-        const refs = self.argumentsVarRefsMut();
-        if (index >= refs.len) return false;
-        const cell = refs[index] orelse return false;
-        cell.setVarRefValue(rt, new_value.dup());
-        return true;
-    }
-
     pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
         const slot = &self.u.array.values[@intCast(index)];
