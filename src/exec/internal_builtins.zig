@@ -110,6 +110,75 @@ pub const table: [domain_count][]const InternalRecord = build: {
     break :build domains;
 };
 
+/// A method-id enum plus the record domain its values index into.
+const IdEnumBinding = struct {
+    domain: NativeBuiltinDomain,
+    label: []const u8,
+    Ids: type,
+};
+
+/// Method-id enums that do NOT live under `core.host_function.builtin_method_ids`
+/// (the block below discovers those automatically by domain name). `math`, `uri`
+/// and `performance` are excluded on purpose: they key their records off bare
+/// integers, so there is no enum to cross-check.
+///
+/// `primitive_ops.Tag` is deliberately absent. It is a *class* tag, not a method
+/// id -- `primitiveId` composes an id as `tag * 10 + method` -- so its values
+/// (1..5) are not record ids and asserting on them would be wrong.
+const exec_side_id_enums = [_]IdEnumBinding{
+    .{ .domain = .error_object, .label = "error_ops.StaticMethod", .Ids = error_object.StaticMethod },
+    .{ .domain = .function, .label = "function_ops.PrototypeMethod", .Ids = function.PrototypeMethod },
+    .{ .domain = .object, .label = "object_builtin_ops.PrototypeMethod", .Ids = object.PrototypeMethod },
+    .{ .domain = .date, .label = "date_ops.ExtendedPrototypeMethod", .Ids = date.ExtendedPrototypeMethod },
+    .{ .domain = .collection, .label = "collection_ops.StaticMethod", .Ids = collection.StaticMethod },
+};
+
+fn assertIdEnumIsDense(comptime binding: IdEnumBinding) void {
+    const records = table[@intFromEnum(binding.domain)];
+    for (@typeInfo(binding.Ids).@"enum".fields) |field| {
+        if (field.value < records.len and records[field.value].hasCallable()) continue;
+        @compileError("`" ++ binding.label ++ "." ++ field.name ++
+            "` (id " ++ std.fmt.comptimePrint("{d}", .{field.value}) ++
+            ") has no callable record in the `." ++ @tagName(binding.domain) ++
+            "` domain. `denseRecords` sizes each domain from its entries' max id," ++
+            " so an enum member with no `internal_entries` row is not an empty slot --" ++
+            " it is an id that decodes and then points past the end of the table," ++
+            " leaving `setNativeBuiltinIdAndRecord` with a null record and every call" ++
+            " to it in the `callNativeCallableByName` cascade. Add the row to the" ++
+            " domain's `internal_entries`, or delete the enum member.");
+    }
+}
+
+// ENUM -> ENTRY CONNECTIVITY GATE.
+//
+// `denseRecords` already validates the entries->records direction (id 0,
+// duplicates, missing function, cproto mismatch). It cannot see the other
+// direction: because the record array is sized `max_id + 1` from the entries
+// themselves, an id enum member that no entry declares is *out of bounds*
+// rather than an empty slot, and every lookup silently misses. That is exactly
+// how `buffer.ConstructorMethod.array_buffer` / `.shared_array_buffer` (ids
+// 901/902) came to be stamped onto the live ArrayBuffer / SharedArrayBuffer
+// objects while resolving to nothing at all.
+comptime {
+    @setEvalBranchQuota(100_000);
+    for (@typeInfo(core.host_function.builtin_method_ids).@"struct".decls) |domain_decl| {
+        if (!@hasField(NativeBuiltinDomain, domain_decl.name)) continue;
+        const domain = @field(NativeBuiltinDomain, domain_decl.name);
+        const domain_ids = @field(core.host_function.builtin_method_ids, domain_decl.name);
+        for (@typeInfo(domain_ids).@"struct".decls) |id_decl| {
+            const candidate = @field(domain_ids, id_decl.name);
+            if (@TypeOf(candidate) != type) continue;
+            if (@typeInfo(candidate) != .@"enum") continue;
+            assertIdEnumIsDense(.{
+                .domain = domain,
+                .label = "builtin_method_ids." ++ domain_decl.name ++ "." ++ id_decl.name,
+                .Ids = candidate,
+            });
+        }
+    }
+    for (exec_side_id_enums) |binding| assertIdEnumIsDense(binding);
+}
+
 test "Promise.resolve has an internal record handler" {
     const testing = @import("std").testing;
     const records = table[@intFromEnum(NativeBuiltinDomain.promise)];
