@@ -248,10 +248,17 @@ pub noinline fn field(
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
-            if (qjsGetFieldFast(ctx.runtime, receiver, atom_id)) |value| {
-                replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
-                return .done;
-            }
+            // The `qjsGetFieldFast` shape walk that used to sit here is gone: it
+            // is the SAME walk the resident `op_get_field` already ran
+            // (`qjsGetFieldFastSlotOrAbsent`, tailcall_dispatch.zig) — this
+            // shell is only ever reached THROUGH that handler's miss (see the
+            // `cold_table` note: the all-cold table is the fast handlers' miss
+            // target, never a primary dispatch table). The resident probe runs
+            // with `trust_non_private_atom = true`, so its admission set is a
+            // superset of this one's; a miss there is a guaranteed miss here.
+            // Same shape as the `h_put_var` cell arm removal above. qjs's
+            // GET_FIELD_INLINE window likewise runs once per access and drops
+            // straight into JS_GetPropertyInternal (quickjs.c:19107-19160).
             if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
@@ -286,10 +293,9 @@ pub noinline fn field(
                 stack.pushAssumeCapacity(value);
                 return .done;
             }
-            if (qjsGetFieldFast(ctx.runtime, obj, atom_id)) |value| {
-                stack.pushAssumeCapacity(value);
-                return .done;
-            }
+            // Removed for the same reason as the get_field arm above: the
+            // resident `op_get_field2` already ran this exact walk and tailed
+            // here only because it missed (quickjs.c:19107-19160).
             if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, obj, atom_id)) |value| {
                 stack.pushAssumeCapacity(value);
                 return .done;
@@ -325,10 +331,18 @@ pub noinline fn field(
                 value_consumed = true;
                 return .done;
             }
-            if (qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) {
-                value_consumed = true;
-                return .done;
-            }
+            // `qjsPutFieldFast` is gone from here: the resident `op_put_field`
+            // ran `qjsPutFieldFastSlot` — the identical
+            // `findWritableOwnDataSlotFast` probe — and tailed into this shell
+            // precisely because it found no writable own data slot. Neither of
+            // the two arms above mutates a shape on its declining path
+            // (`setArrayLengthForPutFieldFastPath` returns false before any
+            // store; `setObjectDataPropertyForSimplePutFieldOwned` declines on
+            // the same missing writable-own-data lookup), so re-probing was a
+            // guaranteed second miss on every cold put — the `pf_bail_missing ==
+            // 2 * pf_cold` census signature. qjs's OP_put_field inline window
+            // runs once and falls straight through to JS_SetPropertyInternal
+            // (quickjs.c:19188-19203).
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
