@@ -457,7 +457,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
     }
 
     try std.testing.expectEqual(
-        @as(usize, 8),
+        @as(usize, 64),
         @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
     );
     try std.testing.expectEqual(
@@ -467,6 +467,10 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
     try std.testing.expectEqual(
         @as(usize, 4),
         @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "script_or_module"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 8),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "simple_ctor"),
     );
 }
 
@@ -501,6 +505,10 @@ test "FunctionLayout matches the QJS-order core pack for both JSValue representa
     try std.testing.expectEqual(expected_total_size, layout.mainPayloadBytes());
     try std.testing.expectEqual(expected_total_size - @sizeOf(bytecode.FunctionBytecode), layout.famBytes());
 
+    // Only the QJS core pack carries fidelity: the zjs hot tail is appended at
+    // code end, so the totals are pinned relative to `byte_code_end` instead of
+    // re-hardcoding the extension's own (zjs-owned) width.
+    const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
     switch (value_size) {
         16 => {
             try std.testing.expectEqual(@as(usize, 0x80), layout.cpool_off);
@@ -509,8 +517,8 @@ test "FunctionLayout matches the QJS-order core pack for both JSValue representa
             try std.testing.expectEqual(@as(usize, 0xd4), layout.byte_code_off);
             try std.testing.expectEqual(@as(usize, 0xd7), layout.byte_code_end);
             try std.testing.expectEqual(@as(?usize, 0xd7), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0xdf), layout.total_size);
-            try std.testing.expectEqual(@as(usize, 0x7f), layout.famBytes());
+            try std.testing.expectEqual(@as(usize, 0xd7) + hot_bytes, layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x77) + hot_bytes, layout.famBytes());
         },
         8 => {
             try std.testing.expectEqual(@as(usize, 0x80), layout.cpool_off);
@@ -519,8 +527,8 @@ test "FunctionLayout matches the QJS-order core pack for both JSValue representa
             try std.testing.expectEqual(@as(usize, 0xc4), layout.byte_code_off);
             try std.testing.expectEqual(@as(usize, 0xc7), layout.byte_code_end);
             try std.testing.expectEqual(@as(?usize, 0xc7), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0xcf), layout.total_size);
-            try std.testing.expectEqual(@as(usize, 0x6f), layout.famBytes());
+            try std.testing.expectEqual(@as(usize, 0xc7) + hot_bytes, layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x67) + hot_bytes, layout.famBytes());
         },
         else => return error.TestUnexpectedResult,
     }
@@ -641,7 +649,10 @@ test "FunctionLayout places the exact hot tail at every code-end residue" {
         if (code_len == 3) {
             try std.testing.expectEqual(@as(usize, 0x63), actual.byte_code_end);
             try std.testing.expectEqual(@as(?usize, 0x63), actual.hot_off);
-            try std.testing.expectEqual(@as(usize, 0x6b), actual.total_size);
+            try std.testing.expectEqual(
+                @as(usize, 0x63) + @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
+                actual.total_size,
+            );
         }
     }
 }
@@ -670,7 +681,7 @@ test "CallFacts is one 16-bit execution snapshot" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(bytecode.CallFacts));
     try std.testing.expectEqual(@as(usize, 0), @bitOffsetOf(bytecode.CallFacts, "execution"));
     try std.testing.expectEqual(
-        @as(usize, 8),
+        @as(usize, 64),
         @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
     );
     try std.testing.expectEqual(
@@ -804,16 +815,17 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
         @intFromPtr(fb.hotExtension().?),
     );
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
+    const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
     switch (@sizeOf(core.JSValue)) {
         16 => {
             try std.testing.expectEqual(@as(usize, 0x7c), layout.byte_code_end);
             try std.testing.expectEqual(@as(?usize, 0x7c), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0x84), layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x7c) + hot_bytes, layout.total_size);
         },
         8 => {
             try std.testing.expectEqual(@as(usize, 0x74), layout.byte_code_end);
             try std.testing.expectEqual(@as(?usize, 0x74), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0x7c), layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x74) + hot_bytes, layout.total_size);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -892,6 +904,12 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     first.closureVar()[0].var_idx = 0xffff;
     first.hotExtensionMut().?.call_facts = @bitCast(@as(u16, 0xffff));
     first.hotExtensionMut().?._call_facts_padding = 0xffff;
+    first.hotExtensionMut().?.simple_ctor = .{
+        .state = .simple,
+        .field_count = 3,
+        .atoms = @splat(0xdeadbeef),
+        .arg_indices = @splat(0xffff),
+    };
     first.destroyUnpublishedFixture(rt);
 
     const second = try bytecode.FunctionBytecode.createFixture(rt, .{
@@ -922,6 +940,20 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), second.hotExtension().?.call_facts);
     try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?._call_facts_padding);
     try std.testing.expectEqual(atom_module.null_atom, second.hotExtension().?.script_or_module);
+    // Simple-field-constructor memo ABA immunity: the memo lives INSIDE the FB
+    // allocation, so a recycled address hands back the zero-filled `unknown`
+    // state and the construct path re-classifies. No runtime-side pointer key
+    // can outlive the record it described, so the destructor needs no memo hook.
+    try std.testing.expectEqual(
+        bytecode.function_bytecode.SimpleCtorState.unknown,
+        second.hotExtension().?.simple_ctor.state,
+    );
+    try std.testing.expectEqual(@as(u8, 0), second.hotExtension().?.simple_ctor.field_count);
+    try std.testing.expectEqual(
+        @as(u32, atom_module.null_atom),
+        second.hotExtension().?.simple_ctor.atoms[0],
+    );
+    try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?.simple_ctor.arg_indices[0]);
     try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().flags.kind);
     try std.testing.expectEqual(@as(i32, 1), second.header.meta().rc);
 }
@@ -1937,15 +1969,15 @@ test "legacy execution adapter delegates synthetic var-ref name mirrors" {
     try std.testing.expectEqual(@as(u16, 1), execution_function.openVarRefCount());
     try std.testing.expect(execution_function.callFacts().execution.has_mapped_arguments);
     try std.testing.expectEqual(
-        @as(usize, 112),
+        @as(usize, 168),
         @sizeOf(bytecode.LegacyExecutionAdapter),
     );
     // The negative sentinel deliberately keeps this borrowed stack bridge out
     // of canonical count-based FunctionLayout reconstruction. Its hot tail and
-    // borrowed pointer occupy fixed base+96/base+104 slots even though the
+    // borrowed pointer occupy fixed base+96/base+160 slots even though the
     // mirrored table counts and borrowed code are all non-empty.
     try std.testing.expectEqual(
-        @as(usize, 0x68),
+        @as(usize, 0xa0),
         @offsetOf(bytecode.LegacyExecutionAdapter, "legacy_bytecode_adapter"),
     );
     try std.testing.expectEqual(

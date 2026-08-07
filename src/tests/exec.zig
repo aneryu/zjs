@@ -13225,21 +13225,21 @@ test "leaf returns with leftover operands route through general teardown" {
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
-test "padded-args leaf missing parameters read undefined across every entry arm" {
+test "missing-argument calls read undefined across every entry arm" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
     const rt = js.runtime;
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
 
-    // Q3 red lights, outcome side: the padded (`argc < arg_count`) call
-    // shape of a published exact-args leaf pads the missing tail with
-    // undefined IN PLACE above the supplied args. Every observable must be
-    // byte-identical to the generic padded constructor it replaces: missing
-    // params read undefined, writes to a padded slot stay frame-local
-    // (fresh undefined on the next call), the supplied prefix stays bound,
-    // and the sloppy/strict/arrow/method `this` arms keep their policies.
-    // The 256-iteration loops run every arm warm (first call may take the
-    // authoritative constructor; the rest take the warm fast path).
+    // Outcome side of the `argc < arg_count` call shape (qjs's `for(i = argc;
+    // i < arg_count; i++) arg_buf[i] = JS_UNDEFINED`, quickjs.c:17856-17857):
+    // missing params read undefined, writes to a padded slot stay frame-local
+    // (fresh undefined on the next call), the supplied prefix stays bound, and
+    // the sloppy/strict/arrow/method `this` arms keep their policies. A
+    // dedicated warm padded-leaf family used to serve these calls and was
+    // deleted (3273 Octane hits total); the callees below are still published
+    // exact-args leaves, so this is also the regression pin that their
+    // MISSING-arg siblings keep generic-path semantics.
     const setup = try js.eval(
         \\globalThis.__padOne = function (value) { return value === undefined ? 1 : 0; };
         \\globalThis.__padTwo = function (first, second) {
@@ -13277,16 +13277,13 @@ test "padded-args leaf missing parameters read undefined across every entry arm"
     );
     setup.free(rt);
 
-    // Publication pins: the padded arms fire off the SAME O1 kind byte the
-    // exact family uses. The sloppy plain callee and sloppy arrow publish
-    // `.sloppy`; the non-`this`-reading strict callee publishes `.raw_this`.
-    // The `this`-READING strict callee pins `.none`: `this` compiles to
-    // `push_this; put_loc` (a local), so `var_count > 0` refuses the whole
-    // leaf family by geometry and the raw frame `this` policy stays
-    // unobservable from a published plain body — its outcome line above
-    // covers the generic path instead. If a refactor stopped publishing the
-    // first three, the padded arm would silently never run and this test
-    // would only cover the generic path.
+    // Publication pins: these callees really are published exact-args leaves,
+    // so the outcomes above are the missing-arg shape of the leaf family and
+    // not some unrelated generic callee. The sloppy plain callee and sloppy
+    // arrow publish `.sloppy`; the non-`this`-reading strict callee publishes
+    // `.raw_this`. The `this`-READING strict callee pins `.none`: `this`
+    // compiles to `push_this; put_loc` (a local), so `var_count > 0` refuses
+    // the whole leaf family by geometry.
     const one_name = try rt.internAtom("__padOne");
     defer rt.atoms.free(one_name);
     const strict_name = try rt.internAtom("__padStrict");
@@ -13332,19 +13329,18 @@ test "padded-args leaf missing parameters read undefined across every entry arm"
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
-test "padded-args leaf excluded shapes keep generic-path outcomes" {
+test "missing-argument calls on leaf-excluded shapes keep generic-path outcomes" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
     const rt = js.runtime;
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
 
-    // Q3 red lights, exclusion side: the shapes the padded arm must NEVER
-    // capture stay off the O1 kind byte at publication, so a missing-arg
-    // call keeps its authoritative semantics — `arguments` observes the
-    // real argc (not the padded window), default parameter initializers run
-    // (`has_simple_parameter_list` gate), rest parameters collect the real
-    // args, and a captured parameter reads through its cell
-    // (`open_var_ref_count` gate).
+    // Exclusion side: the shapes no leaf arm may ever capture stay off the O1
+    // kind byte at publication, so a missing-arg call keeps its authoritative
+    // semantics — `arguments` observes the real argc (not a padded window),
+    // default parameter initializers run (`has_simple_parameter_list` gate),
+    // rest parameters collect the real args, and a captured parameter reads
+    // through its cell (`open_var_ref_count` gate).
     const setup = try js.eval(
         \\globalThis.__exArguments = function (a, b) { return arguments.length; };
         \\globalThis.__exDefault = function (a, b = 9) { return String(a) + ":" + String(b); };
@@ -13364,9 +13360,8 @@ test "padded-args leaf excluded shapes keep generic-path outcomes" {
     );
     setup.free(rt);
 
-    // Publication pins: every excluded shape must read `.none` — the padded
-    // arm shares the O1 byte, so `.none` here proves these calls can never
-    // enter the padded leaf constructors.
+    // Publication pins: every excluded shape must read `.none`, which proves
+    // these calls can never enter any leaf constructor.
     const names = [_][]const u8{ "__exArguments", "__exDefault", "__exRest", "__exCapture" };
     for (names) |name| {
         const atom_name = try rt.internAtom(name);
@@ -13388,19 +13383,18 @@ test "padded-args leaf excluded shapes keep generic-path outcomes" {
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
-test "padded-args leaf abrupt teardown releases supplied args and pads exactly once" {
+test "missing-argument abrupt teardown releases supplied args and pads exactly once" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    // Q3 red lights, release-balance side: a padded leaf that throws
-    // mid-body dies through general teardown, whose args release walks the
-    // FULL `arg_count` window — the supplied refcounted prefix exactly once
-    // (double free corrupts rc, missed free strands the object) and the
-    // undefined pads as tag-test no-ops. Covers supplied-prefix
-    // (argc=1 < 2), all-missing (argc=0 < 2), the plain/strict/method entry
-    // arms, and the deep-recursion overflow unwind through the padded
-    // authoritative constructor (every live padded frame's window released
-    // during the exception walk; the engine keeps running afterwards).
+    // Release-balance side: a frame that throws mid-body dies through general
+    // teardown, whose args release walks the FULL `arg_count` window — the
+    // supplied refcounted prefix exactly once (double free corrupts rc, missed
+    // free strands the object) and the undefined pads as tag-test no-ops.
+    // Covers supplied-prefix (argc=1 < 2), all-missing (argc=0 < 2), the
+    // plain/strict/method entry arms, and the deep-recursion overflow unwind
+    // (every live frame's window released during the exception walk; the
+    // engine keeps running afterwards).
     const setup = try js.eval(
         \\function padThrow(a, b) { return a.x + null.missing + String(b); }
         \\function strictPadThrow(a, b) { "use strict"; return a.x + null.missing + String(b); }
@@ -13432,16 +13426,14 @@ test "padded-args leaf abrupt teardown releases supplied args and pads exactly o
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
-test "padded-args leaf leftover-carrying returns route through general teardown" {
+test "missing-argument leftover-carrying returns route through general teardown" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    // Q3 twin of the exact-args leftover coverage: the padded frame
-    // publishes the same `exact_args_leaf` teardown bit, so its return arm
-    // carries the same runtime len==0 operand-window guard. Parser-elided
-    // trailing drops and switch discriminants held across `return` must
-    // route to general teardown, which releases the leftovers AND the
-    // padded args window exactly once.
+    // Missing-argument twin of the exact-args leftover coverage. Parser-elided
+    // trailing drops and switch discriminants held across `return` must route
+    // to general teardown, which releases the leftovers AND the padded args
+    // window exactly once.
     const setup = try js.eval(
         \\function padLeftover(a, b) { ({ x: a, y: b }); }
         \\function padSwitchLeftover(a, b) {
