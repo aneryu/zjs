@@ -381,14 +381,26 @@ fn linkWeakEntry(object: *core.Object, index: usize) void {
     heads.*[bucket] = index;
 }
 
-fn relinkWeakIndex(object: *core.Object) void {
+/// Splice entry `index` out of its bucket chain. Mirrors `map_delete_record`
+/// (quickjs.c:52177-52201), which walks the one bucket the record hashes to and
+/// re-points the predecessor link; the strong twin is `unlinkStrongEntry`.
+fn unlinkWeakEntry(object: *core.Object, index: usize) void {
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    @memset(heads.*, weak_no_entry);
-    for (object.weakCollectionEntriesSlot().*, 0..) |*entry, index| {
-        entry.hash = weakEntryHash(entry.key_identity);
-        entry.hash_next = weak_no_entry;
-        linkWeakEntry(object, index);
+    const entries = object.weakCollectionEntriesSlot().*;
+    if (index >= entries.len) return;
+    var link = &heads.*[bucketIndex(entries[index].hash, heads.*.len)];
+    while (link.* != weak_no_entry) {
+        const current = link.*;
+        if (current >= entries.len) {
+            link.* = weak_no_entry;
+            return;
+        }
+        if (current == index) {
+            link.* = entries[current].hash_next;
+            return;
+        }
+        link = &entries[current].hash_next;
     }
 }
 
@@ -415,14 +427,33 @@ pub fn rollbackStrongEntriesTo(rt: *core.JSRuntime, object: *core.Object, len: u
     object.collectionActiveCountSlot().* = active_count;
 }
 
+/// O(1) weak delete: unchain the victim, then move the tail entry into the hole
+/// and rechain only that one entry.
+///
+/// qjs deletes a record by splicing it out of its bucket chain and its record
+/// list and freeing it (`map_delete_record` quickjs.c:52196-52202 ->
+/// `map_delete_record_internal` quickjs.c:52066-52086) — O(1), no surviving
+/// record is touched. zjs stores weak entries in a dense array, so the faithful
+/// adaptation of "unlink one node" is unlink + swap-remove. Weak collections
+/// have no iterator and no JS-observable order (qjs only walks the list in
+/// `map_delete_weakrefs`, quickjs.c:52099), so reordering is unobservable, and
+/// the O(n) `@memmove` + full `relinkWeakIndex` rehash it replaces had no qjs
+/// counterpart at all.
 pub fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const entries_slot = object.weakCollectionEntriesSlot();
+    const last = entries_slot.*.len - 1;
+    unlinkWeakEntry(object, index);
     const entry = entries_slot.*[index];
-    if (index + 1 < entries_slot.*.len) {
-        @memmove(entries_slot.*[index .. entries_slot.*.len - 1], entries_slot.*[index + 1 ..]);
+    if (index != last) {
+        // Unchain the mover under its old index first: its bucket link stores
+        // the index, so it has to be rewritten after the move.
+        unlinkWeakEntry(object, last);
+        entries_slot.*[index] = entries_slot.*[last];
+        entries_slot.* = entries_slot.*.ptr[0..last];
+        linkWeakEntry(object, index);
+    } else {
+        entries_slot.* = entries_slot.*.ptr[0..last];
     }
-    entries_slot.* = entries_slot.*.ptr[0 .. entries_slot.*.len - 1];
-    relinkWeakIndex(object);
     entry.destroy(rt);
     object.pruneBorrowedReferenceHolderIfEmpty(rt);
 }
