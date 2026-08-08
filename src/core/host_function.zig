@@ -1052,7 +1052,13 @@ pub const builtin_method_id_lookup = struct {
     };
 
     pub const collection = struct {
-        const StaticMethod = builtin_method_ids.collection.StaticMethod;
+        // NOTE: there is deliberately no `StaticMethod` alias here.
+        // `builtin_method_ids.collection` declares no such enum -- the only
+        // collection static (`Map.groupBy`) lives in
+        // `exec/collection_ops.zig`'s `StaticMethod`. A dangling
+        // `builtin_method_ids.collection.StaticMethod` alias used to sit on
+        // this line; Zig only analyses container decls lazily, so it compiled
+        // purely because nothing referenced it.
         const PrototypeMethod = builtin_method_ids.collection.PrototypeMethod;
         const ConstructorMethod = builtin_method_ids.collection.ConstructorMethod;
 

@@ -166,11 +166,19 @@ pub noinline fn compareVm(
 /// is `compare`'s minus that arm (the float-vs-int / float-vs-float / object /
 /// loose-eq cases). `lhs`/`rhs` are OWNED here (consumed via the defers / the
 /// borrowing coercions, exactly as `compare`'s popped operands were).
+///
+/// `cmp` is COMPTIME — qjs reaches its slow calls from independent CASE labels
+/// (`js_relational_slow(ctx, sp, opcode)` at quickjs.c:20268-20271 vs
+/// `js_eq_slow(ctx, sp, inv)` at 20330), so no qjs slow path ever selects its
+/// predicate at run time. With a runtime `u8` here every eq-family call still
+/// evaluated the relational float leg's switch and every relational call still
+/// evaluated the eq dispatch; both legs measured ZERO hits from the other family's
+/// traffic. Specializing folds each caller down to only its own arms.
 pub fn compareAt(
+    comptime cmp: u8,
     ctx: *core.JSContext,
     global: *core.Object,
     output: ?*std.Io.Writer,
-    cmp: u8,
     lhs: core.JSValue,
     rhs: core.JSValue,
 ) !core.JSValue {

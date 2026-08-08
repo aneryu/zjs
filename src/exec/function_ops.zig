@@ -13,16 +13,60 @@ pub const PrototypeMethod = enum(u32) {
     bind = 2,
     call = 3,
     apply = 4,
+    has_instance = 5,
 };
 
 /// Declaration + dispatch table for the `.function` native-builtin domain
-/// (QuickJS `js_function_proto_funcs` analogue).
+/// (QuickJS `js_function_proto_funcs` analogue, quickjs.c:41390).
 pub const internal_entries = [_]core.host_function.InternalEntry{
     functionCallEntry(),
     functionEntry("apply", 2, @intFromEnum(PrototypeMethod.apply)),
     functionEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
     functionEntry("bind", 1, @intFromEnum(PrototypeMethod.bind)),
+    // qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`.
+    // Every `instanceof` whose RHS does not override `Symbol.hasInstance` lands
+    // here, so it must resolve by record id rather than by name cascade.
+    //
+    // `JS_CFUNC_DEF` is `JS_CFUNC_generic`, not `JS_CFUNC_MAGIC_DEF`: qjs gives
+    // this method its own C function rather than a magic selector into a shared
+    // body. Mirror that -- a dedicated `.generic` entry keeps the 24M-call
+    // `instanceof` path out of `functionCall`'s magic switch, which the hot
+    // `apply`/`bind`/`toString` trio shares.
+    functionHasInstanceEntry(),
 };
+
+fn functionHasInstanceEntry() core.host_function.InternalEntry {
+    return .{
+        .name = "[Symbol.hasInstance]",
+        .length = 1,
+        .id = @intFromEnum(PrototypeMethod.has_instance),
+        .magic = 0,
+        .cproto = .generic,
+        .native_function = .{ .generic = &functionHasInstance },
+    };
+}
+
+/// qjs:41379 `js_function_hasInstance` -> `JS_OrdinaryIsInstanceOf(ctx,
+/// argv[0], this_val)`. The receiver is the constructor, the first argument the
+/// probed value.
+fn functionHasInstance(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
+    return call_runtime.qjsFunctionHasInstanceCall(
+        host_call.ctx,
+        host_call.output,
+        realm.global,
+        host_call.this_value,
+        host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    );
+}
 
 fn functionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{

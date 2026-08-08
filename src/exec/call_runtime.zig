@@ -1177,9 +1177,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "raw")) {
         return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
-        return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
     if (std.mem.eql(u8, name, "sumPrecise")) {
         return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
     }
@@ -2899,33 +2896,9 @@ fn createBytecodeConstructorInstance(
     return createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
 }
 
-const max_simple_constructor_fields = 8;
+const max_simple_constructor_fields = bytecode.function_bytecode.max_simple_ctor_fields;
 
-const SimpleFieldConstructorPattern = struct {
-    atoms: [max_simple_constructor_fields]core.Atom = undefined,
-    arg_indices: [max_simple_constructor_fields]u16 = undefined,
-    len: usize = 0,
-};
-
-/// Populate `rt.simple_ctor_memo` for `fb` unless it already holds it. The
-/// pattern is a pure function of the (immutable) bytecode, so a hit avoids the
-/// per-construct bytecode scan; the destructor clears the memo so a reused FB
-/// address never reads a stale entry.
-fn ensureSimpleCtorMemo(rt: *core.JSRuntime, fb: *const bytecode.FunctionBytecode) void {
-    const key = @intFromPtr(fb);
-    if (rt.simple_ctor_memo.fb == key) return;
-    rt.simple_ctor_memo.fb = key;
-    if (simpleFieldConstructorPattern(fb)) |pattern| {
-        rt.simple_ctor_memo.is_simple = true;
-        rt.simple_ctor_memo.len = @intCast(pattern.len);
-        for (0..pattern.len) |i| {
-            rt.simple_ctor_memo.atoms[i] = pattern.atoms[i];
-            rt.simple_ctor_memo.args[i] = pattern.arg_indices[i];
-        }
-    } else {
-        rt.simple_ctor_memo.is_simple = false;
-    }
-}
+const SimpleCtorFacts = bytecode.function_bytecode.SimpleCtorFacts;
 
 fn constructSimpleFieldConstructor(
     ctx: *core.JSContext,
@@ -2939,35 +2912,30 @@ fn constructSimpleFieldConstructor(
 ) !?core.JSValue {
     if (!new_target.sameValue(func)) return null;
     const rt = ctx.runtime;
-    const scanned_pattern: ?SimpleFieldConstructorPattern = if (comptime simple_ctor_memo_enabled)
-        null
-    else
-        simpleFieldConstructorPattern(fb) orelse return null;
-    if (comptime simple_ctor_memo_enabled) {
-        // Memoize the (immutable) bytecode pattern per FB — the scan was the top
-        // self-cost of the fast-path construct, re-run on every `new F()`. The
-        // memo is invalidated in the FB destructor, so keying on the FB pointer
-        // is safe.
-        ensureSimpleCtorMemo(rt, fb);
-        if (!rt.simple_ctor_memo.is_simple) return null;
-    }
+    // The classification is a pure function of the FunctionBytecode's immutable
+    // published bytecode, so it is computed once and memoized in the FB itself.
+    // Variant B (and any extension-less fixture record) has no memo slot and
+    // re-scans into `scratch` on every construct.
+    var scratch: SimpleCtorFacts = undefined;
+    const facts: *align(1) const SimpleCtorFacts = facts: {
+        if (comptime simple_ctor_memo_enabled) {
+            if (fb.simpleCtorMemoMut()) |memo| {
+                if (memo.state == .unknown) memo.* = classifySimpleFieldConstructor(fb);
+                break :facts memo;
+            }
+        }
+        scratch = classifySimpleFieldConstructor(fb);
+        break :facts &scratch;
+    };
+    if (facts.state != .simple) return null;
     const prototype = (function_object.getOwnConstructorPrototypeObject(rt) catch return null) orelse return null;
     // The prototype materialization above can allocate/GC on the FIRST
-    // construct only and never re-enters construction. Select the field slices
-    // afterwards: A borrows the still-valid runtime memo, while B borrows its
-    // per-call stack scan.
-    const field_len = if (comptime simple_ctor_memo_enabled)
-        @as(usize, rt.simple_ctor_memo.len)
-    else
-        scanned_pattern.?.len;
-    const field_atoms = if (comptime simple_ctor_memo_enabled)
-        rt.simple_ctor_memo.atoms[0..field_len]
-    else
-        scanned_pattern.?.atoms[0..field_len];
-    const field_args = if (comptime simple_ctor_memo_enabled)
-        rt.simple_ctor_memo.args[0..field_len]
-    else
-        scanned_pattern.?.arg_indices[0..field_len];
+    // construct only and never re-enters construction; the memo lives in the
+    // FB allocation the caller already holds alive, so these slices stay valid
+    // across it.
+    const field_len: usize = facts.field_count;
+    const field_atoms = facts.atoms[0..field_len];
+    const field_args = facts.arg_indices[0..field_len];
     if (prototypeChainBlocksSimpleFieldStore(prototype, field_atoms)) return null;
 
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
@@ -2989,7 +2957,15 @@ fn constructSimpleFieldConstructor(
     return instance.value();
 }
 
-fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
+/// Decide, once per FunctionBytecode, whether the construct fast path applies.
+/// Never returns `.unknown`: the caller stores the result verbatim.
+fn classifySimpleFieldConstructor(fb: *const bytecode.FunctionBytecode) SimpleCtorFacts {
+    var facts = simpleFieldConstructorPattern(fb) orelse return .{ .state = .not_simple };
+    facts.state = .simple;
+    return facts;
+}
+
+fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleCtorFacts {
     if (fb.isDerivedClassConstructor()) return null;
     if (fb.functionKind() != .normal or !fb.hasPrototype()) return null;
     // Base class bytecode starts with OP_check_ctor, so it cannot match either
@@ -3010,19 +2986,19 @@ fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFi
     return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
 }
 
-fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
+fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleCtorFacts {
     const code = fb.byteCode();
     var pc: usize = 0;
-    var pattern = SimpleFieldConstructorPattern{};
+    var pattern = SimpleCtorFacts{};
     if (pc >= code.len or code[pc] != op.push_this) return null;
     pc += 1;
     const this_local = decodeSimpleConstructorPutLoc(code, &pc) orelse return null;
     while (pc < code.len) {
         if (code[pc] == op.return_undef) {
             pc += 1;
-            return if (pc == code.len and pattern.len != 0) pattern else null;
+            return if (pc == code.len and pattern.field_count != 0) pattern else null;
         }
-        if (pattern.len == max_simple_constructor_fields) return null;
+        if (pattern.field_count == max_simple_constructor_fields) return null;
         const local_index = decodeSimpleConstructorGetLoc(code, &pc) orelse return null;
         if (local_index != this_local) return null;
         tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
@@ -3030,18 +3006,18 @@ fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) 
     return null;
 }
 
-fn simpleStackThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
+fn simpleStackThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleCtorFacts {
     const code = fb.byteCode();
     var pc: usize = 0;
-    var pattern = SimpleFieldConstructorPattern{};
+    var pattern = SimpleCtorFacts{};
     if (pc >= code.len or code[pc] != op.push_this) return null;
     pc += 1;
     while (pc < code.len) {
         if (code[pc] == op.return_undef) {
             pc += 1;
-            return if (pc == code.len and pattern.len != 0) pattern else null;
+            return if (pc == code.len and pattern.field_count != 0) pattern else null;
         }
-        if (pattern.len == max_simple_constructor_fields) return null;
+        if (pattern.field_count == max_simple_constructor_fields) return null;
         const keeps_this_for_next_field = if (code[pc] == op.dup) blk: {
             pc += 1;
             break :blk true;
@@ -3052,17 +3028,17 @@ fn simpleStackThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) 
     return null;
 }
 
-fn tryAppendSimpleConstructorField(code: []const u8, pc: *usize, pattern: *SimpleFieldConstructorPattern) ?void {
+fn tryAppendSimpleConstructorField(code: []const u8, pc: *usize, pattern: *SimpleCtorFacts) ?void {
     const arg_index = decodeSimpleConstructorArgGet(code, pc) orelse return null;
     if (pc.* + 5 > code.len or code[pc.*] != op.put_field) return null;
     const atom_id = readInt(u32, code[pc.* + 1 ..][0..4]);
     pc.* += 5;
-    for (pattern.atoms[0..pattern.len]) |existing| {
+    for (pattern.atoms[0..pattern.field_count]) |existing| {
         if (existing == atom_id) return null;
     }
-    pattern.atoms[pattern.len] = atom_id;
-    pattern.arg_indices[pattern.len] = arg_index;
-    pattern.len += 1;
+    pattern.atoms[pattern.field_count] = atom_id;
+    pattern.arg_indices[pattern.field_count] = arg_index;
+    pattern.field_count += 1;
 }
 
 fn decodeSimpleConstructorPutLoc(code: []const u8, pc: *usize) ?u16 {
@@ -3113,7 +3089,9 @@ fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
     return null;
 }
 
-fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, atoms: []const core.Atom) bool {
+// `align(1)`: the atoms are read straight out of the FunctionBytecode's
+// byte-aligned hot extension tail.
+fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, atoms: []align(1) const core.Atom) bool {
     var current: ?*core.Object = prototype;
     while (current) |object| {
         if (object.hasExoticMethods() or object.proxyTarget() != null) return true;

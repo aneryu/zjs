@@ -6471,12 +6471,33 @@ fn materializeArgsFromArrayLike(
     const dense_values: ?[]const core.JSValue = if (dense_array_length != null and
         @as(usize, @intCast(object.fastArrayCount())) == length)
         object.fastArrayValues()
+    else if (object.unmappedArgumentsDenseValues().len == length and length != 0)
+        // qjs build_arg_list admits JS_CLASS_ARGUMENTS alongside JS_CLASS_ARRAY
+        // (quickjs.c:41185); `len == p->u.array.count` is what keeps a rewritten
+        // `arguments.length` on the observable [[Get]] path.
+        object.unmappedArgumentsDenseValues()
     else
         null;
+    // qjs's third build_arg_list arm: a MAPPED arguments object stores var-refs
+    // rather than values, so each element is read through its cell
+    // (`*p->u.array.u.var_refs[i]->pvalue`, quickjs.c:41190). Sloppy
+    // simple-parameter functions — `f.apply(this, arguments)` forwarding, the
+    // RayTrace/Earley shape — produce exactly this class.
+    const mapped_cells: ?[]const ?*core.VarRef = if (dense_values == null and length != 0) blk: {
+        const bound = object.fullyBoundMappedArgumentsVarRefs() orelse break :blk null;
+        break :blk if (bound.len == length) bound else null;
+    } else null;
     if (dense_values) |dense| {
         std.debug.assert(dense.len == length);
         for (dense, 0..) |value, index| {
             values[index] = value.dup();
+            initialized += 1;
+            rooted_args = values[0..initialized];
+        }
+    } else if (mapped_cells) |cells| {
+        std.debug.assert(cells.len == length);
+        for (cells, 0..) |cell, index| {
+            values[index] = cell.?.pvalue.*.dup();
             initialized += 1;
             rooted_args = values[0..initialized];
         }
