@@ -240,6 +240,7 @@ const PropertyTailSlot = enum(usize) {
     get_field_absent,
     put_field_release_old,
     put_field_release_receiver,
+    put_array_el_rest,
 };
 
 inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
@@ -3060,7 +3061,77 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 // value is consumed by the slot and the proven-int key needs no release.
 // Typed arrays (not is_array), string keys, out-of-range / holey, and exotic
 // receivers fall to the cold h_put_array_element with all operands still owned.
+/// Hot inline put_array_el, lowered like `op_put_field`: qjs settles the
+/// in-range store inside JS_CallInternal with the operands in registers --
+/// object/int tag pair, JS_CLASS_ARRAY, one bounds test, then
+/// `set_value(ctx, &p->u.array.u.values[idx], sp[-1])` (quickjs.c:19552-19581)
+/// -- and its shared interpreter frame pays no per-op prologue.
+///
+/// Everything that needs an operand ADDRESS lives in the cold twin below. The
+/// slow legs hand `&value` to setValuePropertyWithThrow / the typed-array
+/// writer, and LLVM hoists that frame materialization above every branch, so
+/// leaving them here cost the hot arm a 144-byte frame, six callee-saved `stp`
+/// pairs and two operand spills on a path that never reads them back. Both
+/// rare destroys (a dying old element, a dying receiver) route to tails for the
+/// same reason op_put_field routes its pair.
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const obj = (sp - 3)[0];
+    if (obj.isObject()) {
+        if (class_vm.objectFromValue(obj)) |array_object| {
+            if (array_object.isArray()) {
+                if ((sp - 2)[0].asInt32()) |index_i32| {
+                    if (index_i32 >= 0) {
+                        const index: u32 = @intCast(index_i32);
+                        if (array_object.isFastArrayIndexInBounds(index)) {
+                            const rt = vm.ctx.runtime;
+                            const slot = array_object.fastArraySlotAssumeCapacity(index);
+                            const old_value = loadValueAsIntPair(slot);
+                            storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                            if (old_value.releaseRefCountedNeedsDestroy(rt)) {
+                                // Park the dying element in the now-dead value
+                                // slot so the tail completes both releases off
+                                // intact operands (op_put_field precedent).
+                                storeValueAsIntPair(&(sp - 1)[0], old_value);
+                                return @call(.always_tail, op_put_array_el_release_old_tail, .{ pc, sp, var_buf, vm });
+                            }
+                            if (obj.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+                                return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                            }
+                            return cont(pc + 1, sp - 3, var_buf, vm);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Reached through the property-tail table: an indirect transfer LLVM cannot
+    // inline, which is what keeps the address-taking slow legs (and their frame)
+    // out of this handler. A direct call to the same function gets inlined and
+    // the 144-byte frame comes straight back.
+    return @call(.always_tail, propertyTailHandler(vm, .put_array_el_rest), .{ pc, sp, var_buf, vm });
+}
+
+/// Contract: the new element is already in the array slot; the dying old
+/// element (rc == 1) is parked in the dead value slot at (sp - 1); the receiver
+/// at (sp - 3) has NOT been released yet.
+fn op_put_array_el_release_old_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const rt = vm.ctx.runtime;
+    (sp - 1)[0].free(rt);
+    (sp - 3)[0].freeObjectAssumeObject(rt);
+    return cont(pc + 1, sp - 3, var_buf, vm);
+}
+
+/// Contract: slot written and old element already released inline; only the
+/// receiver at (sp - 3) (rc == 1) remains to destroy.
+fn op_put_array_el_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    (sp - 3)[0].freeObjectAssumeObject(vm.ctx.runtime);
+    return cont(pc + 1, sp - 3, var_buf, vm);
+}
+
+/// Every leg that needs an operand address, kept out of the hot handler. Not
+/// marked `noinline` because that would break the `musttail` transfers below;
+/// its size keeps LLVM from inlining it anyway.
+fn op_put_array_el_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = loadValueAsIntPair(&(sp - 1)[0]);
     const key = loadValueAsIntPair(&(sp - 2)[0]);
     const obj = loadValueAsIntPair(&(sp - 3)[0]);
@@ -4462,7 +4533,7 @@ fn profiledHandler(comptime profiled_op: u8, comptime real: Handler) Handler {
         }
     }.dispatch;
 }
-const property_tail_table = [14]Handler{
+const property_tail_table = [15]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_cached_string,
@@ -4477,6 +4548,7 @@ const property_tail_table = [14]Handler{
     op_get_field_absent_tail,
     op_put_field_release_old_tail,
     op_put_field_release_receiver_tail,
+    op_put_array_el_cold,
 };
 
 // ===========================================================================
