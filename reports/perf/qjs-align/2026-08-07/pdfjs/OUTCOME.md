@@ -171,3 +171,72 @@ Known but unpriced: mapped arguments materialization does **two** heap
 allocations to qjs's one (the extra `argument_root_storage` is a GC-rooting
 mirror). Whether it can go depends on zjs GC reachability semantics for an
 object held only by a Zig local mid-loop — not decidable by reading.
+
+## Second sweep: six consecutive misses, and what they establish
+
+After the knives landed, a further sweep looked for more single points. It
+found none. Recording it so the same six doors are not reopened.
+
+**splay (0.755) — diffuse.** `cycles 1.311x = insn 1.378x × IPC 0.952`; zjs's
+IPC is *better*. GC marking is 423.7 vs 384.4 Mcyc = 1.10x, i.e. near parity
+despite `traceChildren` being zjs's top two symbols at 25.85% combined.
+
+**typescript (0.729) — diffuse.** `cycles 1.355x = insn 1.378x × IPC 0.984`.
+The profile is all base opcodes; the largest, `op_get_field` at 19.19%, prices
+at 1.04x — typescript simply reads a lot of properties.
+
+**glibc heap trim — refuted.** `strace -c` shows zjs spending 6.08x the time in
+`brk` (19 vs 4 usec/call) on splay, which looks like a zjs-specific allocator
+pathology. Disabling trim (`MALLOC_TRIM_THRESHOLD_`) helps **both** engines
+(zjs −7.2%, qjs −5.6%) and moves the ratio only 1.397 → 1.374. It is generic
+glibc behaviour, and qjs sets no `mallopt`, so matching it would not be faithful.
+
+**`argumentsPropertyTemplate`'s context re-lookup — refuted.**
+`createArgumentsObject` takes `ctx` as its first parameter, then calls
+`argumentsPropertyTemplate(ctx.runtime, global, …)`, which opens with
+`rt.contextForGlobal(global)` — a linear walk of the realm list to recover the
+context the caller already held. Passing `ctx` through changed nothing
+(+1.7 insn, inside noise): the realm list holds one entry, so the walk hits on
+the first iteration and the added identity test costs what it saves.
+
+### The engine-level baseline
+
+Lining up every measured benchmark's instruction ratio:
+
+| benchmark | insn ratio | |
+|---|---|---|
+| pdfjs (post-fix) | 1.229 | typed-array heavy, a zjs strength |
+| boyer | 1.357 | |
+| **splay** | **1.378** | |
+| **typescript** | **1.378** | |
+| earley | 1.602 | arguments-heavy |
+| raytrace | 1.767 | arguments/apply-heaviest |
+
+splay and typescript land on the *same* ratio. That is the engine's uniform
+per-opcode baseline; everything above it is arguments/apply density and the one
+below it is typed-array density. **The residual gap belongs to no mechanism** —
+which is why no further single point exists to find.
+
+### Differential-build pricing (the method that did work)
+
+Deleting a step, rebuilding, and differencing instruction counts is the only
+technique in this campaign that located cost reliably. Applied to
+`createArgumentsObject`:
+
+- Replacing `arrayPrototypeValuesFromGlobal(...)` with `undefined` (safe for E0,
+  which reads only `.length`): **43 insn per materialization, 6.9% of the 627
+  insn gap**. Mechanism: it goes through `cachedRealmValue` →
+  `contextForGlobalIncludingConstructing`, which walks *two* realm lists, then
+  `.dup()`s, while the call site `defer`s a `free` and `createFromShape` dups
+  again — **2 dups + 1 free where qjs does one `JS_DupValue(ctx,
+  ctx->array_proto_values)`**. Worth ~40 insn, i.e. 0.74% of raytrace. Not cut.
+
+The same run re-confirmed that **stub/shim pricing is unsound**: stubbing
+`createArgumentsObject` to return a plain object made E0 26% *slower*, because
+`arguments.length` then fell into the property-miss path. A diagnostic must not
+perturb what the benchmark does downstream.
+
+**Conclusion of the sweep: the arguments cluster's 627 insn/op is spread across
+a dozen items whose largest is 6.9%.** There is nothing left worth a knife at
+this granularity; lowering the 1.378x baseline means trimming individual opcode
+handlers, one at a time, the way the dense-write pair did.
