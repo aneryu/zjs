@@ -3070,13 +3070,26 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // are typed array writes that always miss the dense probes — the noinline
     // call to putDenseArrayElementOverwriteOwnedFast just checks isArray()
     // and returns .miss, costing ~2.27M function calls for zero hits.
-    const obj_is_array = if (obj.isObject()) blk: {
-        if (class_vm.objectFromValue(obj)) |obj_ptr| {
-            break :blk obj_ptr.isArray();
+    const array_ptr: ?*core.Object = if (obj.isObject()) blk: {
+        const obj_ptr = class_vm.objectFromValue(obj) orelse break :blk null;
+        break :blk if (obj_ptr.isArray()) obj_ptr else null;
+    } else null;
+    if (array_ptr) |array_object| {
+        // qjs resolves the in-range overwrite INLINE in the OP_put_array_el arm:
+        // after the object/int tag pair and the JS_CLASS_ARRAY check it does one
+        // bounds test and `set_value(ctx, &p->u.array.u.values[idx], sp[-1])`
+        // (quickjs.c:19552-19581). Doing the same here keeps the dominant arm
+        // off the noinline probe below, which otherwise re-derives the object
+        // and re-tests isArray() on every store even though this handler just
+        // proved both.
+        if (key.asInt32()) |index_i32| {
+            if (index_i32 >= 0 and
+                array_object.setFastArrayElementOwnedDuringActiveBytecode(rt, @intCast(index_i32), value))
+            {
+                obj.freeDuringActiveBytecode(rt);
+                return cont(pc + 1, sp - 3, var_buf, vm);
+            }
         }
-        break :blk false;
-    } else false;
-    if (obj_is_array) {
         const overwrite_result = array_ops.putDenseArrayElementOverwriteOwnedFast(rt, obj, key, value);
         if (overwrite_result == .handled) {
             // QuickJS still uses generic JS_FreeValue for sp[-3] here: preserve
