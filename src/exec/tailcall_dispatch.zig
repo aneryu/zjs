@@ -2901,6 +2901,44 @@ pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 
+/// qjs OP_put_arg / OP_set_arg and their short forms (quickjs.c:18566-18612)
+/// replace `arg_buf[idx]` in the interpreter body. Frame construction pads the
+/// writable argument window to `function.arg_count`, so compiler-emitted
+/// operands have the same trusted bound as op_get_arg. Each ownership contract
+/// shares its wide and short encodings instead of publishing the VM and crossing
+/// vm_property_locals.arg/slot_ops for every parameter assignment.
+const ArgStoreKind = enum { put, set };
+
+pub fn opArgStore(comptime kind: ArgStoreKind) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
+            const wide_op = switch (kind) {
+                .put => op.put_arg,
+                .set => op.set_arg,
+            };
+            const short_base = switch (kind) {
+                .put => op.put_arg0,
+                .set => op.set_arg0,
+            };
+            const wide = pc[0] == wide_op;
+            const idx: u16 = if (wide) readInt(u16, pc + 1) else pc[0] - short_base;
+            const advance: usize = if (wide) 3 else 1;
+            std.debug.assert(idx < vm.frame.args.len);
+            const value = (sp - 1)[0];
+            switch (kind) {
+                .put => {
+                    value_slot.replaceOwned(vm.ctx.runtime, &vm.frame.args.ptr[idx], value);
+                    return cont(pc + advance, sp - 1, var_buf, vm);
+                },
+                .set => {
+                    value_slot.replaceBorrowed(vm.ctx.runtime, &vm.frame.args.ptr[idx], value);
+                    return cont(pc + advance, sp, var_buf, vm);
+                },
+            }
+        }
+    }.h;
+}
+
 // Hot get_field mirrors qjs GET_FIELD_INLINE: ordinary objects walk shape data
 // properties in this handler, while misses and primitive receivers tail-dispatch to
 // a separate ordinary-property walker so their uncommon qualification code does not

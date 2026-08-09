@@ -13247,6 +13247,10 @@ test "missing-argument calls read undefined across every entry arm" {
         \\};
         \\globalThis.__padWrite = function (a, b) { b = 42; return b; };
         \\globalThis.__padFive = function (a, b, c, d, fifth) { return fifth; };
+        \\globalThis.__padPutShort = function (a, b, c, d) { a = b; d = b; return a === d ? a : null; };
+        \\globalThis.__padSetShort = function (a, b, c, d) { return (a = b) === (d = b); };
+        \\globalThis.__padPutWide = function (a, b, c, d, fifth) { fifth = a; return fifth; };
+        \\globalThis.__padSetWide = function (a, b, c, d, fifth) { return (fifth = a); };
         \\globalThis.__padStrict = function (a, b) {
         \\    "use strict";
         \\    return String(this) + ":" + String(a) + ":" + String(b);
@@ -13267,6 +13271,11 @@ test "missing-argument calls read undefined across every entry arm" {
         \\        if (__padWrite(i) !== 42) throw new Error("pad write not frame-local");
         \\        if (__padFive(1, 2, 3, 4) !== undefined) throw new Error("wide missing read");
         \\        if (__padFive(1, 2, 3, 4, i) !== i) throw new Error("wide supplied read");
+        \\        const marker = { i: i };
+        \\        if (__padPutShort(null, marker, null, null) !== marker) throw new Error("short put arg");
+        \\        if (__padSetShort(null, marker, null, null) !== true) throw new Error("short set arg");
+        \\        if (__padPutWide(marker, null, null, null) !== marker) throw new Error("wide put arg");
+        \\        if (__padSetWide(marker, null, null, null) !== marker) throw new Error("wide set arg");
         \\        if (__padStrict(i) !== "undefined:" + i + ":undefined") throw new Error("strict pad this");
         \\        if (__padStrictLeaf(i) !== i + "^undefined") throw new Error("strict pad leaf");
         \\        if (__padStrictLeaf() !== "undefined^undefined") throw new Error("strict pad leaf both");

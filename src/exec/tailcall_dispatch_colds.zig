@@ -865,6 +865,12 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
     t[op.get_arg] = td.op_get_arg;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
+    inline for ([_]struct { o: u8, h: Handler }{
+        .{ .o = op.put_arg, .h = td.opArgStore(.put) },
+        .{ .o = op.set_arg, .h = td.opArgStore(.set) },
+    }) |e| t[e.o] = e.h;
+    inline for ([_]u8{ op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3 }) |o| t[o] = td.opArgStore(.put);
+    inline for ([_]u8{ op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 }) |o| t[o] = td.opArgStore(.set);
     t[op.push_atom_value] = td.op_push_atom_value;
     t[op.special_object] = td.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
     t[op.push_this] = td.op_push_this; // object dup / sloppy nullish->global; ToObject boxing + strict non-object + uninitialized stay cold
