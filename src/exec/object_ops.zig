@@ -2571,17 +2571,9 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
         return object.value();
     }
 
-    var argument_root_storage: []*core.VarRef = &.{};
-    var rooted_argument_cells: []*core.VarRef = &.{};
-    var argument_cells_root = CellSliceRoot{};
-    argument_cells_root.init(ctx.runtime, &rooted_argument_cells);
-    defer argument_cells_root.deinit();
-    defer if (argument_root_storage.len != 0) ctx.runtime.memory.free(*core.VarRef, argument_root_storage);
     if (args.len > 0) {
         _ = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
-        argument_root_storage = try ctx.runtime.memory.alloc(*core.VarRef, args.len);
     }
-    var initialized_argument_refs: usize = 0;
     for (args, 0..) |_, index| {
         const refs = object.argumentsVarRefsMut();
         const cell = if (index < frame.function.arg_count) blk: {
@@ -2595,9 +2587,6 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
             break :blk try core.VarRef.createClosed(ctx.runtime, initial);
         };
         refs[index] = cell;
-        argument_root_storage[index] = cell;
-        initialized_argument_refs = index + 1;
-        rooted_argument_cells = argument_root_storage[0..initialized_argument_refs];
     }
     return object.value();
 }

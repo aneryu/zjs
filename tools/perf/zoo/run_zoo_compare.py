@@ -37,6 +37,7 @@ import math
 import os
 import platform
 import re
+import statistics
 import subprocess
 import sys
 import time
@@ -144,6 +145,10 @@ def geomean(values: list[float]) -> float:
     return math.exp(sum(math.log(v) for v in values) / len(values))
 
 
+def median(values: list[int] | list[float]) -> int | float:
+    return statistics.median(values)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--zjs", required=True)
@@ -217,11 +222,11 @@ def main() -> int:
             )
         entry = {"scores": {}, "wallSecondsMedian": {}}
         for engine in ("zjs", "qjs"):
-            entry["wallSecondsMedian"][engine] = sorted(wall[engine])[len(wall[engine]) // 2]
+            entry["wallSecondsMedian"][engine] = median(wall[engine])
         for key in keys:
             z = sorted(per_engine["zjs"][key])
             q = sorted(per_engine["qjs"][key])
-            zm, qm = z[len(z) // 2], q[len(q) // 2]
+            zm, qm = median(z), median(q)
             entry["scores"][key] = {
                 "zjs": {"median": zm, "min": z[0], "max": z[-1], "samples": per_engine["zjs"][key]},
                 "qjs": {"median": qm, "min": q[0], "max": q[-1], "samples": per_engine["qjs"][key]},
@@ -245,7 +250,8 @@ def main() -> int:
 
     artifact = {
         "tool": "zjs-zoo-compare",
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "medianMethod": "statistics.median; even sample counts average the middle pair",
         "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "samplesPerEnginePerBench": args.samples,

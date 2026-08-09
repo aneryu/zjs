@@ -36,6 +36,37 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
 Build `zjs` first — a stale binary has produced wrong campaign conclusions
 before.
 
+## Fixed-work PMU attribution
+
+The normal Octane protocol runs each benchmark for roughly one second. Faster
+engines therefore execute more iterations, so whole-process instructions and
+cycles from that protocol do not describe equal work. Use the deterministic
+runner when attributing a score gap:
+
+```bash
+flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+  python3 tools/perf/zoo/run_zoo_fixed_pmu.py \
+    --zjs zig-out/bin/zjs \
+    --qjs /home/aneryu/quickjs/qjs \
+    --benches raytrace earley-boyer splay typescript pdfjs \
+    --samples 4 \
+    --cpu 19 \
+    --pmu armv8_pmuv3_1 \
+    --iteration-divisor 4 \
+    --output reports/perf/qjs-align/<date>/zoo-fixed-pmu.json
+```
+
+The runner makes temporary benchmark copies that set Octane's
+`doWarmup=false` and `doDeterministic=true`. Both engines therefore execute the
+same declared `deterministicIterations` batches. It refuses odd sample counts,
+un-pinned execution, missing explicit-PMU counters, or non-canonical benchmark
+harness markers. Ratios are `zjs / qjs`; instructions are the primary
+work-removal signal, while cycles, IPC, branches, and cache events support
+attribution. `--iteration-divisor` divides both `deterministicIterations` and
+`minIterations` by the same factor for both engines, rounding each result up;
+use it to shorten exploratory sweeps, and keep the unscaled workload for final
+attribution. The ordinary throughput runner remains the macro acceptance gate.
+
 ## What it fails closed on
 
 - **Odd `--samples`.** Refused, not rounded up. The order alternates on sample
@@ -55,3 +86,9 @@ the zoo checkout's commit, kernel, CPU model, effective affinity, the sample
 count, the full execution order log, every raw score, and per-benchmark median /
 min / max. Provenance is the point: a score without the binary identity that
 produced it cannot be compared against a later run.
+
+Schema 2 uses `statistics.median`; with the required even sample count this
+averages the two middle values. Historical schema-1 artifacts selected the
+upper middle value, so their stored summaries must not be compared directly
+with schema-2 summaries. Their raw samples can be reaggregated with the schema-2
+definition when a historical comparison is needed.

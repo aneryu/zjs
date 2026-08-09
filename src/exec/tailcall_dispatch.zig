@@ -2715,6 +2715,27 @@ pub fn op_push_i32(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     return cont(pc + 5, sp + 1, var_buf, vm);
 }
 
+/// QuickJS OP_push_const / OP_push_const8 are direct constant-pool loads plus
+/// JS_DupValue in the interpreter case (quickjs.c:17888-17913). Keep that
+/// non-allocating retained-value push in the register-resident dispatcher;
+/// malformed/synthetic bytecode and generator/eval stop seams retain the
+/// existing published cold path.
+pub fn op_push_const(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const value = vm.function.constantAt(readInt(u32, pc + 1)) orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = value;
+    return cont(pc + 5, sp + 1, var_buf, vm);
+}
+
+pub fn op_push_const8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const value = vm.function.constantAt(pc[1]) orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    sp[0] = value;
+    return cont(pc + 2, sp + 1, var_buf, vm);
+}
+
 /// qjs OP_push_atom_value: decode the atom and push its retained string/symbol
 /// value directly in the register-resident dispatcher. A cached atom conversion
 /// cannot run user code; only the allocation/error path needs published state.

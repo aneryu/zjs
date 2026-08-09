@@ -828,6 +828,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.push_i32] = td.op_push_i32;
     t[op.push_i16] = td.op_push_i16;
     t[op.push_i8] = td.op_push_i8;
+    t[op.push_const] = td.op_push_const;
+    t[op.push_const8] = td.op_push_const8;
     inline for ([_]u8{ op.push_minus1, op.push_0, op.push_1, op.push_2, op.push_3, op.push_4, op.push_5, op.push_6, op.push_7 }) |o| t[o] = td.op_push_small;
     // Per-variant local handlers (qjs-style distinct labels, no runtime decode).
     inline for ([_]struct { o: u8, h: Handler }{
