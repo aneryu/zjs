@@ -9043,14 +9043,16 @@ pub const pipeline_finalize = struct {
         // The packed production path folds its final topology, atom-owner and
         // var-ref proof into this walk. Direct Bytecode callers retain the
         // self-contained resolve_labels proof and do not repeat it here.
-        const final_artifact: ?stack_size.FinalArtifactValidation = if (comptime validate_final_artifact) blk: {
+        const FinalArtifact = if (validate_final_artifact) stack_size.FinalArtifactValidation else void;
+        const final_artifact: FinalArtifact = if (comptime validate_final_artifact) blk: {
             const def = fd orelse return error.InvalidBytecode;
             break :blk .{
                 .atom_owners = function.atom_operands,
                 .closure_var_count = def.closure_var.len,
             };
-        } else null;
+        } else {};
         function.stack_size = try computeStackSizeForCurrentBytecode(
+            validate_final_artifact,
             function,
             &function.leaf_returns_balanced,
             final_artifact,
@@ -9062,9 +9064,10 @@ pub const pipeline_finalize = struct {
     // packed finalizer; the resulting backend-stall regression was the carrier
     // behind QCP-1B's crypto/code-load shift. See the decision record §9.3.
     noinline fn computeStackSizeForCurrentBytecode(
+        comptime validate_final_artifact: bool,
         function: *bytecode_function.Bytecode,
         leaf_returns_balanced: *bool,
-        final_artifact: ?stack_size.FinalArtifactValidation,
+        final_artifact: if (validate_final_artifact) stack_size.FinalArtifactValidation else void,
     ) FinalizeError!u16 {
         // Parser compilation switches MemoryAccount.allocator to the stable,
         // accounted artifact allocator before entering finalization. Direct
@@ -9072,7 +9075,7 @@ pub const pipeline_finalize = struct {
         return stack_size.compute(function.code, .{
             .scratch_allocator = function.memory.allocator,
             .returns_balanced_out = leaf_returns_balanced,
-            .final_artifact = final_artifact,
+            .final_artifact = if (comptime validate_final_artifact) final_artifact else null,
         }) catch |err| switch (err) {
             // Reachable falloff is a verifier diagnosis; consumers of the
             // finalize pipeline observe the established invalid-bytecode API.
