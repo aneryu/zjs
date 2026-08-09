@@ -240,3 +240,81 @@ perturb what the benchmark does downstream.
 a dozen items whose largest is 6.9%.** There is nothing left worth a knife at
 this granularity; lowering the 1.378x baseline means trimming individual opcode
 handlers, one at a time, the way the dense-write pair did.
+
+## The frame boundary: why `op_get_array_el` cannot take the dense-write cure
+
+Applying the dense-write treatment to `op_get_array_el` **worked technically and
+was still rejected**. Recording it in full, because the reason generalizes.
+
+### It worked
+
+`op_get_field` is the template, and its comment explains the trick that matters:
+
+```zig
+_ = value.dup();   // discard the result
+```
+> "discarding the result keeps the pushed value a single SSA scalar instead of a
+> two-arm join that LLVM would park in a stack slot"
+
+`op_get_array_el` was using `fastArrayElementDup`, which returns `?JSValue` *and*
+returns the duped value — precisely that two-arm join. Rewriting the hot arm in
+`op_get_field`'s shape (integer-pair slot read, discarded `dup()`, receiver
+destroy routed to a tail) and moving every other leg to a cold twin gave:
+
+- handler **191 → 50 instructions, prologue gone**
+- dense read **67.14 → 62.12 insn (−7.5%)**, **1.133x → 1.048x** vs qjs
+- all gates green; semantics fixture (holes, prototype getters, typed arrays,
+  `arguments`, sparse, rc==1 receiver) matches qjs item for item
+
+### And zoo rejected it
+
+8 samples, pinned:
+
+| | baseline | after |
+|---|---|---|
+| navier-stokes | 0.807 | **0.845** (+4.7%) |
+| mandreel | 0.840 | 0.809 (−3.7%) |
+| zlib | 0.858 | 0.831 (−3.1%) |
+| gbemu | 0.855 | 0.835 (−2.3%) |
+
+Geomean −0.25%. Rejected on the same rule that killed the −0.199% write arm.
+
+### A refuted intermediate hypothesis
+
+The cold twin initially repeated the dense probe (`fastDenseArrayElementValue`),
+whose test is *identical* to the one the hot arm just failed — so every typed
+read paid a guaranteed second miss. Removing it recovered only 0.3–0.6%; the
+regressions stayed. **That was not the cause.**
+
+### The structural finding
+
+The cause is the indirect tail itself. Typed-array reads now go through
+`vm.property_tail_tbl` (table load + `br x`) where they used to be sequential
+compares inside one function; qjs reaches its own out-of-line leg with a direct
+`bl` and no table.
+
+And that indirection **is the precondition for the frame disappearing**:
+
+- direct `always_tail` to the twin → LLVM inlines it back (measured: 338
+  instructions, the 144-byte frame returns)
+- `noinline` on the twin → breaks the `musttail` transfers inside it
+- only the `property_tail_tbl` load is a boundary LLVM will not cross
+
+So on this handler, **"no prologue" and "fast typed-array arm" are mutually
+exclusive**. The dense-*write* knife escaped the trade because its slow legs
+(`setValuePropertyWithThrow`, the typed writer) already lived behind noinline
+helpers — moving them out added no hop. The dense-*read* handler had its typed
+arm inlined in the hot body, so extracting it necessarily costs a hop.
+
+This is the mechanism under the older observation that "the same correct logic
+in three positions gives three results" — it is not a tuning problem but an
+artifact of zjs's sequential class chain versus qjs's `switch (p->class_id)`
+(quickjs.c:9959). The real fix is that O(1) dispatch, but note it would put a
+jump-table indirect on the **dense hit** too, which is the hottest case and the
+one currently paying nothing — so it could equally give the navier win back and
+take the mandreel loss. Not attempted.
+
+**Practical rule for future handlers: before extracting a hot arm, check where
+the slow legs already live. If they are inlined in the hot body, extraction buys
+a prologue but sells a hop, and the trade is decided by how hot the extracted
+legs are.**
