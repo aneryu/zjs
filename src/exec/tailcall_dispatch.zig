@@ -134,13 +134,12 @@ pub const Vm = struct {
     /// Occupies the retired `_dispatch_layout_padding` slot, so the measured
     /// Vm layout (dispatch tables / outcome payload offsets) is unchanged.
     rt: *core.JSRuntime,
-    /// RETIRED dispatch-table base (B1: hot dispatch is `dispatch_table[op]` static
-    /// `adrp+add` now — two dependency-free insns beat the `ldr vm.tbl` whose load sat
-    /// on the `br`-target critical path; the historical remat tax this indirection
-    /// defended against was a multi-site monolith artifact, see
-    /// dispatch-table-base-remat-rootcause). Field kept ONLY to preserve the measured
-    /// Vm layout (same rationale as `_dispatch_layout_padding` above).
-    tbl: [*]const Handler = undefined,
+    /// Resident arithmetic slow-tail handlers. This reuses the retired B1
+    /// dispatch-table pointer slot, preserving the measured Vm layout while the
+    /// indirect target keeps string concat's call and exception freight out of
+    /// the int/float add handler. Hot opcode dispatch itself still uses the
+    /// static dispatch table.
+    arithmetic_tail_tbl: [*]const Handler = undefined,
     /// Property-specialized handlers live behind a resident table pointer for the
     /// same reason cold_table does: the indirect tail call keeps their shape walks
     /// out of the already-hot object/array handlers without adding a non-tail frame.
@@ -243,8 +242,16 @@ const PropertyTailSlot = enum(usize) {
     put_array_el_rest,
 };
 
+const ArithmeticTailSlot = enum(usize) {
+    add_strings,
+};
+
 inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
     return vm.property_tail_tbl[@intFromEnum(slot)];
+}
+
+inline fn arithmeticTailHandler(vm: *const Vm, comptime slot: ArithmeticTailSlot) Handler {
+    return vm.arithmetic_tail_tbl[@intFromEnum(slot)];
 }
 
 /// Computed-goto: tail-call the handler for the opcode at `pc[0]`. No fall-off
@@ -2245,17 +2252,14 @@ inline fn decodeLocalOperand(opc: u8, operand: [*]const u8) LocalOperand {
 /// op_loc) leaves each handler a pure-register straight line: both-int tag fold
 /// → int op (+overflow check) → 16-byte scalar store into sp[-2] → tail dispatch.
 ///
-/// Guard misses take the INDIRECT `cold_table[pc[0]]` hop (op_if_false8 pattern:
-/// the runtime index defeats devirtualization so the cold publish+helper is not
-/// inlined back). Everything the qjs int leg does not fully resolve inline is
-/// routed there rather than re-implemented: int overflow on add/sub/mul and
-/// mul's -0 (qjs handles those in-CASE via __JS_NewFloat64, 19704/19800/19842/
-/// 19847 — the cold path's vm_arith.fastInt32Add/Sub/Mul computes bit-identical
-/// results), mod's `v1 < 0 || v2 <= 0` (qjs 19906 also goes slow), and every
-/// non-(both-int) pairing. qjs OP_add/sub/mul additionally inline a float leg
-/// (19710-19728) and OP_add a string leg (19729): those stay cold here — this
-/// knife is int-only (the reverted op_add_loc float-inline precedent), and the
-/// cold h_binary already carries the full float/string/object/BigInt protocol.
+/// Guard misses take an indirect resident-handler hop so LLVM cannot inline
+/// slow freight back into the integer handler. Int overflow on add/sub/mul,
+/// mul's -0, mod's slow cases, and unresolved operand shapes still use
+/// `cold_table[pc[0]]`. qjs OP_add's direct float leg remains in the arithmetic
+/// handler; its direct string-string leg tails through `arithmetic_tail_tbl`,
+/// while object/BigInt/coercion cases stay in the same authoritative cold
+/// handler. The indirect boundary matters because string concat's call and
+/// exception path otherwise give every int add a native stack frame.
 const BinOp = enum { add, sub, mul, div, mod, shl, sar, shr, band, bor, bxor };
 
 pub fn opBinary(comptime kind: BinOp) Handler {
@@ -2356,24 +2360,12 @@ fn opBinaryFloat(comptime kind: BinOp) Handler {
             if (comptime kind == .add) {
                 const lhs = (sp - 2)[0];
                 const rhs = (sp - 1)[0];
-                // qjs OP_add has a direct `JS_IsString(op1) &&
-                // JS_IsString(op2)` arm before js_add_slow. Both values are
-                // already primitive strings, so no observable coercion can run
-                // here; consume them in the concat helper and keep pc/sp in
-                // registers on success.
-                if (lhs.isString() and rhs.isString()) {
-                    const result = value_ops.addStringsOwned(vm.ctx.runtime, lhs, rhs) catch |err| {
-                        // addStringsOwned consumed both operands. Publish the
-                        // shortened stack only on the exceptional path, then
-                        // use the same catch materialization as h_binary.
-                        vm.publish(pc, sp - 2);
-                        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
-                        if (!caught) return vm.fail(err);
-                        return coldNext(var_buf, vm);
-                    };
-                    (sp - 2)[0] = result;
-                    return cont(pc + 1, sp - 1, var_buf, vm);
-                }
+                // qjs OP_add has a direct string-string arm before js_add_slow.
+                // Keep the same semantic arm, but indirect-tail into its native
+                // helper boundary so its call/exception frame is not inherited
+                // by the overwhelmingly hot int and float legs.
+                if (lhs.isString() and rhs.isString())
+                    return @call(.always_tail, arithmeticTailHandler(vm, .add_strings), .{ pc, sp, var_buf, vm });
             }
             switch (kind) {
                 .add, .sub, .mul => {
@@ -2395,6 +2387,22 @@ fn opBinaryFloat(comptime kind: BinOp) Handler {
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         }
     }.hnd;
+}
+
+/// Resident body for qjs OP_add's primitive string-string arm. The caller has
+/// proved both operands are strings, so no coercion or observable user code is
+/// skipped; `addStringsOwned` consumes both just as the former inline body did.
+fn op_add_strings(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const result = value_ops.addStringsOwned(vm.ctx.runtime, (sp - 2)[0], (sp - 1)[0]) catch |err| {
+        // addStringsOwned consumed both operands. Publish the shortened stack
+        // only on the exceptional path, then use h_binary's catch materializer.
+        vm.publish(pc, sp - 2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    };
+    (sp - 2)[0] = result;
+    return cont(pc + 1, sp - 1, var_buf, vm);
 }
 
 /// Direct dispatch to the handler for the opcode at `npc[0]`, skipping the
@@ -4571,6 +4579,9 @@ const property_tail_table = [15]Handler{
     op_put_field_release_receiver_tail,
     op_put_array_el_cold,
 };
+const arithmetic_tail_table = [1]Handler{
+    op_add_strings,
+};
 
 // ===========================================================================
 // Driver — the Outcome loop. Replaces dispatchLoop's switch; reuses the Machine +
@@ -4622,7 +4633,7 @@ inline fn reloadAfterPop(
 
 /// Run the tail-call chain to completion for the current top frame.
 pub fn run(vm: *Vm) HostError!JSValue {
-    vm.tbl = &dispatch_table; // layout-preserving init of the retired slot; dispatch reads the static table
+    vm.arithmetic_tail_tbl = &arithmetic_tail_table;
     vm.property_tail_tbl = &property_tail_table;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     var pc = vm.code_base + vm.frame.pc;
