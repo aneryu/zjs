@@ -2878,6 +2878,23 @@ pub fn op_push_small(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 
 // I-cache pin (see op_return): keeps this hot handler's entry alignment
 // invariant under unrelated text-size changes elsewhere in the dispatch unit.
+/// qjs OP_get_arg (quickjs.c:18557-18565): decode the u16 formal index and
+/// duplicate `arg_buf[idx]` directly. Frame construction pads `args` to at
+/// least `function.arg_count` (frame.frameArgCount), and the compiler emits
+/// argument operands from that formal range, so the same trusted-bytecode
+/// bound used by the short forms below applies here. Keeping the wide form
+/// resident matters for functions with a fifth-or-later parameter: otherwise
+/// every read publishes the VM and crosses vm_property_locals.arg/execGetArg.
+pub fn op_get_arg(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
+    const idx = readInt(u16, pc + 1);
+    std.debug.assert(idx < vm.frame.args.len);
+    const v = vm.frame.args.ptr[idx];
+    sp[0] = v.dup();
+    return cont(pc + 3, sp + 1, var_buf, vm);
+}
+
+// I-cache pin (see op_return): keeps this hot handler's entry alignment
+// invariant under unrelated text-size changes elsewhere in the dispatch unit.
 pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     const v = vm.frame.args.ptr[pc[0] - op.get_arg0];
     sp[0] = v.dup();

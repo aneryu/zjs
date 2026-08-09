@@ -13246,6 +13246,7 @@ test "missing-argument calls read undefined across every entry arm" {
         \\    return String(first) + "," + String(second);
         \\};
         \\globalThis.__padWrite = function (a, b) { b = 42; return b; };
+        \\globalThis.__padFive = function (a, b, c, d, fifth) { return fifth; };
         \\globalThis.__padStrict = function (a, b) {
         \\    "use strict";
         \\    return String(this) + ":" + String(a) + ":" + String(b);
@@ -13264,6 +13265,8 @@ test "missing-argument calls read undefined across every entry arm" {
         \\        if (__padTwo() !== "undefined,undefined") throw new Error("missing-both read");
         \\        if (__padWrite(i) !== 42) throw new Error("pad write");
         \\        if (__padWrite(i) !== 42) throw new Error("pad write not frame-local");
+        \\        if (__padFive(1, 2, 3, 4) !== undefined) throw new Error("wide missing read");
+        \\        if (__padFive(1, 2, 3, 4, i) !== i) throw new Error("wide supplied read");
         \\        if (__padStrict(i) !== "undefined:" + i + ":undefined") throw new Error("strict pad this");
         \\        if (__padStrictLeaf(i) !== i + "^undefined") throw new Error("strict pad leaf");
         \\        if (__padStrictLeaf() !== "undefined^undefined") throw new Error("strict pad leaf both");

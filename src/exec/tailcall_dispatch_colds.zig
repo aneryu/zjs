@@ -863,6 +863,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }) |e| t[e.o] = e.h;
     t[op.set_loc_uninitialized] = td.op_set_loc_uninitialized;
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
+    t[op.get_arg] = td.op_get_arg;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
     t[op.push_atom_value] = td.op_push_atom_value;
     t[op.special_object] = td.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
