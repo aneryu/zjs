@@ -51,13 +51,26 @@ the full gate battery with bit-identical test262 results.
 
 ## Next queue
 
-1. Property-read generic route 4.21x (inline arm is at 1.067 parity; RayTrace
-   miss-reason distribution unattributed — biggest remaining RayTrace block).
-2. Simple-ctor fast path fixed cost (+106 cyc vs qjs, does not shrink with
-   field count; arena churn ~35 + prototype-gate walk ~26).
-3. `op_get_var` 2.9–6.1x (5-level chain + local_fast_blocked gate).
-4. splay object-create 3.22x (clone-leg unit cost / bucket-chain occupancy —
-   counter probes, not disassembly).
+**Superseded by the tranche-6 diagnosis below.** Items 1–4 of the original queue
+(read generic route, simple-ctor fixed cost, `op_get_var`, object-create bucket
+chains) were all re-measured with counter builds and either dissolved or
+re-sized; the corrected queue is:
+
+1. New-property cold write chain — 1.9x, Δ≈5.2G ≈ 25% of the remaining gap.
+   zjs pays ~83 cyc per cold write against QuickJS's ~42: a `coldStd` publish
+   shell, then `field()` re-decoding the atom and re-probing, then
+   `appendPreparedPropertyEntry` at 19.1 cyc against `add_shape_property`'s 5.8.
+   QuickJS's `OP_put_field` slow leg is one in-frame `JS_SetPropertyInternal`
+   call (qjs:19188) with no shell and no re-decode.
+2. Shape clone unit cost — 30.5 vs 10.1 cyc. Bucket-chain length was falsified
+   (both engines walk identically, to the probe); the difference is
+   `js_clone_shape`'s single FAM memcpy (qjs:5268) against
+   `createWithFam` + memsets + per-prop copy + per-prop link.
+3. `appendPreparedPropertyEntry`'s internals — the second half of the write gap
+   (~26M cyc/run) is unattributed; needs `tryCachedTransition` hit/miss counters
+   before it can be priced.
+4. `createArgumentsObject` at ~3.1x (Δ≈29M cyc/run), still inside the
+   arguments/apply cluster.
 5. Call-boundary state coupling (C-track ledger): reduce the ~14 vm.* rewrites
    per call boundary; return-chain probe (K4) validated the chain-depth lever.
 
