@@ -25,11 +25,19 @@ cycles realized −12.2% of a −14.2% naive sum (86% realization).
 | RayTrace Octane score ratio (8 samples) | 0.565 | **0.645** |
 | zoo 15-bench throughput geomean (8 samples) | 0.794 (2026-08-09) | **0.8326** |
 
-Score moved exactly as cycles predicted (1/1.550 = 0.645). The geomean gain is
-broad — the put_field single walk prices every benchmark that adds properties:
-crypto 0.734→0.945, navier-stokes 0.826→0.921, box2d 0.772→0.810,
-typescript 0.729→0.761, deltablue 0.835→0.851. No benchmark regressed beyond
-historical cross-session spread (regexp 1.094 sits inside its 1.07–1.11 band).
+Score moved exactly as cycles predicted (1/1.550 = 0.645).
+
+**Attribution caveat (causal A/B against the frozen d050302c baseline, same
+session, 8 samples):** the knives' own cross-benchmark effect is raytrace
+1.138, typescript 1.046, box2d 1.023, navier-stokes 0.999, crypto 0.966. The
+large crypto/navier moves in the table above belong to the ten interim commits
+landed between the 2026-08-09 measurement base and d050302c (751831b0 zoo
+hot-path alignment, argument-residency pair, string-add outlining, …) plus
+cross-session spread — not to these knives. A per-knife crypto bisect read
+1.001/0.999/1.007/1.005: the integrated 0.966 decomposes to no single knife
+and is consistent with integrated-build layout lottery (±2.5% precedent).
+No benchmark regressed beyond spread (regexp 1.094 is inside its 1.07–1.11
+band).
 
 ## Gates (all on the integrated tree)
 
