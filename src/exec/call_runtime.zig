@@ -1352,7 +1352,9 @@ noinline fn callNativeCallableByName(
         return value;
     }
     if (std.mem.eql(u8, name, "apply")) {
-        return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
+        // Legacy name-only entry for recordless `apply` data functions; must
+        // stay behaviorally identical to `functionApplyRecord`'s body.
+        return qjsFunctionApplyCall(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (std.mem.eql(u8, name, "call")) {
         return qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame);
@@ -1787,10 +1789,6 @@ pub fn isErrorStackSetterValue(value: core.JSValue) bool {
     return native_ref.domain == .error_object and native_ref.id == @intFromEnum(method_ids.error_object.PrototypeMethod.stack_setter);
 }
 
-pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object) !core.JSValue {
-    return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "not a function");
-}
-
 /// Function.prototype.call body shared by the native-record owner and the
 /// legacy name-only callable path. Keeping the VM caller pair preserves
 /// nested callsite/property-access context while the native record contributes
@@ -1813,70 +1811,27 @@ pub fn qjsFunctionCallCall(
     return callValueOrBytecodeRootPreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
 }
 
-/// Function.prototype.apply body. `argsFromArrayLike` is the shared
-/// CreateListFromArrayLike implementation used by Reflect.apply/construct;
-/// its returned owned values stay rooted for the complete target invocation.
+/// Function.prototype.apply body shared by the native-record owner and the
+/// legacy name-only callable path. Flat mirror of `js_function_apply`
+/// (qjs:41213): check_function -> read this_arg/array_arg -> null/undefined
+/// short-circuit -> build_arg_list -> JS_Call -> free_arg_list. Callable
+/// classification is one `isCallableValue` probe (qjs `check_function`
+/// resolves before argv is read), with the throw outlined; bound/Proxy
+/// callables share the same call leg as plain functions.
 pub fn qjsFunctionApplyCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    function_object: *core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (!this_value.isFunctionBytecode()) {
-        const target_object = object_ops.objectFromValue(this_value) orelse
-            return qjsFunctionApplyUncommonCallable(
-                ctx,
-                output,
-                global,
-                this_value,
-                function_object,
-                args,
-                caller_function,
-                caller_frame,
-            );
-        if (target_object.class_id != core.class.ids.bytecode_function and
-            !isFunctionLikeClass(target_object.class_id))
-        {
-            return qjsFunctionApplyUncommonCallable(
-                ctx,
-                output,
-                global,
-                this_value,
-                function_object,
-                args,
-                caller_function,
-                caller_frame,
-            );
-        }
-    }
-    return qjsFunctionApplyCallable(
-        ctx,
-        output,
-        global,
-        this_value,
-        function_object,
-        args,
-        caller_function,
-        caller_frame,
-    );
-}
-
-inline fn qjsFunctionApplyCallable(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!core.JSValue {
+    // qjs:41221 `check_function(ctx, this_val)` precedes reading argv.
+    if (!isCallableValue(this_value)) return throwApplyTypeError(ctx, global, "not a function");
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const arg_array = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    // qjs:41224: undefined/null array_arg calls the target with no arguments.
     if (arg_array.isNull() or arg_array.isUndefined()) {
         return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
     }
@@ -1886,62 +1841,37 @@ inline fn qjsFunctionApplyCallable(
         global,
         this_arg,
         this_value,
-        function_object,
         arg_array,
         caller_function,
         caller_frame,
     );
 }
 
-noinline fn qjsFunctionApplyUncommonCallable(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!core.JSValue {
-    if (!isCallableValue(this_value)) {
-        return throwFunctionRealmTypeError(ctx, global, function_object);
-    }
-    return qjsFunctionApplyCallable(
-        ctx,
-        output,
-        global,
-        this_value,
-        function_object,
-        args,
-        caller_function,
-        caller_frame,
-    );
+/// Outlined cold throw for both apply TypeError arms: qjs `check_function`
+/// "not a function" for the non-callable receiver, `build_arg_list`
+/// (qjs:41167) "not a object" for the non-object argument list.
+noinline fn throwApplyTypeError(ctx: *core.JSContext, global: *core.Object, message: []const u8) HostError!core.JSValue {
+    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
+    _ = ctx.throwValue(error_value);
+    return error.JSException;
 }
 
-/// Observable CreateListFromArrayLike materialization and its owned argument
-/// transaction are needed only when apply receives a non-null list. Keep that
-/// large cold state out of the zero-list native-fence caller frame.
+/// Observable CreateListFromArrayLike materialization (qjs `build_arg_list`,
+/// qjs:41159) and its owned argument transaction are needed only when apply
+/// receives a non-null list. Keep that large cold state outlined from the
+/// flat record body -- the slow leg lives behind this call boundary.
 noinline fn qjsFunctionApplyArrayLike(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_arg: core.JSValue,
     this_value: core.JSValue,
-    function_object: *core.Object,
     arg_array: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
-    if (object_ops.callableObjectFromValue(this_value)) |target_object| {
-        if (core.function.decodeNativeBuiltinId(target_object.nativeFunctionId())) |native_ref| {
-            if (native_ref.domain == .string and
-                native_ref.id == @intFromEnum(method_ids.string.StaticMethod.from_code_point))
-            {
-                return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
-            }
-        }
-    }
+    // qjs build_arg_list (qjs:41167) rejects non-object argument lists.
+    if (!arg_array.isObject()) return throwApplyTypeError(ctx, global, "not a object");
     var owned_args = try array_ops.ownedArgsFromArrayLike(
         ctx,
         output,
@@ -1968,12 +1898,6 @@ noinline fn qjsFunctionApplyArrayLike(
         caller_function,
         caller_frame,
     );
-}
-
-pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, _: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
-    _ = ctx.throwValue(error_value);
-    return error.JSException;
 }
 
 pub fn constructValueOrBytecode(
