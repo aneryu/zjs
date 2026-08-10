@@ -2529,7 +2529,10 @@ fn argumentsIteratorValueOwned(ctx: *core.JSContext, global: *core.Object) !core
     return (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
 }
 
-pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
+// `noinline`: qjs OP_special_object reaches js_build_(mapped_)arguments as an
+// out-of-line call (quickjs.c:17971-17983); keeping the builder's construction
+// locals out of the dispatch arm's frame mirrors that call boundary.
+pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
     // zjs-side adaptation (R2): qjs finalizes the mapped/unmapped decision at
     // emit time (quickjs.c:34864 gates OP_special_object MAPPED_ARGUMENTS on
     // `!(js_mode & JS_MODE_STRICT) && has_simple_parameter_list`). zjs's
@@ -2597,21 +2600,23 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
     }
 
     if (args.len > 0) {
-        _ = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
-    }
-    for (args, 0..) |_, index| {
-        const refs = object.argumentsVarRefsMut();
-        const cell = if (index < frame.function.arg_count) blk: {
-            break :blk try frame.captureArg(ctx.runtime, index);
-        } else blk: {
-            // qjs creates a closed var-ref for each extra actual argument: it
-            // remains mutable through the Arguments object but has no formal
-            // parameter binding in the frame.
-            const initial = value_slot.loadOwned(&args[index]);
-            errdefer initial.free(ctx.runtime);
-            break :blk try core.VarRef.createClosed(ctx.runtime, initial);
-        };
-        refs[index] = cell;
+        // qjs fills a local `tab` and installs it once (quickjs.c:16236-16261);
+        // the adopted backing never moves, so derive the typed window once
+        // instead of re-running the bytesAsSlice reinterpret per iteration.
+        const refs = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
+        for (args, 0..) |_, index| {
+            const cell = if (index < frame.function.arg_count) blk: {
+                break :blk try frame.captureArg(ctx.runtime, index);
+            } else blk: {
+                // qjs creates a closed var-ref for each extra actual argument:
+                // it remains mutable through the Arguments object but has no
+                // formal parameter binding in the frame.
+                const initial = value_slot.loadOwned(&args[index]);
+                errdefer initial.free(ctx.runtime);
+                break :blk try core.VarRef.createClosed(ctx.runtime, initial);
+            };
+            refs[index] = cell;
+        }
     }
     return object.value();
 }
