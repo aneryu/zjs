@@ -1,5 +1,6 @@
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const bytecode = @import("../bytecode.zig");
 const bignum = @import("../libs/bigint.zig");
@@ -2190,6 +2191,13 @@ pub fn constructValueOrBytecodeWithNewTargetInternal(
 pub const SameMachineConstructorTarget = struct {
     resolved: inline_calls.ResolvedInlineFunction,
     function_object: *core.Object,
+    /// Resolution-time image of `new_target.sameValue(func)`. The direct
+    /// `new F(...)` admission gate already proved it, and the spread resolver
+    /// computes it while classifying the differing-new-target Realm — so the
+    /// prepare path reads this bit instead of re-running the outline
+    /// sameValue per `new` (qjs holds new_target in a JS_CallInternal
+    /// register and never re-compares it, quickjs.c:20839-20856).
+    new_target_is_func: bool,
 };
 
 pub fn resolveSameMachineConstructor(
@@ -2205,6 +2213,7 @@ pub fn resolveSameMachineConstructor(
     return .{
         .resolved = resolved,
         .function_object = function_object,
+        .new_target_is_func = true,
     };
 }
 
@@ -2221,7 +2230,8 @@ pub fn resolveSameMachineSpreadConstructor(
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
-    if (!new_target.sameValue(func)) {
+    const new_target_is_func = new_target.sameValue(func);
+    if (!new_target_is_func) {
         // `callableObjectFromValue` is the native/bound-call adapter and
         // deliberately excludes the bytecode-function class. A super-call's
         // differing new.target is normally precisely that class, so inspect
@@ -2233,6 +2243,7 @@ pub fn resolveSameMachineSpreadConstructor(
     return .{
         .resolved = resolved,
         .function_object = function_object,
+        .new_target_is_func = new_target_is_func,
     };
 }
 
@@ -2263,35 +2274,67 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!SameMachineConstructorPreparation {
     std.debug.assert(!target.resolved.fb.isDerivedClassConstructor());
-    // Merge resolution: the dossier-only comptime gate comes from the phase
-    // branch, the `new_target` argument from main's execution-root refactor.
-    // The other `simple_ctor_bypass_enabled` site merged cleanly into exactly
-    // this shape, so this one matches it.
+    // Publication-time gate: the simple-field probe used to be an
+    // unconditional outline call per `new` (432B-frame scan + memo chain +
+    // sret) although the answer is a pure function of the published bytecode.
+    // qjs JS_CallConstructorInternal has no probe at all (quickjs.c:20839-
+    // 20856), so a non-simple constructor — every RayTrace constructor — now
+    // reads one already-loaded CallFacts bit instead. The writer itself is
+    // entered only when the bit says simple AND resolution proved
+    // new_target == func, which is exactly the pair of conditions it used to
+    // re-derive per call.
     if (comptime simple_ctor_bypass_enabled) {
-        if (try constructSimpleFieldConstructor(
-            ctx,
-            global,
-            func,
-            target.function_object,
-            target.resolved.fb,
-            args,
-            new_target,
-            false,
-        )) |constructed| {
-            return .{ .completed = constructed };
+        if (target.resolved.call_facts.execution.simple_field_ctor and target.new_target_is_func) {
+            if (try constructSimpleFieldConstructor(
+                true,
+                ctx,
+                global,
+                func,
+                target.function_object,
+                target.resolved.fb,
+                args,
+                new_target,
+                false,
+            )) |constructed| {
+                return .{ .completed = constructed };
+            }
         }
     }
 
-    const instance = try createBytecodeConstructorInstance(
-        ctx,
-        output,
-        global,
-        func,
-        target.function_object,
-        new_target,
-        caller_function,
-        caller_frame,
-    );
+    const instance = instance: {
+        if (target.new_target_is_func) {
+            // Direct route: resolution proved new_target == func, so skip
+            // createBytecodeConstructorInstance's per-call sameValue re-check
+            // and take the materialized-`.prototype` data read (the first
+            // construct materializes the lazy auto_init slot; see
+            // createBytecodeConstructorInstance). A prototype miss — e.g.
+            // `F.prototype = 42` — keeps the authoritative
+            // createConstructorInstance fallback, mirroring qjs
+            // js_create_from_ctor's non-object-prototype arm.
+            if (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
+                const created = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+                break :instance created.value();
+            }
+            break :instance try createConstructorInstance(
+                ctx,
+                output,
+                global,
+                new_target,
+                caller_function,
+                caller_frame,
+            );
+        }
+        break :instance try createBytecodeConstructorInstance(
+            ctx,
+            output,
+            global,
+            func,
+            target.function_object,
+            new_target,
+            caller_function,
+            caller_frame,
+        );
+    };
     errdefer instance.free(ctx.runtime);
     const interrupt_global = ctx.global orelse global;
     try exception_ops.pollInterrupt(ctx, interrupt_global);
@@ -2324,7 +2367,7 @@ fn constructOrdinaryBytecodeFunctionObject(
         return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     }
     if (comptime simple_ctor_bypass_enabled) {
-        if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
+        if (try constructSimpleFieldConstructor(false, ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
     }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     errdefer instance.free(ctx.runtime);
@@ -2820,11 +2863,16 @@ fn createBytecodeConstructorInstance(
     return createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
 }
 
-const max_simple_constructor_fields = bytecode.function_bytecode.max_simple_ctor_fields;
-
 const SimpleCtorFacts = bytecode.function_bytecode.SimpleCtorFacts;
 
 fn constructSimpleFieldConstructor(
+    /// Comptime split of the retired per-call sameValue: the prepare route
+    /// (op_call_constructor / spread) enters only under
+    /// `SameMachineConstructorTarget.new_target_is_func`, whose resolution
+    /// already proved `new_target == func`, so its instantiation carries no
+    /// comparison. The recursive [[Construct]] adapter still proves it here —
+    /// that is spread-super's sameValue load-bearing wall.
+    comptime assume_new_target_is_func: bool,
     ctx: *core.JSContext,
     caller_global: *core.Object,
     func: core.JSValue,
@@ -2834,7 +2882,11 @@ fn constructSimpleFieldConstructor(
     new_target: core.JSValue,
     copy_argv: bool,
 ) !?core.JSValue {
-    if (!new_target.sameValue(func)) return null;
+    if (comptime assume_new_target_is_func) {
+        std.debug.assert(new_target.sameValue(func));
+    } else {
+        if (!new_target.sameValue(func)) return null;
+    }
     const rt = ctx.runtime;
     // The classification is a pure function of the FunctionBytecode's immutable
     // published bytecode, so it is computed once and memoized in the FB itself.
@@ -2851,6 +2903,20 @@ fn constructSimpleFieldConstructor(
         scratch = classifySimpleFieldConstructor(fb);
         break :facts &scratch;
     };
+    if (comptime builtin.mode == .Debug) {
+        // Two-way publication/runtime lockstep: the CallFacts bit published
+        // by publishExecutionFlags must match the lazily-derived
+        // classification, or the publish-time gate would silently starve the
+        // fast path (bit clear, pattern simple) or admit a non-simple body
+        // (bit set, pattern rejected). Canonical published FBs only: the
+        // legacy stack adapter borrows MUTABLE fixture bytecode, so its
+        // init-time bit can go legitimately stale, and extension-less
+        // records never published any CallFacts word.
+        if (fb.legacyBytecodeAdapter() == null and fb.simpleCtorMemoMut() != null) {
+            std.debug.assert((facts.state == .simple) ==
+                fb.callFacts().execution.simple_field_ctor);
+        }
+    }
     if (facts.state != .simple) return null;
     const prototype = (function_object.getOwnConstructorPrototypeObject(rt) catch return null) orelse return null;
     // The prototype materialization above can allocate/GC on the FIRST
@@ -2881,137 +2947,11 @@ fn constructSimpleFieldConstructor(
     return instance.value();
 }
 
-/// Decide, once per FunctionBytecode, whether the construct fast path applies.
-/// Never returns `.unknown`: the caller stores the result verbatim.
-fn classifySimpleFieldConstructor(fb: *const bytecode.FunctionBytecode) SimpleCtorFacts {
-    var facts = simpleFieldConstructorPattern(fb) orelse return .{ .state = .not_simple };
-    facts.state = .simple;
-    return facts;
-}
-
-fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleCtorFacts {
-    if (fb.isDerivedClassConstructor()) return null;
-    if (fb.functionKind() != .normal or !fb.hasPrototype()) return null;
-    // Base class bytecode starts with OP_check_ctor, so it cannot match either
-    // ordinary push_this prefix accepted below. Keep the gate explicit so a
-    // future pattern broadening cannot accidentally bypass class call entry.
-    const code = fb.byteCode();
-    if (code.len == 0 or code[0] == op.check_ctor) return null;
-    if (fb.var_count > 1 or fb.closureVarCount() != 0 or fb.cpool_count != 0) return null;
-    // NOTE: argumentsAllowed() is NOT gated on — it is set for every non-arrow
-    // function (it means "`arguments` is in scope", not "used"), so gating on it
-    // made this fast path dead for all ordinary constructors. The bytecode
-    // pattern matched below is exhaustively `push_this; (get this; get_arg;
-    // put_field)*; return_undef`, which references neither `arguments` nor any
-    // local/closure, so a lazily-materialized arguments object is never
-    // observable — skipping the body is identical to running it.
-    if (fb.superCallAllowed() or fb.superAllowed() or fb.isDirectOrIndirectEval()) return null;
-
-    return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
-}
-
-fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleCtorFacts {
-    const code = fb.byteCode();
-    var pc: usize = 0;
-    var pattern = SimpleCtorFacts{};
-    if (pc >= code.len or code[pc] != op.push_this) return null;
-    pc += 1;
-    const this_local = decodeSimpleConstructorPutLoc(code, &pc) orelse return null;
-    while (pc < code.len) {
-        if (code[pc] == op.return_undef) {
-            pc += 1;
-            return if (pc == code.len and pattern.field_count != 0) pattern else null;
-        }
-        if (pattern.field_count == max_simple_constructor_fields) return null;
-        const local_index = decodeSimpleConstructorGetLoc(code, &pc) orelse return null;
-        if (local_index != this_local) return null;
-        tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
-    }
-    return null;
-}
-
-fn simpleStackThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleCtorFacts {
-    const code = fb.byteCode();
-    var pc: usize = 0;
-    var pattern = SimpleCtorFacts{};
-    if (pc >= code.len or code[pc] != op.push_this) return null;
-    pc += 1;
-    while (pc < code.len) {
-        if (code[pc] == op.return_undef) {
-            pc += 1;
-            return if (pc == code.len and pattern.field_count != 0) pattern else null;
-        }
-        if (pattern.field_count == max_simple_constructor_fields) return null;
-        const keeps_this_for_next_field = if (code[pc] == op.dup) blk: {
-            pc += 1;
-            break :blk true;
-        } else false;
-        tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
-        if (pc < code.len and code[pc] != op.return_undef and !keeps_this_for_next_field) return null;
-    }
-    return null;
-}
-
-fn tryAppendSimpleConstructorField(code: []const u8, pc: *usize, pattern: *SimpleCtorFacts) ?void {
-    const arg_index = decodeSimpleConstructorArgGet(code, pc) orelse return null;
-    if (pc.* + 5 > code.len or code[pc.*] != op.put_field) return null;
-    const atom_id = readInt(u32, code[pc.* + 1 ..][0..4]);
-    pc.* += 5;
-    for (pattern.atoms[0..pattern.field_count]) |existing| {
-        if (existing == atom_id) return null;
-    }
-    pattern.atoms[pattern.field_count] = atom_id;
-    pattern.arg_indices[pattern.field_count] = arg_index;
-    pattern.field_count += 1;
-}
-
-fn decodeSimpleConstructorPutLoc(code: []const u8, pc: *usize) ?u16 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    if (opcode_id >= op.put_loc0 and opcode_id <= op.put_loc3) {
-        return @intCast(opcode_id - op.put_loc0);
-    }
-    if (opcode_id == op.put_loc) {
-        if (pc.* + 2 > code.len) return null;
-        const index = readInt(u16, code[pc.*..][0..2]);
-        pc.* += 2;
-        return index;
-    }
-    return null;
-}
-
-fn decodeSimpleConstructorGetLoc(code: []const u8, pc: *usize) ?u16 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    if (opcode_id >= op.get_loc0 and opcode_id <= op.get_loc3) {
-        return @intCast(opcode_id - op.get_loc0);
-    }
-    if (opcode_id == op.get_loc) {
-        if (pc.* + 2 > code.len) return null;
-        const index = readInt(u16, code[pc.*..][0..2]);
-        pc.* += 2;
-        return index;
-    }
-    return null;
-}
-
-fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    if (opcode_id >= op.get_arg0 and opcode_id <= op.get_arg3) {
-        return @intCast(opcode_id - op.get_arg0);
-    }
-    if (opcode_id == op.get_arg) {
-        if (pc.* + 2 > code.len) return null;
-        const index = readInt(u16, code[pc.*..][0..2]);
-        pc.* += 2;
-        return index;
-    }
-    return null;
-}
+/// The pattern scanner moved next to `SimpleCtorFacts` in bytecode.zig so
+/// both publication funnels (publishExecutionFlags / LegacyExecutionAdapter)
+/// evaluate the identical predicate they publish as the `simple_field_ctor`
+/// CallFacts bit; the runtime memo above keeps calling it lazily.
+const classifySimpleFieldConstructor = bytecode.function_bytecode.classifySimpleFieldConstructor;
 
 // `align(1)`: the atoms are read straight out of the FunctionBytecode's
 // byte-aligned hot extension tail.

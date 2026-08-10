@@ -435,16 +435,6 @@ pub const Entry = struct {
         return self.teardown.constructor_completion;
     }
 
-    fn takeConstructorFallback(self: *Entry) core.JSValue {
-        std.debug.assert(self.teardown.constructor_completion);
-        std.debug.assert(self.return_action == .constructor);
-        std.debug.assert(!self.teardown.has_native_caller);
-        const fallback = self.native_caller;
-        self.native_caller = core.JSValue.undefinedValue();
-        self.teardown.constructor_completion = false;
-        return fallback;
-    }
-
     /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
     /// storage that is dead for empty-leaf entries. Default repr: the 16-byte
     /// `native_caller` value is live under `teardown.has_native_caller` or
@@ -813,6 +803,52 @@ pub const Entry = struct {
             return;
         }
         self.deinitGeneral(ctx);
+    }
+
+    /// Normal-return teardown for a constructor frame whose fallback instance
+    /// the caller has already moved out of `native_caller` by plain read.
+    /// This is `deinitReturned`'s exact routing for that frame minus every
+    /// statically excluded probe: constructor frames never publish a leaf bit
+    /// (pushConstructorCall/pushDerivedConstructorCall build generic or plain
+    /// simple frames), never own a native `call` record, and the fallback
+    /// release is the caller's — so neither `releaseNativeCaller` nor
+    /// `releaseConstructorFallback` may run here, and the teardown byte's
+    /// completion flags are NOT rewritten first (the retired
+    /// takeConstructorFallback round-trip existed only to make the shared
+    /// deinit family skip the fallback). The one remaining dynamic decision
+    /// is the only one that cannot be made at push time: whether the frame
+    /// kept the arena-backed simple shape. A cold frame (`arguments`,
+    /// materialized new_target box) routes general exactly as before — that
+    /// part is frame truth, not return-path tax.
+    ///
+    /// Abrupt completion must NEVER come through here: it still enters
+    /// `Entry.deinit` with `constructor_completion` set, whose flag-guarded
+    /// `releaseConstructorFallback` frees the instance exactly once.
+    inline fn deinitConstructorReturned(self: *Entry, ctx: *core.JSContext) void {
+        std.debug.assert(self.teardown.constructor_completion);
+        std.debug.assert(!self.teardown.has_native_caller);
+        std.debug.assert(!self.teardown.empty_leaf);
+        std.debug.assert(!self.teardown.exact_args_leaf);
+        std.debug.assert(!self.teardown.special_return);
+        const rt = ctx.runtime;
+        if (self.canUseSimpleTeardown()) {
+            const frame = &self.frame;
+            std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
+            std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
+            if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+            if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
+            if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+            // qjs done: close var refs first, then free local_buf..sp
+            // (quickjs.c:20701-20706).
+            const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
+            for (live_values) |v| v.free(rt);
+            for (frame.args) |v| v.free(rt);
+        } else {
+            self.stack.deinit(rt);
+            self.frame.deinitInlineCall(&rt.memory, rt);
+        }
+        rt.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
     }
 
     /// General teardown for frames whose stack, cold state, or storage escaped
@@ -4371,24 +4407,66 @@ pub const Machine = struct {
         return continuation;
     }
 
-    /// Apply constructor return completion. A base Entry still owns its
-    /// fallback instance: an object result replaces it, while every primitive
-    /// is discarded in favor of the instance. A derived Entry has no fallback;
-    /// its compiler/control helper has already enforced derived-return
-    /// legality and produced the final object.
-    pub fn popConstructorReturn(self: *Machine, result: core.JSValue) core.JSValue {
+    /// Apply constructor return completion, fused to qjs's construct-return
+    /// two-branch: after the shared done: epilogue (quickjs.c:20699-20709)
+    /// JS_CallConstructorInternal keeps only a tag test plus one free
+    /// (quickjs.c:20846-20856). A base Entry still owns its fallback
+    /// instance: an object result replaces it, while every primitive is
+    /// discarded in favor of the instance. A derived Entry carries the
+    /// undefined no-fallback sentinel and forwards the checked result.
+    ///
+    /// Static proof that `constructor_completion AND tail_chain` is
+    /// unsatisfiable, so this pop performs no tail-chain probe and no budget
+    /// overlay read: `tail_chain` is set only by `tailCallReuse` (the
+    /// replacement Entry above), whose single entry point is gated by
+    /// `!completesConstructor()` (tailcall_dispatch.zig `.tail` arm), and the
+    /// replacement is rebuilt as a generic non-constructor frame, so no
+    /// tail-chain carrier ever holds `constructor_completion`; a
+    /// `.constructor` continuation reaching the driver is `unreachable`
+    /// (tailcall_dispatch.zig op_post_call_continuation / run switch arms).
+    ///
+    /// The fallback moves out by plain read: the retired Entry's
+    /// `native_caller`/`constructor_completion` states are dead after this
+    /// pop (the next push reinitializes the slot), so the retired
+    /// takeConstructorFallback round-trip (store undefined + clear flag) was
+    /// two stores per `new` feeding only the shared deinit family's
+    /// flag-guarded release, which the dedicated teardown twin excludes
+    /// statically. Abrupt completion keeps that shared family: an exception
+    /// in the body enters `Entry.deinit` with the flag still SET and
+    /// releases the fallback exactly once through
+    /// `releaseConstructorFallback` — the two routes are mutually exclusive.
+    ///
+    /// Outline on purpose: the return handler pays one bl here instead of
+    /// growing its resident body (the ninth-knife frame-boundary lesson).
+    pub noinline fn popConstructorReturn(self: *Machine, result: core.JSValue) core.JSValue {
         const dying = self.topEntry();
-        const fallback = dying.takeConstructorFallback();
-        const is_derived = fallback.isUndefined();
-        const continuation = self.popReturnedFrame();
-        std.debug.assert(continuation.action == .constructor);
-        std.debug.assert(continuation.payload == 0);
-        if (is_derived) return result;
+        std.debug.assert(dying.teardown.constructor_completion);
+        std.debug.assert(!dying.teardown.has_native_caller);
+        std.debug.assert(!dying.teardown.tail_chain);
+        std.debug.assert(dying.return_action == .constructor);
+        std.debug.assert(dying.continuation_payload == 0);
+        const rt = self.ctx.runtime;
+        const fallback = dying.native_caller;
+        // Committed charge persisted at construction; the recompute is the
+        // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        ));
+        dying.deinitConstructorReturned(self.ctx);
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        self.depth -= 1;
+        // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
+        // done: epilogue (quickjs.c:20709).
+        self.top = dying.prev;
+        if (fallback.isUndefined()) return result;
         if (result.isObject()) {
-            fallback.free(self.ctx.runtime);
+            fallback.free(rt);
             return result;
         }
-        result.free(self.ctx.runtime);
+        result.free(rt);
         return fallback;
     }
 
