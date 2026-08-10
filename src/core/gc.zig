@@ -1986,12 +1986,28 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
     // round, so shape needs no gate.
     if (rt.gc.phase == .remove_cycles and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
 
+    // qjs free_var_ref (quickjs.c:6164-6183) tears a dead cell down fully
+    // synchronously: --ref_count -> JS_FreeValueRT(value) -> remove_gc_object
+    // -> js_free_rt. __JS_FreeValueRT's zero-ref queue set is only
+    // {OBJECT, FUNCTION_BYTECODE, MODULE} (quickjs.c:6471-6483) — a JSVarRef
+    // never touches gc_zero_ref_count_list, so zjs enqueuing it paid a queue
+    // splice + drain pop + the full destroyZeroRefNow frame per dead cell.
+    // The three phase gates above stay in front, so this tail is reachable only
+    // in .none/.decref; remove_cycles keeps its batch loop as the sole cycle
+    // release point. Recursion is bounded: a cell's value is never itself a
+    // cell (var_ref.zig setVarRefValue terminal-state assert), and an object
+    // value released here still goes through the queue exactly like qjs.
+    if (header.meta().flags.kind == .var_ref) {
+        destroyVarRefNow(rt, header);
+        return;
+    }
+
     // QJS queues the GC kinds reachable through JSValue and lets the outermost
     // free drain them. Strings/ropes and BigInt remain immediate; Shape has its
     // own direct release path and can only add object work while a queued node
-    // is being destroyed. This removes unbounded Object/FB/VarRef destructor
+    // is being destroyed. This removes unbounded Object/FB destructor
     // recursion without adding a fallible allocation to the zero-ref path.
-    if (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module) {
+    if (header.meta().flags.kind == .object or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module) {
         rt.gc.enqueueZeroRef(rt, header);
         return;
     }
@@ -1999,39 +2015,86 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
     destroyZeroRefNow(rt, header);
 }
 
+/// Synchronous var_ref teardown, mirroring qjs free_var_ref
+/// (quickjs.c:6164-6183): unlink + accounting, then the existing destructor.
+/// Never sets the queued-node mark bit — a var_ref has no weak identity
+/// (runtime.zig objectFromWeakIdentity resolves objects only) and no
+/// containsHeader consumer, so nothing observes the queued state qjs's
+/// `js_rc(p)->mark = 1` publishes for objects.
+noinline fn destroyVarRefNow(rt: anytype, header: *Header) void {
+    std.debug.assert(header.meta().rc == 0);
+    std.debug.assert(header.meta().flags.kind == .var_ref);
+    // Accounting must not drift from the generic path: heapByteSizeFromHeader
+    // resolves a var_ref to @sizeOf(VarRef) either via the stamped size_class
+    // (addInitializedWithSize stores encodeHeapBytes(@sizeOf(VarRef)), exact
+    // as long as it is below the large-class clamp) or the kind switch.
+    comptime std.debug.assert(@sizeOf(var_ref.VarRef) < large_heap_size_class);
+    rt.gc.unlinkObjectWithBytes(header, comptime @sizeOf(var_ref.VarRef));
+    var_ref.VarRef.destroyFromHeader(rt, header);
+}
+
 /// Destruct a zero-ref node whose queue link has already been removed. Kept
 /// separate from `destroyZeroRef` so releases performed by this teardown append
 /// to Registry.zero_ref_* instead of entering another destructor recursively.
+///
+/// Mirrors qjs free_gc_object (quickjs.c:6394-6412): a frame-free small switch
+/// whose hot object arm tail-jumps into free_object. `Object.destroyFromHeader`
+/// (via `unregisterObjectWithBytes`) and `Registry.destroyShape` each ALREADY
+/// unlink their own header and record the space-account free as the first
+/// thing they do — an unlink here would only make that in-destructor unlink a
+/// double no-op, yet pay a `heapByteSizeFromHeader` load per free (qjs
+/// free_object/free_shape do the gc_obj_list unlink + malloc_size adjustment
+/// exactly once inside the teardown, never twice). The cold kinds whose
+/// destructors do NOT self-unlink (function_bytecode / realm_context / module)
+/// are outlined into noinline wrappers that carry unlink + accounting + the
+/// destructor call: inlining the FunctionBytecode dismantle arm
+/// (FunctionLayout.init + SIMD copies) here used to cost the hot object arm a
+/// 304-byte prologue before its tail jump.
 fn destroyZeroRefNow(rt: anytype, header: *Header) void {
     std.debug.assert(header.meta().rc == 0);
-    // GC-list unlink + free-byte accounting. `Object.destroyFromHeader`
-    // (via `unregisterObjectWithBytes`) and `Registry.destroyShape` each ALREADY
-    // unlink their own header and record the space-account free as the first
-    // thing they do — so calling `unlinkObjectWithBytes` here first would only
-    // make that in-destructor unlink a double no-op (`recordHeapFreeWithBytes`
-    // short-circuits on `size_class == 0`, `removeGcObject` on a null prev/next),
-    // yet still pays a `heapByteSizeFromHeader` load + a call that re-derives
-    // `is_large` and re-walks the page-account arithmetic per free. Skip it for
-    // those two kinds and let their destructor be the single accounting site
-    // (identical bytes: both resolve the size the same way — `size_class` /
-    // `allocationSize`). bigint / var_ref / function_bytecode destructors do NOT
-    // self-unlink, so they still need the unlink here. This mirrors qjs, where
-    // `free_object` / `free_shape` do the gc_obj_list unlink + malloc_size
-    // adjustment exactly once inside the object/shape teardown, never twice.
-    switch (header.meta().flags.kind) {
-        .object, .shape => {},
-        else => rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header)),
-    }
-
-    // 10.1 静态 kind switch 派发销毁
     switch (header.meta().flags.kind) {
         .string => unreachable,
         .object => object.Object.destroyFromHeader(rt, header),
-        .big_int => bigint.BigInt.destroyFromHeader(rt, header),
-        .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
-        .var_ref => var_ref.VarRef.destroyFromHeader(rt, header),
         .shape => rt.shapes.destroyFromHeader(header),
-        .realm_context => context_mod.JSContext.destroyFromHeader(rt, header),
-        .module => module_mod.ModuleRecord.destroyFromHeader(rt, header),
+        .big_int => destroyBigIntZeroRef(rt, header),
+        // Unreachable through the queue since var_ref frees synchronously
+        // (destroyZeroRef); kept routed for direct callers' completeness.
+        .var_ref => destroyVarRefNow(rt, header),
+        .function_bytecode => destroyFunctionBytecodeZeroRef(rt, header),
+        .realm_context => destroyRealmContextZeroRef(rt, header),
+        .module => destroyModuleZeroRef(rt, header),
     }
+}
+
+/// Cold zero-ref tails. Private noinline wrappers keep the FunctionBytecode /
+/// context / module dismantle bodies (and their frames) out of the hot
+/// destroyZeroRefNow switch while leaving each destructor's contract — the
+/// runtime-deinit sweep's phase-1 accounting/phase-2 destroy split and the
+/// cycle-removal batch's own unlink+destroy pairs — untouched.
+noinline fn destroyBigIntZeroRef(rt: anytype, header: *Header) void {
+    // BigInt is never queued (destroyZeroRef reaches it directly) and its heap
+    // bytes are stamped per allocation, so it keeps the size-from-header unlink.
+    rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header));
+    bigint.BigInt.destroyFromHeader(rt, header);
+}
+
+noinline fn destroyFunctionBytecodeZeroRef(rt: anytype, header: *Header) void {
+    const fb: *const FunctionBytecode = @fieldParentPtr("header", header);
+    rt.gc.unlinkObjectWithBytes(header, fb.heapByteSize());
+    function_bytecode_mod.destroyFromHeader(rt, header);
+}
+
+noinline fn destroyRealmContextZeroRef(rt: anytype, header: *Header) void {
+    // comptime kind->size: identical to heapByteSizeFromHeader's resolution
+    // (stamped size_class roundtrips below the large clamp; the switch arm is
+    // @sizeOf either way), with the clamp condition pinned at comptime.
+    comptime std.debug.assert(@sizeOf(context_mod.JSContext) < large_heap_size_class);
+    rt.gc.unlinkObjectWithBytes(header, comptime @sizeOf(context_mod.JSContext));
+    context_mod.JSContext.destroyFromHeader(rt, header);
+}
+
+noinline fn destroyModuleZeroRef(rt: anytype, header: *Header) void {
+    comptime std.debug.assert(@sizeOf(module_mod.ModuleRecord) < large_heap_size_class);
+    rt.gc.unlinkObjectWithBytes(header, comptime @sizeOf(module_mod.ModuleRecord));
+    module_mod.ModuleRecord.destroyFromHeader(rt, header);
 }

@@ -6806,6 +6806,93 @@ test "generator object uses the prototype selected after parameter initializatio
     try std.testing.expect(result.isUndefined());
 }
 
+test "closure-env var_ref hitting rc zero during remove_cycles stays a batch no-op" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const body =
+        \\(function () {
+        \\  let cycleSelf = null;
+        \\  function cycleInner() { return cycleSelf; }
+        \\  cycleSelf = { fn: cycleInner };
+        \\  if (cycleSelf.fn() !== cycleSelf) throw new Error("capture wiring");
+        \\})();
+        \\"collected";
+    ;
+
+    // First round reaches the engine's steady state (repl bootstrap pins a
+    // few permanent cells). forceGC must run from outside any active frame:
+    // an in-eval $262.gc() still sees stale VM-stack slots of the running
+    // script as conservative roots and would keep the dead ring alive.
+    const warm = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+    warm.free(js.runtime);
+    _ = try js.runtime.forceGC(null);
+    const cell_steady = js.runtime.gc.liveCountKind(.var_ref);
+    const object_steady = js.runtime.gc.liveCountKind(.object);
+
+    // Each round strands one {closure -> cell -> object -> closure} ring that
+    // only the cycle batch can reclaim. destroyZeroRef's remove_cycles gate
+    // must keep the cell's mid-batch rc==0 a pure no-op (never the synchronous
+    // free_var_ref tail), so the garbage_var_refs loop frees it exactly once
+    // and the live census cannot grow across rounds.
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        const result = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+        defer result.free(js.runtime);
+        try helpers.expectStringValueBytes(result, "collected");
+        _ = try js.runtime.forceGC(null);
+        try std.testing.expectEqual(cell_steady, js.runtime.gc.liveCountKind(.var_ref));
+        try std.testing.expectEqual(object_steady, js.runtime.gc.liveCountKind(.object));
+    }
+}
+
+test "parked generator open cell death path reclaims cell and generator together" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const body =
+        \\var parkedProbe = (function () {
+        \\  function* parkedGen() {
+        \\    let captured = 1;
+        \\    const bump = () => ++captured;
+        \\    yield bump;
+        \\    yield captured;
+        \\  }
+        \\  const it = parkedGen();
+        \\  const bump = it.next().value;
+        \\  // Frame now parked: `captured`'s open cell owns the generator
+        \\  // (attachOpenOwner) while the parked frame owns the cell.
+        \\  return "" + bump() + bump();
+        \\})();
+        \\parkedProbe;
+    ;
+
+    // First round reaches steady state (repl bootstrap + lazy generator
+    // machinery pin some permanent nodes); later rounds must not grow the
+    // live census. See the remove_cycles no-op test above for why forceGC
+    // runs from Zig instead of an in-eval $262.gc().
+    const warm = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+    warm.free(js.runtime);
+    _ = try js.runtime.forceGC(null);
+    const cell_steady = js.runtime.gc.liveCountKind(.var_ref);
+    const object_steady = js.runtime.gc.liveCountKind(.object);
+
+    // Each round strands a {parked frame -> open cell -> generator owner}
+    // ring that dies only via cycle collection: teardown close()s the cell
+    // mid-batch and its rc==0 must stay gated (no synchronous destroy of a
+    // cycle-owned cell), then the batch frees cell + generator exactly once.
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        const result = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+        defer result.free(js.runtime);
+        // Writes through the escaped closure stay visible through the open alias.
+        try helpers.expectStringValueBytes(result, "23");
+        _ = try js.runtime.forceGC(null);
+        try std.testing.expectEqual(cell_steady, js.runtime.gc.liveCountKind(.var_ref));
+        try std.testing.expectEqual(object_steady, js.runtime.gc.liveCountKind(.object));
+    }
+}
+
 test "generator continuation keeps its FunctionBytecode alive after every source binding is dropped" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
