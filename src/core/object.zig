@@ -1794,6 +1794,25 @@ fn classNeedsSlowPropertyAccess(class_id: class.ClassId, has_exotic_methods: boo
     };
 }
 
+/// Classes whose instances can own dense element storage (`u.array`) or
+/// materialized index properties with element semantics: only for these does
+/// an array-index-form atom need the full `array.arrayIndexFromAtom` probe
+/// (whose string leg parses the >= 10-digit "2147483648".."4294967294"
+/// window) before a plain shape add. qjs's set/add path likewise asks the
+/// index question only in the fast_array class arm — the inline
+/// `__JS_AtomIsTaggedInt` bit test (quickjs.c:9868-9877) — while the ordinary
+/// object add_property runs with no index probe at all (quickjs.c:9884-9890).
+fn classOwnsIndexedElementStorage(class_id: class.ClassId) bool {
+    return switch (class_id) {
+        class.ids.array,
+        class.ids.arguments,
+        class.ids.mapped_arguments,
+        class.ids.string,
+        => true,
+        else => false,
+    };
+}
+
 fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
     if (builtin.is_test and class_id < test_standard_exotic_methods.len) {
         if (test_standard_exotic_methods[class_id]) |methods| return methods;
@@ -10723,8 +10742,15 @@ pub const Object = extern struct {
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
-            if (try self.setDenseArrayElement(rt, index, new_value)) return;
+        // Hoisted fast_array gate (setDenseArrayElement's own first check):
+        // only a dense-element receiver can consume the index, so a plain
+        // object's named set skips the out-of-line arrayIndexFromAtom probe
+        // entirely (qjs asks the index question only inside its fast_array
+        // arms, quickjs.c:9741-9750, 9868-9877).
+        if (self.flags.fast_array) {
+            if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
+                if (try self.setDenseArrayElement(rt, index, new_value)) return;
+            }
         }
         var prototype = self.getPrototype();
         while (prototype) |proto| {
@@ -10894,7 +10920,15 @@ pub const Object = extern struct {
         if (self.class_id == class.ids.module_ns or self.class_id == class.ids.mapped_arguments) return false;
         if (isTypedArrayObjectForSetFastPath(self)) return false;
         if (self.isArray() and atom_id == atom.ids.length) return false;
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
+        // Index-form atoms: the tagged-int bit test runs for every class (a
+        // folded `o['5'] = x` computed key reaches the set path with a
+        // tagged-int atom), but only dense-storage-capable classes pay the
+        // out-of-line string-leg probe — an ordinary object's add never asks
+        // (qjs add_property, quickjs.c:9884-9890; the index question lives in
+        // the fast_array arm's __JS_AtomIsTaggedInt, quickjs.c:9868-9877).
+        if (atom.isTaggedInt(atom_id)) return false;
+        if (classOwnsIndexedElementStorage(self.class_id) and
+            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
 
         var prototype = self.getPrototype();
         while (prototype) |proto| {
@@ -11011,8 +11045,14 @@ pub const Object = extern struct {
 
         // Own miss: new-property leg. Index-form atoms keep the resolver's
         // element/length machinery — a folded computed key (`o['5'] = x`) can
-        // still reach put_field with a tagged-int atom.
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
+        // still reach put_field with a tagged-int atom. Ordinary classes pay
+        // only the bit test; the string-leg probe (>= 10-digit index names)
+        // runs for dense-storage-capable classes alone, mirroring qjs's
+        // fast_array-arm-only __JS_AtomIsTaggedInt (quickjs.c:9868-9877)
+        // against the probe-free ordinary add (quickjs.c:9884-9890).
+        if (atom.isTaggedInt(atom_id)) return false;
+        if (classOwnsIndexedElementStorage(self.class_id) and
+            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
         if (self.isGlobal()) return false;
 
         // qjs's prototype walk (quickjs.c:9739-9854): the FIRST holder of the
