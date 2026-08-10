@@ -837,6 +837,12 @@ pub const Registry = struct {
         std.debug.assert(self.zero_ref_tail == null);
         std.debug.assert(self.zero_ref_current == null);
         self.phase = .deinit;
+        // Deinit-bit mirror sync (rt.gc_deinit_mirror_head): this is one of
+        // the two sites where the `phase == .deinit` bit changes. No VM driver
+        // can be live here (JSRuntime.assertIdleForTeardown), so the walk is
+        // over an empty list; it exists so the mirror can never go stale even
+        // if that invariant were ever relaxed.
+        rt.syncGcDeinitMirrors(true);
 
         // Phase 1: free object resources. Function bytecodes, Shapes, and
         // VarRefs are spliced into holding stacks (reusing their now-unused
@@ -952,6 +958,9 @@ pub const Registry = struct {
         self.pin_entries_capacity = 0;
 
         self.phase = .none;
+        // Second of the two deinit-bit-changing sites (see the `.deinit`
+        // assignment above); keeps any registered VM mirror byte in sync.
+        rt.syncGcDeinitMirrors(false);
     }
 
     pub fn reportExternalAlloc(self: *Registry, bytes: usize) !ExternalMemoryToken {
@@ -1728,11 +1737,15 @@ pub const Registry = struct {
         std.debug.assert(self.phase == .none);
         std.debug.assert(self.zero_ref_head == null);
         std.debug.assert(self.zero_ref_tail == null);
+        // .none -> .decref: the `phase == .deinit` bit is unchanged (asserted
+        // above), so the VM deinit-mirror bytes need no sync — keeping this
+        // per-destroy-batch path free of the mirror-list walk.
         self.phase = .decref;
     }
 
     pub fn endDecrefPhase(self: *Registry, rt: anytype) void {
         std.debug.assert(self.phase == .decref);
+        // .decref -> .none: deinit bit unchanged (asserted); no mirror sync.
         defer self.phase = .none;
         self.drainZeroRefs(rt);
     }
@@ -1753,6 +1766,8 @@ pub const Registry = struct {
             return;
         }
 
+        // .none -> .decref (guarded above): deinit bit unchanged, so the hot
+        // per-zero-ref path pays no VM deinit-mirror sync.
         self.phase = .decref;
         self.endDecrefPhase(rt);
     }
