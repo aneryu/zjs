@@ -4174,6 +4174,95 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+// 32-bit-displacement twin of jump8Target: qjs OP_if_false (quickjs.c:18859-18879)
+// computes `pc += (int32_t)get_u32(pc - 4) - 4` after the operand advance, i.e. the
+// displacement is relative to the operand byte — the same convention branch32's
+// relativePc(operand_pc, diff) uses in the cold shell.
+inline fn jump32Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
+    const operand_pc = @intFromPtr(pc + 1) - @intFromPtr(vm.code_base);
+    const diff = readInt(i32, pc + 1);
+    return vm.code_base + @as(usize, @intCast(@as(i64, @intCast(operand_pc)) + diff));
+}
+// Long-form conditional branch (op.if_false, 4-byte label) — the same handler body
+// as op_if_false8 with the wide displacement. qjs CASE(OP_if_false) (quickjs.c:
+// 18859-18879) classifies with the identical `(uint32_t)tag <= JS_TAG_UNDEFINED`
+// comparison and polls js_poll_interrupts on every execution; the zjs immediate arm
+// mirrors that with the cadence tick, routing a cadence hit to the cold branch32
+// shell, which re-executes the untouched operand with the publishing poll. Plain
+// objects take qjs JS_ToBoolFree's object leg (quickjs.c:11205-11211) inline, as
+// op_if_false8 already does; HTMLDDA and every remaining tag (float/string/BigInt)
+// fall to the cold shell from the original pc/sp, exactly like the short form.
+pub fn op_if_false(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    if (value.asBranchImmediateBool()) |b| {
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        if (!b) return @call(.always_tail, next, .{ jump32Target(pc, vm), sp - 1, var_buf, vm });
+        return cont(pc + 5, sp - 1, var_buf, vm);
+    }
+    if (value.isObject()) {
+        // See op_if_false8: guard before mutation so the cold handler re-executes
+        // the HTMLDDA case from the original pc/sp; shrink the GC root window
+        // before the inline free just as stack.pop() does there.
+        if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        const nsp = sp - 1;
+        vm.stack.setTopPtr(nsp);
+        value.free(vm.ctx.runtime);
+        return cont(pc + 5, nsp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+// qjs CASE(OP_lnot) (quickjs.c:19092-19105) classifies the operand with the same
+// single unsigned tag comparison OP_if_{true,false} uses — `(uint32_t)tag <=
+// JS_TAG_UNDEFINED` — and answers the immediate case with `JS_VALUE_GET_INT(op1)
+// != 0` inline; the remaining tags reach JS_ToBoolFree as a bare out-of-line leaf
+// `bl` (pinned qjs binary: JS_CallInternal+0x6abc), with no frame protocol. zjs had
+// no hot handler at all for this opcode: BOTH tables held the coldStd shell, so
+// every `!x` paid publish -> noinline logicalNot (Stack.pop/push + an operand
+// round-trip through memory) -> coldNext re-derivation — 91.0 insn / 22.2 cyc per
+// lnot vs qjs's 18 / 3.7 (RayTrace attribution, 2026-08-10).
+//
+// Two inline arms, measured against the RayTrace operand mix (74.6% immediate,
+// 25.4% object, ~0% float/string): the immediate arm overwrites the top slot in
+// place (lnot is stack-neutral, n_pop 1 / n_push 1; none of the four immediate tags
+// is reference-counted, so there is no operand free), and the object arm takes qjs
+// JS_ToBoolFree's object leg (quickjs.c:11205-11211) inline exactly as op_if_false8
+// does — a non-HTMLDDA object is truthy, so `!obj` is false and the dying operand
+// is freed after the boolean overwrite removes it from the root window. HTMLDDA and
+// every remaining tag (float/string/BigInt) fall to the canonical cold logicalNot
+// with pc/sp untouched, re-executing from the original state — the single semantic
+// authority.
+//
+// No interrupt poll, unlike op_if_false8: OP_lnot is not a back edge. qjs polls only
+// in OP_goto/OP_if_* (quickjs.c:18822-18919) and its CASE(OP_lnot) has no
+// js_poll_interrupts; zjs's cold route (coldStd -> logicalNot -> coldNext) polls
+// nothing either, so adding a tick would be a new semantic, not a preserved one.
+// The complex fallback keeps the INDIRECT cold_table[pc[0]] hop for the reason
+// op_if_false8 documents: a direct tail call gets re-inlined and drags the cold
+// shell's frame onto this hot body (and P7-62 measured the direct-route variant
+// perturbing neighboring codegen).
+pub fn op_lnot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    if (value.asBranchImmediateBool()) |truthy| {
+        (sp - 1)[0] = JSValue.boolean(!truthy);
+        return cont(pc + 1, sp, var_buf, vm);
+    }
+    if (value.isObject()) {
+        if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        // Overwrite before the free: the boolean takes the slot out of the GC root
+        // window, then setTopPtr pins the exact window end for the inline rc==1
+        // destruction (see op_if_false8's object arm).
+        (sp - 1)[0] = JSValue.boolean(false);
+        vm.stack.setTopPtr(sp);
+        value.free(vm.ctx.runtime);
+        return cont(pc + 1, sp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 // Fused local-update ops (1-byte local index). qjs OP_inc_loc/OP_add_loc — the
 // hottest loop ops (`i++`, `s += i`), so a cold miss here dominates loop regression.
 // int32-only; non-int / generator-boundary cases fall back to the cold op.

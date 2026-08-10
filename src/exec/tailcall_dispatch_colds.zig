@@ -910,6 +910,16 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.goto8] = td.op_goto8;
     t[op.if_false8] = td.op_if_false8;
     t[op.if_true8] = td.op_if_true8;
+    // Long-form conditional branch (qjs CASE(OP_if_false):18859 — same immediate/
+    // object fast legs as the short form, 4-byte label); float/string/HTMLDDA and
+    // the cadence-hit poll fall to the cold branch32 shell assigned above.
+    t[op.if_false] = td.op_if_false;
+    // qjs CASE(OP_lnot):19092 answers int/bool/null/undefined inline with the same
+    // tag comparison OP_if_* uses, and the object arm takes JS_ToBoolFree's object
+    // leg (11205-11211) inline like op_if_false8; every other tag stays on the cold
+    // logicalNot assigned above (qjs reaches those via an out-of-line JS_ToBoolFree
+    // bl too — pinned binary, JS_CallInternal+0x6abc).
+    t[op.lnot] = td.op_lnot;
     t[op.inc_loc] = td.op_update_loc;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
