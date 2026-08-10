@@ -864,7 +864,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.set_loc_uninitialized] = td.op_set_loc_uninitialized;
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
     t[op.get_arg] = td.op_get_arg;
-    inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
+    t[op.get_arg0] = td.op_get_arg0_fast;
+    t[op.get_arg1] = td.op_get_arg1_fast;
+    t[op.get_arg2] = td.op_get_arg2_fast;
+    t[op.get_arg3] = td.op_get_arg3_fast;
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.put_arg, .h = td.opArgStore(.put) },
         .{ .o = op.set_arg, .h = td.opArgStore(.set) },

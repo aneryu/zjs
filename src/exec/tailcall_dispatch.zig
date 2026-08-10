@@ -2884,12 +2884,46 @@ pub fn op_get_arg(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     return cont(pc + 3, sp + 1, var_buf, vm);
 }
 
-// I-cache pin (see op_return): keeps this hot handler's entry alignment
-// invariant under unrelated text-size changes elsewhere in the dispatch unit.
-pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
-    const v = vm.frame.args.ptr[pc[0] - op.get_arg0];
+inline fn getArgShort(comptime index: usize, pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
+    const v = vm.frame.args.ptr[index];
     sp[0] = v.dup();
     return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+const get_arg_source_local_sections = builtin.target.cpu.arch == .aarch64 and builtin.target.ofmt == .elf;
+
+// qjs gives OP_get_arg0..3 distinct labels. Besides removing the runtime
+// opcode decode, distinct handlers preserve one terminal indirect-branch PC
+// per source opcode so the predictor can learn each successor distribution.
+// On AArch64 ELF the linker script keeps every 56-byte body inside one cache
+// line while varying the terminal branch's line offset; equal 64-byte spacing
+// was measured to create workload-dependent predictor conflicts.
+pub fn op_get_arg0_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(4) linksection(if (get_arg_source_local_sections) ".text.zjs.tail_hot.0110" else switch (builtin.target.ofmt) {
+    .macho => "__TEXT,__text",
+    else => ".text",
+}) callconv(.c) Outcome {
+    return getArgShort(0, pc, sp, var_buf, vm);
+}
+
+pub fn op_get_arg1_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(4) linksection(if (get_arg_source_local_sections) ".text.zjs.tail_hot.0120" else switch (builtin.target.ofmt) {
+    .macho => "__TEXT,__text",
+    else => ".text",
+}) callconv(.c) Outcome {
+    return getArgShort(1, pc, sp, var_buf, vm);
+}
+
+pub fn op_get_arg2_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(4) linksection(if (get_arg_source_local_sections) ".text.zjs.tail_hot.0130" else switch (builtin.target.ofmt) {
+    .macho => "__TEXT,__text",
+    else => ".text",
+}) callconv(.c) Outcome {
+    return getArgShort(2, pc, sp, var_buf, vm);
+}
+
+pub fn op_get_arg3_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(4) linksection(if (get_arg_source_local_sections) ".text.zjs.tail_hot.0140" else switch (builtin.target.ofmt) {
+    .macho => "__TEXT,__text",
+    else => ".text",
+}) callconv(.c) Outcome {
+    return getArgShort(3, pc, sp, var_buf, vm);
 }
 
 /// qjs OP_put_arg / OP_set_arg and their short forms (quickjs.c:18566-18612)
