@@ -43,7 +43,25 @@ fn functionHasInstanceEntry() core.host_function.InternalEntry {
         .magic = 0,
         .cproto = .generic,
         .native_function = .{ .generic = &functionHasInstance },
+        .exec_direct = builtin_dispatch.execDirectFunction(&functionHasInstanceDirect),
     };
+}
+
+/// Exec-direct ABI twin of `functionHasInstance` (NB2-B): identical body
+/// routing, but the realm pair, output, and VM caller pair arrive by
+/// parameter, so no NativeCallEnvironment recovery is needed. Declared
+/// separately because `qjsFunctionHasInstanceCall` carries an inferred error
+/// set and the direct ABI requires the exact `HostError` surface.
+fn functionHasInstanceDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    return call_runtime.qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
 }
 
 /// qjs:41379 `js_function_hasInstance` -> `JS_OrdinaryIsInstanceOf(ctx,
@@ -89,6 +107,10 @@ fn functionCallEntry() core.host_function.InternalEntry {
         .forwards_call = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&functionCallRecord),
+        // NB2-B: same shape as apply — the body consumes only the direct-ABI
+        // parameter set, so the non-forwarding dispatch paths (e.g.
+        // `fastNativeMethodCall`) skip the environment round-trip too.
+        .exec_direct = builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionCallCall),
     };
 }
 
@@ -108,6 +130,12 @@ fn functionApplyEntry() core.host_function.InternalEntry {
         .magic = @intCast(id),
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&functionApplyRecord),
+        // NB2-B (qjs:17563 `js_call_c_function` has no env side-channel):
+        // the flat apply body takes the whole call state by parameter, so the
+        // hot record dispatch skips the NativeCallEnvironment stores and the
+        // `active_native_call` save/set/restore. `functionApplyRecord` stays
+        // as the env-path shim for any dispatcher that still owns one.
+        .exec_direct = builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionApplyCall),
     };
 }
 
@@ -151,6 +179,12 @@ test "Function.apply has a dedicated non-forwarding native record handler" {
             // apply must NOT route into op_call_method's fused-frame
             // forwarding arm, which only implements Function.prototype.call.
             try std.testing.expect(!entry.forwards_call);
+            // NB2-B: the hot record dispatch must take the exec-direct ABI
+            // (no NativeCallEnvironment round-trip) straight into the flat
+            // apply body.
+            try std.testing.expect(entry.exec_direct != null);
+            try std.testing.expect(entry.exec_direct.? ==
+                builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionApplyCall));
             return;
         }
     }

@@ -59,6 +59,12 @@ fn denseRecords(comptime entries: []const InternalEntry) []const InternalRecord 
             if (entry.fallback_function != null and entry.cproto != .f_f and entry.cproto != .f_f_f) {
                 @compileError("only numeric cproto entries may set a coercion fallback: " ++ entry.name);
             }
+            // The exec-direct ABI carries no is_constructor/new_target
+            // channel; construct-capable records must keep the environment
+            // path (their construct terminal reads both fields).
+            if (entry.exec_direct != null and core.host_function.isConstructorCProto(entry.cproto)) {
+                @compileError("construct-capable entries may not set exec_direct: " ++ entry.name);
+            }
             records[entry.id] = .{
                 .length = entry.length,
                 .magic = entry.magic,
@@ -66,6 +72,7 @@ fn denseRecords(comptime entries: []const InternalEntry) []const InternalRecord 
                 .cproto = entry.cproto,
                 .native_function = entry.native_function,
                 .fallback_function = entry.fallback_function,
+                .exec_direct = entry.exec_direct,
             };
         }
         const frozen = records;
