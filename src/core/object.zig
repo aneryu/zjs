@@ -11580,8 +11580,17 @@ pub const Object = extern struct {
     /// preludes and the duplicate arrayIndexFromAtom of defineOwnProperty+
     /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
     /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
-    /// class_id==object, !hasExoticMethods, !is_array, extensible, and a
-    /// NON-refcounted `value` (both call sites guard `requiresRefCount`).
+    /// class_id==object, !hasExoticMethods, !is_array, extensible.
+    ///
+    /// Ownership contract (any value shape, refcounted included — qjs
+    /// OP_define_field, quickjs.c:19269, has no value-form gate):
+    /// `data_value` is CONSUMED on success and NOT consumed on ANY failure.
+    /// The hot caller (defineFieldFast) turns every error into a cold-shell
+    /// RE-EXECUTION of the opcode with the value still owned by the VM stack
+    /// slot, so the append leg installs the slot borrow-until-commit (its
+    /// failure unwind must not destroy the caller's ref) and the duplicate-key
+    /// leg goes through replaceProperty's borrow (`slotFromDescriptor` dups)
+    /// and then frees the caller's ref only after the replace committed.
     ///
     /// Takes the bare value instead of a `Descriptor`: qjs OP_define_field
     /// carries its property flags as the constant int `JS_PROP_C_W_E`
@@ -11607,6 +11616,15 @@ pub const Object = extern struct {
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
+            // replaceProperty is BORROW semantics (slotFromDescriptor dups the
+            // value into the new slot, object.zig:12284-ish); the define
+            // contract is consume-on-success (qjs JS_DefinePropertyValue frees
+            // its `val` argument), so retire the caller's ref here — without
+            // this, every duplicate refcounted literal key (`({a:o1,a:o2})`)
+            // leaked one ref. Failure paths above did not consume: the
+            // materialize/compat/replace errors leave ownership with the
+            // caller (replaceProperty's own errdefer frees only its dup).
+            data_value.free(rt);
             return;
         }
         // Both call sites (vm_literal.zig defineFieldFast + the cold defineField
@@ -11616,16 +11634,21 @@ pub const Object = extern struct {
         // current_function ref keeps live for the whole opcode. That external
         // root makes appendPreparedPropertyEntry's own atom guard redundant here,
         // so use the trusted (guard-free) add. Flags are the comptime C_W_E
-        // constant. No `.dup()` on the slot install: both call sites guard
-        // `!value.requiresRefCount()`, for which dup is the identity — the
-        // residual rc-branch was dead weight on the literal hot path (qjs
-        // OP_define_field hands sp[-1] to JS_DefinePropertyValue pre-owned
-        // with no extra dup either).
-        if (comptime builtin.mode == .Debug) {
-            std.debug.assert(!data_value.requiresRefCount());
-        }
+        // constant. No `.dup()` on the slot install: the value MOVES into the
+        // slot pre-owned, exactly qjs OP_define_field handing sp[-1] to
+        // JS_DefinePropertyValue with no extra dup (quickjs.c:19269). The move
+        // only COMMITS with the shape transition: `slot_borrowed_until_commit`
+        // keeps the failure unwind from destroying the caller's ref (the cold
+        // shell re-executes the opcode still owning the value — destroying it
+        // here would double-free a refcounted value on OOM mid-append). A
+        // refcounted value needs no explicit rooting across the shape alloc/GC
+        // window: its live refcount (held via the caller's stack slot) is
+        // unaccounted by trial-deletion cycle removal and therefore an
+        // external root — the same argument the over-hang comment in
+        // appendPreparedPropertyEntryImpl makes for the pending entry itself.
         try self.appendPreparedPropertyEntryImpl(
             true, // caller_holds_atom_ref: the bytecode operand root (see above)
+            true, // slot_borrowed_until_commit: consume-on-success contract (see above)
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
@@ -11638,7 +11661,7 @@ pub const Object = extern struct {
     /// allocations below (which can trigger GC, whose object/shape sweep frees
     /// prop atoms — dropping an otherwise-unrooted atom to ref_count 0 mid-call).
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        return self.appendPreparedPropertyEntryImpl(false, rt, atom_id, entry_flags, slot);
+        return self.appendPreparedPropertyEntryImpl(false, false, rt, atom_id, entry_flags, slot);
     }
 
     /// `caller_holds_atom_ref == true` is the trusted leg: the caller already
@@ -11652,7 +11675,16 @@ pub const Object = extern struct {
     /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
     /// per-property guard. MUST NOT be used with a transient/just-interned atom
     /// that has no other root than the (elided) guard.
-    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+    ///
+    /// `slot_borrowed_until_commit == true` (the definePlainDataPropertyKnownFast
+    /// leg only): the slot's data value is a BORROW of the caller's live ref
+    /// until the shape transition commits — on ANY failure the unwind restores
+    /// the pre-call object state WITHOUT destroying the slot value (ownership
+    /// stays with the caller, whose cold-shell re-execution still holds it on
+    /// the VM stack). On success the value is committed as MOVED (the caller's
+    /// consume-on-success contract). `false` keeps the historical owned-slot
+    /// unwind: failure destroys the prepared slot via destroyPropertySlot.
+    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // Root the atom across the shape allocations below unless the caller
         // already holds a live ref. The dup/free must span the WHOLE function
         // (defer at function scope), so gate via comptime rather than a runtime
@@ -11666,7 +11698,7 @@ pub const Object = extern struct {
         if (atom.isTaggedInt(atom_id)) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
         const is_array_index = rt.atoms.atomIsArrayIndex(atom_id);
         var slot_owned = true;
-        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
+        errdefer if (!slot_borrowed_until_commit and slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
         const old_len = self.shape_ref.prop_count;
         const old_capacity = self.propertyStorageCapacity();
@@ -11690,14 +11722,20 @@ pub const Object = extern struct {
         // Over-hang: write the value at index `old_len` (== current prop_count)
         // BEFORE adoptShapeForNewProperty below commits prop_count = old_len + 1.
         // Until that commit the entry is EXCLUDED from propertyEntries(); a GC
-        // triggered by the shape allocation skips it (a fresh, not-yet-cyclic
-        // value, so skipping cannot collect it prematurely).
+        // triggered by the shape allocation skips it. Skipping cannot collect a
+        // refcounted pending value prematurely: cycle removal is trial deletion
+        // (gc_decref/gc_scan), so an UNTRACED edge leaves the value's refcount
+        // unaccounted — an external root that keeps it (and anything it
+        // references) alive for the whole collection.
         self.prop_values[old_len] = .{ .slot = slot };
         slot_owned = false;
 
         var inserted = true;
         errdefer if (inserted) {
-            destroyPropertySlot(rt, atom_id, entry_flags, self.prop_values[old_len].slot);
+            // Borrow-until-commit: the pending value at old_len is the
+            // caller's ref (not ours to destroy); just un-stage the entry.
+            if (!slot_borrowed_until_commit)
+                destroyPropertySlot(rt, atom_id, entry_flags, self.prop_values[old_len].slot);
             self.prop_values[old_len] = .{};
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {

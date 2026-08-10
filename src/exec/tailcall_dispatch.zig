@@ -3695,11 +3695,13 @@ pub fn op_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) 
 // Frameless OP_define_field — qjs CASE(OP_define_field): one JS_DefinePropertyValue on
 // sp[-2] with sp[-1] (quickjs.c:19269), the 3-per-iteration hot op of `o={a:i,b:i,c:i}`
 // object literals. The cold h_field shell paid the 224-byte coldStd publish+spill tax
-// each of those three times per iteration. `defineFieldFast` handles the plain-data-add
-// case (non-refcounted value, ordinary extensible non-array non-exotic non-proxy obj —
-// the same in-CASE fast leg the cold defineField itself runs first); on a hit the value
-// is consumed into the slot, so pop it and free the popped obj slot at sp[-2]. Arrays,
-// private atoms, proxies, non-extensible, setters, and refcounted values (every
+// each of those three times per iteration. `defineFieldFast` handles the plain-data
+// define (ANY value shape, refcounted included — qjs JS_DefinePropertyValue has no
+// value-form gate — on an ordinary extensible non-array non-exotic non-proxy obj);
+// on a hit the value is consumed into the slot, so pop it (obj stays as the literal's
+// running receiver). On `false` the value was NOT consumed (borrow-until-commit
+// failure contract), so the cold-shell re-execution finds the stack ownership intact.
+// Arrays, private atoms, proxies, non-extensible, and setters (every
 // backtrace/user-code-capable case) fall to the cold shell (which publishes frame.pc at
 // the u32 atom operand — this handler left frame.pc untouched, so the decode matches).
 // 5-byte op (u32 atom).

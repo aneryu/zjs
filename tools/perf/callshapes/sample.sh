@@ -24,7 +24,7 @@ CASES=(empty ctrl A_direct_call A2_direct_call_ret B_method_call \
        L0_ctor_noprops L3_ctor_threeprops M1_proto_data_read \
        L3p_ctor_shadowing M2_chain_read M3_poly_read \
        L4_generic_ctor L4p_generic_ctor_shadowing \
-       W0_fresh_object W1_newprop_writes)
+       W0_fresh_object W1_newprop_writes S1_reflit_fields)
 
 if [ $((SAMPLES % 2)) -ne 0 ]; then
     echo "sample count must be even (got $SAMPLES)" >&2

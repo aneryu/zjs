@@ -4743,6 +4743,175 @@ test "property replacement preserves references under memory cap" {
     try std.testing.expectEqual(&replacement.header, stored.refHeader().?);
 }
 
+// OP_define_field refcounted literal fields (qjs CASE(OP_define_field),
+// quickjs.c:19269, has no value-form gate): definePlainDataPropertyKnownFast
+// must CONSUME the value on success (append moves it; duplicate-key replace
+// dups into the slot and retires the caller's ref) and must NOT consume it on
+// any failure (the VM's cold-shell re-execution still owns it on the stack).
+test "definePlainDataPropertyKnownFast refcounted append and duplicate-key replace balance refs" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline_live = rt.gc.liveCountKind(.object);
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("refcounted-literal-dup-key");
+    defer rt.atoms.free(key);
+
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    const second = try core.Object.create(rt, core.class.ids.object, null);
+    const second_probe = second.value().dup();
+    defer second_probe.free(rt);
+
+    // Append leg: `first` is consumed into the slot (no residual caller ref).
+    try holder.definePlainDataPropertyKnownFast(rt, key, first.value());
+    try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
+    try std.testing.expectEqual(&first.header, holder.prop_values[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(@as(i32, 1), first.header.meta().rc);
+
+    // Duplicate-key replace leg (`({a:o1,a:o2})`): `second` is consumed, the
+    // displaced `first` is destroyed — rc must balance (slot + probe only).
+    try holder.definePlainDataPropertyKnownFast(rt, key, second.value());
+    try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.prop_count);
+    try std.testing.expectEqual(&second.header, holder.prop_values[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(@as(i32, 2), second.header.meta().rc);
+    // holder + second only: the replaced `first` must be gone (a leaked ref
+    // from the pre-fix borrow/consume mismatch would keep it live).
+    try std.testing.expectEqual(baseline_live + 2, rt.gc.liveCountKind(.object));
+}
+
+const DefineFieldForceGcProbe = struct {
+    rt: *core.JSRuntime,
+    fired: usize = 0,
+
+    fn trigger(ctx: ?*anyopaque, size: usize) void {
+        _ = size;
+        const self: *DefineFieldForceGcProbe = @ptrCast(@alignCast(ctx.?));
+        self.fired += 1;
+        // Full cycle removal before every allocation — the force-GC shape of
+        // `-Dzjs_force_gc=true` — so the collection lands inside the append
+        // over-hang and the replace-branch shape mutation.
+        _ = self.rt.runObjectCycleRemoval();
+    }
+};
+
+test "definePlainDataPropertyKnownFast refcounted define survives forced GC at every allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline_live = rt.gc.liveCountKind(.object);
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("refcounted-literal-force-gc");
+    defer rt.atoms.free(key);
+
+    // A two-object cycle whose ONLY external root is the value ref handed to
+    // the define: trial-deletion must treat the in-flight (unpublished /
+    // over-hang) ref as an external root and keep the pair alive mid-append.
+    const cyclic = try core.Object.create(rt, core.class.ids.object, null);
+    const partner = try core.Object.create(rt, core.class.ids.object, null);
+    const partner_key = try rt.internAtom("refcounted-literal-partner");
+    try cyclic.defineOwnProperty(rt, partner_key, core.Descriptor.data(partner.value(), true, true, true));
+    try partner.defineOwnProperty(rt, partner_key, core.Descriptor.data(cyclic.value(), true, true, true));
+    partner.value().free(rt);
+    rt.atoms.free(partner_key);
+
+    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+
+    var probe = DefineFieldForceGcProbe{ .rt = rt };
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_context = rt.memory.trigger_gc_ctx;
+    rt.memory.trigger_gc_fn = DefineFieldForceGcProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger;
+        rt.memory.trigger_gc_ctx = saved_context;
+    }
+
+    // Append leg under forced GC: consumes the cycle's only external ref.
+    try holder.definePlainDataPropertyKnownFast(rt, key, cyclic.value());
+    try std.testing.expectEqual(&cyclic.header, holder.prop_values[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(baseline_live + 4, rt.gc.liveCountKind(.object));
+
+    // Duplicate-key replace leg under forced GC: consumes `replacement`,
+    // destroys the displaced cycle root; the now-unrooted pair must be
+    // reclaimed by the next collection, not leaked.
+    try holder.definePlainDataPropertyKnownFast(rt, key, replacement.value());
+    try std.testing.expect(probe.fired > 0);
+    try std.testing.expectEqual(&replacement.header, holder.prop_values[0].slot.data.refHeader().?);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(baseline_live + 2, rt.gc.liveCountKind(.object));
+}
+
+test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned by caller" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline_live = rt.gc.liveCountKind(.object);
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("refcounted-literal-oom-key");
+    defer rt.atoms.free(key);
+
+    const child = try core.Object.create(rt, core.class.ids.object, null);
+    const child_probe = child.value().dup();
+    defer child_probe.free(rt);
+
+    // Budget sweep: walk the memory limit upward so the failure lands at every
+    // internal allocation boundary in turn (property storage grow, shape
+    // clone/transition), not just the first. Every failed attempt must leave
+    // the caller's ref intact (borrow-until-commit: destroying the staged slot
+    // would double-free on the cold-shell re-execution) and the object
+    // unchanged.
+    var budget: usize = 0;
+    var failures: usize = 0;
+    while (true) : (budget += 8) {
+        try std.testing.expect(budget < 1 << 20);
+        rt.setMemoryLimit(rt.memory.allocated_bytes + budget);
+        if (holder.definePlainDataPropertyKnownFast(rt, key, child.value())) {
+            rt.setMemoryLimit(null);
+            break;
+        } else |err| {
+            rt.setMemoryLimit(null);
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+            try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
+            try std.testing.expectEqual(@as(usize, 0), holder.shape_ref.prop_count);
+        }
+    }
+    try std.testing.expect(failures > 0);
+    // Success consumed the caller's ref: slot + probe only.
+    try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
+    try std.testing.expectEqual(&child.header, holder.prop_values[0].slot.data.refHeader().?);
+
+    // Same sweep over the duplicate-key replace leg: failures must not touch
+    // the incumbent slot value nor consume the caller's replacement ref.
+    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+    const replacement_probe = replacement.value().dup();
+    defer replacement_probe.free(rt);
+    budget = 0;
+    var replace_failures: usize = 0;
+    while (true) : (budget += 8) {
+        try std.testing.expect(budget < 1 << 20);
+        rt.setMemoryLimit(rt.memory.allocated_bytes + budget);
+        if (holder.definePlainDataPropertyKnownFast(rt, key, replacement.value())) {
+            rt.setMemoryLimit(null);
+            break;
+        } else |err| {
+            rt.setMemoryLimit(null);
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            replace_failures += 1;
+            try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
+            try std.testing.expectEqual(@as(i32, 2), child.header.meta().rc);
+            try std.testing.expectEqual(&child.header, holder.prop_values[0].slot.data.refHeader().?);
+        }
+    }
+    try std.testing.expectEqual(@as(i32, 2), replacement.header.meta().rc);
+    try std.testing.expectEqual(@as(i32, 1), child.header.meta().rc);
+    try std.testing.expectEqual(&replacement.header, holder.prop_values[0].slot.data.refHeader().?);
+    try std.testing.expectEqual(baseline_live + 3, rt.gc.liveCountKind(.object));
+}
+
 test "object data property self-assignment keeps stored object alive" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
