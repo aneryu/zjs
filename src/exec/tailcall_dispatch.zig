@@ -243,6 +243,7 @@ const PropertyTailSlot = enum(usize) {
     get_field_absent,
     put_field_release_old,
     put_field_release_receiver,
+    put_field_add,
     put_array_el_rest,
 };
 
@@ -3321,6 +3322,62 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         }
         return cont(pc + 5, sp - 2, var_buf, vm);
     }
+    return @call(.always_tail, propertyTailHandler(vm, .put_field_add), .{ pc, sp, var_buf, vm });
+}
+
+/// Resident add-tail for the hot put_field miss (T6-W1). qjs OP_put_field's
+/// slow leg is ONE JS_SetPropertyInternal direct call from the shared
+/// interpreter frame (quickjs.c:19188-19203 -> 9706-9890) — no shell
+/// republish, no operand re-pop, no atom re-decode. zjs's previous route paid
+/// the coldStd publish, two stack.pop()s, a bytecode re-decode and a repeat
+/// own-probe per new-property write. This tail decodes the atom off the live
+/// pc and calls the same single-walk core the cold arm uses
+/// (setOrDefineOwnDataPropertyForPutFieldOwned: own-hit data/var_ref/
+/// auto_init writes, prototype-walk-then-extensible order per quickjs.c:9862,
+/// add_property C_W_E). Every form that needs the full resolver (non-object
+/// receivers, array length, exotic/proxy/mapped-arguments/with/global-add,
+/// accessor or read-only hits) declines with zero state mutated and re-tails
+/// to the cold twin, whose own publish(pc, sp) re-covers the intact operands.
+///
+/// Throwing-tail contract (first throwing resident property tail; op_add_
+/// strings precedent, plus the cold arm's value_consumed/close-iterator/
+/// handleCatchableRuntimeError sequence):
+/// - BEFORE the throwing helper the live stack boundary is synced to sp - 2:
+///   the helper's owned contract consumes `value` on error, and the catch
+///   delivery below trims the stack to the handler's marker — both must see
+///   a boundary that excludes the two consumed operand slots.
+/// - On error, `value` is already consumed (owned contract), so only the
+///   receiver's ref remains ours (the cold arm's `defer obj.free`); frame.pc
+///   is synced one past the full instruction (the cold arm's site + 5) so
+///   error materialization captures the write site.
+/// - On success the receiver free runs here (the cold arm's defer), then
+///   dispatch continues at pc + 5 with both operands popped.
+fn op_put_field_add_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (comptime builtin.mode == .Debug) std.debug.assert(pc[0] == op.put_field);
+    const receiver_value = (sp - 2)[0];
+    const receiver = class_vm.objectFromValueTrustedExpression(receiver_value) orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const atom_id = readInt(u32, pc + 1);
+    const value = (sp - 1)[0];
+    const rt = vm.ctx.runtime;
+    vm.syncSp(sp - 2);
+    const done = receiver.setOrDefineOwnDataPropertyForPutFieldOwned(rt, atom_id, value) catch |err| {
+        // Owned contract: the error path consumed `value`; release our
+        // receiver ref, then run the cold arm's catch sequence against the
+        // already-synced sp - 2 boundary.
+        receiver_value.freeObjectAssumeObject(rt);
+        vm.syncPc(pc, 5);
+        forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(vm.ctx, vm.output, vm.global, vm.stack, vm.frame) catch |e2| return vm.fail(e2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    };
+    if (done) {
+        receiver_value.freeObjectAssumeObject(rt);
+        return cont(pc + 5, sp - 2, var_buf, vm);
+    }
+    // Decline: no state was mutated and ownership of both operands stays with
+    // the stack; the cold twin's publish(pc, sp) re-covers them.
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -4694,7 +4751,7 @@ fn profiledHandler(comptime profiled_op: u8, comptime real: Handler) Handler {
         }
     }.dispatch;
 }
-const property_tail_table = [15]Handler{
+const property_tail_table = [16]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_cached_string,
@@ -4709,6 +4766,7 @@ const property_tail_table = [15]Handler{
     op_get_field_absent_tail,
     op_put_field_release_old_tail,
     op_put_field_release_receiver_tail,
+    op_put_field_add_tail,
     op_put_array_el_cold,
 };
 const arithmetic_tail_table = [1]Handler{
