@@ -38,6 +38,8 @@ ITERS = {
     "M3_poly_read": 40_000_000,
     "L4_generic_ctor": 5_000_000,
     "L4p_generic_ctor_shadowing": 5_000_000,
+    "W0_fresh_object": 5_000_000,
+    "W1_newprop_writes": 5_000_000,
 }
 
 LABEL = {
@@ -68,6 +70,8 @@ LABEL = {
     "M3_poly_read": "M3    o.p (2 shapes)",
     "L4_generic_ctor": "L4    generic ctor, 3 props",
     "L4p_generic_ctor_shadowing": "L4p   generic ctor + proto x,y,z",
+    "W0_fresh_object": "W0    var o = {} (control)",
+    "W1_newprop_writes": "W1    {} + 3 new-prop writes",
 }
 
 ORDER = [c for c in ITERS if c != "empty"]
