@@ -109,6 +109,23 @@ unconditional GO) > the get_var/empty-ctor riders (both need zoo-wide
 adjudication before they earn a verdict; the get_var prototype showed a
 RayTrace +1.04% seam tax that must be treated as mechanism, not layout noise).
 
+**One tranche-7 measurement survives** and it de-risks the largest knife. The
+add-tail's stub differential (a resident tail slot that immediately re-tails to
+the cold twin, isolating the pure routing change) was built and measured on
+rt-fixed-d64, 4 interleaved pairs, before that agent halted:
+
+| | base | stub | delta |
+|---|---:|---:|---:|
+| cycles | 1,210,585,277 | 1,211,716,100 | **+1,130,823 (+0.093%)** |
+| instructions | 5,608,604,402 | 5,613,567,524 | +4,963,122 (+0.088%) |
+
+So the extra dispatch hop costs about +0.58 cyc per cold write — the routing
+itself is very nearly free against a 15–30M target. The knife's viability
+therefore rests entirely on whether deleting the `coldStd` publish shell, the
+atom re-decode and the re-probe delivers the projected saving; the structural
+change it needs to make is not itself expensive. Recovered from the agent
+transcript in `subagents/workflows/wf_7d4083ad-cea/agent-af9e493d8f*.jsonl`.
+
 ## Reproducing the frozen baselines
 
 Every A/B in this campaign was judged against a frozen binary rather than a
