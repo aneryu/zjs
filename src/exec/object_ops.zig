@@ -2512,7 +2512,27 @@ fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime
     return (if (mapped) ctx.mapped_arguments_shape else ctx.arguments_shape) orelse return error.TypeError;
 }
 
-pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
+fn argumentsIteratorValueOwned(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    // qjs js_build_(mapped_)arguments reads the realm cache with a single
+    // `JS_DupValue(ctx, ctx->array_proto_values)` (quickjs.c:16162/16226).
+    // createArgumentsObject already holds the frame's realm (`ctx = b->realm`,
+    // the same context whose shapes argumentsPropertyTemplate serves), so read
+    // the slot directly instead of arrayPrototypeValuesFromGlobal's
+    // global->context reverse lookup plus dup/defer-free pair. Bootstrap and
+    // bare-runtime frames may run before the cache is populated (or against a
+    // caller-supplied global): fall back to the lookup path.
+    if (ctx.global == global) {
+        if (ctx.cached_values[@intFromEnum(core.object.RealmValueSlot.array_prototype_values)]) |cached| {
+            return cached.dup();
+        }
+    }
+    return (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
+}
+
+// `noinline`: qjs OP_special_object reaches js_build_(mapped_)arguments as an
+// out-of-line call (quickjs.c:17971-17983); keeping the builder's construction
+// locals out of the dispatch arm's frame mirrors that call boundary.
+pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
     // zjs-side adaptation (R2): qjs finalizes the mapped/unmapped decision at
     // emit time (quickjs.c:34864 gates OP_special_object MAPPED_ARGUMENTS on
     // `!(js_mode & JS_MODE_STRICT) && has_simple_parameter_list`). zjs's
@@ -2538,26 +2558,34 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
             try argumentsPropertyTemplate(ctx.runtime, global, true)
         else
             try argumentsPropertyTemplate(ctx.runtime, global, false);
-        const iterator_value = (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
-        defer iterator_value.free(ctx.runtime);
         if (mapped) {
+            // qjs js_build_mapped_arguments prop fill (quickjs.c:16225-16227):
+            // int32 length carries no ref, Symbol.iterator and callee
+            // (cur_func) are one JS_DupValue each; the prepared-shape
+            // constructor consumes the cells (owned transfer) instead of
+            // re-dup-ing borrowed slots through the generic path.
+            const iterator_value = try argumentsIteratorValueOwned(ctx, global);
             const entries = [_]core.property.Entry{
                 .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
                 .{ .slot = .{ .data = iterator_value } },
-                .{ .slot = .{ .data = frame.current_function } },
+                .{ .slot = .{ .data = frame.current_function.dup() } },
             };
-            break :blk try core.Object.createFromShape(ctx.runtime, core.class.ids.mapped_arguments, initial_shape, &entries);
+            break :blk try core.Object.createArgumentsFromShape(ctx.runtime, core.class.ids.mapped_arguments, initial_shape, &entries);
         }
+        // qjs js_build_arguments prop fill (quickjs.c:16161-16164): the callee
+        // getset cell owns TWO throw_type_error refs, which
+        // fromBorrowedValues' double retain provides; the accessor then
+        // transfers into the object (destroyed by the shape's accessor flags
+        // on a failed construction).
         const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global);
         defer thrower.free(ctx.runtime);
-        const callee_accessor = core.property.Accessor.fromBorrowedValues(thrower, thrower);
-        defer callee_accessor.destroy(ctx.runtime);
+        const iterator_value = try argumentsIteratorValueOwned(ctx, global);
         const entries = [_]core.property.Entry{
             .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
             .{ .slot = .{ .data = iterator_value } },
-            .{ .slot = .{ .accessor = callee_accessor } },
+            .{ .slot = .{ .accessor = core.property.Accessor.fromBorrowedValues(thrower, thrower) } },
         };
-        break :blk try core.Object.createFromShape(ctx.runtime, core.class.ids.arguments, initial_shape, &entries);
+        break :blk try core.Object.createArgumentsFromShape(ctx.runtime, core.class.ids.arguments, initial_shape, &entries);
     };
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
 
@@ -2572,21 +2600,23 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
     }
 
     if (args.len > 0) {
-        _ = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
-    }
-    for (args, 0..) |_, index| {
-        const refs = object.argumentsVarRefsMut();
-        const cell = if (index < frame.function.arg_count) blk: {
-            break :blk try frame.captureArg(ctx.runtime, index);
-        } else blk: {
-            // qjs creates a closed var-ref for each extra actual argument: it
-            // remains mutable through the Arguments object but has no formal
-            // parameter binding in the frame.
-            const initial = value_slot.loadOwned(&args[index]);
-            errdefer initial.free(ctx.runtime);
-            break :blk try core.VarRef.createClosed(ctx.runtime, initial);
-        };
-        refs[index] = cell;
+        // qjs fills a local `tab` and installs it once (quickjs.c:16236-16261);
+        // the adopted backing never moves, so derive the typed window once
+        // instead of re-running the bytesAsSlice reinterpret per iteration.
+        const refs = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
+        for (args, 0..) |_, index| {
+            const cell = if (index < frame.function.arg_count) blk: {
+                break :blk try frame.captureArg(ctx.runtime, index);
+            } else blk: {
+                // qjs creates a closed var-ref for each extra actual argument:
+                // it remains mutable through the Arguments object but has no
+                // formal parameter binding in the frame.
+                const initial = value_slot.loadOwned(&args[index]);
+                errdefer initial.free(ctx.runtime);
+                break :blk try core.VarRef.createClosed(ctx.runtime, initial);
+            };
+            refs[index] = cell;
+        }
     }
     return object.value();
 }

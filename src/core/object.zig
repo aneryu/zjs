@@ -2273,6 +2273,110 @@ pub const Object = extern struct {
         });
     }
 
+    /// Allocate an arguments object (unmapped or mapped) straight from its
+    /// realm-owned initial Shape, consuming caller-prepared property cells —
+    /// the zjs analogue of qjs js_build_arguments / js_build_mapped_arguments
+    /// filling `JSProperty props[3]` with already-owned refs and transferring
+    /// them wholesale into `JS_NewObjectFromShape` (quickjs.c:16154-16168,
+    /// 16215-16232), whose props arm block-copies the cells (quickjs.c:
+    /// 5727-5730). The general `createInternal` path re-derives class layout
+    /// per call through the class definition plan and re-dups every borrowed
+    /// slot against the shape FAM flags; both arguments classes are standard
+    /// (`.ordinary` declared payload, no exotic methods, no inline layout), so
+    /// their layout facts are hardcoded here exactly like qjs's
+    /// JS_CLASS_ARGUMENTS/JS_CLASS_MAPPED_ARGUMENTS switch arm (quickjs.c:
+    /// 5679-5698, empty fast-array union; the caller adopts the dense/var-ref
+    /// window afterwards). `createArrayFromInitialShape` is the same mirror
+    /// for dense arrays; `createPreparedPropertyTemplate` for property-shaped
+    /// templates.
+    pub fn createArgumentsFromShape(
+        rt: *JSRuntime,
+        class_id: class.ClassId,
+        initial_shape: *shape.Shape,
+        entries: []const property.Entry,
+    ) !*Object {
+        std.debug.assert(class_id == class.ids.arguments or class_id == class.ids.mapped_arguments);
+        std.debug.assert(entries.len == initial_shape.prop_count);
+        if (builtin.mode == .Debug) {
+            // The hardcoded layout facts below must stay in lockstep with the
+            // registered arguments class definitions the generic path
+            // (createInternal) consults: `.ordinary` declared payload attaches
+            // lazily (class_payload_kind stays `.none`), no inline payload, no
+            // exotic methods, and construction leaves `fast_array` false (the
+            // caller's dense/var-ref adoption flips it, exactly as after the
+            // generic path). Divergence here would reroute mapped-arguments
+            // index redefine/delete off the exotic slow path that nulls the
+            // bound cell — the invariant apply's fully-bound window check
+            // relies on to fall back to observable [[Get]].
+            const definition = rt.classes.standardPlan(class_id);
+            std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
+            std.debug.assert(definition.payload_kind == .ordinary);
+            std.debug.assert(!payloadKindAllocates(definition.payload_kind));
+            std.debug.assert(!classHasExoticMethods(class_id, definition.has_exotic));
+        }
+
+        // qjs JS_NewObjectFromShape consumes `props` unconditionally: copied
+        // into the object on success, destroyed by the shape flags on
+        // allocation failure (quickjs.c:5639-5646).
+        var owned_entries_pending = true;
+        errdefer if (owned_entries_pending) {
+            const props = initial_shape.props();
+            for (entries, 0..) |entry, index| {
+                const entry_flags = property.Flags.fromBits(props[index].flags);
+                destroyPropertySlot(rt, props[index].atom_id, entry_flags, entry.slot);
+            }
+        };
+
+        // js_dup_shape on entry (quickjs.c:16165/16229); JS_NewObjectFromShape
+        // consumes the Shape on every failure path (quickjs.c:5647).
+        initial_shape.retain();
+        var shape_owned = true;
+        errdefer if (shape_owned) rt.shapes.release(initial_shape);
+
+        const alloc_size = @sizeOf(Object);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = try rt.memory.createNoTrigger(Object);
+        var initialized = false;
+        errdefer if (initialized)
+            destroyFromHeader(rt, &self.header)
+        else
+            rt.memory.destroy(Object, self);
+
+        // qjs allocates `prop[shape->prop_size]` (quickjs.c:5635); later named
+        // appends trust `shape.prop_size` slots. The arguments shapes always
+        // carry the three named cells, so the zero-capacity sentinel arm of
+        // the generic path is dead here.
+        const property_capacity: usize = initial_shape.prop_size;
+        std.debug.assert(property_capacity >= entries.len and entries.len != 0);
+        const property_storage = try rt.allocRuntime(property.Entry, property_capacity);
+        var property_storage_owned = true;
+        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
+
+        self.* = .{
+            .header = .{},
+            .class_id = class_id,
+            // Null first word: qjs's empty fast-array union (quickjs.c:
+            // 5695-5697) doubling as the no-payload sentinel — identical to
+            // createInternal's arguments storage arm.
+            .u = ObjectStorage.initPayload(null),
+            .flags = .{
+                .class_payload_kind = .none,
+                .has_exotic_methods = false,
+            },
+            .shape_ref = initial_shape,
+            .prop_values = property_storage.ptr,
+        };
+        std.debug.assert(!self.isWeakReferenceHolderClass());
+        @memcpy(self.prop_values[0..entries.len], entries);
+        owned_entries_pending = false;
+        property_storage_owned = false;
+        shape_owned = false;
+        initialized = true;
+        try rt.registerObjectWithBytes(self, alloc_size);
+        initialized = false;
+        return self;
+    }
+
     const PreparedPropertyEntryOwnership = enum {
         /// Retain each live slot while installing it; the caller keeps entries.
         borrowed,
