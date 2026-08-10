@@ -180,3 +180,49 @@ are ~100% mapped-arguments `.length` — the exact case the guard excludes. The
 guarded rider measured +8M instructions on rt-fixed for no hit. Recovering it
 would need per-class reasoning about which named atoms are shape-authoritative
 on mapped arguments; not worth ~0.2%.
+
+**put_field resident add-tail — LANDED** (`fb0ee823`). The tranche-6 round's
+largest target (new-property cold write chain, 1.9x, Δ≈5.2G ≈ 25% of the
+remaining gap) was carried to completion. QuickJS's `OP_put_field` slow leg is
+one `JS_SetPropertyInternal` call from the shared interpreter frame
+(qjs:19188-19203); zjs routed the same miss through the `coldStd` publish
+shell into `field()`, which popped both operands, re-decoded the atom and
+probed the shape a second time. The miss now tails to a resident handler that
+decodes off the live pc and calls the same single-walk core; forms needing the
+full resolver decline with nothing mutated and re-tail to the cold twin.
+
+It is the first throwing resident property tail — the stack boundary is synced
+to `sp - 2` before the call so the owned-value contract and the catch delivery
+agree, and the error path mirrors the cold arm's value_consumed /
+close-iterator / handleCatchableRuntimeError sequence.
+
+Gates: `test-exec` 414, `test-bytecode` 69, `test-oom` 21, unified Debug and
+ReleaseSafe 2161, `test262-gate` 0/49,775 — fifth consecutive bit-identical run.
+
+Fixed-work, 6 interleaved pairs each:
+
+| workload | instructions | cycles |
+|---|---:|---:|
+| rt-fixed-d64 | −2.100% | **−1.907%** (−23.1M/run) |
+| splay-fixed-d1 | −0.299% | −0.629% |
+
+−23.1M cycles/run lands inside the 15–30M band pre-registered before
+implementation.
+
+**Layout artifact, separated by instruction counts.** The full-15 causal A/B
+(vs frozen T5, 8 samples) read geomean 1.0012 with raytrace 1.028,
+typescript 1.015, deltablue 1.009, zlib 1.009, splay 1.005 — and regexp 0.973,
+gbemu 0.992. Fixed-work PMU on the two apparent losers settles it:
+
+| workload | instructions | cycles |
+|---|---:|---:|
+| regexp-fixed | **+0.001%** (100,840.2M vs 100,839.0M, sd 0.3–0.7M) | +2.759% |
+| gbemu-fixed | **+0.000%** (23,026.2M vs 23,026.0M, sd 0.1–0.3M) | +0.968% |
+
+Bit-identical instruction counts mean neither benchmark reaches the new code at
+all, so their cycle deltas are code placement, not mechanism — the ±2.5%
+layout lottery this host has produced before. The build is deterministic for a
+fixed source, so a second draw was not available to confirm by resampling;
+the instruction evidence is stronger anyway, since it shows the code is never
+executed. The wins, by contrast, are all on write-heavy benchmarks and are
+carried by real instruction reductions.
