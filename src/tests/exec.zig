@@ -11827,6 +11827,51 @@ test "Engine eval executes parenthesized literal postfix through quick parser" {
     try std.testing.expectEqualStrings("3\n4\n", stream.buffered());
 }
 
+// qjs CASE(OP_define_field) (quickjs.c:19269) takes the same
+// JS_DefinePropertyValue route for refcounted values as for ints — no value
+// form gate. The zjs fast leg mirrors that: append consumes the value into the
+// slot, and the duplicate-key replace (`({a:o1,a:o2})`) dups into the slot and
+// retires the caller's ref. This pins the refcount balance end-to-end through
+// the resident op_define_field handler (a pre-fix borrow/consume mismatch
+// leaked one ref per duplicate refcounted key).
+test "Engine eval balances refcounts for refcounted duplicate-key object literals" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const rt = js.runtime;
+
+    const setup = try js.eval(
+        \\globalThis.__dupLitO1 = { m: 1 };
+        \\globalThis.__dupLitO2 = { m: 2 };
+    );
+    setup.free(rt);
+
+    // TestEngine only returns the script completion value for "<repl>".
+    const o1 = try js.evalWithOptions("__dupLitO1", .{ .filename = "<repl>" });
+    defer o1.free(rt);
+    const o2 = try js.evalWithOptions("__dupLitO2", .{ .filename = "<repl>" });
+    defer o2.free(rt);
+    const o1_baseline = o1.refHeader().?.meta().rc;
+    const o2_baseline = o2.refHeader().?.meta().rc;
+
+    const result = try js.evalWithOptions(
+        \\let __dupLitLast = null;
+        \\for (let i = 0; i < 16; i++) {
+        \\  __dupLitLast = { a: __dupLitO1, a: __dupLitO2, keep: __dupLitO1 };
+        \\}
+        \\const __dupLitOk = __dupLitLast.a === __dupLitO2 && __dupLitLast.keep === __dupLitO1;
+        \\__dupLitLast = null;
+        \\__dupLitOk ? 1 : 0
+    , .{ .filename = "<repl>" });
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+
+    // Every literal died (last = null): both source objects must be back at
+    // their pre-loop refcounts — no per-iteration leak from the duplicate-key
+    // replace, no over-free from the append move.
+    try std.testing.expectEqual(o1_baseline, o1.refHeader().?.meta().rc);
+    try std.testing.expectEqual(o2_baseline, o2.refHeader().?.meta().rc);
+}
+
 test "Engine eval executes compound assignment and update statements through quick parser" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

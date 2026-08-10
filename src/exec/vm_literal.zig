@@ -39,15 +39,22 @@ pub inline fn newPlainObjectValue(ctx: *core.JSContext, global: *core.Object) !c
 }
 
 /// Frameless OP_define_field fast leg (qjs CASE(OP_define_field): a single
-/// JS_DefinePropertyValue on sp[-2] with sp[-1], quickjs.c:19269). Handles ONLY the
-/// plain-data-add case the cold defineField's own fast leg handles (vm_literal.zig
-/// defineField:184-198): a non-refcounted `value` (so the shape-transition alloc/GC
-/// needs no value rooting — an int/bool/undefined cannot be collected) and a plain,
-/// extensible, non-array, non-exotic, non-proxy `obj`. Returns true on a completed
-/// add (handler pops the value + frees the popped obj slot); false routes to the cold
-/// shell (arrays, proxies, non-extensible, setters, refcounted values — every
+/// JS_DefinePropertyValue on sp[-2] with sp[-1], quickjs.c:19269). Handles the
+/// plain-data-add/replace on a plain, extensible, non-array, non-exotic, non-proxy
+/// `obj` for ANY value shape — qjs's define path carries no value-form gate either:
+/// a refcounted value ({left:obj,right:obj} literals) takes the same
+/// JS_DefinePropertyValue fast route as an int. No explicit value rooting is needed
+/// across the shape-transition alloc/GC: the value keeps its live refcount in the
+/// (unpublished) sp slot, and cycle removal is qjs-faithful trial deletion
+/// (gc_decref/gc_scan) — a refcount unaccounted for by traced children IS an
+/// external root, so the stack-held ref keeps the value alive. Returns true on a
+/// completed define (handler pops the value + keeps obj as the literal receiver);
+/// false routes to the cold shell (arrays, proxies, non-extensible, setters — every
 /// backtrace/user-code-capable case stays on the publishing path). `value` is
-/// CONSUMED into the property slot on success (like the cold leg's Descriptor.data).
+/// CONSUMED into the property slot on success (like the cold leg's Descriptor.data)
+/// and NOT consumed on `false` — definePlainDataPropertyKnownFast is
+/// borrow-until-commit on its failure paths, so the cold shell re-executes the
+/// opcode with the stack's ownership intact (no double-free on OOM mid-append).
 ///
 /// No private-atom probe: OP_define_field's u32 operand is a parser-minted
 /// property-name atom — every private name is discriminated at parse time into
@@ -59,7 +66,6 @@ pub inline fn newPlainObjectValue(ctx: *core.JSContext, global: *core.Object) !c
 /// push_this / any literal-start), never a make_ref cell pair, so the
 /// trusted-expression classification skips the header-kind re-load.
 pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
-    if (value.requiresRefCount()) return false;
     if (comptime builtin.mode == .Debug) {
         std.debug.assert(rt.atoms.kind(atom_id) != .private);
     }

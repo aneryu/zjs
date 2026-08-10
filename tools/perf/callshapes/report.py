@@ -40,6 +40,7 @@ ITERS = {
     "L4p_generic_ctor_shadowing": 5_000_000,
     "W0_fresh_object": 5_000_000,
     "W1_newprop_writes": 5_000_000,
+    "S1_reflit_fields": 5_000_000,
 }
 
 LABEL = {
@@ -72,6 +73,7 @@ LABEL = {
     "L4p_generic_ctor_shadowing": "L4p   generic ctor + proto x,y,z",
     "W0_fresh_object": "W0    var o = {} (control)",
     "W1_newprop_writes": "W1    {} + 3 new-prop writes",
+    "S1_reflit_fields": "S1    {left:o,right:o} reflit",
 }
 
 ORDER = [c for c in ITERS if c != "empty"]
