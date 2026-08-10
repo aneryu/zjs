@@ -2538,26 +2538,34 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
             try argumentsPropertyTemplate(ctx.runtime, global, true)
         else
             try argumentsPropertyTemplate(ctx.runtime, global, false);
-        const iterator_value = (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
-        defer iterator_value.free(ctx.runtime);
         if (mapped) {
+            // qjs js_build_mapped_arguments prop fill (quickjs.c:16225-16227):
+            // int32 length carries no ref, Symbol.iterator and callee
+            // (cur_func) are one JS_DupValue each; the prepared-shape
+            // constructor consumes the cells (owned transfer) instead of
+            // re-dup-ing borrowed slots through the generic path.
+            const iterator_value = (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
             const entries = [_]core.property.Entry{
                 .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
                 .{ .slot = .{ .data = iterator_value } },
-                .{ .slot = .{ .data = frame.current_function } },
+                .{ .slot = .{ .data = frame.current_function.dup() } },
             };
-            break :blk try core.Object.createFromShape(ctx.runtime, core.class.ids.mapped_arguments, initial_shape, &entries);
+            break :blk try core.Object.createArgumentsFromShape(ctx.runtime, core.class.ids.mapped_arguments, initial_shape, &entries);
         }
+        // qjs js_build_arguments prop fill (quickjs.c:16161-16164): the callee
+        // getset cell owns TWO throw_type_error refs, which
+        // fromBorrowedValues' double retain provides; the accessor then
+        // transfers into the object (destroyed by the shape's accessor flags
+        // on a failed construction).
         const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global);
         defer thrower.free(ctx.runtime);
-        const callee_accessor = core.property.Accessor.fromBorrowedValues(thrower, thrower);
-        defer callee_accessor.destroy(ctx.runtime);
+        const iterator_value = (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
         const entries = [_]core.property.Entry{
             .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
             .{ .slot = .{ .data = iterator_value } },
-            .{ .slot = .{ .accessor = callee_accessor } },
+            .{ .slot = .{ .accessor = core.property.Accessor.fromBorrowedValues(thrower, thrower) } },
         };
-        break :blk try core.Object.createFromShape(ctx.runtime, core.class.ids.arguments, initial_shape, &entries);
+        break :blk try core.Object.createArgumentsFromShape(ctx.runtime, core.class.ids.arguments, initial_shape, &entries);
     };
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
 
