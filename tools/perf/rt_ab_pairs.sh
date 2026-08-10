@@ -6,7 +6,8 @@ set -euo pipefail
 CAND="${1:?cand}"; BASE="${2:?base}"; PAIRS="${3:-4}"; SRC="${4:-/tmp/rt-fixed-d64.js}"
 
 run_one() {
-    taskset -c 19 perf stat -x, -e instructions,cycles,task-clock "$1" "$SRC" 2>&1 >/dev/null \
+    flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+      perf stat -x, -e instructions,cycles,task-clock "$1" "$SRC" 2>&1 >/dev/null \
       | awk -F, '$1 != "<not counted>" && $1 != "" {
             if ($3 ~ /instructions/) ins=$1;
             else if ($3 ~ /cycles/) cyc=$1;

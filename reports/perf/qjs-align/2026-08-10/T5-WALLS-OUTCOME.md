@@ -108,3 +108,26 @@ shape clone memcpy (splay object-create, −0.06..0.09G, the round's only
 unconditional GO) > the get_var/empty-ctor riders (both need zoo-wide
 adjudication before they earn a verdict; the get_var prototype showed a
 RayTrace +1.04% seam tax that must be treated as mechanism, not layout noise).
+
+## Reproducing the frozen baselines
+
+Every A/B in this campaign was judged against a frozen binary rather than a
+path a later build could overwrite. Those copies live in `/tmp` and do not
+survive a reboot; rebuild them from their commits when a later tranche needs
+the same comparison:
+
+| snapshot | commit | role |
+|---|---|---|
+| `/tmp/zjs-rt-baseline` | `d050302c` | pre-campaign baseline |
+| `/tmp/zjs-rt-integrated` | `07ab9b24` | after tranche 1 |
+| `/tmp/zjs-rt-t3` | `104e7811` | after tranche 3 |
+| `/tmp/zjs-rt-t5` | `1cc8d275` | after tranche 5 — the numbers in this report |
+
+Rebuild with `git worktree add` at the commit, `zig build zjs --seed 0`, then
+copy the artifact out and `chmod -w` it. Note that a rebuild is not byte-identical
+(build nondeterminism is established here at ±2.5% layout lottery), so a
+reconstructed baseline is only sound for whole-mechanism comparisons, not for
+re-deriving a specific sub-1% delta.
+
+Pinned references throughout: QuickJS `04be2460`, javascript-zoo `a17d4e0a`,
+CPU 19 (Cortex-X925), PMU `armv8_pmuv3_1`, exclusive `/tmp/zjs-host-heavy.lock`.
