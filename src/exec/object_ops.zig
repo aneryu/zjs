@@ -2512,6 +2512,23 @@ fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime
     return (if (mapped) ctx.mapped_arguments_shape else ctx.arguments_shape) orelse return error.TypeError;
 }
 
+fn argumentsIteratorValueOwned(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    // qjs js_build_(mapped_)arguments reads the realm cache with a single
+    // `JS_DupValue(ctx, ctx->array_proto_values)` (quickjs.c:16162/16226).
+    // createArgumentsObject already holds the frame's realm (`ctx = b->realm`,
+    // the same context whose shapes argumentsPropertyTemplate serves), so read
+    // the slot directly instead of arrayPrototypeValuesFromGlobal's
+    // global->context reverse lookup plus dup/defer-free pair. Bootstrap and
+    // bare-runtime frames may run before the cache is populated (or against a
+    // caller-supplied global): fall back to the lookup path.
+    if (ctx.global == global) {
+        if (ctx.cached_values[@intFromEnum(core.object.RealmValueSlot.array_prototype_values)]) |cached| {
+            return cached.dup();
+        }
+    }
+    return (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
+}
+
 pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
     // zjs-side adaptation (R2): qjs finalizes the mapped/unmapped decision at
     // emit time (quickjs.c:34864 gates OP_special_object MAPPED_ARGUMENTS on
@@ -2544,7 +2561,7 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
             // (cur_func) are one JS_DupValue each; the prepared-shape
             // constructor consumes the cells (owned transfer) instead of
             // re-dup-ing borrowed slots through the generic path.
-            const iterator_value = (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
+            const iterator_value = try argumentsIteratorValueOwned(ctx, global);
             const entries = [_]core.property.Entry{
                 .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
                 .{ .slot = .{ .data = iterator_value } },
@@ -2559,7 +2576,7 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
         // on a failed construction).
         const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global);
         defer thrower.free(ctx.runtime);
-        const iterator_value = (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
+        const iterator_value = try argumentsIteratorValueOwned(ctx, global);
         const entries = [_]core.property.Entry{
             .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
             .{ .slot = .{ .data = iterator_value } },
