@@ -1053,6 +1053,18 @@ inline fn storeValueAsIntPair(slot: *JSValue, value: JSValue) void {
 /// simple/general teardown choice stay behind Machine.popFrame.
 inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     const machine = vm.machine;
+    // Read the dying frame's Entry through the register-resident vm.frame
+    // mirror instead of the machine→top dependent chain. Every vm.frame
+    // writer publishes &machine.top.?.frame in lockstep with Machine.top
+    // (asserted below; audited with an all-modes equality probe across full
+    // test262 + async/generator slices), so at any depth>0 return the two
+    // pointers alias. qjs's done: epilogue likewise reads the dying frame
+    // through the register-resident `sf` (quickjs.c:20698-20709), not through
+    // rt->current_stack_frame. Deriving the Entry here lets the teardown-flags
+    // load issue in parallel with the vm.machine load instead of third in the
+    // [vm]→machine→machine.top→flags address chain.
+    const dying: *inline_calls.Entry = @alignCast(@fieldParentPtr("frame", vm.frame));
+    std.debug.assert(dying == machine.topEntry());
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
@@ -1067,7 +1079,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     // case pays one test instead of four. A leaf or constructor frame fails it
     // and reaches the arms below completely unchanged, one predicted test
     // later.
-    if (machine.topEntry().isOrdinaryReturn()) {
+    if (dying.isOrdinaryReturn()) {
         machine.popOrdinaryFrame();
         reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
         // AssumeCapacity never reallocs, so the sp reloadAfterPop captured
@@ -1076,7 +1088,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    if (machine.topEntry().isEmptyLeaf()) {
+    if (dying.isEmptyLeaf()) {
         // No operand-window guard on this arm: zero-arg empty-leaf
         // publication requires the static return-balance proof
         // (`codeProvesLeafReturnBalance`) — every return site of a published
@@ -1084,7 +1096,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         // epilogue below never strands a leftover. The O1/O2/O3 arms below
         // keep runtime len==0 guards instead (their families must stay
         // eligible with leftover-carrying bodies; see each arm's comment).
-        const dying = machine.topEntry();
+        //
         // One ldp: the caller's resume {pc, sp} stored by the empty-leaf
         // constructor. Read FIRST so the dispatch-feeding chain
         // (ldp → opcode ldrb → handler load → br) starts immediately; the
@@ -1127,7 +1139,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    if (machine.topEntry().isExactArgsLeaf() and machine.topEntry().stack.len() == 0) {
+    if (dying.isExactArgsLeaf() and dying.stack.len() == 0) {
         // Exact-args leaf return (O1): the zero-arg arm's one-ldp resume plus
         // the caller-region args release inside `popReturnedExactArgsLeaf`.
         // A separate arm keeps the established zero-arg test single-bit and
@@ -1154,7 +1166,6 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         // and ride the generic path. This family keeps the RUNTIME guard
         // because its shapes (fib's `if` + recursion with args/captures)
         // must stay leaf-eligible even when a body carries leftovers.
-        const dying = machine.topEntry();
         const resume_pc = dying.emptyLeafResumePc();
         const resume_sp = dying.emptyLeafResumeSp();
         const caller_opt = dying.prev;
@@ -1179,13 +1190,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    if (machine.topEntry().hasSpecialReturn()) {
-        if (machine.topEntry().isNativeBoundaryReturn()) {
+    if (dying.hasSpecialReturn()) {
+        if (dying.isNativeBoundaryReturn()) {
             machine.popReturnedNativeBoundary(vm.rt);
             vm.return_value = value;
             return .native_returned;
         }
-        if (machine.topEntry().isForwardedLeaf() and machine.topEntry().stack.len() == 0) {
+        if (dying.isForwardedLeaf() and dying.stack.len() == 0) {
             // Forwarded-leaf return (O3): the zero-arg leaf epilogue plus the
             // owned native `call` frame release inside `popReturnedForwardedLeaf`.
             // No resume record exists for this shape (its default-repr storage
@@ -1195,7 +1206,6 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             // arms established. The len==0 guard routes parser-elided operand
             // leftovers to the general return path below, whose teardown
             // releases the remaining window (and the native frame) exactly once.
-            const dying = machine.topEntry();
             const caller_opt = dying.prev;
             machine.popReturnedForwardedLeaf(vm.rt);
             if (caller_opt) |caller| {
@@ -1225,7 +1235,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
         }
     }
-    if (machine.topEntry().completesConstructor()) {
+    if (dying.completesConstructor()) {
         const completed = machine.popConstructorReturn(value);
         reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
         vm.stack.pushOwnedAssumeCapacity(completed);
