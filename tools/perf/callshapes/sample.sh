@@ -20,7 +20,10 @@ CASES=(empty ctrl A_direct_call A2_direct_call_ret B_method_call \
        E0_arguments_zeroarg E1_arguments_length E2_arguments_index \
        E4_arguments_fourarg F_simple_ctor G_raytrace_ctor \
        H1_prop_read H2_prop_write I_proto_method J_instanceof \
-       K1_length_array K2_length_plain)
+       K1_length_array K2_length_plain \
+       L0_ctor_noprops L3_ctor_threeprops M1_proto_data_read \
+       L3p_ctor_shadowing M2_chain_read M3_poly_read \
+       L4_generic_ctor L4p_generic_ctor_shadowing)
 
 if [ $((SAMPLES % 2)) -ne 0 ]; then
     echo "sample count must be even (got $SAMPLES)" >&2

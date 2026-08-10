@@ -46,6 +46,10 @@ percentage of the median: treat any ratio delta smaller than the spread as noise
 | `I` | `o.method()` | method resolved on the prototype |
 | `J` | `o instanceof Pair` | `Symbol.hasInstance` lookup, native call, prototype walk |
 | `K1` / `K2` | `array.length` / `plainobj.length` | control for `E1`: proves a `.length` read is not itself slow |
+| `L0` | `new Empty()` | generic construct route with an empty body: prices the frame/instance machinery alone |
+| `L3` / `L3p` | `new Three(1,2,3)`, default / shadowing prototype | `L3` matches zjs's simple-field construct fast path; `L3p`'s prototype `{x,y,z}` disqualifies it, so the pair measures the fast path, not shadowing |
+| `L4` / `L4p` | same stores, pattern broken by a local | both halves on the generic route; `L4p - L4` is the true prototype-shadowing cost (≈0 in both engines) |
+| `M1` / `M2` / `M3` | prototype data read / 4-deep chain / one site, two shapes | read-shape controls: all at or ahead of parity, so a slow read bucket cannot be blamed on these shapes |
 
 Iteration counts are per case (tuned so each run is ~0.4s on `qjs`) and live in
 two places that must agree: `var N` in the case file and `ITERS` in `report.py`.

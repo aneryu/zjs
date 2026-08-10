@@ -30,6 +30,14 @@ ITERS = {
     "J_instanceof": 15_000_000,
     "K1_length_array": 40_000_000,
     "K2_length_plain": 40_000_000,
+    "L0_ctor_noprops": 5_000_000,
+    "L3_ctor_threeprops": 5_000_000,
+    "M1_proto_data_read": 40_000_000,
+    "L3p_ctor_shadowing": 5_000_000,
+    "M2_chain_read": 10_000_000,
+    "M3_poly_read": 40_000_000,
+    "L4_generic_ctor": 5_000_000,
+    "L4p_generic_ctor_shadowing": 5_000_000,
 }
 
 LABEL = {
@@ -52,6 +60,14 @@ LABEL = {
     "J_instanceof": "J     o instanceof Pair",
     "K1_length_array": "K1    array.length",
     "K2_length_plain": "K2    plainobj.length",
+    "L0_ctor_noprops": "L0    new Empty()",
+    "L3_ctor_threeprops": "L3    new Three(1,2,3)",
+    "M1_proto_data_read": "M1    o.protoProp",
+    "L3p_ctor_shadowing": "L3p   new Three + proto x,y,z",
+    "M2_chain_read": "M2    a.b.c.c2.d",
+    "M3_poly_read": "M3    o.p (2 shapes)",
+    "L4_generic_ctor": "L4    generic ctor, 3 props",
+    "L4p_generic_ctor_shadowing": "L4p   generic ctor + proto x,y,z",
 }
 
 ORDER = [c for c in ITERS if c != "empty"]
