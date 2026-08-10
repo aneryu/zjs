@@ -1,0 +1,279 @@
+{
+ "tool": "zjs-zoo-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "temporary source copies set doWarmup=false and doDeterministic=true; both engines execute identical deterministicIterations/minIterations batches",
+ "iterationDivisor": 16,
+ "timestamp": "2026-08-09T07:26:52Z",
+ "samplesPerEnginePerBench": 4,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 2,
+  "zjs": 2
+ },
+ "firstPositionBalanced": true,
+ "cpu": 19,
+ "effectiveAffinity": [
+  19
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/zjs-zoo-constpush-ab.XhPAyN/prefix/bin/zjs",
+   "sha256": "b8cff1113f5f0d98df8c13abaf40df4303fe1c97405db8143809ae0fbca88ced",
+   "repo": {
+    "path": "/home/aneryu/zjs-zoo-align-20260809",
+    "commit": "9bc0fb3ac07bf2066b44e7d795a7766d1b0f31ad",
+    "dirty": true
+   }
+  },
+  "qjs": {
+   "path": "/tmp/zjs-zoo-state-ab.sx9rZY/c0/prefix/bin/zjs",
+   "sha256": "336a5641be76522463022d4c06c52e1ce855ec1027b25710c25385a8bf081de9",
+   "repo": {
+    "path": "/tmp/zjs-zoo-state-ab.sx9rZY/c0/prefix/bin",
+    "commit": null,
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "box2d": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/box2d.js",
+    "sha256": "5861c95848d670f97d4c4e32e71c43f8abf8a5b9bca29f9b6854166b25fa6211",
+    "fixedWorkSha256": "2f98346e24c510ceb3269a00fec08bdf142d4c1099bcc8b6387cb505b798cfe8"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 6646627949,
+       "cycles": 1505809497,
+       "branch-instructions": 1366552476,
+       "branch-misses": 2363126,
+       "cache-references": 2844711957,
+       "cache-misses": 13903690
+      },
+      "wallSeconds": 0.40841167978942394,
+      "stdout": "Box2D: 5764"
+     },
+     {
+      "counters": {
+       "instructions": 6646492735,
+       "cycles": 1509749357,
+       "branch-instructions": 1366525302,
+       "branch-misses": 2335147,
+       "cache-references": 2844543435,
+       "cache-misses": 14455642
+      },
+      "wallSeconds": 0.39618623116984963,
+      "stdout": "Box2D: 5749"
+     },
+     {
+      "counters": {
+       "instructions": 6646350290,
+       "cycles": 1504060022,
+       "branch-instructions": 1366505483,
+       "branch-misses": 2322605,
+       "cache-references": 2844625766,
+       "cache-misses": 13963910
+      },
+      "wallSeconds": 0.3942287783138454,
+      "stdout": "Box2D: 5780"
+     },
+     {
+      "counters": {
+       "instructions": 6647060449,
+       "cycles": 1505922356,
+       "branch-instructions": 1366774429,
+       "branch-misses": 2323977,
+       "cache-references": 2844850458,
+       "cache-misses": 14404747
+      },
+      "wallSeconds": 0.39539926405996084,
+      "stdout": "Box2D: 5764"
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 6638678574,
+       "cycles": 1515016665,
+       "branch-instructions": 1365904380,
+       "branch-misses": 2323245,
+       "cache-references": 2838249052,
+       "cache-misses": 14121872
+      },
+      "wallSeconds": 0.39726982405409217,
+      "stdout": "Box2D: 5734"
+     },
+     {
+      "counters": {
+       "instructions": 6637873553,
+       "cycles": 1512735441,
+       "branch-instructions": 1365610629,
+       "branch-misses": 2323988,
+       "cache-references": 2838454037,
+       "cache-misses": 14168038
+      },
+      "wallSeconds": 0.3969419808126986,
+      "stdout": "Box2D: 5734"
+     },
+     {
+      "counters": {
+       "instructions": 6638359748,
+       "cycles": 1510226318,
+       "branch-instructions": 1365771078,
+       "branch-misses": 2318600,
+       "cache-references": 2837202830,
+       "cache-misses": 14118709
+      },
+      "wallSeconds": 0.3966765059158206,
+      "stdout": "Box2D: 5749"
+     },
+     {
+      "counters": {
+       "instructions": 6637970461,
+       "cycles": 1498913051,
+       "branch-instructions": 1365622355,
+       "branch-misses": 2330241,
+       "cache-references": 2837175070,
+       "cache-misses": 14114471
+      },
+      "wallSeconds": 0.3934523547068238,
+      "stdout": "Box2D: 5795"
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 6646560342.0,
+     "zjsMedian": 6638165104.5,
+     "pairedRatiosZjsOverQjs": [
+      0.998803998800445,
+      0.9987031984621586,
+      0.998797754910387,
+      0.998632480015829
+     ],
+     "ratioMedian": 0.9987504766862728,
+     "ratioMAD": 5.040016914320544e-05
+    },
+    "cycles": {
+     "qjsMedian": 1505865926.5,
+     "zjsMedian": 1511480879.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0061144308216565,
+      1.001977867376565,
+      1.00409976723655,
+      0.9953455070428611
+     ],
+     "ratioMedian": 1.0030388173065574,
+     "ratioMAD": 0.002068281722545806
+    },
+    "branch-instructions": {
+     "qjsMedian": 1366538889.0,
+     "zjsMedian": 1365696716.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9995257437885613,
+      0.9993306578380501,
+      0.9994625671033623,
+      0.9991570854886106
+     ],
+     "ratioMedian": 0.9993966124707062,
+     "ratioMAD": 9.754297525560451e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 2329562.0,
+     "zjsMedian": 2323616.5,
+     "pairedRatiosZjsOverQjs": [
+      0.983123625232002,
+      0.9952212858548092,
+      0.9982756430817983,
+      1.002695379515374
+     ],
+     "ratioMedian": 0.9967484644683038,
+     "ratioMAD": 0.0037370468302823645
+    },
+    "cache-references": {
+     "qjsMedian": 2844668861.5,
+     "zjsMedian": 2837725941.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9977280986273156,
+      0.9978592705159378,
+      0.9973905404047444,
+      0.9973020065155214
+     ],
+     "ratioMedian": 0.9975593195160299,
+     "ratioMAD": 0.00021304605589711478
+    },
+    "cache-misses": {
+     "qjsMedian": 14184328.5,
+     "zjsMedian": 14120290.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0156923809434761,
+      0.9801043772390047,
+      1.0110856486471196,
+      0.9798485874135797
+     ],
+     "ratioMedian": 0.9955950129430622,
+     "ratioMAD": 0.015618530616769988
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.39579274761490524,
+     "zjsMedian": 0.3968092433642596,
+     "pairedRatiosZjsOverQjs": [
+      0.9727190570527354,
+      1.0019075616045954,
+      1.00620890137053,
+      0.9950760926230713
+     ],
+     "ratioMedian": 0.9984918271138333,
+     "ratioMAD": 0.00556640437372935
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.41377962342785,
+    "zjsIPC": 4.391828698948487,
+    "ipcRatioZjsOverQjs": 0.9950267284839394
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "box2d",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 3,
+   "order": "zjs->qjs"
+  }
+ ]
+}

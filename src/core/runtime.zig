@@ -752,18 +752,6 @@ const RuntimeCompactState = packed struct(u8) {
     _padding: u5 = 0,
 };
 
-/// Cached result of the simple-field-constructor bytecode scan for one FB.
-/// `fb == 0` means empty; a computed entry sets `fb` to the FB pointer and
-/// `is_simple` to whether it matched (with `len`/`atoms`/`args` the pattern when
-/// it did). Max fields mirrors exec's `max_simple_constructor_fields` (8).
-pub const SimpleCtorMemo = struct {
-    fb: usize = 0,
-    is_simple: bool = false,
-    len: u8 = 0,
-    atoms: [8]u32 = [_]u32{0} ** 8,
-    args: [8]u16 = [_]u16{0} ** 8,
-};
-
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
@@ -823,6 +811,18 @@ pub const JSRuntime = struct {
     /// a core -> exec import cycle. Routing reads it on every eligible native
     /// callback, so keep it adjacent to the hot execution cache line.
     active_invocation: ?*anyopaque = null,
+    /// Intrusive stack of live VM-resident `gc.phase == .deinit` mirror bytes
+    /// (one node per active tail-call driver invocation; nested drivers via
+    /// the native fence chain through `prev`). Every release fast path in a
+    /// dispatch handler reads its Vm's mirror byte with a single load off the
+    /// register-resident vm pointer instead of the vm→ctx→rt→gc.phase
+    /// dependent-load chain LLVM hoists into each handler entry — qjs's
+    /// JS_FreeValue fast path pays no gc_phase load at all (the check lives
+    /// in __JS_FreeValueRT's zero-ref leg, quickjs.c:6476). The bit only
+    /// changes at gc.Registry.deinit entry/exit (both call
+    /// `syncGcDeinitMirrors`); decref/remove_cycles transitions provably
+    /// preserve it (see the audit notes at each `phase =` site).
+    gc_deinit_mirror_head: ?*GcDeinitMirrorNode = null,
 
     owner_thread_id: std.Thread.Id,
     memory: memory.MemoryAccount,
@@ -842,15 +842,6 @@ pub const JSRuntime = struct {
     /// Own-property count to reserve on a global object before running
     /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
     standard_global_own_property_capacity: usize = 0,
-
-    /// Single-entry memo for constructSimpleFieldConstructor's bytecode pattern
-    /// (the `this.f = arg` shape a base constructor's fast path matches). The
-    /// match is a pure, immutable property of the FunctionBytecode, but was
-    /// re-scanned on every `new F()` (top self-cost of the fast-path construct).
-    /// Keyed by FB pointer as a usize (0 = empty) so no exec-layer type leaks
-    /// into core; invalidated in the FunctionBytecode destructor, which makes
-    /// pointer reuse safe. One runtime per thread, so no synchronization.
-    simple_ctor_memo: SimpleCtorMemo = .{},
 
     /// QuickJS `context_list`: intrusive membership only.  Realm ownership is
     /// carried by `RealmRef` and the GC header, never by these links.
@@ -1099,6 +1090,7 @@ pub const JSRuntime = struct {
         rt.hot.current_backtrace_frame = null;
         rt.active_native_call = null;
         rt.active_invocation = null;
+        rt.gc_deinit_mirror_head = null;
         rt.hot.stack_size = options.stack_size;
         rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
         rt.hot.native_stack_size = initial_native_stack_size;
@@ -2030,6 +2022,24 @@ pub const JSRuntime = struct {
         {
             @panic("JSRuntime destroyed with outstanding value handles");
         }
+    }
+
+    /// One live tail-call driver's registration in the deinit-mirror stack.
+    /// The node itself lives on the driver's native stack frame (runTC), so
+    /// registration is allocation-free; only the mirrored byte lives in the Vm.
+    pub const GcDeinitMirrorNode = struct {
+        flag: *bool,
+        prev: ?*GcDeinitMirrorNode,
+    };
+
+    /// Propagate the deinit-phase bit into every registered VM mirror byte.
+    /// Called from the two `gc.phase` transitions that can change the bit
+    /// (Registry.deinit entry/exit) and the remove_cycles save/restore; while
+    /// any driver is live, teardown is excluded (`assertIdleForTeardown`), so
+    /// in practice these walks run over an empty or bit-unchanged list.
+    pub fn syncGcDeinitMirrors(self: *JSRuntime, deinit_phase: bool) void {
+        var node = self.gc_deinit_mirror_head;
+        while (node) |n| : (node = n.prev) n.flag.* = deinit_phase;
     }
 
     /// Stack-local execution/root records are borrowed by Runtime. They must be

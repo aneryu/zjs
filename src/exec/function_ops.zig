@@ -13,16 +13,78 @@ pub const PrototypeMethod = enum(u32) {
     bind = 2,
     call = 3,
     apply = 4,
+    has_instance = 5,
 };
 
 /// Declaration + dispatch table for the `.function` native-builtin domain
-/// (QuickJS `js_function_proto_funcs` analogue).
+/// (QuickJS `js_function_proto_funcs` analogue, quickjs.c:41390).
 pub const internal_entries = [_]core.host_function.InternalEntry{
     functionCallEntry(),
-    functionEntry("apply", 2, @intFromEnum(PrototypeMethod.apply)),
+    functionApplyEntry(),
     functionEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
     functionEntry("bind", 1, @intFromEnum(PrototypeMethod.bind)),
+    // qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`.
+    // Every `instanceof` whose RHS does not override `Symbol.hasInstance` lands
+    // here, so it must resolve by record id rather than by name cascade.
+    //
+    // `JS_CFUNC_DEF` is `JS_CFUNC_generic`, not `JS_CFUNC_MAGIC_DEF`: qjs gives
+    // this method its own C function rather than a magic selector into a shared
+    // body. Mirror that -- a dedicated `.generic` entry keeps the 24M-call
+    // `instanceof` path out of `functionCall`'s magic switch, which the hot
+    // `apply`/`bind`/`toString` trio shares.
+    functionHasInstanceEntry(),
 };
+
+fn functionHasInstanceEntry() core.host_function.InternalEntry {
+    return .{
+        .name = "[Symbol.hasInstance]",
+        .length = 1,
+        .id = @intFromEnum(PrototypeMethod.has_instance),
+        .magic = 0,
+        .cproto = .generic,
+        .native_function = .{ .generic = &functionHasInstance },
+        .exec_direct = builtin_dispatch.execDirectFunction(&functionHasInstanceDirect),
+    };
+}
+
+/// Exec-direct ABI twin of `functionHasInstance` (NB2-B): identical body
+/// routing, but the realm pair, output, and VM caller pair arrive by
+/// parameter, so no NativeCallEnvironment recovery is needed. Declared
+/// separately because `qjsFunctionHasInstanceCall` carries an inferred error
+/// set and the direct ABI requires the exact `HostError` surface.
+fn functionHasInstanceDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    return call_runtime.qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
+}
+
+/// qjs:41379 `js_function_hasInstance` -> `JS_OrdinaryIsInstanceOf(ctx,
+/// argv[0], this_val)`. The receiver is the constructor, the first argument the
+/// probed value.
+fn functionHasInstance(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
+    return call_runtime.qjsFunctionHasInstanceCall(
+        host_call.ctx,
+        host_call.output,
+        realm.global,
+        host_call.this_value,
+        host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    );
+}
 
 fn functionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
@@ -45,6 +107,35 @@ fn functionCallEntry() core.host_function.InternalEntry {
         .forwards_call = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&functionCallRecord),
+        // NB2-B: same shape as apply — the body consumes only the direct-ABI
+        // parameter set, so the non-forwarding dispatch paths (e.g.
+        // `fastNativeMethodCall`) skip the environment round-trip too.
+        .exec_direct = builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionCallCall),
+    };
+}
+
+/// qjs:41392 `JS_CFUNC_MAGIC_DEF("apply", 2, js_function_apply, 0)`: apply is
+/// a dedicated C function in qjs, not a selector into a shared body. Mirror
+/// that with its own record handler so the hot apply path skips the
+/// `functionCall` magic switch. `forwards_call` stays false: apply
+/// materializes its own argument list, and `op_call_method`'s fused-frame
+/// forwarding arm (vm_call.zig `nativeMethodFastDispatch` miss gate) is built
+/// only for Function.prototype.call's argv+1 forwarding.
+fn functionApplyEntry() core.host_function.InternalEntry {
+    const id = @intFromEnum(PrototypeMethod.apply);
+    return .{
+        .name = "apply",
+        .length = 2,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&functionApplyRecord),
+        // NB2-B (qjs:17563 `js_call_c_function` has no env side-channel):
+        // the flat apply body takes the whole call state by parameter, so the
+        // hot record dispatch skips the NativeCallEnvironment stores and the
+        // `active_native_call` save/set/restore. `functionApplyRecord` stays
+        // as the env-path shim for any dispatcher that still owns one.
+        .exec_direct = builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionApplyCall),
     };
 }
 
@@ -64,6 +155,36 @@ test "Function.call has a dedicated native record handler" {
     for (internal_entries) |entry| {
         if (entry.id == @intFromEnum(PrototypeMethod.call)) {
             try std.testing.expect(entry.forwards_call);
+            return;
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "Function.apply has a dedicated non-forwarding native record handler" {
+    var apply_handler: ?core.host_function.NativeGenericMagicFn = null;
+    for (internal_entries) |entry| {
+        if (entry.id == @intFromEnum(PrototypeMethod.apply)) {
+            const native = entry.native_function orelse continue;
+            apply_handler = switch (native) {
+                .generic_magic => |handler| handler,
+                else => null,
+            };
+        }
+    }
+    try std.testing.expect(apply_handler != null);
+    try std.testing.expect(apply_handler.? == &functionApplyRecord);
+    for (internal_entries) |entry| {
+        if (entry.id == @intFromEnum(PrototypeMethod.apply)) {
+            // apply must NOT route into op_call_method's fused-frame
+            // forwarding arm, which only implements Function.prototype.call.
+            try std.testing.expect(!entry.forwards_call);
+            // NB2-B: the hot record dispatch must take the exec-direct ABI
+            // (no NativeCallEnvironment round-trip) straight into the flat
+            // apply body.
+            try std.testing.expect(entry.exec_direct != null);
+            try std.testing.expect(entry.exec_direct.? ==
+                builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionApplyCall));
             return;
         }
     }
@@ -90,22 +211,31 @@ fn functionCall(
             std.debug.assert(realm.realm == ctx);
             return call.qjsFunctionBindCall(ctx, host_call.output, realm.global, &.{}, host_call.this_value, host_call.args);
         },
-        @intFromEnum(PrototypeMethod.apply) => {
-            const realm = try builtin_dispatch.callableRealm(host_call);
-            std.debug.assert(realm.realm == ctx);
-            return call_runtime.qjsFunctionApplyCall(
-                ctx,
-                host_call.output,
-                realm.global,
-                host_call.this_value,
-                host_call.func_obj orelse return error.TypeError,
-                host_call.args,
-                builtin_dispatch.callerBytecode(host_call),
-                builtin_dispatch.callerFrame(host_call),
-            );
-        },
         else => error.TypeError,
     };
+}
+
+/// Dedicated apply record handler (qjs:41213 `js_function_apply`, magic 0).
+/// Same shape as `functionCallRecord`: recover the exec environment, resolve
+/// the callable realm once, then run the flat apply body.
+fn functionApplyRecord(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
+    return call_runtime.qjsFunctionApplyCall(
+        host_call.ctx,
+        host_call.output,
+        realm.global,
+        host_call.this_value,
+        host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    );
 }
 
 fn functionCallRecord(

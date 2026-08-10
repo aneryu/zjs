@@ -1,0 +1,342 @@
+{
+ "tool": "zjs-zoo-compare",
+ "schemaVersion": 2,
+ "medianMethod": "statistics.median; even sample counts average the middle pair",
+ "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
+ "timestamp": "2026-08-10T14:21:35Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "alternating by sample parity; each engine leads exactly half the samples",
+ "firstPositionBalanced": true,
+ "cpu": 19,
+ "effectiveAffinity": [
+  19
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/zjs-rt-t5",
+   "sha256": "2d1518e4f1b7a506d82ef2125ece071866bc480e3bcf305a238adeee9f4c0ec1",
+   "repo": {
+    "path": "/home/aneryu/zjs",
+    "commit": "1cc8d275da49091789759b470a6c97ffd6bc33a0",
+    "dirty": false
+   }
+  },
+  "qjs": {
+   "path": "/home/aneryu/quickjs/qjs",
+   "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+   "repo": {
+    "path": "/home/aneryu/quickjs",
+    "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "raytrace": {
+   "scores": {
+    "RayTrace": {
+     "zjs": {
+      "median": 2393.0,
+      "min": 2375,
+      "max": 2413,
+      "samples": [
+       2392,
+       2394,
+       2387,
+       2392,
+       2396,
+       2375,
+       2406,
+       2413
+      ]
+     },
+     "qjs": {
+      "median": 3394.0,
+      "min": 3360,
+      "max": 3427,
+      "samples": [
+       3387,
+       3360,
+       3401,
+       3427,
+       3394,
+       3390,
+       3410,
+       3394
+      ]
+     },
+     "ratioZjsOverQjs": 0.7050677666470242,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.045667007099837,
+    "qjs": 2.0187783520668745
+   }
+  },
+  "splay": {
+   "scores": {
+    "Splay": {
+     "zjs": {
+      "median": 6804.0,
+      "min": 6741,
+      "max": 6822,
+      "samples": [
+       6804,
+       6804,
+       6822,
+       6741,
+       6780,
+       6814,
+       6796,
+       6813
+      ]
+     },
+     "qjs": {
+      "median": 7293.0,
+      "min": 6438,
+      "max": 7367,
+      "samples": [
+       6438,
+       7367,
+       7310,
+       7293,
+       7302,
+       7285,
+       7293,
+       7285
+      ]
+     },
+     "ratioZjsOverQjs": 0.9329494035376388,
+     "isLatency": false
+    },
+    "SplayLatency": {
+     "zjs": {
+      "median": 15863.0,
+      "min": 15832,
+      "max": 15967,
+      "samples": [
+       15933,
+       15915,
+       15967,
+       15832,
+       15842,
+       15865,
+       15861,
+       15839
+      ]
+     },
+     "qjs": {
+      "median": 17973.0,
+      "min": 16687,
+      "max": 18173,
+      "samples": [
+       16687,
+       18122,
+       17975,
+       17971,
+       17835,
+       17981,
+       17970,
+       18173
+      ]
+     },
+     "ratioZjsOverQjs": 0.8826016802982252,
+     "isLatency": true
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.37219120352529,
+    "qjs": 2.2776754398364574
+   }
+  },
+  "earley-boyer": {
+   "scores": {
+    "EarleyBoyer": {
+     "zjs": {
+      "median": 2854.0,
+      "min": 2818,
+      "max": 2876,
+      "samples": [
+       2846,
+       2862,
+       2863,
+       2876,
+       2818,
+       2854,
+       2854,
+       2851
+      ]
+     },
+     "qjs": {
+      "median": 4490.0,
+      "min": 4481,
+      "max": 4509,
+      "samples": [
+       4492,
+       4509,
+       4488,
+       4509,
+       4484,
+       4482,
+       4494,
+       4481
+      ]
+     },
+     "ratioZjsOverQjs": 0.6356347438752784,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 6.2034938666038215,
+    "qjs": 5.107380765490234
+   }
+  }
+ },
+ "summary": {
+  "throughputGeomean": 0.7477656765841662,
+  "throughputRatios": {
+   "raytrace": 0.7050677666470242,
+   "splay": 0.9329494035376388,
+   "earley-boyer": 0.6356347438752784
+  },
+  "latencyRatios": {
+   "splay:SplayLatency": 0.8826016802982252
+  },
+  "zjsFaster": [],
+  "zjsSlower": [
+   "earley-boyer",
+   "raytrace",
+   "splay"
+  ]
+ },
+ "orderLog": [
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

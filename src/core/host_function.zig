@@ -278,6 +278,16 @@ pub const InternalRecord = struct {
     /// Cold observable-coercion path for numeric cprotos. It uses the same
     /// typed generic+magic ABI as ordinary native records.
     fallback_function: ?NativeGenericMagicFn = null,
+    /// Exec-owned direct-call ABI. QuickJS's `js_call_c_function`
+    /// (quickjs.c:17563) has no environment side-channel: everything the C
+    /// body needs arrives as parameters. When set, exec's record dispatch
+    /// passes the resolved realm pair, host output, and VM caller state by
+    /// parameter and skips the stack-local NativeCallEnvironment
+    /// materialization plus the `active_native_call` save/set/restore
+    /// entirely. Type-erased here because the caller-frame parameter types
+    /// live in exec; only `src/exec/builtin_dispatch.zig` casts it (to
+    /// `ExecDirectCallFn`), and only exec domain tables populate it.
+    exec_direct: ?*const anyopaque = null,
 
     pub fn hasCallable(self: InternalRecord) bool {
         return self.native_function != null;
@@ -304,6 +314,8 @@ pub const InternalEntry = struct {
     native_function: ?NativeFunctionPtr = null,
     /// See `InternalRecord.fallback_function`.
     fallback_function: ?NativeGenericMagicFn = null,
+    /// See `InternalRecord.exec_direct`.
+    exec_direct: ?*const anyopaque = null,
 };
 
 // --- Builtin method-id enums ------------------------------------------------
@@ -1052,7 +1064,13 @@ pub const builtin_method_id_lookup = struct {
     };
 
     pub const collection = struct {
-        const StaticMethod = builtin_method_ids.collection.StaticMethod;
+        // NOTE: there is deliberately no `StaticMethod` alias here.
+        // `builtin_method_ids.collection` declares no such enum -- the only
+        // collection static (`Map.groupBy`) lives in
+        // `exec/collection_ops.zig`'s `StaticMethod`. A dangling
+        // `builtin_method_ids.collection.StaticMethod` alias used to sit on
+        // this line; Zig only analyses container decls lazily, so it compiled
+        // purely because nothing referenced it.
         const PrototypeMethod = builtin_method_ids.collection.PrototypeMethod;
         const ConstructorMethod = builtin_method_ids.collection.ConstructorMethod;
 

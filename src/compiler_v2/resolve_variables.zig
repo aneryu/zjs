@@ -210,6 +210,7 @@ const Resolver = struct {
     source_attach_cursor: u32 = 0,
     next_bind_offset: u64,
     next_source_offset: u64,
+    next_side_offset: u64,
     has_dynamic_env_objects: bool,
     dynamic_env_closure_len: usize,
 
@@ -1026,6 +1027,7 @@ const Resolver = struct {
             self.input_sources[self.source_cursor].temp_offset
         else
             std.math.maxInt(u64);
+        self.refreshSideFrontier();
     }
 
     fn absorbSourcesThrough(self: *Resolver, input_pos: u32) void {
@@ -1244,11 +1246,15 @@ const Resolver = struct {
             self.binds[self.bind_cursor].input_offset
         else
             std.math.maxInt(u64);
+        self.refreshSideFrontier();
+    }
+
+    inline fn refreshSideFrontier(self: *Resolver) void {
+        self.next_side_offset = @min(self.next_bind_offset, self.next_source_offset);
     }
 
     inline fn passSideEventsThrough(self: *Resolver, input_pos: u32) Error!void {
-        if (input_pos < self.next_bind_offset and input_pos < self.next_source_offset)
-            return;
+        if (input_pos < self.next_side_offset) return;
         try self.passBindsAt(input_pos);
         self.absorbSourcesThrough(input_pos);
     }
@@ -2513,6 +2519,14 @@ pub fn run(
     // QCP-1 S3: exact-scope accelerator deferred; the linked-chain fallback is
     // the semantic path shared with the legacy pipeline.
 
+    const initial_bind_offset: u64 = if (binds.len != 0)
+        binds[0].input_offset
+    else
+        std.math.maxInt(u64);
+    const initial_source_offset: u64 = if (input.source_len != 0)
+        input.source_slots[0].temp_offset
+    else
+        std.math.maxInt(u64);
     var resolver: Resolver = .{
         .ctx = &ctx,
         .input = input,
@@ -2522,14 +2536,9 @@ pub fn run(
         .product = &product,
         .binds = binds,
         .graph = &graph,
-        .next_bind_offset = if (binds.len != 0)
-            binds[0].input_offset
-        else
-            std.math.maxInt(u64),
-        .next_source_offset = if (input.source_len != 0)
-            input.source_slots[0].temp_offset
-        else
-            std.math.maxInt(u64),
+        .next_bind_offset = initial_bind_offset,
+        .next_source_offset = initial_source_offset,
+        .next_side_offset = @min(initial_bind_offset, initial_source_offset),
         .has_dynamic_env_objects = rules.functionHasDynamicEnvObjects(&ctx),
         .dynamic_env_closure_len = fd.closure_var.len,
     };

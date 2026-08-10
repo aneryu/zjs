@@ -93,7 +93,10 @@ pub inline fn dataPropertyValueForFastPath(
 }
 
 pub fn functionOwnDataPropertyValueForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    const object = functionOwnDataPropertyObject(rt, value, atom_id) orelse return null;
+    // `rt` is retained for signature parity with the other fast-path probes; the
+    // legacy caller/arguments gate no longer needs the atom table to answer.
+    _ = rt;
+    const object = functionOwnDataPropertyObject(value, atom_id) orelse return null;
     return object.getOwnDataPropertyValue(atom_id);
 }
 
@@ -106,7 +109,7 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
 ) ?core.function.NativeBuiltinRef {
     _ = function;
     _ = site_pc;
-    const object = functionOwnDataPropertyObject(rt, value, atom_id) orelse return null;
+    const object = functionOwnDataPropertyObject(value, atom_id) orelse return null;
     if (object.hasExoticMethods()) return null;
 
     for (object.shapeProps(), 0..) |prop, index| {
@@ -128,10 +131,10 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
     return null;
 }
 
-fn functionOwnDataPropertyObject(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?*core.Object {
+fn functionOwnDataPropertyObject(value: core.JSValue, atom_id: core.Atom) ?*core.Object {
     const object = objectFromValue(value) orelse return null;
     if (!isFunctionLikeClassId(object.class_id)) return null;
-    if (atom_id == core.atom.ids.arguments or value_ops.atomNameEql(rt, atom_id, "caller")) return null;
+    if (atom_id == core.atom.ids.arguments or atom_id == core.atom.ids.caller) return null;
     return object;
 }
 
@@ -161,19 +164,6 @@ test "function-like class predicate recognizes every bytecode function class" {
     try std.testing.expect(!isFunctionLikeClassId(core.class.ids.object));
 }
 
-pub fn setObjectDataPropertyForPutFieldFastPath(
-    rt: *core.JSRuntime,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-    value: core.JSValue,
-) !bool {
-    _ = function;
-    _ = site_pc;
-    return setObjectDataPropertyForSimplePutFieldOwned(rt, receiver, atom_id, value);
-}
-
 /// Formerly an IC-hit-only put for the lean `op_put_field` fast handler. With the
 /// inline cache removed (qjs has none), there is no cached slot to write, so this
 /// always returns false and the lean handler defers to the cold handler's full
@@ -194,20 +184,6 @@ pub inline fn cachedSetObjectDataPropertyForPutFastPath(
     _ = atom_id;
     _ = value;
     return false;
-}
-
-fn setObjectDataPropertyForSimplePutFieldOwned(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
-    if (rt.atoms.kind(atom_id) == .private) return false;
-    const object = objectFromValue(receiver) orelse return false;
-    if (object.needsSlowPropertyAccess()) return false;
-    if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
-    if (object.class_id == core.class.ids.module_ns) return false;
-    if (core.object.isTypedArrayObject(object)) return false;
-    if (object.isArray()) {
-        if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
-    }
-    const lookup = writableOwnDataPropertyLookupForObject(object, atom_id) orelse return false;
-    return setOwnDataPropertyLookupOwned(rt, object, lookup, atom_id, value);
 }
 
 inline fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
@@ -323,10 +299,6 @@ fn setOwnDataPropertyLookup(rt: *core.JSRuntime, object: *core.Object, lookup: B
     return setOwnDataPropertyAt(rt, object, lookup.index, atom_id, value);
 }
 
-fn setOwnDataPropertyLookupOwned(rt: *core.JSRuntime, object: *core.Object, lookup: BorrowedOwnDataLookup, atom_id: core.Atom, value: core.JSValue) bool {
-    return setOwnDataPropertyAtOwned(rt, object, lookup.index, atom_id, value);
-}
-
 fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) !bool {
     const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
     if (atom_id != core.atom.ids.Private_brand and !slot.value.requiresRefCount() and !value.requiresRefCount()) {
@@ -344,14 +316,6 @@ fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize,
 /// `writableDataSlotAt` guarantees the slot is `.data`; destroy with a
 /// data-kind flag (the w/e/c bits are irrelevant to `destroyPropertySlot`).
 const data_flags = core.property.Flags{ .kind = .data, .writable = true };
-
-fn setOwnDataPropertyAtOwned(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) bool {
-    const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
-    const old_slot = slot.entry.slot;
-    slot.entry.slot = .{ .data = value };
-    core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
-    return true;
-}
 
 fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.Atom) FastOwnDataResult {
     const index = object.findProperty(atom_id) orelse return .missing;

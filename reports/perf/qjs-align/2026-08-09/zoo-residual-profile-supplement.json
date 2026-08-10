@@ -1,0 +1,122 @@
+{
+ "schemaVersion": 1,
+ "purpose": "Durable selected counters from the profile-only Box2D, DeltaBlue, Richards and floating-operation attribution runs",
+ "measurementRole": "Attribution only; every performance ratio in OUTCOME.md comes from frozen production ReleaseFast binaries",
+ "profileBinary": {
+  "sha256": "507bfecb7350ef3ff85a1862807cf8d92b344dd1ed196f071fb29aa9b323b5c3",
+  "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+  "instrumentation": "opcode profiling enabled"
+ },
+ "fixedWork": {
+  "iterationDivisor": 16,
+  "sourceHashesMatch": "zoo-final-fixed-pmu-all.json benchmark source.fixedWorkSha256",
+  "benchmarks": {
+   "box2d": {
+    "fixedWorkSha256": "2f98346e24c510ceb3269a00fec08bdf142d4c1099bcc8b6387cb505b798cfe8",
+    "opcodesExecuted": 145006585,
+    "valueFrees": 48409202,
+    "callFrames": 1716673,
+    "selectedOpcodes": {
+     "get_field": 31426487,
+     "get_loc8": 20062778,
+     "mul": 10556470,
+     "add": 5154590,
+     "sub": 4639916,
+     "put_field": 4090588,
+     "get_field2": 3182774,
+     "call_method": 1756846,
+     "push_const8": 148739
+    },
+    "flatCycleProfilePercent": {
+     "qjs_JS_CallInternal": [87.09, 85.57],
+     "zjs_op_get_field": [30.97, 30.80],
+     "zjs_largest_binary_handler": [5.18, 4.88],
+     "zjs_op_get_field2": [4.87, 4.70],
+     "zjs_op_call_method": [3.61, 3.10]
+    }
+   },
+   "deltablue": {
+    "fixedWorkSha256": "e9b32adfc7ac6b25513c2b0d5356a655d91e4a3e4594b8d24228aa735eb6a5a5",
+    "opcodesExecuted": 379035827,
+    "valueFrees": 181951251,
+    "callFrames": 31163587,
+    "selectedOpcodes": {
+     "get_field": 54966835,
+     "get_loc0": 53649232,
+     "get_field2": 31829912,
+     "call_method": 31744385,
+     "push_this": 30228013,
+     "put_loc0": 30175588,
+     "return": 24944438,
+     "if_false8": 16177466,
+     "push_const8": 1
+    },
+    "flatCycleProfilePercent": {
+     "qjs_JS_CallInternal": [93.45, 93.63],
+     "zjs_op_call_method": [18.62, 18.91],
+     "zjs_op_get_field": [17.36, 17.18],
+     "zjs_op_get_field2": [16.28, 16.47],
+     "zjs_pushExactSimpleFrame": [8.31, 7.85],
+     "zjs_op_return": [7.07, 7.22]
+    }
+   },
+   "richards": {
+    "fixedWorkSha256": "4e0e348f303d1529df42f9bddf953eb385d94ceeef40c6dade94e20db2fcc9c9",
+    "opcodesExecuted": 500722906,
+    "valueFrees": 201566292,
+    "callFrames": 20768830,
+    "selectedOpcodes": {
+     "get_field": 80141454,
+     "get_loc0": 66470975,
+     "if_false8": 29843303,
+     "put_field": 25999423,
+     "get_field2": 23419506,
+     "call_method": 20759086,
+     "return": 17811373,
+     "push_const8": 1
+    },
+    "flatCycleProfilePercent": {
+     "qjs_JS_CallInternal": [99.05, 99.07],
+     "zjs_op_get_field": [24.83, 24.81],
+     "zjs_op_call_method": [14.46, 13.37],
+     "zjs_op_get_field2": [12.83, 12.78],
+     "zjs_op_return": [7.57, 7.97],
+     "zjs_pushExactSimpleFrame": [7.46, 7.37],
+     "zjs_op_put_field": [5.17, 5.47]
+    }
+   }
+  }
+ },
+ "floatingOperationConfound": {
+  "iterations": 20000000,
+  "cases": {
+   "float-binary-control": {
+    "sourceSha256": "3ad9062bcbf18e3adf14d1832454e1f51f2545c6158b93843574b5141b219400",
+    "opcodesExecuted": 300000027,
+    "push_const8": 2
+   },
+   "float-add": {
+    "sourceSha256": "0725e719f01514640c0b0c73d8dbf4b85a6a15f821e106222ae58649aa522868",
+    "opcodesExecuted": 340000027,
+    "push_const8": 20000002,
+    "add": 20000000
+   },
+   "float-sub": {
+    "sourceSha256": "56702b46c5733d5159a122c816c8576666d967f4aa6a6ae27a0342c57db3fbdf",
+    "opcodesExecuted": 340000027,
+    "push_const8": 20000002,
+    "sub": 20000000
+   },
+   "float-mul": {
+    "sourceSha256": "82cb39621befb177f6903405ead635fd0e6e9b6f5c517ded21b245cb95be04fd",
+    "opcodesExecuted": 340000027,
+    "push_const8": 20000002,
+    "mul": 20000000
+   }
+  },
+  "isolatedDeltaPerOperationCase": {
+   "push_const8": 20000000,
+   "binaryOpcode": 20000000
+  }
+ }
+}

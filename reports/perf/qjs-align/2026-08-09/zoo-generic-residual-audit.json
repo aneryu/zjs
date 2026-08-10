@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-09",
+  "decision": "no additional one-cut: generic Zoo residual is distributed across already-audited call/frame and shared object-lifecycle costs",
+  "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+  "provenance": {
+    "zjsCommit": "9bc0fb3ac07bf2066b44e7d795a7766d1b0f31ad",
+    "zjsCandidateSha256": "336a5641be76522463022d4c06c52e1ce855ec1027b25710c25385a8bf081de9",
+    "zjsProfileSha256": "8da5f21b9bc477e623fcc9c916b17cef086231a3178a7b890f543ee209b473aa",
+    "quickjsCommit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "quickjsSha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+    "zooCommit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+    "cpu": 19,
+    "cpuModel": "Cortex-X925",
+    "pmu": "armv8_pmuv3_1",
+    "samplingOrder": "paired ABBA",
+    "samplesPerEngine": 4
+  },
+  "fixedWorkProfiles": {
+    "iterationDivisor": 16,
+    "splayFixedSourceSha256": "aa33f72468def72fa400e7765518f573059641dcd9ccf48852ad4fb309ce9dfa",
+    "typescriptFixedSourceSha256": "7e9f5cf9a9dd1195f1039453ba2c4c52cdc74579db11ef95783b644f1fce54f9",
+    "splay": {
+      "instructions": { "qjsMedian": 3879311727.0, "zjsMedian": 5398844546.5, "ratio": 1.3919249649881889 },
+      "cycles": { "qjsMedian": 1347982622.0, "zjsMedian": 1862737198.5, "ratio": 1.3799539692995872 },
+      "opcodeCount": 38573726,
+      "callFrames": 1210095,
+      "valueFrees": 14381520,
+      "selectedOpcodeCounts": {
+        "get_field": 3107543,
+        "define_field": 1895047,
+        "object": 947523,
+        "call2": 947520,
+        "call_method": 232505,
+        "get_field2": 232507,
+        "return": 1131206
+      },
+      "cycleProfilePercent": {
+        "qjsLifecycleRuns": [38.71, 38.78],
+        "zjsLifecycleRuns": [38.95, 39.46],
+        "qjsAllocatorRuns": [9.50, 9.32],
+        "zjsAllocatorRuns": [9.06, 8.58],
+        "qjsPropertyPublishRuns": [8.18, 8.08],
+        "zjsPropertyPublishRuns": [9.20, 9.94]
+      },
+      "cycleGcEntryCount": { "qjs": 16, "zjs": 16 },
+      "cycleGcCountMethod": "GDB production-symbol entry counters on JS_RunGC and Object.destroyRuntimeCyclesWithValueRoots"
+    },
+    "typescript": {
+      "instructions": { "qjsMedian": 16145361315.0, "zjsMedian": 21358843067.5, "ratio": 1.322846403949631 },
+      "cycles": { "qjsMedian": 4535624002.0, "zjsMedian": 5397221926.0, "ratio": 1.189889805171625 },
+      "opcodeCount": 307813820,
+      "callFrames": 10772841,
+      "valueFrees": 127855505,
+      "selectedOpcodeCounts": {
+        "get_field": 53583551,
+        "call_method": 13117437,
+        "put_field": 13597510,
+        "get_field2": 15767034,
+        "if_false8": 18783442,
+        "return": 6225911,
+        "return_undef": 4546930
+      },
+      "topZjsCycleSymbolsPercent": {
+        "op_get_field": 19.46,
+        "op_call_method": 7.67,
+        "op_get_field2": 6.72,
+        "op_put_field": 3.58,
+        "op_return": 3.11,
+        "pushExactSimpleFrame": 2.95
+      }
+    }
+  },
+  "operationPricingControlSubtractedPerOperation": {
+    "control": {
+      "instructions": { "qjs": 102.060, "zjs": 91.066, "ratio": 0.8923 },
+      "cycles": { "qjs": 18.552, "zjs": 15.321, "ratio": 0.8258 }
+    },
+    "ownPropertyRead": {
+      "instructions": { "qjs": 119.103, "zjs": 125.104, "ratio": 1.0504 },
+      "cycles": { "qjs": 20.513, "zjs": 19.286, "ratio": 0.9402 }
+    },
+    "ownPropertyWrite": {
+      "instructions": { "qjs": 82.058, "zjs": 83.059, "ratio": 1.0122 },
+      "cycles": { "qjs": 10.879, "zjs": 10.600, "ratio": 0.9743 }
+    },
+    "directExactLeafCall": {
+      "instructions": { "qjs": 290.171, "zjs": 346.219, "ratio": 1.1932 },
+      "cycles": { "qjs": 40.980, "zjs": 57.620, "ratio": 1.4061 }
+    },
+    "methodCall": {
+      "instructions": { "qjs": 351.230, "zjs": 427.281, "ratio": 1.2165 },
+      "cycles": { "qjs": 56.691, "zjs": 74.983, "ratio": 1.3227 }
+    },
+    "prototypeMethodCall": {
+      "instructions": { "qjs": 488.480, "zjs": 687.557, "ratio": 1.4075 },
+      "cycles": { "qjs": 110.542, "zjs": 134.090, "ratio": 1.2130 }
+    }
+  },
+  "twoFieldObjectControlSubtracted": {
+    "iterations": 10000000,
+    "case": "cases/splay-object2.js",
+    "caseSha256": "c6ebc5499a75c0e941b63a0ab7deb5f8d5f4dce0660da21d83f78c230bd80f65",
+    "control": "cases/splay-object2-control.js",
+    "controlSha256": "718c23048cc916710502b6011d3f174442c84d0012ece7cd7e5641a9ec65797f",
+    "stdoutMatch": "100000000000000",
+    "samples": {
+      "qjsControlInstructions": [3263504077, 3263622322, 3263498421, 3263529716],
+      "zjsControlInstructions": [3343098377, 3343151822, 3343118464, 3343048548],
+      "qjsObjectInstructions": [17368808718, 17408732394, 17459126449, 17368847725],
+      "zjsObjectInstructions": [20868910633, 20668850324, 20578979170, 20718793654],
+      "qjsControlCycles": [500605948, 499734825, 497971852, 499803797],
+      "zjsControlCycles": [499963661, 501497641, 499881349, 501294297],
+      "qjsObjectCycles": [2684874937, 2700462797, 2772328157, 2699430128],
+      "zjsObjectCycles": [3005835807, 2951543378, 2931646295, 2974740263]
+    },
+    "medianNetPerIteration": {
+      "instructions": { "qjs": 1412.527, "zjs": 1735.071, "ratio": 1.2283 },
+      "cycles": { "qjs": 220.018, "zjs": 246.251, "ratio": 1.1192 }
+    }
+  },
+  "closedMechanisms": [
+    "ordinary call wrapper inlining: rejected in P3-08",
+    "return bookkeeping and completion classification: landed in P3-10/P3-12",
+    "extended return outlining: rejected in P4-01a",
+    "frame representation rewrite: no-go after P4-01c/P4-02.0",
+    "native continuation boundary: rejected at +24.8% on fib_rec in P5-01",
+    "allocator empty-arena retention: shared with QuickJS and permanently closed in P7-00"
+  ]
+}

@@ -258,7 +258,6 @@ const native_record_debt = [_]NoRecordEntry{
     .{ .table = .async_disposable_stack_prototype, .name = "move", .reason = .disposable_stack_marker_debt },
 
     // ---- DEBT: standalone AUTOINIT descriptors ----------------------------
-    .{ .table = .standalone_auto_init, .name = "[Symbol.hasInstance]", .reason = .name_cascade_debt },
     .{ .table = .standalone_auto_init, .name = "[Symbol.iterator]", .reason = .name_cascade_debt },
 };
 
@@ -542,7 +541,7 @@ const array_unscopables_auto_init = Method{ .name = "[Symbol.unscopables]", .len
 // native-record gate covers them too.
 const symbol_to_primitive_auto_init = preparedMethod(.{ .name = "[Symbol.toPrimitive]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.primitive, primitive_symbol_to_primitive_id) }, .standalone_auto_init);
 const date_to_primitive_auto_init = preparedMethod(.{ .name = "[Symbol.toPrimitive]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.date, @intFromEnum(date_builtin.PrototypeMethod.to_primitive)) }, .standalone_auto_init);
-const function_has_instance_auto_init = preparedMethod(.{ .name = "[Symbol.hasInstance]", .length = 1 }, .standalone_auto_init);
+const function_has_instance_auto_init = preparedMethod(.{ .name = "[Symbol.hasInstance]", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.function, @intFromEnum(function_ops.PrototypeMethod.has_instance)) }, .standalone_auto_init);
 const iterator_dispose_auto_init = preparedMethod(.{ .name = "[Symbol.dispose]", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.PrototypeMethod.dispose)) }, .standalone_auto_init);
 const string_iterator_auto_init = preparedMethod(.{ .name = "[Symbol.iterator]", .length = 0 }, .standalone_auto_init);
 const regexp_escape_auto_init = preparedMethod(.{ .name = "escape", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.StaticMethod.escape)) }, .standalone_auto_init);

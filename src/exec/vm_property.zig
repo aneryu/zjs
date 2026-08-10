@@ -1174,6 +1174,25 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     return object.fastArrayElementDup(index);
 }
 
+/// qjs's JS_GetPropertyValue switches on class_id, and JS_CLASS_MAPPED_ARGUMENTS
+/// sits right beside the ARRAY/ARGUMENTS arms with its own cell-dereferencing
+/// read (quickjs.c:9047-9049). `fastDenseArrayElementValue` covers ARRAY and
+/// UNMAPPED arguments — both store JSValues inline — while a mapped arguments
+/// object stores JSVarRef pointers in the same union, so it needs a separate arm
+/// rather than a widened bounds check.
+///
+/// Kept as its own entry point instead of a tail on the dense reader: that
+/// reader has six callers, and growing it moved enough code to cost 26% cycles
+/// on a plain-call benchmark that never reads an element at all (instructions
+/// unchanged — pure layout). Only the hot `OP_get_array_el` handler pays the
+/// extra probe.
+pub noinline fn fastMappedArgumentsElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue {
+    const index_i32 = key.asInt32() orelse return null;
+    if (index_i32 < 0) return null;
+    const object = objectFromValue(value) orelse return null;
+    return object.mappedArgumentsElementDup(@intCast(index_i32));
+}
+
 /// Own integer-element read for a NON-fast (sparse/slow) Array — the leg after
 /// fastDenseArrayElementValue misses. qjs JS_GetPropertyValue's JS_CLASS_ARRAY
 /// arm, when `idx >= u.array.count`, routes to JS_GetPropertyInternal with the

@@ -1794,6 +1794,25 @@ fn classNeedsSlowPropertyAccess(class_id: class.ClassId, has_exotic_methods: boo
     };
 }
 
+/// Classes whose instances can own dense element storage (`u.array`) or
+/// materialized index properties with element semantics: only for these does
+/// an array-index-form atom need the full `array.arrayIndexFromAtom` probe
+/// (whose string leg parses the >= 10-digit "2147483648".."4294967294"
+/// window) before a plain shape add. qjs's set/add path likewise asks the
+/// index question only in the fast_array class arm — the inline
+/// `__JS_AtomIsTaggedInt` bit test (quickjs.c:9868-9877) — while the ordinary
+/// object add_property runs with no index probe at all (quickjs.c:9884-9890).
+fn classOwnsIndexedElementStorage(class_id: class.ClassId) bool {
+    return switch (class_id) {
+        class.ids.array,
+        class.ids.arguments,
+        class.ids.mapped_arguments,
+        class.ids.string,
+        => true,
+        else => false,
+    };
+}
+
 fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
     if (builtin.is_test and class_id < test_standard_exotic_methods.len) {
         if (test_standard_exotic_methods[class_id]) |methods| return methods;
@@ -2252,6 +2271,110 @@ pub const Object = extern struct {
             .shape_ref = template.shape_ref,
             .entries = template.propertyEntries(),
         });
+    }
+
+    /// Allocate an arguments object (unmapped or mapped) straight from its
+    /// realm-owned initial Shape, consuming caller-prepared property cells —
+    /// the zjs analogue of qjs js_build_arguments / js_build_mapped_arguments
+    /// filling `JSProperty props[3]` with already-owned refs and transferring
+    /// them wholesale into `JS_NewObjectFromShape` (quickjs.c:16154-16168,
+    /// 16215-16232), whose props arm block-copies the cells (quickjs.c:
+    /// 5727-5730). The general `createInternal` path re-derives class layout
+    /// per call through the class definition plan and re-dups every borrowed
+    /// slot against the shape FAM flags; both arguments classes are standard
+    /// (`.ordinary` declared payload, no exotic methods, no inline layout), so
+    /// their layout facts are hardcoded here exactly like qjs's
+    /// JS_CLASS_ARGUMENTS/JS_CLASS_MAPPED_ARGUMENTS switch arm (quickjs.c:
+    /// 5679-5698, empty fast-array union; the caller adopts the dense/var-ref
+    /// window afterwards). `createArrayFromInitialShape` is the same mirror
+    /// for dense arrays; `createPreparedPropertyTemplate` for property-shaped
+    /// templates.
+    pub fn createArgumentsFromShape(
+        rt: *JSRuntime,
+        class_id: class.ClassId,
+        initial_shape: *shape.Shape,
+        entries: []const property.Entry,
+    ) !*Object {
+        std.debug.assert(class_id == class.ids.arguments or class_id == class.ids.mapped_arguments);
+        std.debug.assert(entries.len == initial_shape.prop_count);
+        if (builtin.mode == .Debug) {
+            // The hardcoded layout facts below must stay in lockstep with the
+            // registered arguments class definitions the generic path
+            // (createInternal) consults: `.ordinary` declared payload attaches
+            // lazily (class_payload_kind stays `.none`), no inline payload, no
+            // exotic methods, and construction leaves `fast_array` false (the
+            // caller's dense/var-ref adoption flips it, exactly as after the
+            // generic path). Divergence here would reroute mapped-arguments
+            // index redefine/delete off the exotic slow path that nulls the
+            // bound cell — the invariant apply's fully-bound window check
+            // relies on to fall back to observable [[Get]].
+            const definition = rt.classes.standardPlan(class_id);
+            std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
+            std.debug.assert(definition.payload_kind == .ordinary);
+            std.debug.assert(!payloadKindAllocates(definition.payload_kind));
+            std.debug.assert(!classHasExoticMethods(class_id, definition.has_exotic));
+        }
+
+        // qjs JS_NewObjectFromShape consumes `props` unconditionally: copied
+        // into the object on success, destroyed by the shape flags on
+        // allocation failure (quickjs.c:5639-5646).
+        var owned_entries_pending = true;
+        errdefer if (owned_entries_pending) {
+            const props = initial_shape.props();
+            for (entries, 0..) |entry, index| {
+                const entry_flags = property.Flags.fromBits(props[index].flags);
+                destroyPropertySlot(rt, props[index].atom_id, entry_flags, entry.slot);
+            }
+        };
+
+        // js_dup_shape on entry (quickjs.c:16165/16229); JS_NewObjectFromShape
+        // consumes the Shape on every failure path (quickjs.c:5647).
+        initial_shape.retain();
+        var shape_owned = true;
+        errdefer if (shape_owned) rt.shapes.release(initial_shape);
+
+        const alloc_size = @sizeOf(Object);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = try rt.memory.createNoTrigger(Object);
+        var initialized = false;
+        errdefer if (initialized)
+            destroyFromHeader(rt, &self.header)
+        else
+            rt.memory.destroy(Object, self);
+
+        // qjs allocates `prop[shape->prop_size]` (quickjs.c:5635); later named
+        // appends trust `shape.prop_size` slots. The arguments shapes always
+        // carry the three named cells, so the zero-capacity sentinel arm of
+        // the generic path is dead here.
+        const property_capacity: usize = initial_shape.prop_size;
+        std.debug.assert(property_capacity >= entries.len and entries.len != 0);
+        const property_storage = try rt.allocRuntime(property.Entry, property_capacity);
+        var property_storage_owned = true;
+        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
+
+        self.* = .{
+            .header = .{},
+            .class_id = class_id,
+            // Null first word: qjs's empty fast-array union (quickjs.c:
+            // 5695-5697) doubling as the no-payload sentinel — identical to
+            // createInternal's arguments storage arm.
+            .u = ObjectStorage.initPayload(null),
+            .flags = .{
+                .class_payload_kind = .none,
+                .has_exotic_methods = false,
+            },
+            .shape_ref = initial_shape,
+            .prop_values = property_storage.ptr,
+        };
+        std.debug.assert(!self.isWeakReferenceHolderClass());
+        @memcpy(self.prop_values[0..entries.len], entries);
+        owned_entries_pending = false;
+        property_storage_owned = false;
+        shape_owned = false;
+        initialized = true;
+        try rt.registerObjectWithBytes(self, alloc_size);
+        initialized = false;
+        return self;
     }
 
     const PreparedPropertyEntryOwnership = enum {
@@ -4917,6 +5040,37 @@ pub const Object = extern struct {
         return refs;
     }
 
+    /// Dense element buffer of an UNMAPPED arguments object, for
+    /// `build_arg_list`'s JS_CLASS_ARGUMENTS arm (quickjs.c:41185-41196), which
+    /// reads `p->u.array.u.values[i]` directly instead of running [[Get]] per
+    /// index. `fast_array` is the same dense-extent guard qjs tests, so an
+    /// arguments object that lost its dense representation falls back.
+    pub fn unmappedArgumentsDenseValues(self: *const Object) []const JSValue {
+        if (self.class_id != class.ids.arguments or !self.flags.fast_array) return &.{};
+        if (self.u.array.count == 0) return &.{};
+        std.debug.assert(self.u.array.capacity >= self.u.array.count);
+        return self.u.array.values[0..@as(usize, @intCast(self.u.array.count))];
+    }
+
+    /// Var-ref window of a MAPPED arguments object whose every index is still
+    /// bound to its frame slot, for `build_arg_list`'s JS_CLASS_MAPPED_ARGUMENTS
+    /// arm (quickjs.c:41188-41191). qjs guards that arm with `p->fast_array`,
+    /// which redefining or deleting an index clears; zjs records the same fact
+    /// per element by nulling the cell (`deleteMappedArgumentsBinding`, reached
+    /// from delete and from any accessor/non-writable redefine). A single
+    /// unbound index therefore has to send the whole list back to observable
+    /// [[Get]] — that index may now resolve to an own accessor or to the
+    /// prototype chain.
+    pub fn fullyBoundMappedArgumentsVarRefs(self: *const Object) ?[]const ?*var_ref_mod.VarRef {
+        if (self.hasExoticMethods() or self.proxyTarget() != null) return null;
+        const refs = self.argumentsVarRefs();
+        if (refs.len == 0) return null;
+        for (refs) |cell| {
+            if (cell == null) return null;
+        }
+        return refs;
+    }
+
     pub fn argumentsVarRefs(self: *const Object) []const ?*var_ref_mod.VarRef {
         if (self.class_id != class.ids.mapped_arguments or self.u.array.count == 0) return &.{};
         std.debug.assert(self.u.array.capacity >= self.u.array.count);
@@ -5034,6 +5188,29 @@ pub const Object = extern struct {
     pub fn fastArrayElementDup(self: *const Object, index: u32) ?JSValue {
         if (!self.isFastArrayIndexInBounds(index)) return null;
         return self.u.array.values[@intCast(index)].dup();
+    }
+
+    /// Indexed read of a MAPPED arguments object — qjs JS_GetPropertyValue's
+    /// JS_CLASS_MAPPED_ARGUMENTS arm (quickjs.c:9047-9049), which sits beside
+    /// the JS_CLASS_ARRAY/ARGUMENTS arms and dereferences the element's var-ref
+    /// cell (`*p->u.array.u.var_refs[idx]->pvalue`). The dense arm cannot serve
+    /// this class: `u.array.values` holds JSVarRef pointers, not JSValues.
+    ///
+    /// qjs takes a whole object out of the fast representation when any index is
+    /// redefined (convert_fast_array_to_array, quickjs.c:9262); zjs records the
+    /// same fact per element by nulling the cell, so an unbound index falls
+    /// through to the full path while its neighbours keep the fast read.
+    /// noinline: this is the rarest of the indexed-read arms, and letting it
+    /// inline into `fastDenseArrayElementValue` grew that hot helper enough to
+    /// cost 26% cycles on a plain-call benchmark that never touches arguments
+    /// (instructions unchanged — pure layout). Keeping it out of line restores
+    /// the dense arm's code shape.
+    pub noinline fn mappedArgumentsElementDup(self: *const Object, index: u32) ?JSValue {
+        if (self.class_id != class.ids.mapped_arguments) return null;
+        const refs = self.argumentsVarRefs();
+        if (index >= refs.len) return null;
+        const cell = refs[index] orelse return null;
+        return cell.pvalue.*.dup();
     }
 
     pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
@@ -7701,7 +7878,14 @@ pub const Object = extern struct {
 
         const old_phase = rt.gc.phase;
         rt.gc.phase = .remove_cycles;
-        defer rt.gc.phase = old_phase;
+        // Cold once-per-collection transition: keep the VM deinit-mirror bytes
+        // authoritative across the save/restore (old_phase could in principle
+        // be .deinit if a teardown pass ever ran cycle removal).
+        rt.syncGcDeinitMirrors(false);
+        defer {
+            rt.gc.phase = old_phase;
+            rt.syncGcDeinitMirrors(old_phase == .deinit);
+        }
 
         // STEP 3 (qjs faithful): no edge-nulling pre-pass. qjs has none — its
         // cascade defense is the REMOVE_CYCLES gate in __JS_FreeValueRT
@@ -10669,8 +10853,15 @@ pub const Object = extern struct {
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
-            if (try self.setDenseArrayElement(rt, index, new_value)) return;
+        // Hoisted fast_array gate (setDenseArrayElement's own first check):
+        // only a dense-element receiver can consume the index, so a plain
+        // object's named set skips the out-of-line arrayIndexFromAtom probe
+        // entirely (qjs asks the index question only inside its fast_array
+        // arms, quickjs.c:9741-9750, 9868-9877).
+        if (self.flags.fast_array) {
+            if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
+                if (try self.setDenseArrayElement(rt, index, new_value)) return;
+            }
         }
         var prototype = self.getPrototype();
         while (prototype) |proto| {
@@ -10756,7 +10947,7 @@ pub const Object = extern struct {
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
             if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
-            if (!entry_flags.writable) return false;
+            if (entry_flags.deleted or !entry_flags.writable) return false;
             const entry = &self.prop_values[index];
             if (atom_id != atom.ids.Private_brand) {
                 switch (entry_flags.kind) {
@@ -10767,9 +10958,19 @@ pub const Object = extern struct {
                             return true;
                         }
                     },
-                    // VARREF slots are written through the cell via putVar, never
-                    // here; refuse the fast path so we never overwrite the slot.
-                    .var_ref => return false,
+                    // VARREF: write THROUGH the cell (never overwrite the
+                    // slot), mirroring setOwnWritableDataProperty and qjs
+                    // JS_SetPropertyInternal's JS_PROP_VARREF set_value leg
+                    // (quickjs.c:9720-9726). Needed since the merged caller
+                    // (setValuePropertyWithThrow) replaced its leading
+                    // setOwnWritableDataProperty probe with this one.
+                    .var_ref => {
+                        const cell = entry.slot.var_ref;
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        cell.setVarRefValue(rt, next_value);
+                        return true;
+                    },
                     // Data-destined auto_init placeholder: overwrite + flip kind.
                     .auto_init => {
                         const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
@@ -10790,11 +10991,6 @@ pub const Object = extern struct {
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
-        return try self.defineNewOwnDataPropertyForSimpleSetKnownNoOwn(rt, atom_id, new_value);
-    }
-
-    pub fn defineNewOwnDataPropertyForSimpleSet(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.findProperty(atom_id) != null) return false;
         return try self.defineNewOwnDataPropertyForSimpleSetKnownNoOwn(rt, atom_id, new_value);
     }
 
@@ -10835,7 +11031,15 @@ pub const Object = extern struct {
         if (self.class_id == class.ids.module_ns or self.class_id == class.ids.mapped_arguments) return false;
         if (isTypedArrayObjectForSetFastPath(self)) return false;
         if (self.isArray() and atom_id == atom.ids.length) return false;
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
+        // Index-form atoms: the tagged-int bit test runs for every class (a
+        // folded `o['5'] = x` computed key reaches the set path with a
+        // tagged-int atom), but only dense-storage-capable classes pay the
+        // out-of-line string-leg probe — an ordinary object's add never asks
+        // (qjs add_property, quickjs.c:9884-9890; the index question lives in
+        // the fast_array arm's __JS_AtomIsTaggedInt, quickjs.c:9868-9877).
+        if (atom.isTaggedInt(atom_id)) return false;
+        if (classOwnsIndexedElementStorage(self.class_id) and
+            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
 
         var prototype = self.getPrototype();
         while (prototype) |proto| {
@@ -10865,6 +11069,127 @@ pub const Object = extern struct {
         }
 
         try self.addProperty(rt, atom_id, descriptor.Descriptor.data(new_value, true, true, true));
+        return true;
+    }
+
+    /// qjs JS_SetPropertyInternal's single-walk core (quickjs.c:9706-9890) for
+    /// the put_field cold shell: ONE trusted own probe that classifies the hit
+    /// (plain writable data / var_ref / auto_init handled here; accessor and
+    /// read-only hits defer), ONE prototype walk that `break`s at the first
+    /// plain writable data holder (quickjs.c:9840-9853), then add_property
+    /// with C_W_E flags straight into the slot (quickjs.c:9884-9890) — no
+    /// Descriptor materialization and no re-probing. The old cold cascade
+    /// re-ran an equivalent admission gate set and own probe up to four times
+    /// per new-property write (setObjectDataPropertyForPutFieldFastPath ->
+    /// setValuePropertyWithThrow -> setOwnWritableDataProperty ->
+    /// defineNewOwnDataPropertyForSimpleSet).
+    ///
+    /// Returns true when the write was fully performed; false defers to the
+    /// full setValueProperty resolver with NO state mutated. OWNED value
+    /// contract (qjs consumes `val` the same way): `new_value` is consumed
+    /// when `true` is returned AND on the error path (the append's errdefer
+    /// destroys the prepared slot); a `false` return leaves ownership with
+    /// the caller.
+    ///
+    /// Deliberate defers that pin the resolver's semantic order:
+    /// - with-environment receivers: the strict-miss ReferenceError door in
+    ///   setValuePropertyWithThrow must stay ahead of any own probe;
+    /// - mapped-arguments receivers (via needsSlowPropertyAccess): both the
+    ///   own-hit setMappedArgumentsValue hook and the new-property
+    ///   updateMappedArgumentsBinding hook live in the resolver;
+    /// - accessor/read-only hits anywhere on the chain: setter invocation and
+    ///   throw_on_set_failure polarity need the caller frame;
+    /// - a global receiver may take the own-hit write but never the add — qjs
+    ///   likewise routes JS_CLASS_GLOBAL_OBJECT to generic_create_prop
+    ///   (quickjs.c:9882-9883);
+    /// - the extensible check sits AFTER the prototype walk (qjs order,
+    ///   quickjs.c:9862-9865): a non-extensible receiver whose chain holds a
+    ///   setter must reach that setter, never a synthesized failure.
+    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
+        // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
+        // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
+        // classes, whose set semantics (length, canonical numeric indices,
+        // binding mirrors, traps) all live in the resolver.
+        if (self.needsSlowPropertyAccess()) return false;
+        if (self.proxyTarget() != null) return false;
+        if (self.flags.is_with_environment) return false;
+
+        if (self.findPropertyProbeTrusted(atom_id)) |lookup| {
+            const entry_flags = property.Flags.fromBits(lookup.prop.flags);
+            if (entry_flags.deleted or !entry_flags.writable) return false;
+            const entry = &self.prop_values[lookup.index];
+            switch (entry_flags.kind) {
+                // qjs's single-mask fast case (quickjs.c:9708-9713): swap the
+                // slot, free the old value. The owned store consumes new_value.
+                .data => {
+                    const old_slot = entry.slot;
+                    entry.slot = .{ .data = new_value };
+                    destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
+                    return true;
+                },
+                // JS_PROP_VARREF: set_value through the cell
+                // (quickjs.c:9720-9726); module_ns cells were excluded by the
+                // class gate and const cells carry writable == false.
+                .var_ref => {
+                    entry.slot.var_ref.setVarRefValue(rt, new_value);
+                    return true;
+                },
+                // Data-destined AUTOINIT (quickjs.c:9727-9733 instantiates and
+                // retries; the retry lands in the fast case): discard the lazy
+                // default and flip the kind in lockstep. Auto-init entries are
+                // always data-destined (native accessors install eagerly, see
+                // isAccessorOrAccessorPlaceholderAt); non-writable placeholders
+                // were deferred above.
+                .auto_init => {
+                    self.ensureUniqueShapeForMutation(rt) catch |err| {
+                        // Owned contract: errors consume new_value.
+                        new_value.free(rt);
+                        return err;
+                    };
+                    self.setEntryKindAndSlot(rt, atom_id, lookup.index, entry_flags.withKind(.data), .{ .data = new_value });
+                    self.pruneBorrowedReferenceHolderIfEmpty(rt);
+                    return true;
+                },
+                .accessor => return false,
+            }
+        }
+
+        // Own miss: new-property leg. Index-form atoms keep the resolver's
+        // element/length machinery — a folded computed key (`o['5'] = x`) can
+        // still reach put_field with a tagged-int atom. Ordinary classes pay
+        // only the bit test; the string-leg probe (>= 10-digit index names)
+        // runs for dense-storage-capable classes alone, mirroring qjs's
+        // fast_array-arm-only __JS_AtomIsTaggedInt (quickjs.c:9868-9877)
+        // against the probe-free ordinary add (quickjs.c:9884-9890).
+        if (atom.isTaggedInt(atom_id)) return false;
+        if (classOwnsIndexedElementStorage(self.class_id) and
+            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
+        if (self.isGlobal()) return false;
+
+        // qjs's prototype walk (quickjs.c:9739-9854): the FIRST holder of the
+        // key decides — setter/auto_init/read-only entries defer to the
+        // resolver, a plain writable data property does NOT shadow the create
+        // (break and add an own slot). Exotic/proxy/typed links keep their
+        // trap/canonical-index semantics in the resolver.
+        var prototype = self.getPrototype();
+        while (prototype) |proto| {
+            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
+            if (isTypedArrayObjectForSetFastPath(proto)) return false;
+            if (proto.findPropertyProbeTrusted(atom_id)) |proto_lookup| {
+                const proto_flags = property.Flags.fromBits(proto_lookup.prop.flags);
+                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return false;
+                break;
+            }
+            prototype = proto.getPrototype();
+        }
+
+        // Extensibility AFTER the walk (quickjs.c:9862-9865, see doc note).
+        if (!self.flags.extensible) return false;
+
+        // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890). The
+        // prepared slot takes the caller's ref; on append failure the errdefer
+        // inside destroys it (owned contract).
+        try self.appendPreparedPropertyEntry(rt, atom_id, property.Flags.data(true, true, true), .{ .data = new_value });
         return true;
     }
 
@@ -11262,8 +11587,17 @@ pub const Object = extern struct {
     /// preludes and the duplicate arrayIndexFromAtom of defineOwnProperty+
     /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
     /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
-    /// class_id==object, !hasExoticMethods, !is_array, extensible, and a
-    /// NON-refcounted `value` (both call sites guard `requiresRefCount`).
+    /// class_id==object, !hasExoticMethods, !is_array, extensible.
+    ///
+    /// Ownership contract (any value shape, refcounted included — qjs
+    /// OP_define_field, quickjs.c:19269, has no value-form gate):
+    /// `data_value` is CONSUMED on success and NOT consumed on ANY failure.
+    /// The hot caller (defineFieldFast) turns every error into a cold-shell
+    /// RE-EXECUTION of the opcode with the value still owned by the VM stack
+    /// slot, so the append leg installs the slot borrow-until-commit (its
+    /// failure unwind must not destroy the caller's ref) and the duplicate-key
+    /// leg goes through replaceProperty's borrow (`slotFromDescriptor` dups)
+    /// and then frees the caller's ref only after the replace committed.
     ///
     /// Takes the bare value instead of a `Descriptor`: qjs OP_define_field
     /// carries its property flags as the constant int `JS_PROP_C_W_E`
@@ -11289,6 +11623,15 @@ pub const Object = extern struct {
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
+            // replaceProperty is BORROW semantics (slotFromDescriptor dups the
+            // value into the new slot, object.zig:12284-ish); the define
+            // contract is consume-on-success (qjs JS_DefinePropertyValue frees
+            // its `val` argument), so retire the caller's ref here — without
+            // this, every duplicate refcounted literal key (`({a:o1,a:o2})`)
+            // leaked one ref. Failure paths above did not consume: the
+            // materialize/compat/replace errors leave ownership with the
+            // caller (replaceProperty's own errdefer frees only its dup).
+            data_value.free(rt);
             return;
         }
         // Both call sites (vm_literal.zig defineFieldFast + the cold defineField
@@ -11298,16 +11641,21 @@ pub const Object = extern struct {
         // current_function ref keeps live for the whole opcode. That external
         // root makes appendPreparedPropertyEntry's own atom guard redundant here,
         // so use the trusted (guard-free) add. Flags are the comptime C_W_E
-        // constant. No `.dup()` on the slot install: both call sites guard
-        // `!value.requiresRefCount()`, for which dup is the identity — the
-        // residual rc-branch was dead weight on the literal hot path (qjs
-        // OP_define_field hands sp[-1] to JS_DefinePropertyValue pre-owned
-        // with no extra dup either).
-        if (comptime builtin.mode == .Debug) {
-            std.debug.assert(!data_value.requiresRefCount());
-        }
+        // constant. No `.dup()` on the slot install: the value MOVES into the
+        // slot pre-owned, exactly qjs OP_define_field handing sp[-1] to
+        // JS_DefinePropertyValue with no extra dup (quickjs.c:19269). The move
+        // only COMMITS with the shape transition: `slot_borrowed_until_commit`
+        // keeps the failure unwind from destroying the caller's ref (the cold
+        // shell re-executes the opcode still owning the value — destroying it
+        // here would double-free a refcounted value on OOM mid-append). A
+        // refcounted value needs no explicit rooting across the shape alloc/GC
+        // window: its live refcount (held via the caller's stack slot) is
+        // unaccounted by trial-deletion cycle removal and therefore an
+        // external root — the same argument the over-hang comment in
+        // appendPreparedPropertyEntryImpl makes for the pending entry itself.
         try self.appendPreparedPropertyEntryImpl(
             true, // caller_holds_atom_ref: the bytecode operand root (see above)
+            true, // slot_borrowed_until_commit: consume-on-success contract (see above)
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
@@ -11320,7 +11668,7 @@ pub const Object = extern struct {
     /// allocations below (which can trigger GC, whose object/shape sweep frees
     /// prop atoms — dropping an otherwise-unrooted atom to ref_count 0 mid-call).
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        return self.appendPreparedPropertyEntryImpl(false, rt, atom_id, entry_flags, slot);
+        return self.appendPreparedPropertyEntryImpl(false, false, rt, atom_id, entry_flags, slot);
     }
 
     /// `caller_holds_atom_ref == true` is the trusted leg: the caller already
@@ -11334,7 +11682,16 @@ pub const Object = extern struct {
     /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
     /// per-property guard. MUST NOT be used with a transient/just-interned atom
     /// that has no other root than the (elided) guard.
-    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+    ///
+    /// `slot_borrowed_until_commit == true` (the definePlainDataPropertyKnownFast
+    /// leg only): the slot's data value is a BORROW of the caller's live ref
+    /// until the shape transition commits — on ANY failure the unwind restores
+    /// the pre-call object state WITHOUT destroying the slot value (ownership
+    /// stays with the caller, whose cold-shell re-execution still holds it on
+    /// the VM stack). On success the value is committed as MOVED (the caller's
+    /// consume-on-success contract). `false` keeps the historical owned-slot
+    /// unwind: failure destroys the prepared slot via destroyPropertySlot.
+    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // Root the atom across the shape allocations below unless the caller
         // already holds a live ref. The dup/free must span the WHOLE function
         // (defer at function scope), so gate via comptime rather than a runtime
@@ -11348,7 +11705,7 @@ pub const Object = extern struct {
         if (atom.isTaggedInt(atom_id)) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
         const is_array_index = rt.atoms.atomIsArrayIndex(atom_id);
         var slot_owned = true;
-        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
+        errdefer if (!slot_borrowed_until_commit and slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
         const old_len = self.shape_ref.prop_count;
         const old_capacity = self.propertyStorageCapacity();
@@ -11372,14 +11729,20 @@ pub const Object = extern struct {
         // Over-hang: write the value at index `old_len` (== current prop_count)
         // BEFORE adoptShapeForNewProperty below commits prop_count = old_len + 1.
         // Until that commit the entry is EXCLUDED from propertyEntries(); a GC
-        // triggered by the shape allocation skips it (a fresh, not-yet-cyclic
-        // value, so skipping cannot collect it prematurely).
+        // triggered by the shape allocation skips it. Skipping cannot collect a
+        // refcounted pending value prematurely: cycle removal is trial deletion
+        // (gc_decref/gc_scan), so an UNTRACED edge leaves the value's refcount
+        // unaccounted — an external root that keeps it (and anything it
+        // references) alive for the whole collection.
         self.prop_values[old_len] = .{ .slot = slot };
         slot_owned = false;
 
         var inserted = true;
         errdefer if (inserted) {
-            destroyPropertySlot(rt, atom_id, entry_flags, self.prop_values[old_len].slot);
+            // Borrow-until-commit: the pending value at old_len is the
+            // caller's ref (not ours to destroy); just un-stage the entry.
+            if (!slot_borrowed_until_commit)
+                destroyPropertySlot(rt, atom_id, entry_flags, self.prop_values[old_len].slot);
             self.prop_values[old_len] = .{};
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {

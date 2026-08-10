@@ -435,16 +435,6 @@ pub const Entry = struct {
         return self.teardown.constructor_completion;
     }
 
-    fn takeConstructorFallback(self: *Entry) core.JSValue {
-        std.debug.assert(self.teardown.constructor_completion);
-        std.debug.assert(self.return_action == .constructor);
-        std.debug.assert(!self.teardown.has_native_caller);
-        const fallback = self.native_caller;
-        self.native_caller = core.JSValue.undefinedValue();
-        self.teardown.constructor_completion = false;
-        return fallback;
-    }
-
     /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
     /// storage that is dead for empty-leaf entries. Default repr: the 16-byte
     /// `native_caller` value is live under `teardown.has_native_caller` or
@@ -813,6 +803,52 @@ pub const Entry = struct {
             return;
         }
         self.deinitGeneral(ctx);
+    }
+
+    /// Normal-return teardown for a constructor frame whose fallback instance
+    /// the caller has already moved out of `native_caller` by plain read.
+    /// This is `deinitReturned`'s exact routing for that frame minus every
+    /// statically excluded probe: constructor frames never publish a leaf bit
+    /// (pushConstructorCall/pushDerivedConstructorCall build generic or plain
+    /// simple frames), never own a native `call` record, and the fallback
+    /// release is the caller's — so neither `releaseNativeCaller` nor
+    /// `releaseConstructorFallback` may run here, and the teardown byte's
+    /// completion flags are NOT rewritten first (the retired
+    /// takeConstructorFallback round-trip existed only to make the shared
+    /// deinit family skip the fallback). The one remaining dynamic decision
+    /// is the only one that cannot be made at push time: whether the frame
+    /// kept the arena-backed simple shape. A cold frame (`arguments`,
+    /// materialized new_target box) routes general exactly as before — that
+    /// part is frame truth, not return-path tax.
+    ///
+    /// Abrupt completion must NEVER come through here: it still enters
+    /// `Entry.deinit` with `constructor_completion` set, whose flag-guarded
+    /// `releaseConstructorFallback` frees the instance exactly once.
+    inline fn deinitConstructorReturned(self: *Entry, ctx: *core.JSContext) void {
+        std.debug.assert(self.teardown.constructor_completion);
+        std.debug.assert(!self.teardown.has_native_caller);
+        std.debug.assert(!self.teardown.empty_leaf);
+        std.debug.assert(!self.teardown.exact_args_leaf);
+        std.debug.assert(!self.teardown.special_return);
+        const rt = ctx.runtime;
+        if (self.canUseSimpleTeardown()) {
+            const frame = &self.frame;
+            std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
+            std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
+            if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+            if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
+            if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+            // qjs done: close var refs first, then free local_buf..sp
+            // (quickjs.c:20701-20706).
+            const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
+            for (live_values) |v| v.free(rt);
+            for (frame.args) |v| v.free(rt);
+        } else {
+            self.stack.deinit(rt);
+            self.frame.deinitInlineCall(&rt.memory, rt);
+        }
+        rt.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
     }
 
     /// General teardown for frames whose stack, cold state, or storage escaped
@@ -1553,10 +1589,30 @@ pub const Machine = struct {
     /// inlines it back into `pushFrame`, the simple path's spills re-couple with
     /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
     noinline fn setupSimpleInlineEntry(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
-        return setupSimpleInlineEntryImpl(strict_this, snapshot_args, pad_args, method_receiver, move_args, ctx, global, entry, target, source);
+        return setupSimpleInlineEntryImpl(strict_this, snapshot_args, pad_args, method_receiver, move_args, false, ctx, global, entry, target, source);
     }
 
-    inline fn setupSimpleInlineEntryImpl(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+    /// Constructor member of the simple-frame family. qjs builds constructor
+    /// frames with the byte-identical JS_CallInternal prologue used for method
+    /// calls — JS_CallConstructorInternal (quickjs.c:20845) passes straight
+    /// into the shared alloca prologue (quickjs.c:17828-17871) and
+    /// JS_CALL_FLAG_CONSTRUCTOR is never consumed by that bytecode prologue.
+    /// The `constructor_this` instantiation differs from the method arm in one
+    /// ownership byte: the frame's `this` binding is written `.borrowed` ONCE
+    /// (the eager fallback instance is owned by `Entry.native_caller` under
+    /// `teardown.constructor_completion`, which `pushConstructorCall` publishes
+    /// right after this returns), instead of the retired general-path
+    /// `.owned`-then-flip pair.
+    ///
+    /// `noinline` is LOAD-BEARING exactly as for `setupSimpleInlineEntry`:
+    /// this body must not fold back into `pushConstructorCall`, or its
+    /// register allocation re-couples with the push shell (fib precedent
+    /// 3.09x→3.26x).
+    noinline fn setupSimpleConstructorEntry(comptime snapshot_args: bool, comptime pad_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+        return setupSimpleInlineEntryImpl(false, snapshot_args, pad_args, true, false, true, ctx, global, entry, target, source);
+    }
+
+    inline fn setupSimpleInlineEntryImpl(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, comptime constructor_this: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
         const function = target.fb;
         entry.catch_target = null;
@@ -1571,6 +1627,10 @@ pub const Machine = struct {
         // continuations and tail-call reuse consume a temporary owned region.
         // Both share `[receiver, callable, args...]` for method calls.
         comptime std.debug.assert(!move_args or method_receiver);
+        // Constructors are method-shaped stack regions (op_call_constructor
+        // recast `[instance, callable, args...]`); tail-call reuse never
+        // replaces a constructor Entry, so the moved variant cannot occur.
+        comptime std.debug.assert(!constructor_this or (method_receiver and !move_args and !strict_this));
         std.debug.assert(source.metadata.moved == move_args);
         std.debug.assert(source.metadata.has_receiver == method_receiver);
         const receiver_count: usize = @intFromBool(method_receiver);
@@ -1712,7 +1772,13 @@ pub const Machine = struct {
             .open_var_refs = open_var_refs,
             .storage_values = if (storage_on_heap) slab_values else &.{},
             .ownership = .{
-                .this_value = if (method_receiver) .owned else .borrowed,
+                // A constructor frame BORROWS the eager fallback instance: the
+                // owned reference moved out of the receiver slot is recorded in
+                // `Entry.native_caller` by `pushConstructorCall` immediately
+                // after this returns (no failable step in between), and
+                // constructor completion / abrupt teardown releases it there.
+                // Written `.borrowed` once instead of the retired owned→flip.
+                .this_value = if (method_receiver and !constructor_this) .owned else .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -1800,7 +1866,7 @@ pub const Machine = struct {
             // remove one call instruction from this less common method shape.
             try setupSimpleInlineEntry(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
         } else {
-            try setupSimpleInlineEntryImpl(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
+            try setupSimpleInlineEntryImpl(strict_this, snapshot_args, false, method_receiver, false, false, self.ctx, global, entry, target, source);
         }
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
         entry.prev = self.top;
@@ -1989,70 +2055,6 @@ pub const Machine = struct {
         return self.finishCaptureLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
-    /// Padded-args authoritative constructor (Q3) — the deep fallible twin
-    /// of `pushExactArgsLeafFrame` for the `argc < arg_count` call shape.
-    /// The dispatch arm's capacity gate covers this path too (a warm miss
-    /// re-enters with the same already-proved region), and the pad fill
-    /// happens only inside the infallible publication tail
-    /// (`finishPaddedArgsLeafFrame`), so the sole-owner errdefer below
-    /// releases exactly the supplied `argc` values plus callable/receiver —
-    /// a pad slot is never written on a failure path. Kept as a SEPARATE
-    /// body (see `pushExactArgsLeafFrame` for the tail-merge re-scheduling
-    /// hazard).
-    noinline fn pushPaddedArgsLeafFrame(
-        self: *Machine,
-        comptime leaf_this: LeafThis,
-        global: *core.Object,
-        function: *const bytecode.FunctionBytecode,
-        call_facts: bytecode.CallFacts,
-        captures: []*core.VarRef,
-        region_start: [*]core.JSValue,
-        argc: u16,
-    ) HostError!*Entry {
-        const method_receiver = comptime leaf_this == .receiver;
-        const ctx = self.ctx;
-        const rt = ctx.runtime;
-        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
-        std.debug.assert(argc < function.arg_count);
-        std.debug.assert(function.var_count == 0);
-        std.debug.assert(function.openVarRefCount() == 0);
-
-        // Same sole-owner contract as the exact-args constructor, over the
-        // SUPPLIED args window only (reverse index order, mirroring
-        // cleanupStackSource). The missing tail has not been written.
-        errdefer {
-            var index: usize = argc;
-            while (index > 0) {
-                index -= 1;
-                freeSourceSlot(rt, &region_start[@as(usize, @intFromBool(method_receiver)) + 1 + index]);
-            }
-            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
-            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
-        }
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
-        try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
-        errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
-        const entry = try self.acquireSlot(global);
-        entry.return_action = .next;
-        entry.continuation_payload = 0;
-        entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
-
-        entry.arena_mark = rt.vm_stack.mark();
-        errdefer rt.vm_stack.restore(entry.arena_mark);
-        const stack_count = @as(usize, function.stack_size) + 1;
-        var storage_on_heap = false;
-        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
-            const heap = try rt.memory.alloc(core.JSValue, stack_count);
-            storage_on_heap = true;
-            break :blk heap;
-        };
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
-
-        return self.finishPaddedArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
-    }
-
     /// Debug-only proof that the comptime `this` arm matches the published
     /// per-policy eligibility bit and the callee's frame-`this` policy: the
     /// sloppy arm substitutes the realm global and the raw arm preserves
@@ -2096,26 +2098,6 @@ pub const Machine = struct {
             .sloppy_global => std.debug.assert(capture_kind == .sloppy),
             .raw_undefined => std.debug.assert(capture_kind == .raw_this),
             .receiver => std.debug.assert(capture_kind != .none),
-        }
-        if (comptime leaf_this != .receiver) {
-            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
-        }
-    }
-
-    /// Padded-args twin of `assertExactArgsLeafEligible` (Q3): the padded
-    /// call shape reuses the O1 family's publication byte verbatim — the
-    /// published conditions already prove what padding relies on
-    /// (`has_simple_parameter_list` excludes default/rest parameter
-    /// initializers via `simple_inline_base`, and the leaf body geometry
-    /// excludes `arguments` materialization), so a missing parameter
-    /// slot is exactly the spec's plain `undefined` binding.
-    inline fn assertPaddedArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
-        const execution = call_facts.execution;
-        switch (comptime leaf_this) {
-            .sloppy_global => std.debug.assert(execution.simple_inline_exact_args_leaf),
-            .raw_undefined => std.debug.assert(execution.raw_this_inline_exact_args_leaf),
-            .receiver => std.debug.assert(execution.simple_inline_exact_args_leaf or
-                execution.raw_this_inline_exact_args_leaf),
         }
         if (comptime leaf_this != .receiver) {
             std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
@@ -2333,95 +2315,6 @@ pub const Machine = struct {
         return entry;
     }
 
-    /// Padded-args publication tail (Q3) — the parallel twin of
-    /// `finishExactArgsLeafFrame` for the `argc < arg_count` call shape of a
-    /// published exact-args leaf callee (separate body; see
-    /// `pushExactArgsLeafFrame` for the tail-merge re-scheduling hazard).
-    /// The ONLY divergence from the exact tail: the args window spans the
-    /// full `arg_count` parameter slots of the caller region and the missing
-    /// tail `[argc..arg_count)` is filled with undefined HERE, after the
-    /// last failable point — the leaf form of qjs's `arg_buf` missing-tail
-    /// fill (`for(i = argc; i < arg_count; i++) arg_buf[i] = JS_UNDEFINED`,
-    /// quickjs.c:17856-17857) without the argv copy: the supplied prefix
-    /// already lives where the borrowed window wants it, and the dispatch
-    /// arm's capacity gate (`paddedLeafRegionHasCapacity`) proved the pad
-    /// slots stay inside the caller's fixed operand backing. Constructor
-    /// failure paths therefore release exactly the supplied `argc` values
-    /// (their errdefers never see a pad), while every teardown that runs
-    /// after publication releases the whole window exactly once (undefined
-    /// frees are tag-test no-ops). The teardown publishes the SAME
-    /// `exact_args_leaf` bit: after construction the frame is
-    /// indistinguishable from an exact-args leaf (`args.len == arg_count`),
-    /// so the O1 return arm and both teardown epilogues apply unchanged.
-    /// `actual_arg_count = argc` stays truthful for the
-    /// excluded-by-publication consumers (arguments/rest/super never
-    /// materialize in a leaf body).
-    inline fn finishPaddedArgsLeafFrame(
-        self: *Machine,
-        comptime leaf_this: LeafThis,
-        rt: *core.JSRuntime,
-        entry: *Entry,
-        global: *core.Object,
-        function: *const bytecode.FunctionBytecode,
-        captures: []*core.VarRef,
-        region_start: [*]core.JSValue,
-        argc: u16,
-        stack_window: []core.JSValue,
-        storage_on_heap: bool,
-        planned_stack_bytes: usize,
-        resume_pc: [*]const u8,
-    ) *Entry {
-        const method_receiver = comptime leaf_this == .receiver;
-        std.debug.assert(rt == self.ctx.runtime);
-        const callable_slot = &region_start[@intFromBool(method_receiver)];
-        const args_base = region_start + @as(usize, @intFromBool(method_receiver)) + 1;
-        const args_window: []core.JSValue = args_base[0..function.arg_count];
-        // K1 single pricing, extended through publication (see
-        // finishEmptyLeafFrame): padded pricing includes the qjs argv prefix.
-        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(function, argc, false));
-        // Missing-tail fill, in place. No failable operation follows (or
-        // precedes, within this tail), so an abandoned construction can
-        // never leave a written pad behind for a source-cleanup errdefer to
-        // double-free.
-        @memset(args_base[argc..function.arg_count], core.JSValue.undefinedValue());
-        // Ownership transfers mirror `finishExactArgsLeafFrame` exactly:
-        // `var_refs` borrows the closure's cell array (qjs `var_refs =
-        // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
-        // `current_function` until teardown.
-        entry.frame = .{
-            .function = function,
-            .this_value = switch (comptime leaf_this) {
-                .receiver => takeSourceSlot(&region_start[0]),
-                .raw_undefined => core.JSValue.undefinedValue(),
-                .sloppy_global => global.value(),
-            },
-            .current_function = takeSourceSlot(callable_slot),
-            .actual_arg_count = argc,
-            // Padded pricing: argc < arg_count allocates the qjs argv prefix.
-            .planned_stack_bytes = @intCast(planned_stack_bytes),
-            .args = args_window,
-            .var_refs = captures,
-            .storage_values = if (storage_on_heap) stack_window else &.{},
-            .ownership = .{
-                .this_value = if (method_receiver) .owned else .borrowed,
-                .var_refs = .borrowed,
-                .storage = if (storage_on_heap) .owned else .borrowed,
-            },
-        };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
-        entry.teardown = .{
-            .simple = true,
-            .exact_args_leaf = !storage_on_heap,
-        };
-        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
-        // return path never reads the record.
-        entry.setEmptyLeafResume(resume_pc, region_start);
-        entry.prev = self.top;
-        self.top = entry;
-        self.depth += 1;
-        return entry;
-    }
-
     /// The caller's post-operand resume pointer, exactly what
     /// `reloadAfterPop` re-derives on return. Every empty-leaf constructor
     /// runs after the call opcode published the caller's resume offset
@@ -2597,68 +2490,6 @@ pub const Machine = struct {
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishCaptureLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, carve.window, false, planned_stack_bytes, resume_pc);
-    }
-
-    /// Warm, allocation-free padded-args leaf construction (Q3) — the
-    /// `argc < arg_count` sibling of `tryPushExactArgsLeafCallFast`. The
-    /// dispatch arm has already proved the caller's operand backing keeps
-    /// `arg_count` slots addressable at the region's args base
-    /// (`paddedLeafRegionHasCapacity` — asserted below), so the publication
-    /// tail fills the missing slots with undefined IN PLACE and the frame
-    /// binds the same borrowed caller-region args window as the exact
-    /// family. Same pure-miss contract: a null result leaves call depth,
-    /// arena watermark, source ownership, the untouched pad slots, and
-    /// Machine links unchanged, so the caller can invoke
-    /// `pushPaddedArgsLeafCall` for first-use Entry allocation, chunk
-    /// switching, heap fallback, OOM, or stack-overflow handling. Kept as a
-    /// SEPARATE body (see `pushExactArgsLeafFrame` for the tail-merge
-    /// re-scheduling hazard).
-    pub inline fn tryPushPaddedArgsLeafCallFast(
-        self: *Machine,
-        comptime leaf_this: LeafThis,
-        rt: *core.JSRuntime,
-        global: *core.Object,
-        caller_stack: *stack_mod.Stack,
-        function: *const bytecode.FunctionBytecode,
-        call_facts: bytecode.CallFacts,
-        captures: []*core.VarRef,
-        region_start: [*]core.JSValue,
-        argc: u16,
-        resume_pc: [*]const u8,
-    ) ?*Entry {
-        std.debug.assert(caller_stack.topPtr() == region_start);
-        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
-        std.debug.assert(argc < function.arg_count);
-        std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
-            @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
-        // Vm-resident rt (see tryPushEmptyLeafCallFast).
-        std.debug.assert(rt == self.ctx.runtime);
-        // K1 single pricing (argc < arg_count allocates the qjs argv prefix).
-        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
-        // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
-        // rare chunk/carve misses retreat the committed charge cold.
-        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
-
-        const index = self.depth;
-        const chunk_index = index / entries_per_chunk;
-        if (chunk_index >= self.chunk_count) {
-            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
-            return null;
-        }
-        const entry = self.entryAt(index);
-
-        const stack_count = @as(usize, function.stack_size) + 1;
-        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
-            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
-            return null;
-        };
-
-        entry.return_action = .next;
-        entry.continuation_payload = 0;
-        entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        entry.arena_mark = carve.mark;
-        return self.finishPaddedArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -3080,29 +2911,6 @@ pub const Machine = struct {
         return self.pushCaptureLeafFrame(leaf_this, global, function, call_facts, captures, region_start);
     }
 
-    /// Padded-args twin of `pushExactArgsLeafCall` (Q3): authoritative
-    /// fallible entry for a leaf call that supplies `argc < arg_count`
-    /// arguments in the caller region, with the missing tail padded in
-    /// place by the publication tail (capacity proved by the dispatch arm's
-    /// gate — asserted here).
-    pub inline fn pushPaddedArgsLeafCall(
-        self: *Machine,
-        comptime leaf_this: LeafThis,
-        global: *core.Object,
-        caller_stack: *stack_mod.Stack,
-        function: *const bytecode.FunctionBytecode,
-        call_facts: bytecode.CallFacts,
-        captures: []*core.VarRef,
-        region_start: [*]core.JSValue,
-        argc: u16,
-    ) HostError!*Entry {
-        std.debug.assert(caller_stack.topPtr() == region_start);
-        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
-        std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
-            @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
-        return self.pushPaddedArgsLeafFrame(leaf_this, global, function, call_facts, captures, region_start, argc);
-    }
-
     /// Push a method inline call whose raw source is
     /// `[receiver, callable, args...]`. Sloppy simple methods with their
     /// complete argv — the established `recv.m(x)` hot shape — and strict
@@ -3163,6 +2971,10 @@ pub const Machine = struct {
         target: *const InlineTarget,
         region_start: [*]core.JSValue,
         argc: u16,
+        /// Constructor spread's parser-owned `new.target` operand, consumed on
+        /// success; `null` for direct `new F(...)`, whose new-target is the
+        /// callable itself. On failure the caller still owns it.
+        owned_new_target: ?core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(target.this_value.isObject());
@@ -3183,16 +2995,60 @@ pub const Machine = struct {
         };
         entry.return_action = .constructor;
         entry.continuation_payload = 0;
-        setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
+        // qjs constructor frames are built by the byte-identical
+        // JS_CallInternal prologue used for method calls:
+        // JS_CallConstructorInternal (quickjs.c:20845) enters the shared
+        // alloca prologue (quickjs.c:17828-17871) and JS_CALL_FLAG_CONSTRUCTOR
+        // is never consumed by that bytecode prologue. The caller already
+        // recast the region to method shape `[instance, callable, args...]`
+        // with `target.this_value == values[0]`, so the ordinary method
+        // simple-frame selector applies verbatim; every constructor-specific
+        // fact lives in the completion tail below. The simple slab partitions
+        // give `frame.locals` a valid pointer even at var_count == 0 (empty
+        // slice AT the operand-stack base), so `deinitSimpleResources`'s
+        // live-operand derivation holds — unlike the retired attempt that set
+        // `teardown.simple` on a `Frame.init`-defaulted general frame and
+        // aborted in ReleaseSafe inside `popConstructorReturn`.
+        if (methodSimpleInlineMode(target, source)) |mode| {
+            switch (mode) {
+                .stack_exact => try setupSimpleConstructorEntry(false, false, self.ctx, global, entry, target, source),
+                .stack_padded => try setupSimpleConstructorEntry(false, true, self.ctx, global, entry, target, source),
+                .stack_snapshot_exact => try setupSimpleConstructorEntry(true, false, self.ctx, global, entry, target, source),
+                .stack_snapshot_padded => try setupSimpleConstructorEntry(true, true, self.ctx, global, entry, target, source),
+                // `source` is built by initStack above: `moved` is statically
+                // false, so the temporary-region variants cannot be selected.
+                .moved_exact, .moved_padded, .moved_snapshot_exact, .moved_snapshot_padded => unreachable,
+            }
+        } else {
+            setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
+            // General setup took the receiver `.owned` (its method arm); move
+            // to the same write-once `.borrowed` the simple variants publish,
+            // BEFORE the fallback slot takes ownership below.
+            std.debug.assert(entry.frame.ownership.this_value == .owned);
+            entry.frame.ownership.this_value = .borrowed;
+        }
         errdefer entry.deinit(self.ctx);
 
-        const cold = try entry.frame.ensureCold(&self.ctx.runtime.memory);
-        cold.new_target = entry.frame.current_function;
-        std.debug.assert(entry.frame.ownership.this_value == .owned);
+        // Publish the fallback-instance ownership before the failable
+        // new-target transfer: with `constructor_completion` + `native_caller`
+        // set, `entry.deinit` releases the instance exactly once through
+        // `releaseConstructorFallback` on either teardown route, while the
+        // frame's `.borrowed` this can never double-free it. The bit is set
+        // AFTER setup because both setup families assign the whole teardown
+        // byte.
         std.debug.assert(entry.frame.this_value.same(target.this_value));
         entry.native_caller = entry.frame.this_value;
-        entry.frame.ownership.this_value = .borrowed;
         entry.teardown.constructor_completion = true;
+        // qjs keeps `new_target` in a JS_CallInternal register and gives
+        // JSStackFrame no field for it (quickjs.c:405-417); only a function
+        // that actually reads `new.target` pays anything, at the
+        // OP_special_object dup (quickjs.c:17984). Direct construction has
+        // `new.target == current_function`, so record the alias instead of
+        // heap-allocating a cold box on every `new`.
+        entry.frame.ownership.new_target = .aliases_function;
+        if (owned_new_target) |value| {
+            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, self.ctx.runtime, value);
+        }
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
 
         entry.prev = self.top;
@@ -3213,6 +3069,8 @@ pub const Machine = struct {
         target: *const InlineTarget,
         region_start: [*]core.JSValue,
         argc: u16,
+        /// See `pushConstructorCall`: consumed on success, caller-owned on failure.
+        owned_new_target: ?core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(target.this_value.isUninitialized());
@@ -3236,8 +3094,10 @@ pub const Machine = struct {
         setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
         errdefer entry.deinit(self.ctx);
 
-        const cold = try entry.frame.ensureCold(&self.ctx.runtime.memory);
-        cold.new_target = entry.frame.current_function;
+        entry.frame.ownership.new_target = .aliases_function;
+        if (owned_new_target) |value| {
+            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, self.ctx.runtime, value);
+        }
         std.debug.assert(entry.frame.this_value.isUninitialized());
         entry.native_caller = core.JSValue.undefinedValue();
         entry.teardown.constructor_completion = true;
@@ -3347,6 +3207,14 @@ pub const Machine = struct {
                 args,
                 moved_args,
             );
+        }
+        // NB2-C: the moved general shape (e.g. RayTrace's `initialize` via
+        // Function.apply — materializes arguments, var_count > 0) has a warm
+        // twin too. Copied callers keep the authoritative path: the copied
+        // variant is inlined at three call sites with zero measured events,
+        // and widening a shared hot body has regressed layout before.
+        if (comptime move_args) {
+            return self.tryPushNativeBoundarySimpleGeneralFast(rt, target, moved_args);
         }
         return null;
     }
@@ -3480,6 +3348,123 @@ pub const Machine = struct {
             .locals = stack_window[0..0],
             .args = frame_args,
             .var_refs = captures,
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(
+            &rt.memory,
+            rt.vm_stack_arena_policy,
+            stack_window,
+        );
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+            .copy_argv = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
+    /// Warm form of the general `setupNativeBoundarySimpleEntry` shape for
+    /// MOVED arguments (NB2-C): eligibility is already proven, the Entry slot
+    /// and VM arena are warm, and the frame carries no original-args snapshot
+    /// (sloppy simple-parameter functions — the mapped-arguments shape — plus
+    /// any zero-argument call), so the FrameCold allocation, the fallback
+    /// carve/heap legs, and the errdefer unwind machinery all vanish. The
+    /// geometry is exactly the authoritative slab: args | locals | operand
+    /// stack | open-var-ref tail. Unlike the exact-leaf twin, the argument
+    /// window is `max(actual, declared)` and ALL actuals are copied —
+    /// `arguments` observes extra actual arguments. A null result is a pure
+    /// miss with every budget and watermark unchanged.
+    inline fn tryPushNativeBoundarySimpleGeneralFast(
+        self: *Machine,
+        rt: *core.JSRuntime,
+        target: *const InlineTarget,
+        moved_args: []core.JSValue,
+    ) ?*Entry {
+        const function = target.fb;
+        std.debug.assert(nativeBoundarySimpleEligible(target));
+        const actual_arg_count = moved_args.len;
+        // Snapshot-carrying shapes (strict / derived ctor / non-simple
+        // parameter lists with argc > 0) allocate a FrameCold box; they keep
+        // the authoritative path.
+        if (frame_mod.originalArgCount(
+            actual_arg_count,
+            frame_mod.argumentsNeedsOriginalSnapshot(function),
+        ) != 0) return null;
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            function,
+            actual_arg_count,
+            true,
+        );
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
+        const entry = self.entryAt(index);
+
+        const frame_arg_count = frame_mod.frameArgCount(function, actual_arg_count);
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
+        const open_slots = if (open_var_ref_count == 0)
+            0
+        else
+            (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+        const total = frame_arg_count + var_count + stack_count + open_slots;
+        const carve = rt.vm_stack.carveActiveMarked(total) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
+
+        const frame_args = carve.window[0..frame_arg_count];
+        const locals = carve.window[frame_arg_count..][0..var_count];
+        const stack_window = carve.window[frame_arg_count + var_count ..][0..stack_count];
+        const open_start = frame_arg_count + var_count + stack_count;
+        const open_var_refs: []?*core.VarRef = if (open_slots == 0)
+            &.{}
+        else
+            std.mem.bytesAsSlice(
+                ?*core.VarRef,
+                std.mem.sliceAsBytes(carve.window[open_start..][0..open_slots]),
+            )[0..open_var_ref_count];
+
+        @memset(locals, core.JSValue.undefinedValue());
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
+        @memcpy(frame_args[0..actual_arg_count], moved_args);
+        @memset(moved_args, core.JSValue.undefinedValue());
+        @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
+
+        const captures = target.captureSlice();
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .actual_arg_count = @intCast(actual_arg_count),
+            .locals = locals,
+            .args = frame_args,
+            .var_refs = captures,
+            .open_var_refs = open_var_refs,
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .storage_values = &.{},
             .ownership = .{
@@ -4484,10 +4469,9 @@ pub const Machine = struct {
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
-        // This bit also covers the capture (argc==0) and padded (argc <
-        // arg_count) families, so the release stays argc-aware; only the
-        // copy_argv pricing select is statically false here (none of the
-        // exact/capture/padded finishers sets it).
+        // This bit also covers the capture (argc==0) family, so the release
+        // stays argc-aware; only the copy_argv pricing select is statically
+        // false here (neither the exact nor the capture finisher sets it).
         std.debug.assert(!dying.teardown.copy_argv);
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
         std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
@@ -4548,24 +4532,66 @@ pub const Machine = struct {
         return continuation;
     }
 
-    /// Apply constructor return completion. A base Entry still owns its
-    /// fallback instance: an object result replaces it, while every primitive
-    /// is discarded in favor of the instance. A derived Entry has no fallback;
-    /// its compiler/control helper has already enforced derived-return
-    /// legality and produced the final object.
-    pub fn popConstructorReturn(self: *Machine, result: core.JSValue) core.JSValue {
+    /// Apply constructor return completion, fused to qjs's construct-return
+    /// two-branch: after the shared done: epilogue (quickjs.c:20699-20709)
+    /// JS_CallConstructorInternal keeps only a tag test plus one free
+    /// (quickjs.c:20846-20856). A base Entry still owns its fallback
+    /// instance: an object result replaces it, while every primitive is
+    /// discarded in favor of the instance. A derived Entry carries the
+    /// undefined no-fallback sentinel and forwards the checked result.
+    ///
+    /// Static proof that `constructor_completion AND tail_chain` is
+    /// unsatisfiable, so this pop performs no tail-chain probe and no budget
+    /// overlay read: `tail_chain` is set only by `tailCallReuse` (the
+    /// replacement Entry above), whose single entry point is gated by
+    /// `!completesConstructor()` (tailcall_dispatch.zig `.tail` arm), and the
+    /// replacement is rebuilt as a generic non-constructor frame, so no
+    /// tail-chain carrier ever holds `constructor_completion`; a
+    /// `.constructor` continuation reaching the driver is `unreachable`
+    /// (tailcall_dispatch.zig op_post_call_continuation / run switch arms).
+    ///
+    /// The fallback moves out by plain read: the retired Entry's
+    /// `native_caller`/`constructor_completion` states are dead after this
+    /// pop (the next push reinitializes the slot), so the retired
+    /// takeConstructorFallback round-trip (store undefined + clear flag) was
+    /// two stores per `new` feeding only the shared deinit family's
+    /// flag-guarded release, which the dedicated teardown twin excludes
+    /// statically. Abrupt completion keeps that shared family: an exception
+    /// in the body enters `Entry.deinit` with the flag still SET and
+    /// releases the fallback exactly once through
+    /// `releaseConstructorFallback` — the two routes are mutually exclusive.
+    ///
+    /// Outline on purpose: the return handler pays one bl here instead of
+    /// growing its resident body (the ninth-knife frame-boundary lesson).
+    pub noinline fn popConstructorReturn(self: *Machine, result: core.JSValue) core.JSValue {
         const dying = self.topEntry();
-        const fallback = dying.takeConstructorFallback();
-        const is_derived = fallback.isUndefined();
-        const continuation = self.popReturnedFrame();
-        std.debug.assert(continuation.action == .constructor);
-        std.debug.assert(continuation.payload == 0);
-        if (is_derived) return result;
+        std.debug.assert(dying.teardown.constructor_completion);
+        std.debug.assert(!dying.teardown.has_native_caller);
+        std.debug.assert(!dying.teardown.tail_chain);
+        std.debug.assert(dying.return_action == .constructor);
+        std.debug.assert(dying.continuation_payload == 0);
+        const rt = self.ctx.runtime;
+        const fallback = dying.native_caller;
+        // Committed charge persisted at construction; the recompute is the
+        // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        ));
+        dying.deinitConstructorReturned(self.ctx);
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        self.depth -= 1;
+        // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
+        // done: epilogue (quickjs.c:20709).
+        self.top = dying.prev;
+        if (fallback.isUndefined()) return result;
         if (result.isObject()) {
-            fallback.free(self.ctx.runtime);
+            fallback.free(rt);
             return result;
         }
-        result.free(self.ctx.runtime);
+        result.free(rt);
         return fallback;
     }
 

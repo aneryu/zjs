@@ -49,6 +49,7 @@ const decodeOptionalLocalCompletionTail = property_vm.decodeOptionalLocalComplet
 const decodeStringSliceConstLocalStore = property_vm.decodeStringSliceConstLocalStore;
 const fastArrayPrototypeMethodIsDefault = property_vm.fastArrayPrototypeMethodIsDefault;
 pub const fastDenseArrayElementValue = property_vm.fastDenseArrayElementValue;
+pub const fastMappedArgumentsElementValue = property_vm.fastMappedArgumentsElementValue;
 pub const fastArrayOwnIntElementValue = property_vm.fastArrayOwnIntElementValue;
 pub const fastArrayOwnIntElementSet = property_vm.fastArrayOwnIntElementSet;
 const fastRegExpPrototypeMethodIsDefault = property_vm.fastRegExpPrototypeMethodIsDefault;
@@ -248,10 +249,17 @@ pub noinline fn field(
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
-            if (qjsGetFieldFast(ctx.runtime, receiver, atom_id)) |value| {
-                replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
-                return .done;
-            }
+            // The `qjsGetFieldFast` shape walk that used to sit here is gone: it
+            // is the SAME walk the resident `op_get_field` already ran
+            // (`qjsGetFieldFastSlotOrAbsent`, tailcall_dispatch.zig) — this
+            // shell is only ever reached THROUGH that handler's miss (see the
+            // `cold_table` note: the all-cold table is the fast handlers' miss
+            // target, never a primary dispatch table). The resident probe runs
+            // with `trust_non_private_atom = true`, so its admission set is a
+            // superset of this one's; a miss there is a guaranteed miss here.
+            // Same shape as the `h_put_var` cell arm removal above. qjs's
+            // GET_FIELD_INLINE window likewise runs once per access and drops
+            // straight into JS_GetPropertyInternal (quickjs.c:19107-19160).
             if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
@@ -286,10 +294,9 @@ pub noinline fn field(
                 stack.pushAssumeCapacity(value);
                 return .done;
             }
-            if (qjsGetFieldFast(ctx.runtime, obj, atom_id)) |value| {
-                stack.pushAssumeCapacity(value);
-                return .done;
-            }
+            // Removed for the same reason as the get_field arm above: the
+            // resident `op_get_field2` already ran this exact walk and tailed
+            // here only because it missed (quickjs.c:19107-19160).
             if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, obj, atom_id)) |value| {
                 stack.pushAssumeCapacity(value);
                 return .done;
@@ -321,13 +328,24 @@ pub noinline fn field(
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
             if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
-            if (try property_ic.setObjectDataPropertyForPutFieldFastPath(ctx.runtime, function, site_pc, obj, atom_id, value)) {
+            // Single-walk cold put (qjs OP_put_field's slow path is ONE call
+            // into JS_SetPropertyInternal, quickjs.c:19188-19203 ->
+            // 9706-9890): one trusted own probe, one prototype walk, then
+            // add_property. The old cascade here re-ran the same gates and
+            // own probe up to four times per new-property write
+            // (setObjectDataPropertyForPutFieldFastPath's guaranteed-miss
+            // re-probe — the `pf_bail_missing == 2 * pf_cold` census
+            // signature — then setValueProperty's own pair). The resident
+            // `op_put_field` already ran `qjsPutFieldFastSlot` and tailed
+            // here on its miss; field operand atoms are proven non-private
+            // (debugAssertNonPrivateFieldOperandAtom), so no private probe.
+            if (object_ops.objectFromValueTrustedExpression(obj)) |receiver| {
+                debugAssertNonPrivateFieldOperandAtom(ctx.runtime, atom_id);
+                // Owned contract: value is consumed on success AND on the
+                // (OOM-only) error path — flag before, clear on a decline.
                 value_consumed = true;
-                return .done;
-            }
-            if (qjsPutFieldFast(ctx.runtime, obj, atom_id, value)) {
-                value_consumed = true;
-                return .done;
+                if (try receiver.setOrDefineOwnDataPropertyForPutFieldOwned(ctx.runtime, atom_id, value)) return .done;
+                value_consumed = false;
             }
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
@@ -1064,6 +1082,19 @@ pub noinline fn getArrayElement(
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
+            }
+            // Mapped-arguments element: qjs's JS_GetPropertyValue reaches its
+            // JS_CLASS_MAPPED_ARGUMENTS case through an O(1) switch on class_id
+            // (quickjs.c:9047-9049), so the arm costs it nothing wherever it
+            // sits. zjs probes in sequence, and this is the rarest indexed
+            // class, so it lives here on the cold VM path rather than in the
+            // threaded OP_get_array_el handler -- growing that handler cost
+            // navier -5.5%, mandreel -3.3% and crypto -3.2% on zoo for a class
+            // those benchmarks never read.
+            if (fastMappedArgumentsElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;

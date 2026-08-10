@@ -166,6 +166,25 @@ pub const internal_entries = bufferEntries: {
         codecEntry("toHex", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_hex)),
         codecEntry("setFromBase64", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64)),
         codecEntry("setFromHex", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex)),
+        // The two buffer constructor ids (qjs `JS_NewCConstructor(...,
+        // js_array_buffer_constructor, 1, JS_CFUNC_constructor, 0)`,
+        // quickjs.c:61036 / :61046). `installStandardConstructor` stamps these
+        // ids onto the live `ArrayBuffer` / `SharedArrayBuffer` objects
+        // (standard_globals.zig), so they must resolve to a record; without
+        // these rows the id decoded but pointed past the end of the domain's
+        // record array, leaving `nativeRecordSlot` null.
+        //
+        // `new ArrayBuffer(n)` never reaches this record: construction is
+        // intercepted upstream by `array_ops.constructArrayBufferNativeRecord`
+        // (call_runtime.zig:2476), which reads the raw id. What lands here is
+        // the *plain call* `ArrayBuffer(8)`, which must throw -- and does,
+        // because `qjsBufferNativeRecord` has no arm for these ids and
+        // `bufferCall` turns that miss into a TypeError. Hence `generic_magic`
+        // rather than a constructor cproto: a constructor cproto would also
+        // make `callConstructRecordImpl` claim the construct path and route it
+        // into the same TypeError.
+        bufferEntry("ArrayBuffer", 1, @intFromEnum(ConstructorMethod.array_buffer)),
+        bufferEntry("SharedArrayBuffer", 1, @intFromEnum(ConstructorMethod.shared_array_buffer)),
     };
 };
 

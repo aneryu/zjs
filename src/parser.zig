@@ -8426,7 +8426,7 @@ pub const parser_core = struct {
 
     /// `js_parse_expr_binary` (`quickjs.c:27049`). Pratt-style with hand
     /// rolled level table. Levels 1..8 covered, including private-name `in`.
-    pub fn parseExprBinary(s: *State, level: u8, flags: ParseFlags) Error!void {
+    pub fn parseExprBinary(s: *State, level: u32, flags: ParseFlags) Error!void {
         if (level == 0) {
             return parseUnary(s, ParseFlags{
                 .in_accepted = flags.in_accepted,
@@ -8471,7 +8471,9 @@ pub const parser_core = struct {
     /// `js_parse_unary` (`quickjs.c:26922`). Covers prefix `+`, `-`, `~`,
     /// `!`, `void`, `typeof`, `delete`, prefix `++`/`--`, right-associative
     /// `**`, contextual `yield`, and contextual `await`.
-    pub fn parseUnary(s: *State, flags: ParseFlags) Error!void {
+    // Keep this hot successor on a stable fetch boundary when the preceding
+    // recursive precedence dispatcher changes code size.
+    pub fn parseUnary(s: *State, flags: ParseFlags) align(16) Error!void {
         const k = s.peekKind();
         if (k == @as(tok.TokenKind, @intCast('+'))) {
             const operator_source = SourcePosition{
@@ -10924,7 +10926,7 @@ pub const parser_core = struct {
     }
 
     /// Mirror `quickjs.c:27083..27201` — token-to-opcode level table.
-    fn matchBinaryOp(k: tok.TokenKind, level: u8, flags: ParseFlags) u8 {
+    fn matchBinaryOp(k: tok.TokenKind, level: u32, flags: ParseFlags) u8 {
         return switch (level) {
             1 => switch (k) {
                 @as(tok.TokenKind, @intCast('*')) => opcode.op.mul,

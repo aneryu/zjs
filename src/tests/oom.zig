@@ -373,6 +373,30 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "lit-ok:len=4,d=4" },
     },
     .{
+        // Refcounted object-literal fields through OP_define_field (qjs
+        // CASE(OP_define_field) -> JS_DefinePropertyValue, quickjs.c:19269,
+        // has no value-form gate). The fast leg's failure contract is
+        // borrow-until-commit: an injected allocation failure mid-append or
+        // mid-replace must leave the value owned by the VM stack for the
+        // cold-shell re-execution — a destroy on the staged slot would
+        // double-free, a consume on the replace dup would leak. Duplicate
+        // keys (`a:` twice) drive the replaceProperty leg; the cycle pass
+        // covers the trial-deletion rooting of in-flight values.
+        .name = "refcounted-literal-fields",
+        .source =
+        \\const o1 = { m: 1 };
+        \\const o2 = { m: 2 };
+        \\let last = null;
+        \\for (let i = 0; i < 4; i++) {
+        \\  last = { a: o1, a: o2, left: o1, right: o2 };
+        \\}
+        \\last.a === o2 && last.left === o1 && last.right === o2
+        \\  ? "reflit-ok" : "reflit-bad"
+        ,
+        .expect = .{ .string = "reflit-ok" },
+        .collect_cycles = true,
+    },
+    .{
         .name = "realm-owned-intrinsic-prototypes",
         .source =
         \\const boxed = Object(1);

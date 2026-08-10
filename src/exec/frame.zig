@@ -197,6 +197,22 @@ pub const Ownership = enum(u1) {
 ///
 /// One packed disposition replaces three booleans that previously had to stay
 /// synchronized with Entry's fast-teardown discriminator.
+/// How a frame reaches its `new.target`. qjs never stores one: it is a
+/// JS_CallInternal parameter that only `OP_special_object NEW_TARGET` reads
+/// (quickjs.c:17984), and JSStackFrame has no field for it (quickjs.c:405-417).
+/// Direct construction therefore needs no per-frame storage at all — the
+/// operand IS `current_function` — which `aliases_function` records without
+/// allocating the cold box. Only a differing target (constructor spread,
+/// `super()` forwarding a caller's new.target) needs the box.
+pub const NewTargetBinding = enum(u2) {
+    /// No binding, or a cold-box value this frame does not release.
+    borrowed = 0,
+    /// A cold-box value this frame releases at teardown.
+    owned = 1,
+    /// `new.target` is `current_function`; there is no cold-box value.
+    aliases_function = 2,
+};
+
 pub const OwnershipDisposition = packed struct(u8) {
     this_value: Ownership = .owned,
     current_function: Ownership = .owned,
@@ -204,8 +220,8 @@ pub const OwnershipDisposition = packed struct(u8) {
     storage: Ownership = .borrowed,
     /// Appended inside the former reserved tail so the established hot
     /// this/function/var-ref/storage bit positions do not move.
-    new_target: Ownership = .borrowed,
-    _reserved: u3 = 0,
+    new_target: NewTargetBinding = .borrowed,
+    _reserved: u2 = 0,
 };
 
 comptime {
@@ -305,7 +321,7 @@ pub const Frame = struct {
 
     pub fn freeColdBox(self: *Frame, account: *memory.MemoryAccount) void {
         if (self.cold) |c| {
-            std.debug.assert(self.ownership.new_target == .borrowed);
+            std.debug.assert(self.ownership.new_target != .owned);
             account.destroy(FrameCold, c);
             self.cold = null;
         }
@@ -336,17 +352,26 @@ pub const Frame = struct {
     }
 
     // ---- Cold-field read accessors (return the default when `cold == null`) ----
+    /// BORROWED, exactly like `current_function`: every reader either tests it
+    /// or hands it to a callee that dups what it keeps (qjs's
+    /// `OP_special_object NEW_TARGET` dups at the push, quickjs.c:17984).
     pub inline fn newTargetValue(self: *const Frame) JSValue {
+        if (self.ownership.new_target == .aliases_function) return self.current_function;
         return if (self.cold) |c| c.new_target else JSValue.undefinedValue();
     }
 
-    /// Replace an already-installed borrowed constructor binding with the
-    /// parser-owned new-target operand transferred by constructor spread.
-    /// The constructor Entry guarantees the cold box exists, so this commit
-    /// step is infallible after frame setup succeeds.
-    pub inline fn takeConstructorNewTarget(self: *Frame, value: JSValue) void {
-        const c = self.cold orelse unreachable;
-        std.debug.assert(self.ownership.new_target == .borrowed);
+    /// Install the parser-owned new-target operand transferred by constructor
+    /// spread over the alias the constructor push established. `new F(...)`
+    /// spread duplicates the callable into both operand slots, so the common
+    /// case still resolves to the alias and drops the redundant reference
+    /// instead of allocating a cold box for a value the frame already has.
+    pub fn takeConstructorNewTarget(self: *Frame, account: *memory.MemoryAccount, rt: anytype, value: JSValue) !void {
+        std.debug.assert(self.ownership.new_target == .aliases_function);
+        if (value.same(self.current_function)) {
+            value.free(rt);
+            return;
+        }
+        const c = try self.ensureCold(account);
         c.new_target = value;
         self.ownership.new_target = .owned;
     }

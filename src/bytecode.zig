@@ -1308,7 +1308,6 @@ pub const function_bytecode = struct {
     const std = @import("std");
     const builtin = @import("builtin");
     const build_options = @import("build_options");
-    const simple_ctor_memo_enabled = std.mem.eql(u8, build_options.zjs_dossier_simple_ctor, "a");
 
     const atom = @import("core/atom.zig");
     const bulk_memory = @import("core/bulk_memory.zig");
@@ -1613,7 +1612,20 @@ pub const function_bytecode = struct {
         /// before entering. Derived constructors keep the canonical qjs
         /// header bit; this covers only the base-class entry probe.
         entry_rejects_plain_call: bool = false,
-        _reserved: u2 = 0,
+        /// Publication-time image of the simple-field constructor
+        /// classification (`classifySimpleFieldConstructor`): the body is
+        /// exhaustively `push_this; (this.f = arg_i;)*; return_undef`, so
+        /// `new` may run the direct field writer without entering the
+        /// bytecode body. Published code is immutable, so hoisting the probe
+        /// out of the per-`new` construct path is exact; the lazily-filled
+        /// `SimpleCtorFacts` memo still carries the field table for admitted
+        /// constructors. qjs needs no such bit — JS_CallConstructorInternal
+        /// (quickjs.c:20839-20856) always enters the bytecode body — but the
+        /// zjs writer must reject before construction commits, and RayTrace's
+        /// constructors are all non-simple: the per-`new` outline probe was
+        /// pure dead cost there.
+        simple_field_ctor: bool = false,
+        _reserved: u1 = 0,
     };
 
     /// Immutable execution policy published before a FunctionBytecode escapes.
@@ -1628,10 +1640,203 @@ pub const function_bytecode = struct {
         }
     };
 
+    /// Widest `this.f = arg` field run the simple-field constructor fast path
+    /// accepts. It bounds `SimpleCtorFacts`, so it is also the memo's width.
+    pub const max_simple_ctor_fields = 8;
+
+    /// Tri-state of the lazily-classified simple-field constructor pattern.
+    /// `unknown` must be the zero value: `createRaw` zero-fills the whole
+    /// packed payload, so a fresh FunctionBytecode starts unclassified without
+    /// a seeding write.
+    pub const SimpleCtorState = enum(u8) {
+        unknown = 0,
+        not_simple = 1,
+        simple = 2,
+    };
+
+    /// Memoized classification of the zjs-only simple-field constructor fast
+    /// path (a `this.f = arg` body whose stores the constructor writes
+    /// directly instead of entering JS_CallInternal). The answer is a pure
+    /// function of the FunctionBytecode's immutable published bytecode, so it
+    /// is computed once on the first `new F()` and kept HERE, inside the FB
+    /// allocation itself.
+    ///
+    /// QuickJS has no counterpart (js_call_c_function/JS_CallInternal always
+    /// run the body), so this record lives entirely in the zjs hot extension
+    /// and cannot perturb any `JSFunctionBytecode` core offset.
+    pub const SimpleCtorFacts = extern struct {
+        /// Field atom ids, in store order (borrowed from the code bytes, which
+        /// own them for the FB's whole life — the memo takes no reference).
+        atoms: [max_simple_ctor_fields]atom.Atom = @splat(atom.null_atom),
+        /// Parameter index feeding each field; `>= argc` stores undefined.
+        arg_indices: [max_simple_ctor_fields]u16 = @splat(0),
+        state: SimpleCtorState = .unknown,
+        field_count: u8 = 0,
+        _padding: [6]u8 = @splat(0),
+
+        comptime {
+            std.debug.assert(@sizeOf(@This()) == 56);
+            std.debug.assert(@offsetOf(@This(), "atoms") == 0x00);
+            std.debug.assert(@offsetOf(@This(), "arg_indices") == 0x20);
+            std.debug.assert(@offsetOf(@This(), "state") == 0x30);
+            std.debug.assert(@offsetOf(@This(), "field_count") == 0x31);
+        }
+    };
+
+    /// Decide whether the construct fast path applies to this
+    /// FunctionBytecode. Never returns `.unknown`: callers store the result
+    /// verbatim. Pure function of the immutable published bytecode and header
+    /// facts, so both publication funnels evaluate it once
+    /// (`publishExecutionFlags` / `LegacyExecutionAdapter.init`) into the
+    /// `simple_field_ctor` CallFacts bit, while the runtime construct path
+    /// still derives the field table lazily into the `SimpleCtorFacts` memo
+    /// and Debug-asserts the two agree.
+    pub fn classifySimpleFieldConstructor(fb: *const FunctionBytecodeImpl) SimpleCtorFacts {
+        var facts = simpleFieldConstructorPattern(fb) orelse return .{ .state = .not_simple };
+        facts.state = .simple;
+        return facts;
+    }
+
+    fn simpleFieldConstructorPattern(fb: *const FunctionBytecodeImpl) ?SimpleCtorFacts {
+        const op = opcode.op;
+        if (fb.isDerivedClassConstructor()) return null;
+        if (fb.functionKind() != .normal or !fb.hasPrototype()) return null;
+        // Base class bytecode starts with OP_check_ctor, so it cannot match
+        // either ordinary push_this prefix accepted below. Keep the gate
+        // explicit so a future pattern broadening cannot accidentally bypass
+        // class call entry.
+        const code = fb.byteCode();
+        if (code.len == 0 or code[0] == op.check_ctor) return null;
+        if (fb.var_count > 1 or fb.closureVarCount() != 0 or fb.cpool_count != 0) return null;
+        // NOTE: argumentsAllowed() is NOT gated on — it is set for every
+        // non-arrow function (it means "`arguments` is in scope", not
+        // "used"), so gating on it made this fast path dead for all ordinary
+        // constructors. The bytecode pattern matched below is exhaustively
+        // `push_this; (get this; get_arg; put_field)*; return_undef`, which
+        // references neither `arguments` nor any local/closure, so a
+        // lazily-materialized arguments object is never observable — skipping
+        // the body is identical to running it.
+        if (fb.superCallAllowed() or fb.superAllowed() or fb.isDirectOrIndirectEval()) return null;
+
+        return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
+    }
+
+    fn simpleLocalThisFieldConstructorPattern(fb: *const FunctionBytecodeImpl) ?SimpleCtorFacts {
+        const op = opcode.op;
+        const code = fb.byteCode();
+        var pc: usize = 0;
+        var pattern = SimpleCtorFacts{};
+        if (pc >= code.len or code[pc] != op.push_this) return null;
+        pc += 1;
+        const this_local = decodeSimpleConstructorPutLoc(code, &pc) orelse return null;
+        while (pc < code.len) {
+            if (code[pc] == op.return_undef) {
+                pc += 1;
+                return if (pc == code.len and pattern.field_count != 0) pattern else null;
+            }
+            if (pattern.field_count == max_simple_ctor_fields) return null;
+            const local_index = decodeSimpleConstructorGetLoc(code, &pc) orelse return null;
+            if (local_index != this_local) return null;
+            tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
+        }
+        return null;
+    }
+
+    fn simpleStackThisFieldConstructorPattern(fb: *const FunctionBytecodeImpl) ?SimpleCtorFacts {
+        const op = opcode.op;
+        const code = fb.byteCode();
+        var pc: usize = 0;
+        var pattern = SimpleCtorFacts{};
+        if (pc >= code.len or code[pc] != op.push_this) return null;
+        pc += 1;
+        while (pc < code.len) {
+            if (code[pc] == op.return_undef) {
+                pc += 1;
+                return if (pc == code.len and pattern.field_count != 0) pattern else null;
+            }
+            if (pattern.field_count == max_simple_ctor_fields) return null;
+            const keeps_this_for_next_field = if (code[pc] == op.dup) blk: {
+                pc += 1;
+                break :blk true;
+            } else false;
+            tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
+            if (pc < code.len and code[pc] != op.return_undef and !keeps_this_for_next_field) return null;
+        }
+        return null;
+    }
+
+    fn tryAppendSimpleConstructorField(code: []const u8, pc: *usize, pattern: *SimpleCtorFacts) ?void {
+        const op = opcode.op;
+        const arg_index = decodeSimpleConstructorArgGet(code, pc) orelse return null;
+        if (pc.* + 5 > code.len or code[pc.*] != op.put_field) return null;
+        const atom_id = std.mem.readInt(u32, code[pc.* + 1 ..][0..4], .little);
+        pc.* += 5;
+        for (pattern.atoms[0..pattern.field_count]) |existing| {
+            if (existing == atom_id) return null;
+        }
+        pattern.atoms[pattern.field_count] = atom_id;
+        pattern.arg_indices[pattern.field_count] = arg_index;
+        pattern.field_count += 1;
+    }
+
+    fn decodeSimpleConstructorPutLoc(code: []const u8, pc: *usize) ?u16 {
+        const op = opcode.op;
+        if (pc.* >= code.len) return null;
+        const opcode_id = code[pc.*];
+        pc.* += 1;
+        if (opcode_id >= op.put_loc0 and opcode_id <= op.put_loc3) {
+            return @intCast(opcode_id - op.put_loc0);
+        }
+        if (opcode_id == op.put_loc) {
+            if (pc.* + 2 > code.len) return null;
+            const index = std.mem.readInt(u16, code[pc.*..][0..2], .little);
+            pc.* += 2;
+            return index;
+        }
+        return null;
+    }
+
+    fn decodeSimpleConstructorGetLoc(code: []const u8, pc: *usize) ?u16 {
+        const op = opcode.op;
+        if (pc.* >= code.len) return null;
+        const opcode_id = code[pc.*];
+        pc.* += 1;
+        if (opcode_id >= op.get_loc0 and opcode_id <= op.get_loc3) {
+            return @intCast(opcode_id - op.get_loc0);
+        }
+        if (opcode_id == op.get_loc) {
+            if (pc.* + 2 > code.len) return null;
+            const index = std.mem.readInt(u16, code[pc.*..][0..2], .little);
+            pc.* += 2;
+            return index;
+        }
+        return null;
+    }
+
+    fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
+        const op = opcode.op;
+        if (pc.* >= code.len) return null;
+        const opcode_id = code[pc.*];
+        pc.* += 1;
+        if (opcode_id >= op.get_arg0 and opcode_id <= op.get_arg3) {
+            return @intCast(opcode_id - op.get_arg0);
+        }
+        if (opcode_id == op.get_arg) {
+            if (pc.* + 2 > code.len) return null;
+            const index = std.mem.readInt(u16, code[pc.*..][0..2], .little);
+            pc.* += 2;
+            return index;
+        }
+        return null;
+    }
+
     /// Hot zjs-only state placed immediately after the exact code bytes. Code
     /// has byte alignment, so canonical access must use `*align(1)`. The
     /// execution snapshot is two bytes; explicit padding preserves the
     /// four-byte ScriptOrModule offset.
+    ///
+    /// The total stays a multiple of eight: `LegacyExecutionAdapter` places its
+    /// aligned back-pointer at `base + 96 + @sizeOf(@This())`.
     pub const FunctionBytecodeHotExtension = extern struct {
         call_facts: function_bytecode.CallFacts,
         /// Preserve ScriptOrModule's aligned offset without widening CallFacts
@@ -1639,12 +1844,16 @@ pub const function_bytecode = struct {
         _call_facts_padding: u16 = 0,
         /// Stable ScriptOrModule identity used as the dynamic-import referrer.
         script_or_module: atom.Atom,
+        /// Lazily published; see `SimpleCtorFacts`.
+        simple_ctor: SimpleCtorFacts = .{},
 
         comptime {
-            std.debug.assert(@sizeOf(@This()) == 8);
+            std.debug.assert(@sizeOf(@This()) == 64);
+            std.debug.assert(@sizeOf(@This()) % 8 == 0);
             std.debug.assert(@offsetOf(@This(), "call_facts") == 0x00);
             std.debug.assert(@offsetOf(@This(), "_call_facts_padding") == 0x02);
             std.debug.assert(@offsetOf(@This(), "script_or_module") == 0x04);
+            std.debug.assert(@offsetOf(@This(), "simple_ctor") == 0x08);
         }
     };
 
@@ -1948,6 +2157,18 @@ pub const function_bytecode = struct {
         pub inline fn callFacts(self: *const FunctionBytecodeImpl) function_bytecode.CallFacts {
             const hot = self.hotExtension() orelse return .{};
             return hot.call_facts;
+        }
+        /// Writable simple-field-constructor memo, or null when this record has
+        /// no zjs tail (extension-less fixtures). `const` is dropped on purpose:
+        /// the memo answers a pure function of the immutable published
+        /// bytecode, so filling it publishes no new state — it only stops the
+        /// construct path from recomputing the same answer. Because the memo
+        /// lives INSIDE the FB allocation it dies with it, so a recycled
+        /// address cannot be read through a stale key (`createRaw` zero-fills
+        /// the packed payload, which is exactly `SimpleCtorState.unknown`).
+        pub inline fn simpleCtorMemoMut(self: *const FunctionBytecodeImpl) ?*align(1) function_bytecode.SimpleCtorFacts {
+            const hot = self.hotExtension() orelse return null;
+            return &@constCast(hot).simple_ctor;
         }
         pub inline fn legacyBytecodeAdapter(self: *const FunctionBytecodeImpl) ?*const function_mod.BytecodeImpl {
             // The negative length is the complete representation
@@ -2731,13 +2952,6 @@ pub const function_bytecode = struct {
 
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
-        // Candidate A drops this FB from the simple-field-constructor pattern
-        // memo before its storage is reused, so a later FB at the same address
-        // cannot read a stale pointer-keyed match. B/C compile this memo reader
-        // away together with the rest of the memo mechanism.
-        if (comptime simple_ctor_memo_enabled) {
-            if (rt.simple_ctor_memo.fb == @intFromPtr(self)) rt.simple_ctor_memo.fb = 0;
-        }
         const layout_value = self.layout();
         self.deinitWithLayout(rt, layout_value);
         // Cycle removal and runtime deinit both defer the struct-free until all
@@ -5546,8 +5760,8 @@ pub const binding_rules = struct {
         var flat_i: usize = fd.vars.len;
         while (flat_i > 0) {
             flat_i -= 1;
-            const vd = fd.vars[flat_i];
-            if (vd.scope_level == 0 and vd.var_name == atom_id) {
+            const vd = &fd.vars[flat_i];
+            if (vd.var_name == atom_id and vd.scope_level == 0) {
                 return .{ .local = @intCast(flat_i) };
             }
         }
@@ -6940,8 +7154,8 @@ pub const binding_rules = struct {
                 var function_var_idx = parent.vars.len;
                 while (function_var_idx > 0) {
                     function_var_idx -= 1;
-                    const vd = parent.vars[function_var_idx];
-                    if (vd.scope_level == 0 and vd.var_name == atom_id) {
+                    const vd = &parent.vars[function_var_idx];
+                    if (vd.var_name == atom_id and vd.scope_level == 0) {
                         return .{ .closure = try threadParentLocalSource(
                             fd,
                             parent,
@@ -8989,14 +9203,16 @@ pub const pipeline_finalize = struct {
         // The packed production path folds its final topology, atom-owner and
         // var-ref proof into this walk. Direct Bytecode callers retain the
         // self-contained resolve_labels proof and do not repeat it here.
-        const final_artifact: ?stack_size.FinalArtifactValidation = if (comptime validate_final_artifact) blk: {
+        const FinalArtifact = if (validate_final_artifact) stack_size.FinalArtifactValidation else void;
+        const final_artifact: FinalArtifact = if (comptime validate_final_artifact) blk: {
             const def = fd orelse return error.InvalidBytecode;
             break :blk .{
                 .atom_owners = function.atom_operands,
                 .closure_var_count = def.closure_var.len,
             };
-        } else null;
+        } else {};
         function.stack_size = try computeStackSizeForCurrentBytecode(
+            validate_final_artifact,
             function,
             &function.leaf_returns_balanced,
             final_artifact,
@@ -9008,9 +9224,10 @@ pub const pipeline_finalize = struct {
     // packed finalizer; the resulting backend-stall regression was the carrier
     // behind QCP-1B's crypto/code-load shift. See the decision record §9.3.
     noinline fn computeStackSizeForCurrentBytecode(
+        comptime validate_final_artifact: bool,
         function: *bytecode_function.Bytecode,
         leaf_returns_balanced: *bool,
-        final_artifact: ?stack_size.FinalArtifactValidation,
+        final_artifact: if (validate_final_artifact) stack_size.FinalArtifactValidation else void,
     ) FinalizeError!u16 {
         // Parser compilation switches MemoryAccount.allocator to the stable,
         // accounted artifact allocator before entering finalization. Direct
@@ -9018,7 +9235,7 @@ pub const pipeline_finalize = struct {
         return stack_size.compute(function.code, .{
             .scratch_allocator = function.memory.allocator,
             .returns_balanced_out = leaf_returns_balanced,
-            .final_artifact = final_artifact,
+            .final_artifact = if (comptime validate_final_artifact) final_artifact else null,
         }) catch |err| switch (err) {
             // Reachable falloff is a verifier diagnosis; consumers of the
             // finalize pipeline observe the established invalid-bytecode API.
@@ -9862,7 +10079,7 @@ const function_mod = struct {
         comptime {
             std.debug.assert(@offsetOf(@This(), "hot_extension") == @sizeOf(FunctionBytecode));
             std.debug.assert(@offsetOf(@This(), "legacy_bytecode_adapter") == @sizeOf(FunctionBytecode) + @sizeOf(function_bytecode_mod.FunctionBytecodeHotExtension));
-            std.debug.assert(@sizeOf(@This()) == 112);
+            std.debug.assert(@sizeOf(@This()) == 168);
             std.debug.assert(@alignOf(@This()) == 8);
         }
 
@@ -9897,6 +10114,21 @@ const function_mod = struct {
                 .is_direct_or_indirect_eval = source.flags.is_direct_or_indirect_eval,
             });
             self.function.setLegacyBytecodeAdapter(source);
+            self.function.func_name = source.name;
+            self.function.arg_count = source.arg_count;
+            self.function.var_count = source.var_count;
+            self.function.defined_arg_count = source.arg_count;
+            self.function.stack_size = source.stack_size;
+            self.function.var_ref_count = source.open_var_ref_count;
+            self.function.closure_var_count = @intCast(if (source.closure_var.len != 0) source.closure_var.len else source.var_ref_names.len);
+            self.function.cpool_count = @intCast(source.constants.values.len);
+            // Publish the execution snapshot LAST: the simple-field
+            // constructor classification reads the adapter code pointer
+            // (installed above) plus the var/closure/cpool counts, so this
+            // funnel matches publishExecutionFlags' code-bytes-final
+            // guarantee. The adapter borrows MUTABLE fixture bytecode, so the
+            // canonical-only Debug lockstep assertion in
+            // constructSimpleFieldConstructor deliberately excludes it.
             self.function.setExecutionFlags(.{
                 .has_mapped_arguments = source.flags.has_mapped_arguments,
                 .simple_inline_eligible = source.simple_inline_eligible,
@@ -9909,15 +10141,9 @@ const function_mod = struct {
                 .exact_args_leaf_kind = source.exact_args_leaf_kind,
                 .capture_leaf_kind = source.capture_leaf_kind,
                 .is_module = source.flags.is_module,
+                .simple_field_ctor = function_bytecode_mod
+                    .classifySimpleFieldConstructor(&self.function).state == .simple,
             });
-            self.function.func_name = source.name;
-            self.function.arg_count = source.arg_count;
-            self.function.var_count = source.var_count;
-            self.function.defined_arg_count = source.arg_count;
-            self.function.stack_size = source.stack_size;
-            self.function.var_ref_count = source.open_var_ref_count;
-            self.function.closure_var_count = @intCast(if (source.closure_var.len != 0) source.closure_var.len else source.var_ref_names.len);
-            self.function.cpool_count = @intCast(source.constants.values.len);
             return &self.function;
         }
     };
@@ -9991,6 +10217,17 @@ const function_mod = struct {
         const entry_code = fb.byteCode();
         const entry_rejects_plain_call = entry_code.len == 0 or
             entry_code[0] == opcode.op.check_ctor;
+        // Publication-time image of the simple-field constructor probe the
+        // construct path used to run per-`new`. The code bytes and every
+        // header fact the classifier reads (flags, var/closure/cpool counts)
+        // are final here — same argument as entry_rejects_plain_call above —
+        // so this is the identical predicate evaluated once. The runtime memo
+        // still re-derives the full SimpleCtorFacts lazily and
+        // constructSimpleFieldConstructor Debug-asserts both classifications
+        // agree, so a drift between this publication and the runtime scan
+        // cannot rot silently.
+        const simple_field_ctor =
+            function_bytecode_mod.classifySimpleFieldConstructor(fb).state == .simple;
 
         call_facts.execution = .{
             .has_mapped_arguments = has_mapped_arguments,
@@ -10005,6 +10242,7 @@ const function_mod = struct {
             .capture_leaf_kind = if (sloppy_capture) .sloppy else if (raw_capture) .raw_this else .none,
             .is_module = is_module,
             .entry_rejects_plain_call = entry_rejects_plain_call,
+            .simple_field_ctor = simple_field_ctor,
         };
         fb.hotExtensionRequiredMut().call_facts = call_facts;
         // Keep the header-resident hot mirror coherent with the authoritative

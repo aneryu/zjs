@@ -756,6 +756,81 @@ test "ordinary spread calls enter eligible bytecode targets on the current Machi
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
 
+test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallbacks" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // S publishes simple_field_ctor = true; the first `new` takes the writer,
+    // then `S.prototype = 42` forces both the writer's prototype gate and the
+    // direct instance route to fall back to the authoritative
+    // createConstructorInstance (Object.prototype realm default). NS is
+    // non-simple (arg mutation after the store), so its `new` must skip the
+    // writer entirely and still honor a replaced prototype object.
+    const setup = try js.eval(
+        \\function S(a) { this.a = a; }
+        \\const before = new S(1);
+        \\const before_proto_hit = Object.getPrototypeOf(before) === S.prototype;
+        \\S.prototype = 42;
+        \\const after = new S(2);
+        \\function NS(a) { this.a = a; a = a + 1; }
+        \\NS.prototype = { marker: 7 };
+        \\const ns = new NS(3);
+        \\globalThis.__ctor_gate_result =
+        \\    (before.a === 1 && before_proto_hit &&
+        \\     after.a === 2 && Object.getPrototypeOf(after) === Object.prototype &&
+        \\     ns.a === 3 && ns.marker === 7) ? 1 : 0;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const result_key = try js.runtime.internAtom("__ctor_gate_result");
+    defer js.runtime.atoms.free(result_key);
+    const result = try global.getProperty(result_key);
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+}
+
+test "constructor return fusion and abrupt teardown each release the fallback exactly once" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // The fused normal-return pop moves the fallback instance out by plain
+    // read and applies qjs's two-branch (keep instance over a primitive
+    // result / replace it with an object result / forward a derived result);
+    // an abrupt body must instead release the fallback exactly once through
+    // Entry.deinit's flag-guarded route. Refcount imbalance on any of the
+    // four paths aborts the runtime teardown in this Debug build.
+    const setup = try js.eval(
+        \\function Keep(v) { this.v = v; return 42; }
+        \\function Override(v) { this.v = v; return { v: v + 1 }; }
+        \\function Abrupt(v) { this.v = v; throw new Error("boom"); }
+        \\class DerivedBase { constructor() { this.tag = 1; } }
+        \\class Derived extends DerivedBase { constructor() { super(); } }
+        \\let total = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    total += new Keep(i).v;
+        \\    total += new Override(i).v;
+        \\    try {
+        \\        new Abrupt(i);
+        \\        total += 100;
+        \\    } catch (e) {
+        \\        total += (e.message === "boom") ? 1 : 50;
+        \\    }
+        \\    total += new Derived().tag;
+        \\}
+        \\globalThis.__ctor_fusion_total = total;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const total_key = try js.runtime.internAtom("__ctor_fusion_total");
+    defer js.runtime.atoms.free(total_key);
+    const total = try global.getProperty(total_key);
+    defer total.free(js.runtime);
+    // Keep: 0+1+2 = 3, Override: 1+2+3 = 6, Abrupt catch: 3, Derived: 3.
+    try std.testing.expectEqual(@as(?i32, 15), total.asInt32());
+}
+
 test "constructor spread preserves new target on the current Machine" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -6806,6 +6881,93 @@ test "generator object uses the prototype selected after parameter initializatio
     try std.testing.expect(result.isUndefined());
 }
 
+test "closure-env var_ref hitting rc zero during remove_cycles stays a batch no-op" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const body =
+        \\(function () {
+        \\  let cycleSelf = null;
+        \\  function cycleInner() { return cycleSelf; }
+        \\  cycleSelf = { fn: cycleInner };
+        \\  if (cycleSelf.fn() !== cycleSelf) throw new Error("capture wiring");
+        \\})();
+        \\"collected";
+    ;
+
+    // First round reaches the engine's steady state (repl bootstrap pins a
+    // few permanent cells). forceGC must run from outside any active frame:
+    // an in-eval $262.gc() still sees stale VM-stack slots of the running
+    // script as conservative roots and would keep the dead ring alive.
+    const warm = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+    warm.free(js.runtime);
+    _ = try js.runtime.forceGC(null);
+    const cell_steady = js.runtime.gc.liveCountKind(.var_ref);
+    const object_steady = js.runtime.gc.liveCountKind(.object);
+
+    // Each round strands one {closure -> cell -> object -> closure} ring that
+    // only the cycle batch can reclaim. destroyZeroRef's remove_cycles gate
+    // must keep the cell's mid-batch rc==0 a pure no-op (never the synchronous
+    // free_var_ref tail), so the garbage_var_refs loop frees it exactly once
+    // and the live census cannot grow across rounds.
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        const result = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+        defer result.free(js.runtime);
+        try helpers.expectStringValueBytes(result, "collected");
+        _ = try js.runtime.forceGC(null);
+        try std.testing.expectEqual(cell_steady, js.runtime.gc.liveCountKind(.var_ref));
+        try std.testing.expectEqual(object_steady, js.runtime.gc.liveCountKind(.object));
+    }
+}
+
+test "parked generator open cell death path reclaims cell and generator together" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const body =
+        \\var parkedProbe = (function () {
+        \\  function* parkedGen() {
+        \\    let captured = 1;
+        \\    const bump = () => ++captured;
+        \\    yield bump;
+        \\    yield captured;
+        \\  }
+        \\  const it = parkedGen();
+        \\  const bump = it.next().value;
+        \\  // Frame now parked: `captured`'s open cell owns the generator
+        \\  // (attachOpenOwner) while the parked frame owns the cell.
+        \\  return "" + bump() + bump();
+        \\})();
+        \\parkedProbe;
+    ;
+
+    // First round reaches steady state (repl bootstrap + lazy generator
+    // machinery pin some permanent nodes); later rounds must not grow the
+    // live census. See the remove_cycles no-op test above for why forceGC
+    // runs from Zig instead of an in-eval $262.gc().
+    const warm = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+    warm.free(js.runtime);
+    _ = try js.runtime.forceGC(null);
+    const cell_steady = js.runtime.gc.liveCountKind(.var_ref);
+    const object_steady = js.runtime.gc.liveCountKind(.object);
+
+    // Each round strands a {parked frame -> open cell -> generator owner}
+    // ring that dies only via cycle collection: teardown close()s the cell
+    // mid-batch and its rc==0 must stay gated (no synchronous destroy of a
+    // cycle-owned cell), then the batch frees cell + generator exactly once.
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        const result = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+        defer result.free(js.runtime);
+        // Writes through the escaped closure stay visible through the open alias.
+        try helpers.expectStringValueBytes(result, "23");
+        _ = try js.runtime.forceGC(null);
+        try std.testing.expectEqual(cell_steady, js.runtime.gc.liveCountKind(.var_ref));
+        try std.testing.expectEqual(object_steady, js.runtime.gc.liveCountKind(.object));
+    }
+}
+
 test "generator continuation keeps its FunctionBytecode alive after every source binding is dropped" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -11665,6 +11827,51 @@ test "Engine eval executes parenthesized literal postfix through quick parser" {
     try std.testing.expectEqualStrings("3\n4\n", stream.buffered());
 }
 
+// qjs CASE(OP_define_field) (quickjs.c:19269) takes the same
+// JS_DefinePropertyValue route for refcounted values as for ints — no value
+// form gate. The zjs fast leg mirrors that: append consumes the value into the
+// slot, and the duplicate-key replace (`({a:o1,a:o2})`) dups into the slot and
+// retires the caller's ref. This pins the refcount balance end-to-end through
+// the resident op_define_field handler (a pre-fix borrow/consume mismatch
+// leaked one ref per duplicate refcounted key).
+test "Engine eval balances refcounts for refcounted duplicate-key object literals" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const rt = js.runtime;
+
+    const setup = try js.eval(
+        \\globalThis.__dupLitO1 = { m: 1 };
+        \\globalThis.__dupLitO2 = { m: 2 };
+    );
+    setup.free(rt);
+
+    // TestEngine only returns the script completion value for "<repl>".
+    const o1 = try js.evalWithOptions("__dupLitO1", .{ .filename = "<repl>" });
+    defer o1.free(rt);
+    const o2 = try js.evalWithOptions("__dupLitO2", .{ .filename = "<repl>" });
+    defer o2.free(rt);
+    const o1_baseline = o1.refHeader().?.meta().rc;
+    const o2_baseline = o2.refHeader().?.meta().rc;
+
+    const result = try js.evalWithOptions(
+        \\let __dupLitLast = null;
+        \\for (let i = 0; i < 16; i++) {
+        \\  __dupLitLast = { a: __dupLitO1, a: __dupLitO2, keep: __dupLitO1 };
+        \\}
+        \\const __dupLitOk = __dupLitLast.a === __dupLitO2 && __dupLitLast.keep === __dupLitO1;
+        \\__dupLitLast = null;
+        \\__dupLitOk ? 1 : 0
+    , .{ .filename = "<repl>" });
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+
+    // Every literal died (last = null): both source objects must be back at
+    // their pre-loop refcounts — no per-iteration leak from the duplicate-key
+    // replace, no over-free from the append move.
+    try std.testing.expectEqual(o1_baseline, o1.refHeader().?.meta().rc);
+    try std.testing.expectEqual(o2_baseline, o2.refHeader().?.meta().rc);
+}
+
 test "Engine eval executes compound assignment and update statements through quick parser" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -13225,27 +13432,32 @@ test "leaf returns with leftover operands route through general teardown" {
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
-test "padded-args leaf missing parameters read undefined across every entry arm" {
+test "missing-argument calls read undefined across every entry arm" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
     const rt = js.runtime;
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
 
-    // Q3 red lights, outcome side: the padded (`argc < arg_count`) call
-    // shape of a published exact-args leaf pads the missing tail with
-    // undefined IN PLACE above the supplied args. Every observable must be
-    // byte-identical to the generic padded constructor it replaces: missing
-    // params read undefined, writes to a padded slot stay frame-local
-    // (fresh undefined on the next call), the supplied prefix stays bound,
-    // and the sloppy/strict/arrow/method `this` arms keep their policies.
-    // The 256-iteration loops run every arm warm (first call may take the
-    // authoritative constructor; the rest take the warm fast path).
+    // Outcome side of the `argc < arg_count` call shape (qjs's `for(i = argc;
+    // i < arg_count; i++) arg_buf[i] = JS_UNDEFINED`, quickjs.c:17856-17857):
+    // missing params read undefined, writes to a padded slot stay frame-local
+    // (fresh undefined on the next call), the supplied prefix stays bound, and
+    // the sloppy/strict/arrow/method `this` arms keep their policies. A
+    // dedicated warm padded-leaf family used to serve these calls and was
+    // deleted (3273 Octane hits total); the callees below are still published
+    // exact-args leaves, so this is also the regression pin that their
+    // MISSING-arg siblings keep generic-path semantics.
     const setup = try js.eval(
         \\globalThis.__padOne = function (value) { return value === undefined ? 1 : 0; };
         \\globalThis.__padTwo = function (first, second) {
         \\    return String(first) + "," + String(second);
         \\};
         \\globalThis.__padWrite = function (a, b) { b = 42; return b; };
+        \\globalThis.__padFive = function (a, b, c, d, fifth) { return fifth; };
+        \\globalThis.__padPutShort = function (a, b, c, d) { a = b; d = b; return a === d ? a : null; };
+        \\globalThis.__padSetShort = function (a, b, c, d) { return (a = b) === (d = b); };
+        \\globalThis.__padPutWide = function (a, b, c, d, fifth) { fifth = a; return fifth; };
+        \\globalThis.__padSetWide = function (a, b, c, d, fifth) { return (fifth = a); };
         \\globalThis.__padStrict = function (a, b) {
         \\    "use strict";
         \\    return String(this) + ":" + String(a) + ":" + String(b);
@@ -13264,6 +13476,13 @@ test "padded-args leaf missing parameters read undefined across every entry arm"
         \\        if (__padTwo() !== "undefined,undefined") throw new Error("missing-both read");
         \\        if (__padWrite(i) !== 42) throw new Error("pad write");
         \\        if (__padWrite(i) !== 42) throw new Error("pad write not frame-local");
+        \\        if (__padFive(1, 2, 3, 4) !== undefined) throw new Error("wide missing read");
+        \\        if (__padFive(1, 2, 3, 4, i) !== i) throw new Error("wide supplied read");
+        \\        const marker = { i: i };
+        \\        if (__padPutShort(null, marker, null, null) !== marker) throw new Error("short put arg");
+        \\        if (__padSetShort(null, marker, null, null) !== true) throw new Error("short set arg");
+        \\        if (__padPutWide(marker, null, null, null) !== marker) throw new Error("wide put arg");
+        \\        if (__padSetWide(marker, null, null, null) !== marker) throw new Error("wide set arg");
         \\        if (__padStrict(i) !== "undefined:" + i + ":undefined") throw new Error("strict pad this");
         \\        if (__padStrictLeaf(i) !== i + "^undefined") throw new Error("strict pad leaf");
         \\        if (__padStrictLeaf() !== "undefined^undefined") throw new Error("strict pad leaf both");
@@ -13277,16 +13496,13 @@ test "padded-args leaf missing parameters read undefined across every entry arm"
     );
     setup.free(rt);
 
-    // Publication pins: the padded arms fire off the SAME O1 kind byte the
-    // exact family uses. The sloppy plain callee and sloppy arrow publish
-    // `.sloppy`; the non-`this`-reading strict callee publishes `.raw_this`.
-    // The `this`-READING strict callee pins `.none`: `this` compiles to
-    // `push_this; put_loc` (a local), so `var_count > 0` refuses the whole
-    // leaf family by geometry and the raw frame `this` policy stays
-    // unobservable from a published plain body — its outcome line above
-    // covers the generic path instead. If a refactor stopped publishing the
-    // first three, the padded arm would silently never run and this test
-    // would only cover the generic path.
+    // Publication pins: these callees really are published exact-args leaves,
+    // so the outcomes above are the missing-arg shape of the leaf family and
+    // not some unrelated generic callee. The sloppy plain callee and sloppy
+    // arrow publish `.sloppy`; the non-`this`-reading strict callee publishes
+    // `.raw_this`. The `this`-READING strict callee pins `.none`: `this`
+    // compiles to `push_this; put_loc` (a local), so `var_count > 0` refuses
+    // the whole leaf family by geometry.
     const one_name = try rt.internAtom("__padOne");
     defer rt.atoms.free(one_name);
     const strict_name = try rt.internAtom("__padStrict");
@@ -13332,19 +13548,18 @@ test "padded-args leaf missing parameters read undefined across every entry arm"
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
-test "padded-args leaf excluded shapes keep generic-path outcomes" {
+test "missing-argument calls on leaf-excluded shapes keep generic-path outcomes" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
     const rt = js.runtime;
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
 
-    // Q3 red lights, exclusion side: the shapes the padded arm must NEVER
-    // capture stay off the O1 kind byte at publication, so a missing-arg
-    // call keeps its authoritative semantics — `arguments` observes the
-    // real argc (not the padded window), default parameter initializers run
-    // (`has_simple_parameter_list` gate), rest parameters collect the real
-    // args, and a captured parameter reads through its cell
-    // (`open_var_ref_count` gate).
+    // Exclusion side: the shapes no leaf arm may ever capture stay off the O1
+    // kind byte at publication, so a missing-arg call keeps its authoritative
+    // semantics — `arguments` observes the real argc (not a padded window),
+    // default parameter initializers run (`has_simple_parameter_list` gate),
+    // rest parameters collect the real args, and a captured parameter reads
+    // through its cell (`open_var_ref_count` gate).
     const setup = try js.eval(
         \\globalThis.__exArguments = function (a, b) { return arguments.length; };
         \\globalThis.__exDefault = function (a, b = 9) { return String(a) + ":" + String(b); };
@@ -13364,9 +13579,8 @@ test "padded-args leaf excluded shapes keep generic-path outcomes" {
     );
     setup.free(rt);
 
-    // Publication pins: every excluded shape must read `.none` — the padded
-    // arm shares the O1 byte, so `.none` here proves these calls can never
-    // enter the padded leaf constructors.
+    // Publication pins: every excluded shape must read `.none`, which proves
+    // these calls can never enter any leaf constructor.
     const names = [_][]const u8{ "__exArguments", "__exDefault", "__exRest", "__exCapture" };
     for (names) |name| {
         const atom_name = try rt.internAtom(name);
@@ -13388,19 +13602,18 @@ test "padded-args leaf excluded shapes keep generic-path outcomes" {
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
-test "padded-args leaf abrupt teardown releases supplied args and pads exactly once" {
+test "missing-argument abrupt teardown releases supplied args and pads exactly once" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    // Q3 red lights, release-balance side: a padded leaf that throws
-    // mid-body dies through general teardown, whose args release walks the
-    // FULL `arg_count` window — the supplied refcounted prefix exactly once
-    // (double free corrupts rc, missed free strands the object) and the
-    // undefined pads as tag-test no-ops. Covers supplied-prefix
-    // (argc=1 < 2), all-missing (argc=0 < 2), the plain/strict/method entry
-    // arms, and the deep-recursion overflow unwind through the padded
-    // authoritative constructor (every live padded frame's window released
-    // during the exception walk; the engine keeps running afterwards).
+    // Release-balance side: a frame that throws mid-body dies through general
+    // teardown, whose args release walks the FULL `arg_count` window — the
+    // supplied refcounted prefix exactly once (double free corrupts rc, missed
+    // free strands the object) and the undefined pads as tag-test no-ops.
+    // Covers supplied-prefix (argc=1 < 2), all-missing (argc=0 < 2), the
+    // plain/strict/method entry arms, and the deep-recursion overflow unwind
+    // (every live frame's window released during the exception walk; the
+    // engine keeps running afterwards).
     const setup = try js.eval(
         \\function padThrow(a, b) { return a.x + null.missing + String(b); }
         \\function strictPadThrow(a, b) { "use strict"; return a.x + null.missing + String(b); }
@@ -13432,16 +13645,14 @@ test "padded-args leaf abrupt teardown releases supplied args and pads exactly o
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
-test "padded-args leaf leftover-carrying returns route through general teardown" {
+test "missing-argument leftover-carrying returns route through general teardown" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    // Q3 twin of the exact-args leftover coverage: the padded frame
-    // publishes the same `exact_args_leaf` teardown bit, so its return arm
-    // carries the same runtime len==0 operand-window guard. Parser-elided
-    // trailing drops and switch discriminants held across `return` must
-    // route to general teardown, which releases the leftovers AND the
-    // padded args window exactly once.
+    // Missing-argument twin of the exact-args leftover coverage. Parser-elided
+    // trailing drops and switch discriminants held across `return` must route
+    // to general teardown, which releases the leftovers AND the padded args
+    // window exactly once.
     const setup = try js.eval(
         \\function padLeftover(a, b) { ({ x: a, y: b }); }
         \\function padSwitchLeftover(a, b) {

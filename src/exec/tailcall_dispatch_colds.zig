@@ -283,11 +283,15 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
     t[op.div] = td.op_div_cold;
     t[op.mod] = td.op_mod_cold;
+    // Register-resident cold bitwise/shift (qjs js_binary_logic_slow 15214 /
+    // js_shr_slow 15735 operate in place on sp[-2]); falls back to the publishing
+    // h_binary path for BigInt/string/object/symbol operands and at the generator stop.
+    inline for ([_]u8{ op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = td.opLogicCold(o);
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing h_compare path internally at the generator parameter/body stop. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used
     // (direct routing would perturb the int32 fast-path codegen).
-    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare_cold;
+    inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompareCold(o);
     inline for ([_]u8{ op.neg, op.plus, op.inc, op.dec }) |o| t[o] = h_unary;
     t[op.in] = h(struct {
         fn b(vm: *Vm) HostError!void {
@@ -824,6 +828,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.push_i32] = td.op_push_i32;
     t[op.push_i16] = td.op_push_i16;
     t[op.push_i8] = td.op_push_i8;
+    t[op.push_const] = td.op_push_const;
+    t[op.push_const8] = td.op_push_const8;
     inline for ([_]u8{ op.push_minus1, op.push_0, op.push_1, op.push_2, op.push_3, op.push_4, op.push_5, op.push_6, op.push_7 }) |o| t[o] = td.op_push_small;
     // Per-variant local handlers (qjs-style distinct labels, no runtime decode).
     inline for ([_]struct { o: u8, h: Handler }{
@@ -857,7 +863,14 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }) |e| t[e.o] = e.h;
     t[op.set_loc_uninitialized] = td.op_set_loc_uninitialized;
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
+    t[op.get_arg] = td.op_get_arg;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
+    inline for ([_]struct { o: u8, h: Handler }{
+        .{ .o = op.put_arg, .h = td.opArgStore(.put) },
+        .{ .o = op.set_arg, .h = td.opArgStore(.set) },
+    }) |e| t[e.o] = e.h;
+    inline for ([_]u8{ op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3 }) |o| t[o] = td.opArgStore(.put);
+    inline for ([_]u8{ op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 }) |o| t[o] = td.opArgStore(.set);
     t[op.push_atom_value] = td.op_push_atom_value;
     t[op.special_object] = td.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
     t[op.push_this] = td.op_push_this; // object dup / sloppy nullish->global; ToObject boxing + strict non-object + uninitialized stay cold
@@ -897,6 +910,16 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.goto8] = td.op_goto8;
     t[op.if_false8] = td.op_if_false8;
     t[op.if_true8] = td.op_if_true8;
+    // Long-form conditional branch (qjs CASE(OP_if_false):18859 — same immediate/
+    // object fast legs as the short form, 4-byte label); float/string/HTMLDDA and
+    // the cadence-hit poll fall to the cold branch32 shell assigned above.
+    t[op.if_false] = td.op_if_false;
+    // qjs CASE(OP_lnot):19092 answers int/bool/null/undefined inline with the same
+    // tag comparison OP_if_* uses, and the object arm takes JS_ToBoolFree's object
+    // leg (11205-11211) inline like op_if_false8; every other tag stays on the cold
+    // logicalNot assigned above (qjs reaches those via an out-of-line JS_ToBoolFree
+    // bl too — pinned binary, JS_CallInternal+0x6abc).
+    t[op.lnot] = td.op_lnot;
     t[op.inc_loc] = td.op_update_loc;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field

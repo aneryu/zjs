@@ -1,5 +1,6 @@
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const bytecode = @import("../bytecode.zig");
 const bignum = @import("../libs/bigint.zig");
@@ -1177,9 +1178,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "raw")) {
         return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
-        return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
-    }
     if (std.mem.eql(u8, name, "sumPrecise")) {
         return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
     }
@@ -1355,7 +1353,9 @@ noinline fn callNativeCallableByName(
         return value;
     }
     if (std.mem.eql(u8, name, "apply")) {
-        return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
+        // Legacy name-only entry for recordless `apply` data functions; must
+        // stay behaviorally identical to `functionApplyRecord`'s body.
+        return qjsFunctionApplyCall(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (std.mem.eql(u8, name, "call")) {
         return qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame);
@@ -1790,10 +1790,6 @@ pub fn isErrorStackSetterValue(value: core.JSValue) bool {
     return native_ref.domain == .error_object and native_ref.id == @intFromEnum(method_ids.error_object.PrototypeMethod.stack_setter);
 }
 
-pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object) !core.JSValue {
-    return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "not a function");
-}
-
 /// Function.prototype.call body shared by the native-record owner and the
 /// legacy name-only callable path. Keeping the VM caller pair preserves
 /// nested callsite/property-access context while the native record contributes
@@ -1816,70 +1812,27 @@ pub fn qjsFunctionCallCall(
     return callValueOrBytecodeRootPreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
 }
 
-/// Function.prototype.apply body. `argsFromArrayLike` is the shared
-/// CreateListFromArrayLike implementation used by Reflect.apply/construct;
-/// its returned owned values stay rooted for the complete target invocation.
+/// Function.prototype.apply body shared by the native-record owner and the
+/// legacy name-only callable path. Flat mirror of `js_function_apply`
+/// (qjs:41213): check_function -> read this_arg/array_arg -> null/undefined
+/// short-circuit -> build_arg_list -> JS_Call -> free_arg_list. Callable
+/// classification is one `isCallableValue` probe (qjs `check_function`
+/// resolves before argv is read), with the throw outlined; bound/Proxy
+/// callables share the same call leg as plain functions.
 pub fn qjsFunctionApplyCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    function_object: *core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (!this_value.isFunctionBytecode()) {
-        const target_object = object_ops.objectFromValue(this_value) orelse
-            return qjsFunctionApplyUncommonCallable(
-                ctx,
-                output,
-                global,
-                this_value,
-                function_object,
-                args,
-                caller_function,
-                caller_frame,
-            );
-        if (target_object.class_id != core.class.ids.bytecode_function and
-            !isFunctionLikeClass(target_object.class_id))
-        {
-            return qjsFunctionApplyUncommonCallable(
-                ctx,
-                output,
-                global,
-                this_value,
-                function_object,
-                args,
-                caller_function,
-                caller_frame,
-            );
-        }
-    }
-    return qjsFunctionApplyCallable(
-        ctx,
-        output,
-        global,
-        this_value,
-        function_object,
-        args,
-        caller_function,
-        caller_frame,
-    );
-}
-
-inline fn qjsFunctionApplyCallable(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!core.JSValue {
+    // qjs:41221 `check_function(ctx, this_val)` precedes reading argv.
+    if (!isCallableValue(this_value)) return throwApplyTypeError(ctx, global, "not a function");
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const arg_array = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    // qjs:41224: undefined/null array_arg calls the target with no arguments.
     if (arg_array.isNull() or arg_array.isUndefined()) {
         return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
     }
@@ -1889,62 +1842,37 @@ inline fn qjsFunctionApplyCallable(
         global,
         this_arg,
         this_value,
-        function_object,
         arg_array,
         caller_function,
         caller_frame,
     );
 }
 
-noinline fn qjsFunctionApplyUncommonCallable(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!core.JSValue {
-    if (!isCallableValue(this_value)) {
-        return throwFunctionRealmTypeError(ctx, global, function_object);
-    }
-    return qjsFunctionApplyCallable(
-        ctx,
-        output,
-        global,
-        this_value,
-        function_object,
-        args,
-        caller_function,
-        caller_frame,
-    );
+/// Outlined cold throw for both apply TypeError arms: qjs `check_function`
+/// "not a function" for the non-callable receiver, `build_arg_list`
+/// (qjs:41167) "not a object" for the non-object argument list.
+noinline fn throwApplyTypeError(ctx: *core.JSContext, global: *core.Object, message: []const u8) HostError!core.JSValue {
+    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
+    _ = ctx.throwValue(error_value);
+    return error.JSException;
 }
 
-/// Observable CreateListFromArrayLike materialization and its owned argument
-/// transaction are needed only when apply receives a non-null list. Keep that
-/// large cold state out of the zero-list native-fence caller frame.
+/// Observable CreateListFromArrayLike materialization (qjs `build_arg_list`,
+/// qjs:41159) and its owned argument transaction are needed only when apply
+/// receives a non-null list. Keep that large cold state outlined from the
+/// flat record body -- the slow leg lives behind this call boundary.
 noinline fn qjsFunctionApplyArrayLike(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_arg: core.JSValue,
     this_value: core.JSValue,
-    function_object: *core.Object,
     arg_array: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
-    if (object_ops.callableObjectFromValue(this_value)) |target_object| {
-        if (core.function.decodeNativeBuiltinId(target_object.nativeFunctionId())) |native_ref| {
-            if (native_ref.domain == .string and
-                native_ref.id == @intFromEnum(method_ids.string.StaticMethod.from_code_point))
-            {
-                return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
-            }
-        }
-    }
+    // qjs build_arg_list (qjs:41167) rejects non-object argument lists.
+    if (!arg_array.isObject()) return throwApplyTypeError(ctx, global, "not a object");
     var owned_args = try array_ops.ownedArgsFromArrayLike(
         ctx,
         output,
@@ -1971,12 +1899,6 @@ noinline fn qjsFunctionApplyArrayLike(
         caller_function,
         caller_frame,
     );
-}
-
-pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, _: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
-    _ = ctx.throwValue(error_value);
-    return error.JSException;
 }
 
 pub fn constructValueOrBytecode(
@@ -2269,6 +2191,13 @@ pub fn constructValueOrBytecodeWithNewTargetInternal(
 pub const SameMachineConstructorTarget = struct {
     resolved: inline_calls.ResolvedInlineFunction,
     function_object: *core.Object,
+    /// Resolution-time image of `new_target.sameValue(func)`. The direct
+    /// `new F(...)` admission gate already proved it, and the spread resolver
+    /// computes it while classifying the differing-new-target Realm — so the
+    /// prepare path reads this bit instead of re-running the outline
+    /// sameValue per `new` (qjs holds new_target in a JS_CallInternal
+    /// register and never re-compares it, quickjs.c:20839-20856).
+    new_target_is_func: bool,
 };
 
 pub fn resolveSameMachineConstructor(
@@ -2284,6 +2213,7 @@ pub fn resolveSameMachineConstructor(
     return .{
         .resolved = resolved,
         .function_object = function_object,
+        .new_target_is_func = true,
     };
 }
 
@@ -2300,7 +2230,8 @@ pub fn resolveSameMachineSpreadConstructor(
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
-    if (!new_target.sameValue(func)) {
+    const new_target_is_func = new_target.sameValue(func);
+    if (!new_target_is_func) {
         // `callableObjectFromValue` is the native/bound-call adapter and
         // deliberately excludes the bytecode-function class. A super-call's
         // differing new.target is normally precisely that class, so inspect
@@ -2312,6 +2243,7 @@ pub fn resolveSameMachineSpreadConstructor(
     return .{
         .resolved = resolved,
         .function_object = function_object,
+        .new_target_is_func = new_target_is_func,
     };
 }
 
@@ -2342,35 +2274,67 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!SameMachineConstructorPreparation {
     std.debug.assert(!target.resolved.fb.isDerivedClassConstructor());
-    // Merge resolution: the dossier-only comptime gate comes from the phase
-    // branch, the `new_target` argument from main's execution-root refactor.
-    // The other `simple_ctor_bypass_enabled` site merged cleanly into exactly
-    // this shape, so this one matches it.
+    // Publication-time gate: the simple-field probe used to be an
+    // unconditional outline call per `new` (432B-frame scan + memo chain +
+    // sret) although the answer is a pure function of the published bytecode.
+    // qjs JS_CallConstructorInternal has no probe at all (quickjs.c:20839-
+    // 20856), so a non-simple constructor — every RayTrace constructor — now
+    // reads one already-loaded CallFacts bit instead. The writer itself is
+    // entered only when the bit says simple AND resolution proved
+    // new_target == func, which is exactly the pair of conditions it used to
+    // re-derive per call.
     if (comptime simple_ctor_bypass_enabled) {
-        if (try constructSimpleFieldConstructor(
-            ctx,
-            global,
-            func,
-            target.function_object,
-            target.resolved.fb,
-            args,
-            new_target,
-            false,
-        )) |constructed| {
-            return .{ .completed = constructed };
+        if (target.resolved.call_facts.execution.simple_field_ctor and target.new_target_is_func) {
+            if (try constructSimpleFieldConstructor(
+                true,
+                ctx,
+                global,
+                func,
+                target.function_object,
+                target.resolved.fb,
+                args,
+                new_target,
+                false,
+            )) |constructed| {
+                return .{ .completed = constructed };
+            }
         }
     }
 
-    const instance = try createBytecodeConstructorInstance(
-        ctx,
-        output,
-        global,
-        func,
-        target.function_object,
-        new_target,
-        caller_function,
-        caller_frame,
-    );
+    const instance = instance: {
+        if (target.new_target_is_func) {
+            // Direct route: resolution proved new_target == func, so skip
+            // createBytecodeConstructorInstance's per-call sameValue re-check
+            // and take the materialized-`.prototype` data read (the first
+            // construct materializes the lazy auto_init slot; see
+            // createBytecodeConstructorInstance). A prototype miss — e.g.
+            // `F.prototype = 42` — keeps the authoritative
+            // createConstructorInstance fallback, mirroring qjs
+            // js_create_from_ctor's non-object-prototype arm.
+            if (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
+                const created = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+                break :instance created.value();
+            }
+            break :instance try createConstructorInstance(
+                ctx,
+                output,
+                global,
+                new_target,
+                caller_function,
+                caller_frame,
+            );
+        }
+        break :instance try createBytecodeConstructorInstance(
+            ctx,
+            output,
+            global,
+            func,
+            target.function_object,
+            new_target,
+            caller_function,
+            caller_frame,
+        );
+    };
     errdefer instance.free(ctx.runtime);
     const interrupt_global = ctx.global orelse global;
     try exception_ops.pollInterrupt(ctx, interrupt_global);
@@ -2403,7 +2367,7 @@ fn constructOrdinaryBytecodeFunctionObject(
         return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     }
     if (comptime simple_ctor_bypass_enabled) {
-        if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
+        if (try constructSimpleFieldConstructor(false, ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
     }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     errdefer instance.free(ctx.runtime);
@@ -2899,35 +2863,16 @@ fn createBytecodeConstructorInstance(
     return createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
 }
 
-const max_simple_constructor_fields = 8;
-
-const SimpleFieldConstructorPattern = struct {
-    atoms: [max_simple_constructor_fields]core.Atom = undefined,
-    arg_indices: [max_simple_constructor_fields]u16 = undefined,
-    len: usize = 0,
-};
-
-/// Populate `rt.simple_ctor_memo` for `fb` unless it already holds it. The
-/// pattern is a pure function of the (immutable) bytecode, so a hit avoids the
-/// per-construct bytecode scan; the destructor clears the memo so a reused FB
-/// address never reads a stale entry.
-fn ensureSimpleCtorMemo(rt: *core.JSRuntime, fb: *const bytecode.FunctionBytecode) void {
-    const key = @intFromPtr(fb);
-    if (rt.simple_ctor_memo.fb == key) return;
-    rt.simple_ctor_memo.fb = key;
-    if (simpleFieldConstructorPattern(fb)) |pattern| {
-        rt.simple_ctor_memo.is_simple = true;
-        rt.simple_ctor_memo.len = @intCast(pattern.len);
-        for (0..pattern.len) |i| {
-            rt.simple_ctor_memo.atoms[i] = pattern.atoms[i];
-            rt.simple_ctor_memo.args[i] = pattern.arg_indices[i];
-        }
-    } else {
-        rt.simple_ctor_memo.is_simple = false;
-    }
-}
+const SimpleCtorFacts = bytecode.function_bytecode.SimpleCtorFacts;
 
 fn constructSimpleFieldConstructor(
+    /// Comptime split of the retired per-call sameValue: the prepare route
+    /// (op_call_constructor / spread) enters only under
+    /// `SameMachineConstructorTarget.new_target_is_func`, whose resolution
+    /// already proved `new_target == func`, so its instantiation carries no
+    /// comparison. The recursive [[Construct]] adapter still proves it here —
+    /// that is spread-super's sameValue load-bearing wall.
+    comptime assume_new_target_is_func: bool,
     ctx: *core.JSContext,
     caller_global: *core.Object,
     func: core.JSValue,
@@ -2937,37 +2882,50 @@ fn constructSimpleFieldConstructor(
     new_target: core.JSValue,
     copy_argv: bool,
 ) !?core.JSValue {
-    if (!new_target.sameValue(func)) return null;
-    const rt = ctx.runtime;
-    const scanned_pattern: ?SimpleFieldConstructorPattern = if (comptime simple_ctor_memo_enabled)
-        null
-    else
-        simpleFieldConstructorPattern(fb) orelse return null;
-    if (comptime simple_ctor_memo_enabled) {
-        // Memoize the (immutable) bytecode pattern per FB — the scan was the top
-        // self-cost of the fast-path construct, re-run on every `new F()`. The
-        // memo is invalidated in the FB destructor, so keying on the FB pointer
-        // is safe.
-        ensureSimpleCtorMemo(rt, fb);
-        if (!rt.simple_ctor_memo.is_simple) return null;
+    if (comptime assume_new_target_is_func) {
+        std.debug.assert(new_target.sameValue(func));
+    } else {
+        if (!new_target.sameValue(func)) return null;
     }
+    const rt = ctx.runtime;
+    // The classification is a pure function of the FunctionBytecode's immutable
+    // published bytecode, so it is computed once and memoized in the FB itself.
+    // Variant B (and any extension-less fixture record) has no memo slot and
+    // re-scans into `scratch` on every construct.
+    var scratch: SimpleCtorFacts = undefined;
+    const facts: *align(1) const SimpleCtorFacts = facts: {
+        if (comptime simple_ctor_memo_enabled) {
+            if (fb.simpleCtorMemoMut()) |memo| {
+                if (memo.state == .unknown) memo.* = classifySimpleFieldConstructor(fb);
+                break :facts memo;
+            }
+        }
+        scratch = classifySimpleFieldConstructor(fb);
+        break :facts &scratch;
+    };
+    if (comptime builtin.mode == .Debug) {
+        // Two-way publication/runtime lockstep: the CallFacts bit published
+        // by publishExecutionFlags must match the lazily-derived
+        // classification, or the publish-time gate would silently starve the
+        // fast path (bit clear, pattern simple) or admit a non-simple body
+        // (bit set, pattern rejected). Canonical published FBs only: the
+        // legacy stack adapter borrows MUTABLE fixture bytecode, so its
+        // init-time bit can go legitimately stale, and extension-less
+        // records never published any CallFacts word.
+        if (fb.legacyBytecodeAdapter() == null and fb.simpleCtorMemoMut() != null) {
+            std.debug.assert((facts.state == .simple) ==
+                fb.callFacts().execution.simple_field_ctor);
+        }
+    }
+    if (facts.state != .simple) return null;
     const prototype = (function_object.getOwnConstructorPrototypeObject(rt) catch return null) orelse return null;
     // The prototype materialization above can allocate/GC on the FIRST
-    // construct only and never re-enters construction. Select the field slices
-    // afterwards: A borrows the still-valid runtime memo, while B borrows its
-    // per-call stack scan.
-    const field_len = if (comptime simple_ctor_memo_enabled)
-        @as(usize, rt.simple_ctor_memo.len)
-    else
-        scanned_pattern.?.len;
-    const field_atoms = if (comptime simple_ctor_memo_enabled)
-        rt.simple_ctor_memo.atoms[0..field_len]
-    else
-        scanned_pattern.?.atoms[0..field_len];
-    const field_args = if (comptime simple_ctor_memo_enabled)
-        rt.simple_ctor_memo.args[0..field_len]
-    else
-        scanned_pattern.?.arg_indices[0..field_len];
+    // construct only and never re-enters construction; the memo lives in the
+    // FB allocation the caller already holds alive, so these slices stay valid
+    // across it.
+    const field_len: usize = facts.field_count;
+    const field_atoms = facts.atoms[0..field_len];
+    const field_args = facts.arg_indices[0..field_len];
     if (prototypeChainBlocksSimpleFieldStore(prototype, field_atoms)) return null;
 
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
@@ -2989,131 +2947,15 @@ fn constructSimpleFieldConstructor(
     return instance.value();
 }
 
-fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
-    if (fb.isDerivedClassConstructor()) return null;
-    if (fb.functionKind() != .normal or !fb.hasPrototype()) return null;
-    // Base class bytecode starts with OP_check_ctor, so it cannot match either
-    // ordinary push_this prefix accepted below. Keep the gate explicit so a
-    // future pattern broadening cannot accidentally bypass class call entry.
-    const code = fb.byteCode();
-    if (code.len == 0 or code[0] == op.check_ctor) return null;
-    if (fb.var_count > 1 or fb.closureVarCount() != 0 or fb.cpool_count != 0) return null;
-    // NOTE: argumentsAllowed() is NOT gated on — it is set for every non-arrow
-    // function (it means "`arguments` is in scope", not "used"), so gating on it
-    // made this fast path dead for all ordinary constructors. The bytecode
-    // pattern matched below is exhaustively `push_this; (get this; get_arg;
-    // put_field)*; return_undef`, which references neither `arguments` nor any
-    // local/closure, so a lazily-materialized arguments object is never
-    // observable — skipping the body is identical to running it.
-    if (fb.superCallAllowed() or fb.superAllowed() or fb.isDirectOrIndirectEval()) return null;
+/// The pattern scanner moved next to `SimpleCtorFacts` in bytecode.zig so
+/// both publication funnels (publishExecutionFlags / LegacyExecutionAdapter)
+/// evaluate the identical predicate they publish as the `simple_field_ctor`
+/// CallFacts bit; the runtime memo above keeps calling it lazily.
+const classifySimpleFieldConstructor = bytecode.function_bytecode.classifySimpleFieldConstructor;
 
-    return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
-}
-
-fn simpleLocalThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
-    const code = fb.byteCode();
-    var pc: usize = 0;
-    var pattern = SimpleFieldConstructorPattern{};
-    if (pc >= code.len or code[pc] != op.push_this) return null;
-    pc += 1;
-    const this_local = decodeSimpleConstructorPutLoc(code, &pc) orelse return null;
-    while (pc < code.len) {
-        if (code[pc] == op.return_undef) {
-            pc += 1;
-            return if (pc == code.len and pattern.len != 0) pattern else null;
-        }
-        if (pattern.len == max_simple_constructor_fields) return null;
-        const local_index = decodeSimpleConstructorGetLoc(code, &pc) orelse return null;
-        if (local_index != this_local) return null;
-        tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
-    }
-    return null;
-}
-
-fn simpleStackThisFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
-    const code = fb.byteCode();
-    var pc: usize = 0;
-    var pattern = SimpleFieldConstructorPattern{};
-    if (pc >= code.len or code[pc] != op.push_this) return null;
-    pc += 1;
-    while (pc < code.len) {
-        if (code[pc] == op.return_undef) {
-            pc += 1;
-            return if (pc == code.len and pattern.len != 0) pattern else null;
-        }
-        if (pattern.len == max_simple_constructor_fields) return null;
-        const keeps_this_for_next_field = if (code[pc] == op.dup) blk: {
-            pc += 1;
-            break :blk true;
-        } else false;
-        tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
-        if (pc < code.len and code[pc] != op.return_undef and !keeps_this_for_next_field) return null;
-    }
-    return null;
-}
-
-fn tryAppendSimpleConstructorField(code: []const u8, pc: *usize, pattern: *SimpleFieldConstructorPattern) ?void {
-    const arg_index = decodeSimpleConstructorArgGet(code, pc) orelse return null;
-    if (pc.* + 5 > code.len or code[pc.*] != op.put_field) return null;
-    const atom_id = readInt(u32, code[pc.* + 1 ..][0..4]);
-    pc.* += 5;
-    for (pattern.atoms[0..pattern.len]) |existing| {
-        if (existing == atom_id) return null;
-    }
-    pattern.atoms[pattern.len] = atom_id;
-    pattern.arg_indices[pattern.len] = arg_index;
-    pattern.len += 1;
-}
-
-fn decodeSimpleConstructorPutLoc(code: []const u8, pc: *usize) ?u16 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    if (opcode_id >= op.put_loc0 and opcode_id <= op.put_loc3) {
-        return @intCast(opcode_id - op.put_loc0);
-    }
-    if (opcode_id == op.put_loc) {
-        if (pc.* + 2 > code.len) return null;
-        const index = readInt(u16, code[pc.*..][0..2]);
-        pc.* += 2;
-        return index;
-    }
-    return null;
-}
-
-fn decodeSimpleConstructorGetLoc(code: []const u8, pc: *usize) ?u16 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    if (opcode_id >= op.get_loc0 and opcode_id <= op.get_loc3) {
-        return @intCast(opcode_id - op.get_loc0);
-    }
-    if (opcode_id == op.get_loc) {
-        if (pc.* + 2 > code.len) return null;
-        const index = readInt(u16, code[pc.*..][0..2]);
-        pc.* += 2;
-        return index;
-    }
-    return null;
-}
-
-fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
-    if (pc.* >= code.len) return null;
-    const opcode_id = code[pc.*];
-    pc.* += 1;
-    if (opcode_id >= op.get_arg0 and opcode_id <= op.get_arg3) {
-        return @intCast(opcode_id - op.get_arg0);
-    }
-    if (opcode_id == op.get_arg) {
-        if (pc.* + 2 > code.len) return null;
-        const index = readInt(u16, code[pc.*..][0..2]);
-        pc.* += 2;
-        return index;
-    }
-    return null;
-}
-
-fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, atoms: []const core.Atom) bool {
+// `align(1)`: the atoms are read straight out of the FunctionBytecode's
+// byte-aligned hot extension tail.
+fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, atoms: []align(1) const core.Atom) bool {
     var current: ?*core.Object = prototype;
     while (current) |object| {
         if (object.hasExoticMethods() or object.proxyTarget() != null) return true;
@@ -7691,7 +7533,10 @@ pub fn instanceofOp(
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     };
-    const has_instance_atom = core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.TypeError;
+    // qjs names this atom as the constant JS_ATOM_Symbol_hasInstance
+    // (quickjs.c:8139). Resolve it at comptime rather than hashing the spelling
+    // through the predefined-symbol map on every `instanceof`.
+    const has_instance_atom = (comptime core.atom.predefinedId("Symbol.hasInstance", .symbol)) orelse return error.TypeError;
     const has_instance = try object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
     defer has_instance.free(ctx.runtime);
     if (!has_instance.isUndefined() and !has_instance.isNull()) {

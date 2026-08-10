@@ -1,0 +1,138 @@
+{
+ "tool": "zjs-zoo-compare",
+ "schemaVersion": 2,
+ "medianMethod": "statistics.median; even sample counts average the middle pair",
+ "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
+ "timestamp": "2026-08-10T10:02:54Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "alternating by sample parity; each engine leads exactly half the samples",
+ "firstPositionBalanced": true,
+ "cpu": 19,
+ "effectiveAffinity": [
+  19
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/zjs-rt-t3",
+   "sha256": "cee1baf231de325859ebe91452563fc0fe7cfe664b7e8e7cf05ed4969818f257",
+   "repo": {
+    "path": "/home/aneryu/zjs",
+    "commit": "104e7811c6233073012257e924485ba4be4dddc5",
+    "dirty": false
+   }
+  },
+  "qjs": {
+   "path": "/home/aneryu/quickjs/qjs",
+   "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+   "repo": {
+    "path": "/home/aneryu/quickjs",
+    "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "raytrace": {
+   "scores": {
+    "RayTrace": {
+     "zjs": {
+      "median": 2310.0,
+      "min": 2249,
+      "max": 2331,
+      "samples": [
+       2249,
+       2317,
+       2297,
+       2331,
+       2308,
+       2312,
+       2299,
+       2322
+      ]
+     },
+     "qjs": {
+      "median": 3404.0,
+      "min": 3350,
+      "max": 3423,
+      "samples": [
+       3404,
+       3404,
+       3413,
+       3401,
+       3416,
+       3350,
+       3384,
+       3423
+      ]
+     },
+     "ratioZjsOverQjs": 0.6786133960047004,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.047165314434096,
+    "qjs": 2.0267997784540057
+   }
+  }
+ },
+ "summary": {
+  "throughputGeomean": 0.6786133960047004,
+  "throughputRatios": {
+   "raytrace": 0.6786133960047004
+  },
+  "latencyRatios": {},
+  "zjsFaster": [],
+  "zjsSlower": [
+   "raytrace"
+  ]
+ },
+ "orderLog": [
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}
