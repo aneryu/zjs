@@ -790,6 +790,47 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
     try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
 }
 
+test "constructor return fusion and abrupt teardown each release the fallback exactly once" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // The fused normal-return pop moves the fallback instance out by plain
+    // read and applies qjs's two-branch (keep instance over a primitive
+    // result / replace it with an object result / forward a derived result);
+    // an abrupt body must instead release the fallback exactly once through
+    // Entry.deinit's flag-guarded route. Refcount imbalance on any of the
+    // four paths aborts the runtime teardown in this Debug build.
+    const setup = try js.eval(
+        \\function Keep(v) { this.v = v; return 42; }
+        \\function Override(v) { this.v = v; return { v: v + 1 }; }
+        \\function Abrupt(v) { this.v = v; throw new Error("boom"); }
+        \\class DerivedBase { constructor() { this.tag = 1; } }
+        \\class Derived extends DerivedBase { constructor() { super(); } }
+        \\let total = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    total += new Keep(i).v;
+        \\    total += new Override(i).v;
+        \\    try {
+        \\        new Abrupt(i);
+        \\        total += 100;
+        \\    } catch (e) {
+        \\        total += (e.message === "boom") ? 1 : 50;
+        \\    }
+        \\    total += new Derived().tag;
+        \\}
+        \\globalThis.__ctor_fusion_total = total;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const total_key = try js.runtime.internAtom("__ctor_fusion_total");
+    defer js.runtime.atoms.free(total_key);
+    const total = try global.getProperty(total_key);
+    defer total.free(js.runtime);
+    // Keep: 0+1+2 = 3, Override: 1+2+3 = 6, Abrupt catch: 3, Derived: 3.
+    try std.testing.expectEqual(@as(?i32, 15), total.asInt32());
+}
+
 test "constructor spread preserves new target on the current Machine" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
