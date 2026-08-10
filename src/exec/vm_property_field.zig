@@ -328,22 +328,25 @@ pub noinline fn field(
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
             if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
-            if (try property_ic.setObjectDataPropertyForPutFieldFastPath(ctx.runtime, function, site_pc, obj, atom_id, value)) {
+            // Single-walk cold put (qjs OP_put_field's slow path is ONE call
+            // into JS_SetPropertyInternal, quickjs.c:19188-19203 ->
+            // 9706-9890): one trusted own probe, one prototype walk, then
+            // add_property. The old cascade here re-ran the same gates and
+            // own probe up to four times per new-property write
+            // (setObjectDataPropertyForPutFieldFastPath's guaranteed-miss
+            // re-probe — the `pf_bail_missing == 2 * pf_cold` census
+            // signature — then setValueProperty's own pair). The resident
+            // `op_put_field` already ran `qjsPutFieldFastSlot` and tailed
+            // here on its miss; field operand atoms are proven non-private
+            // (debugAssertNonPrivateFieldOperandAtom), so no private probe.
+            if (object_ops.objectFromValueTrustedExpression(obj)) |receiver| {
+                debugAssertNonPrivateFieldOperandAtom(ctx.runtime, atom_id);
+                // Owned contract: value is consumed on success AND on the
+                // (OOM-only) error path — flag before, clear on a decline.
                 value_consumed = true;
-                return .done;
+                if (try receiver.setOrDefineOwnDataPropertyForPutFieldOwned(ctx.runtime, atom_id, value)) return .done;
+                value_consumed = false;
             }
-            // `qjsPutFieldFast` is gone from here: the resident `op_put_field`
-            // ran `qjsPutFieldFastSlot` — the identical
-            // `findWritableOwnDataSlotFast` probe — and tailed into this shell
-            // precisely because it found no writable own data slot. Neither of
-            // the two arms above mutates a shape on its declining path
-            // (`setArrayLengthForPutFieldFastPath` returns false before any
-            // store; `setObjectDataPropertyForSimplePutFieldOwned` declines on
-            // the same missing writable-own-data lookup), so re-probing was a
-            // guaranteed second miss on every cold put — the `pf_bail_missing ==
-            // 2 * pf_cold` census signature. qjs's OP_put_field inline window
-            // runs once and falls straight through to JS_SetPropertyInternal
-            // (quickjs.c:19188-19203).
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;

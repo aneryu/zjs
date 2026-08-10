@@ -3236,8 +3236,12 @@ pub fn setValuePropertyWithThrow(
             if (try object.appendDenseArrayIndex(ctx.runtime, index, atom_id, value)) return core.JSValue.undefinedValue();
         }
     }
-    if (try object.setOwnWritableDataProperty(ctx.runtime, atom_id, value)) return core.JSValue.undefinedValue();
-    if (try object.defineNewOwnDataPropertyForSimpleSet(ctx.runtime, atom_id, value)) return core.JSValue.undefinedValue();
+    // Single merged own probe (qjs JS_SetPropertyInternal runs ONE
+    // find_own_property, quickjs.c:9707): the old back-to-back
+    // setOwnWritableDataProperty + defineNewOwnDataPropertyForSimpleSet pair
+    // re-probed the same shape twice — once to classify the hit, once to
+    // prove absence before the add.
+    if (try object.setOrDefineOwnDataPropertyForSimpleSet(ctx.runtime, atom_id, value)) return core.JSValue.undefinedValue();
     if (try typedArrayPrototypeSet(ctx, output, global, object_value, object, object.getPrototype(), atom_id, value, caller_function, caller_frame)) |ok| {
         if (!ok and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
         return core.JSValue.undefinedValue();

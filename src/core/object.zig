@@ -10810,7 +10810,7 @@ pub const Object = extern struct {
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
             if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
-            if (!entry_flags.writable) return false;
+            if (entry_flags.deleted or !entry_flags.writable) return false;
             const entry = &self.prop_values[index];
             if (atom_id != atom.ids.Private_brand) {
                 switch (entry_flags.kind) {
@@ -10821,9 +10821,19 @@ pub const Object = extern struct {
                             return true;
                         }
                     },
-                    // VARREF slots are written through the cell via putVar, never
-                    // here; refuse the fast path so we never overwrite the slot.
-                    .var_ref => return false,
+                    // VARREF: write THROUGH the cell (never overwrite the
+                    // slot), mirroring setOwnWritableDataProperty and qjs
+                    // JS_SetPropertyInternal's JS_PROP_VARREF set_value leg
+                    // (quickjs.c:9720-9726). Needed since the merged caller
+                    // (setValuePropertyWithThrow) replaced its leading
+                    // setOwnWritableDataProperty probe with this one.
+                    .var_ref => {
+                        const cell = entry.slot.var_ref;
+                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
+                        errdefer next_value.free(rt);
+                        cell.setVarRefValue(rt, next_value);
+                        return true;
+                    },
                     // Data-destined auto_init placeholder: overwrite + flip kind.
                     .auto_init => {
                         const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
@@ -10844,11 +10854,6 @@ pub const Object = extern struct {
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
-        return try self.defineNewOwnDataPropertyForSimpleSetKnownNoOwn(rt, atom_id, new_value);
-    }
-
-    pub fn defineNewOwnDataPropertyForSimpleSet(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.findProperty(atom_id) != null) return false;
         return try self.defineNewOwnDataPropertyForSimpleSetKnownNoOwn(rt, atom_id, new_value);
     }
 
@@ -10919,6 +10924,121 @@ pub const Object = extern struct {
         }
 
         try self.addProperty(rt, atom_id, descriptor.Descriptor.data(new_value, true, true, true));
+        return true;
+    }
+
+    /// qjs JS_SetPropertyInternal's single-walk core (quickjs.c:9706-9890) for
+    /// the put_field cold shell: ONE trusted own probe that classifies the hit
+    /// (plain writable data / var_ref / auto_init handled here; accessor and
+    /// read-only hits defer), ONE prototype walk that `break`s at the first
+    /// plain writable data holder (quickjs.c:9840-9853), then add_property
+    /// with C_W_E flags straight into the slot (quickjs.c:9884-9890) — no
+    /// Descriptor materialization and no re-probing. The old cold cascade
+    /// re-ran an equivalent admission gate set and own probe up to four times
+    /// per new-property write (setObjectDataPropertyForPutFieldFastPath ->
+    /// setValuePropertyWithThrow -> setOwnWritableDataProperty ->
+    /// defineNewOwnDataPropertyForSimpleSet).
+    ///
+    /// Returns true when the write was fully performed; false defers to the
+    /// full setValueProperty resolver with NO state mutated. OWNED value
+    /// contract (qjs consumes `val` the same way): `new_value` is consumed
+    /// when `true` is returned AND on the error path (the append's errdefer
+    /// destroys the prepared slot); a `false` return leaves ownership with
+    /// the caller.
+    ///
+    /// Deliberate defers that pin the resolver's semantic order:
+    /// - with-environment receivers: the strict-miss ReferenceError door in
+    ///   setValuePropertyWithThrow must stay ahead of any own probe;
+    /// - mapped-arguments receivers (via needsSlowPropertyAccess): both the
+    ///   own-hit setMappedArgumentsValue hook and the new-property
+    ///   updateMappedArgumentsBinding hook live in the resolver;
+    /// - accessor/read-only hits anywhere on the chain: setter invocation and
+    ///   throw_on_set_failure polarity need the caller frame;
+    /// - a global receiver may take the own-hit write but never the add — qjs
+    ///   likewise routes JS_CLASS_GLOBAL_OBJECT to generic_create_prop
+    ///   (quickjs.c:9882-9883);
+    /// - the extensible check sits AFTER the prototype walk (qjs order,
+    ///   quickjs.c:9862-9865): a non-extensible receiver whose chain holds a
+    ///   setter must reach that setter, never a synthesized failure.
+    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
+        // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
+        // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
+        // classes, whose set semantics (length, canonical numeric indices,
+        // binding mirrors, traps) all live in the resolver.
+        if (self.needsSlowPropertyAccess()) return false;
+        if (self.proxyTarget() != null) return false;
+        if (self.flags.is_with_environment) return false;
+
+        if (self.findPropertyProbeTrusted(atom_id)) |lookup| {
+            const entry_flags = property.Flags.fromBits(lookup.prop.flags);
+            if (entry_flags.deleted or !entry_flags.writable) return false;
+            const entry = &self.prop_values[lookup.index];
+            switch (entry_flags.kind) {
+                // qjs's single-mask fast case (quickjs.c:9708-9713): swap the
+                // slot, free the old value. The owned store consumes new_value.
+                .data => {
+                    const old_slot = entry.slot;
+                    entry.slot = .{ .data = new_value };
+                    destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
+                    return true;
+                },
+                // JS_PROP_VARREF: set_value through the cell
+                // (quickjs.c:9720-9726); module_ns cells were excluded by the
+                // class gate and const cells carry writable == false.
+                .var_ref => {
+                    entry.slot.var_ref.setVarRefValue(rt, new_value);
+                    return true;
+                },
+                // Data-destined AUTOINIT (quickjs.c:9727-9733 instantiates and
+                // retries; the retry lands in the fast case): discard the lazy
+                // default and flip the kind in lockstep. Auto-init entries are
+                // always data-destined (native accessors install eagerly, see
+                // isAccessorOrAccessorPlaceholderAt); non-writable placeholders
+                // were deferred above.
+                .auto_init => {
+                    self.ensureUniqueShapeForMutation(rt) catch |err| {
+                        // Owned contract: errors consume new_value.
+                        new_value.free(rt);
+                        return err;
+                    };
+                    self.setEntryKindAndSlot(rt, atom_id, lookup.index, entry_flags.withKind(.data), .{ .data = new_value });
+                    self.pruneBorrowedReferenceHolderIfEmpty(rt);
+                    return true;
+                },
+                .accessor => return false,
+            }
+        }
+
+        // Own miss: new-property leg. Index-form atoms keep the resolver's
+        // element/length machinery — a folded computed key (`o['5'] = x`) can
+        // still reach put_field with a tagged-int atom.
+        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
+        if (self.isGlobal()) return false;
+
+        // qjs's prototype walk (quickjs.c:9739-9854): the FIRST holder of the
+        // key decides — setter/auto_init/read-only entries defer to the
+        // resolver, a plain writable data property does NOT shadow the create
+        // (break and add an own slot). Exotic/proxy/typed links keep their
+        // trap/canonical-index semantics in the resolver.
+        var prototype = self.getPrototype();
+        while (prototype) |proto| {
+            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
+            if (isTypedArrayObjectForSetFastPath(proto)) return false;
+            if (proto.findPropertyProbeTrusted(atom_id)) |proto_lookup| {
+                const proto_flags = property.Flags.fromBits(proto_lookup.prop.flags);
+                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return false;
+                break;
+            }
+            prototype = proto.getPrototype();
+        }
+
+        // Extensibility AFTER the walk (quickjs.c:9862-9865, see doc note).
+        if (!self.flags.extensible) return false;
+
+        // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890). The
+        // prepared slot takes the caller's ref; on append failure the errdefer
+        // inside destroys it (owned contract).
+        try self.appendPreparedPropertyEntry(rt, atom_id, property.Flags.data(true, true, true), .{ .data = new_value });
         return true;
     }
 
