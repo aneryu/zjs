@@ -3172,6 +3172,14 @@ pub const Machine = struct {
                 moved_args,
             );
         }
+        // NB2-C: the moved general shape (e.g. RayTrace's `initialize` via
+        // Function.apply — materializes arguments, var_count > 0) has a warm
+        // twin too. Copied callers keep the authoritative path: the copied
+        // variant is inlined at three call sites with zero measured events,
+        // and widening a shared hot body has regressed layout before.
+        if (comptime move_args) {
+            return self.tryPushNativeBoundarySimpleGeneralFast(rt, target, moved_args);
+        }
         return null;
     }
 
@@ -3304,6 +3312,123 @@ pub const Machine = struct {
             .locals = stack_window[0..0],
             .args = frame_args,
             .var_refs = captures,
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(
+            &rt.memory,
+            rt.vm_stack_arena_policy,
+            stack_window,
+        );
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+            .copy_argv = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
+    /// Warm form of the general `setupNativeBoundarySimpleEntry` shape for
+    /// MOVED arguments (NB2-C): eligibility is already proven, the Entry slot
+    /// and VM arena are warm, and the frame carries no original-args snapshot
+    /// (sloppy simple-parameter functions — the mapped-arguments shape — plus
+    /// any zero-argument call), so the FrameCold allocation, the fallback
+    /// carve/heap legs, and the errdefer unwind machinery all vanish. The
+    /// geometry is exactly the authoritative slab: args | locals | operand
+    /// stack | open-var-ref tail. Unlike the exact-leaf twin, the argument
+    /// window is `max(actual, declared)` and ALL actuals are copied —
+    /// `arguments` observes extra actual arguments. A null result is a pure
+    /// miss with every budget and watermark unchanged.
+    inline fn tryPushNativeBoundarySimpleGeneralFast(
+        self: *Machine,
+        rt: *core.JSRuntime,
+        target: *const InlineTarget,
+        moved_args: []core.JSValue,
+    ) ?*Entry {
+        const function = target.fb;
+        std.debug.assert(nativeBoundarySimpleEligible(target));
+        const actual_arg_count = moved_args.len;
+        // Snapshot-carrying shapes (strict / derived ctor / non-simple
+        // parameter lists with argc > 0) allocate a FrameCold box; they keep
+        // the authoritative path.
+        if (frame_mod.originalArgCount(
+            actual_arg_count,
+            frame_mod.argumentsNeedsOriginalSnapshot(function),
+        ) != 0) return null;
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            function,
+            actual_arg_count,
+            true,
+        );
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
+        const entry = self.entryAt(index);
+
+        const frame_arg_count = frame_mod.frameArgCount(function, actual_arg_count);
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
+        const open_slots = if (open_var_ref_count == 0)
+            0
+        else
+            (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+        const total = frame_arg_count + var_count + stack_count + open_slots;
+        const carve = rt.vm_stack.carveActiveMarked(total) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
+
+        const frame_args = carve.window[0..frame_arg_count];
+        const locals = carve.window[frame_arg_count..][0..var_count];
+        const stack_window = carve.window[frame_arg_count + var_count ..][0..stack_count];
+        const open_start = frame_arg_count + var_count + stack_count;
+        const open_var_refs: []?*core.VarRef = if (open_slots == 0)
+            &.{}
+        else
+            std.mem.bytesAsSlice(
+                ?*core.VarRef,
+                std.mem.sliceAsBytes(carve.window[open_start..][0..open_slots]),
+            )[0..open_var_ref_count];
+
+        @memset(locals, core.JSValue.undefinedValue());
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
+        @memcpy(frame_args[0..actual_arg_count], moved_args);
+        @memset(moved_args, core.JSValue.undefinedValue());
+        @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
+
+        const captures = target.captureSlice();
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .actual_arg_count = @intCast(actual_arg_count),
+            .locals = locals,
+            .args = frame_args,
+            .var_refs = captures,
+            .open_var_refs = open_var_refs,
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .storage_values = &.{},
             .ownership = .{
