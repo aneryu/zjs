@@ -127,6 +127,30 @@ pub const NativeCall = struct {
     caller_frame: ?*Frame,
 };
 
+/// Direct-call ABI for records whose body consumes only the resolved realm
+/// pair, host output, and the VM caller pair — the `js_call_c_function`
+/// shape (qjs:17563): everything arrives as parameters, so the handler never
+/// consults `active_native_call` and the dispatch never materializes a
+/// NativeCallEnvironment. `ctx`/`global` are the FINAL callable realm view
+/// (post `finalCallEnvironment`), kept as one authority pair.
+pub const ExecDirectCallFn = *const fn (
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue;
+
+/// Registration-side eraser for `InternalEntry.exec_direct`: taking the
+/// pointer through this helper is the only sanctioned way to populate the
+/// type-erased slot, so every stored pointer is proven to carry the
+/// `ExecDirectCallFn` ABI that `callExecDirectRecord` casts back to.
+pub fn execDirectFunction(comptime implementation: ExecDirectCallFn) *const anyopaque {
+    return @ptrCast(implementation);
+}
+
 inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
     const opaque_ptr = ctx.runtime.active_native_call orelse return null;
     return @ptrCast(@alignCast(opaque_ptr));
@@ -372,6 +396,15 @@ inline fn callInternalRecordDirectWithEnvironment(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
+    // Exec-direct terminal (qjs js_call_c_function, qjs:17563, has no env
+    // side-channel): pass the call state by parameter and skip both the
+    // NativeCallEnvironment stores and the `active_native_call`
+    // save/set/restore. Reentrant native dispatch below the handler always
+    // establishes its own environment first, so the skipped restore cannot
+    // leak a stale view.
+    if (record.exec_direct) |direct_ptr| {
+        return callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
+    }
     // QuickJS links a JSStackFrame around every C function call. Use the same
     // active-frame chain as bytecode invocations so an error created inside a
     // builtin captures the native callee before its bytecode caller. The data
@@ -400,6 +433,46 @@ inline fn callInternalRecordDirectWithEnvironment(
         try materializeRuntimeError(view.ctx, view.global, err);
         return err;
     };
+}
+
+/// Direct-ABI record terminal: same native backtrace frame and error
+/// materialization boundary as the environment path, minus the environment
+/// itself. The handler receives the final realm authority pair by parameter.
+inline fn callExecDirectRecord(
+    view: FinalCallEnvironment,
+    output: ?*std.Io.Writer,
+    func_obj: ?*core.Object,
+    this_value: core.JSValue,
+    direct_ptr: *const anyopaque,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
+    var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
+    native_scope.push();
+    defer native_scope.deinit();
+
+    return invokeExecDirectRecord(view, output, this_value, direct_ptr, args, caller_function, caller_frame) catch |err| {
+        try materializeRuntimeError(view.ctx, view.global, err);
+        return err;
+    };
+}
+
+inline fn invokeExecDirectRecord(
+    view: FinalCallEnvironment,
+    output: ?*std.Io.Writer,
+    this_value: core.JSValue,
+    direct_ptr: *const anyopaque,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
+    // Same authority gate as `callableRealm`: a synthetic invocation without
+    // a callable carrier reports the identical registry error the env-path
+    // handler would raise after its `nativeCall` recovery.
+    const realm_view = view.callable_realm orelse return error.InvalidBuiltinRegistry;
+    const direct: ExecDirectCallFn = @ptrCast(@alignCast(direct_ptr));
+    return direct(realm_view.realm, output, realm_view.global, this_value, args, caller_function, caller_frame);
 }
 
 inline fn invokeResolvedInternalRecord(
