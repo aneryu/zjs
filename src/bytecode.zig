@@ -5600,8 +5600,8 @@ pub const binding_rules = struct {
         var flat_i: usize = fd.vars.len;
         while (flat_i > 0) {
             flat_i -= 1;
-            const vd = fd.vars[flat_i];
-            if (vd.scope_level == 0 and vd.var_name == atom_id) {
+            const vd = &fd.vars[flat_i];
+            if (vd.var_name == atom_id and vd.scope_level == 0) {
                 return .{ .local = @intCast(flat_i) };
             }
         }
@@ -6994,8 +6994,8 @@ pub const binding_rules = struct {
                 var function_var_idx = parent.vars.len;
                 while (function_var_idx > 0) {
                     function_var_idx -= 1;
-                    const vd = parent.vars[function_var_idx];
-                    if (vd.scope_level == 0 and vd.var_name == atom_id) {
+                    const vd = &parent.vars[function_var_idx];
+                    if (vd.var_name == atom_id and vd.scope_level == 0) {
                         return .{ .closure = try threadParentLocalSource(
                             fd,
                             parent,
