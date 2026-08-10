@@ -60,3 +60,38 @@ the full gate battery with bit-identical test262 results.
    counter probes, not disassembly).
 5. Call-boundary state coupling (C-track ledger): reduce the ~14 vm.* rewrites
    per call boundary; return-chain probe (K4) validated the chain-depth lever.
+
+## Tranche 7 — started, not landed
+
+A T6 diagnosis round (workflow `wf_ee3e0057-2d2`) re-attributed the residuals and
+overturned three earlier numbers; see the `t6-misattribution-corrections` note.
+Its headline: the "property-read generic route 4.21x / ~6G" does not exist —
+counter builds recorded **69 read exits out of 9.57M reads**, and the symbols
+that had been bucketed as read cost (`vm_property_field.field` and its cold
+shell) are the shared cold body's **put_field arm**. The real block hiding under
+that label is the new-property cold write chain: 1.9x, Δ≈5.2G ≈ 25% of the
+remaining gap.
+
+Tranche 7 was launched to act on that (put_field resident add-tail, shape clone
+memcpy, get_var base mirror plus riders) but all three implementation agents
+halted mid-flight on exhausted credits. Their partial work is preserved as
+explicitly-labelled WIP commits — **none of it is gated, measured, or merged**:
+
+| branch | head | state |
+|---|---|---|
+| `worktree-wf_7d4083ad-cea-1` | `28d19814` | put_field resident add-tail, partial; no build/test/measurement |
+| `worktree-wf_7d4083ad-cea-2` | `873ce066` | shape clone memcpy + probe-first rider; reset-ordering hazard unverified |
+| `worktree-wf_7d4083ad-cea-3` | `9fc2cdfe` | empty-ctor fast path over an ungated get_var base-mirror commit |
+
+`main` is unaffected and remains the fully gated tranche-5 tree.
+
+### Resuming
+
+Task books for all three live in the workflow script
+`.claude/.../workflows/scripts/residual-t7-implement-wf_7d4083ad-cea.js`, with
+the adversarial-review conditions already folded in. Priority order by measured
+budget: put_field add-tail (pre-registered line 15–30M cyc/run, ceiling 48M) >
+shape clone memcpy (splay object-create, −0.06..0.09G, the round's only
+unconditional GO) > the get_var/empty-ctor riders (both need zoo-wide
+adjudication before they earn a verdict; the get_var prototype showed a
+RayTrace +1.04% seam tax that must be treated as mechanism, not layout noise).
