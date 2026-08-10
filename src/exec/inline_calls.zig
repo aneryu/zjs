@@ -1553,10 +1553,30 @@ pub const Machine = struct {
     /// inlines it back into `pushFrame`, the simple path's spills re-couple with
     /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
     noinline fn setupSimpleInlineEntry(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
-        return setupSimpleInlineEntryImpl(strict_this, snapshot_args, pad_args, method_receiver, move_args, ctx, global, entry, target, source);
+        return setupSimpleInlineEntryImpl(strict_this, snapshot_args, pad_args, method_receiver, move_args, false, ctx, global, entry, target, source);
     }
 
-    inline fn setupSimpleInlineEntryImpl(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+    /// Constructor member of the simple-frame family. qjs builds constructor
+    /// frames with the byte-identical JS_CallInternal prologue used for method
+    /// calls — JS_CallConstructorInternal (quickjs.c:20845) passes straight
+    /// into the shared alloca prologue (quickjs.c:17828-17871) and
+    /// JS_CALL_FLAG_CONSTRUCTOR is never consumed by that bytecode prologue.
+    /// The `constructor_this` instantiation differs from the method arm in one
+    /// ownership byte: the frame's `this` binding is written `.borrowed` ONCE
+    /// (the eager fallback instance is owned by `Entry.native_caller` under
+    /// `teardown.constructor_completion`, which `pushConstructorCall` publishes
+    /// right after this returns), instead of the retired general-path
+    /// `.owned`-then-flip pair.
+    ///
+    /// `noinline` is LOAD-BEARING exactly as for `setupSimpleInlineEntry`:
+    /// this body must not fold back into `pushConstructorCall`, or its
+    /// register allocation re-couples with the push shell (fib precedent
+    /// 3.09x→3.26x).
+    noinline fn setupSimpleConstructorEntry(comptime snapshot_args: bool, comptime pad_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+        return setupSimpleInlineEntryImpl(false, snapshot_args, pad_args, true, false, true, ctx, global, entry, target, source);
+    }
+
+    inline fn setupSimpleInlineEntryImpl(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, comptime constructor_this: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
         const function = target.fb;
         entry.catch_target = null;
@@ -1571,6 +1591,10 @@ pub const Machine = struct {
         // continuations and tail-call reuse consume a temporary owned region.
         // Both share `[receiver, callable, args...]` for method calls.
         comptime std.debug.assert(!move_args or method_receiver);
+        // Constructors are method-shaped stack regions (op_call_constructor
+        // recast `[instance, callable, args...]`); tail-call reuse never
+        // replaces a constructor Entry, so the moved variant cannot occur.
+        comptime std.debug.assert(!constructor_this or (method_receiver and !move_args and !strict_this));
         std.debug.assert(source.metadata.moved == move_args);
         std.debug.assert(source.metadata.has_receiver == method_receiver);
         const receiver_count: usize = @intFromBool(method_receiver);
@@ -1712,7 +1736,13 @@ pub const Machine = struct {
             .open_var_refs = open_var_refs,
             .storage_values = if (storage_on_heap) slab_values else &.{},
             .ownership = .{
-                .this_value = if (method_receiver) .owned else .borrowed,
+                // A constructor frame BORROWS the eager fallback instance: the
+                // owned reference moved out of the receiver slot is recorded in
+                // `Entry.native_caller` by `pushConstructorCall` immediately
+                // after this returns (no failable step in between), and
+                // constructor completion / abrupt teardown releases it there.
+                // Written `.borrowed` once instead of the retired owned→flip.
+                .this_value = if (method_receiver and !constructor_this) .owned else .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -1800,7 +1830,7 @@ pub const Machine = struct {
             // remove one call instruction from this less common method shape.
             try setupSimpleInlineEntry(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
         } else {
-            try setupSimpleInlineEntryImpl(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
+            try setupSimpleInlineEntryImpl(strict_this, snapshot_args, false, method_receiver, false, false, self.ctx, global, entry, target, source);
         }
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
         entry.prev = self.top;
@@ -2929,9 +2959,50 @@ pub const Machine = struct {
         };
         entry.return_action = .constructor;
         entry.continuation_payload = 0;
-        setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
+        // qjs constructor frames are built by the byte-identical
+        // JS_CallInternal prologue used for method calls:
+        // JS_CallConstructorInternal (quickjs.c:20845) enters the shared
+        // alloca prologue (quickjs.c:17828-17871) and JS_CALL_FLAG_CONSTRUCTOR
+        // is never consumed by that bytecode prologue. The caller already
+        // recast the region to method shape `[instance, callable, args...]`
+        // with `target.this_value == values[0]`, so the ordinary method
+        // simple-frame selector applies verbatim; every constructor-specific
+        // fact lives in the completion tail below. The simple slab partitions
+        // give `frame.locals` a valid pointer even at var_count == 0 (empty
+        // slice AT the operand-stack base), so `deinitSimpleResources`'s
+        // live-operand derivation holds — unlike the retired attempt that set
+        // `teardown.simple` on a `Frame.init`-defaulted general frame and
+        // aborted in ReleaseSafe inside `popConstructorReturn`.
+        if (methodSimpleInlineMode(target, source)) |mode| {
+            switch (mode) {
+                .stack_exact => try setupSimpleConstructorEntry(false, false, self.ctx, global, entry, target, source),
+                .stack_padded => try setupSimpleConstructorEntry(false, true, self.ctx, global, entry, target, source),
+                .stack_snapshot_exact => try setupSimpleConstructorEntry(true, false, self.ctx, global, entry, target, source),
+                .stack_snapshot_padded => try setupSimpleConstructorEntry(true, true, self.ctx, global, entry, target, source),
+                // `source` is built by initStack above: `moved` is statically
+                // false, so the temporary-region variants cannot be selected.
+                .moved_exact, .moved_padded, .moved_snapshot_exact, .moved_snapshot_padded => unreachable,
+            }
+        } else {
+            setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
+            // General setup took the receiver `.owned` (its method arm); move
+            // to the same write-once `.borrowed` the simple variants publish,
+            // BEFORE the fallback slot takes ownership below.
+            std.debug.assert(entry.frame.ownership.this_value == .owned);
+            entry.frame.ownership.this_value = .borrowed;
+        }
         errdefer entry.deinit(self.ctx);
 
+        // Publish the fallback-instance ownership before the failable
+        // new-target transfer: with `constructor_completion` + `native_caller`
+        // set, `entry.deinit` releases the instance exactly once through
+        // `releaseConstructorFallback` on either teardown route, while the
+        // frame's `.borrowed` this can never double-free it. The bit is set
+        // AFTER setup because both setup families assign the whole teardown
+        // byte.
+        std.debug.assert(entry.frame.this_value.same(target.this_value));
+        entry.native_caller = entry.frame.this_value;
+        entry.teardown.constructor_completion = true;
         // qjs keeps `new_target` in a JS_CallInternal register and gives
         // JSStackFrame no field for it (quickjs.c:405-417); only a function
         // that actually reads `new.target` pays anything, at the
@@ -2942,18 +3013,6 @@ pub const Machine = struct {
         if (owned_new_target) |value| {
             try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, self.ctx.runtime, value);
         }
-        std.debug.assert(entry.frame.ownership.this_value == .owned);
-        std.debug.assert(entry.frame.this_value.same(target.this_value));
-        entry.native_caller = entry.frame.this_value;
-        entry.frame.ownership.this_value = .borrowed;
-        // NOTE: do NOT set `teardown.simple` here. Dropping the cold box makes
-        // `canUseSimpleTeardown`'s `cold == null` test pass, but
-        // `deinitSimpleResources` derives its live-operand window from
-        // `frame.locals.ptr` — and a constructor body with no locals carries
-        // the empty-slice default, not the stack base that derivation assumes
-        // (the same hazard `deinit` documents for exact-args leaves). Doing so
-        // aborts in ReleaseSafe inside `popConstructorReturn`.
-        entry.teardown.constructor_completion = true;
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
 
         entry.prev = self.top;
