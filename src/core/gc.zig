@@ -1986,17 +1986,51 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
     // round, so shape needs no gate.
     if (rt.gc.phase == .remove_cycles and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
 
+    // qjs free_var_ref (quickjs.c:6164-6183) tears a dead cell down fully
+    // synchronously: --ref_count -> JS_FreeValueRT(value) -> remove_gc_object
+    // -> js_free_rt. __JS_FreeValueRT's zero-ref queue set is only
+    // {OBJECT, FUNCTION_BYTECODE, MODULE} (quickjs.c:6471-6483) — a JSVarRef
+    // never touches gc_zero_ref_count_list, so zjs enqueuing it paid a queue
+    // splice + drain pop + the full destroyZeroRefNow frame per dead cell.
+    // The three phase gates above stay in front, so this tail is reachable only
+    // in .none/.decref; remove_cycles keeps its batch loop as the sole cycle
+    // release point. Recursion is bounded: a cell's value is never itself a
+    // cell (var_ref.zig setVarRefValue terminal-state assert), and an object
+    // value released here still goes through the queue exactly like qjs.
+    if (header.meta().flags.kind == .var_ref) {
+        destroyVarRefNow(rt, header);
+        return;
+    }
+
     // QJS queues the GC kinds reachable through JSValue and lets the outermost
     // free drain them. Strings/ropes and BigInt remain immediate; Shape has its
     // own direct release path and can only add object work while a queued node
-    // is being destroyed. This removes unbounded Object/FB/VarRef destructor
+    // is being destroyed. This removes unbounded Object/FB destructor
     // recursion without adding a fallible allocation to the zero-ref path.
-    if (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module) {
+    if (header.meta().flags.kind == .object or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module) {
         rt.gc.enqueueZeroRef(rt, header);
         return;
     }
 
     destroyZeroRefNow(rt, header);
+}
+
+/// Synchronous var_ref teardown, mirroring qjs free_var_ref
+/// (quickjs.c:6164-6183): unlink + accounting, then the existing destructor.
+/// Never sets the queued-node mark bit — a var_ref has no weak identity
+/// (runtime.zig objectFromWeakIdentity resolves objects only) and no
+/// containsHeader consumer, so nothing observes the queued state qjs's
+/// `js_rc(p)->mark = 1` publishes for objects.
+fn destroyVarRefNow(rt: anytype, header: *Header) void {
+    std.debug.assert(header.meta().rc == 0);
+    std.debug.assert(header.meta().flags.kind == .var_ref);
+    // Accounting must not drift from the generic path: heapByteSizeFromHeader
+    // resolves a var_ref to @sizeOf(VarRef) either via the stamped size_class
+    // (addInitializedWithSize stores encodeHeapBytes(@sizeOf(VarRef)), exact
+    // as long as it is below the large-class clamp) or the kind switch.
+    comptime std.debug.assert(@sizeOf(var_ref.VarRef) < large_heap_size_class);
+    rt.gc.unlinkObjectWithBytes(header, comptime @sizeOf(var_ref.VarRef));
+    var_ref.VarRef.destroyFromHeader(rt, header);
 }
 
 /// Destruct a zero-ref node whose queue link has already been removed. Kept
