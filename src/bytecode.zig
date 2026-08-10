@@ -1612,7 +1612,20 @@ pub const function_bytecode = struct {
         /// before entering. Derived constructors keep the canonical qjs
         /// header bit; this covers only the base-class entry probe.
         entry_rejects_plain_call: bool = false,
-        _reserved: u2 = 0,
+        /// Publication-time image of the simple-field constructor
+        /// classification (`classifySimpleFieldConstructor`): the body is
+        /// exhaustively `push_this; (this.f = arg_i;)*; return_undef`, so
+        /// `new` may run the direct field writer without entering the
+        /// bytecode body. Published code is immutable, so hoisting the probe
+        /// out of the per-`new` construct path is exact; the lazily-filled
+        /// `SimpleCtorFacts` memo still carries the field table for admitted
+        /// constructors. qjs needs no such bit — JS_CallConstructorInternal
+        /// (quickjs.c:20839-20856) always enters the bytecode body — but the
+        /// zjs writer must reject before construction commits, and RayTrace's
+        /// constructors are all non-simple: the per-`new` outline probe was
+        /// pure dead cost there.
+        simple_field_ctor: bool = false,
+        _reserved: u1 = 0,
     };
 
     /// Immutable execution policy published before a FunctionBytecode escapes.
@@ -1669,6 +1682,153 @@ pub const function_bytecode = struct {
             std.debug.assert(@offsetOf(@This(), "field_count") == 0x31);
         }
     };
+
+    /// Decide whether the construct fast path applies to this
+    /// FunctionBytecode. Never returns `.unknown`: callers store the result
+    /// verbatim. Pure function of the immutable published bytecode and header
+    /// facts, so both publication funnels evaluate it once
+    /// (`publishExecutionFlags` / `LegacyExecutionAdapter.init`) into the
+    /// `simple_field_ctor` CallFacts bit, while the runtime construct path
+    /// still derives the field table lazily into the `SimpleCtorFacts` memo
+    /// and Debug-asserts the two agree.
+    pub fn classifySimpleFieldConstructor(fb: *const FunctionBytecodeImpl) SimpleCtorFacts {
+        var facts = simpleFieldConstructorPattern(fb) orelse return .{ .state = .not_simple };
+        facts.state = .simple;
+        return facts;
+    }
+
+    fn simpleFieldConstructorPattern(fb: *const FunctionBytecodeImpl) ?SimpleCtorFacts {
+        const op = opcode.op;
+        if (fb.isDerivedClassConstructor()) return null;
+        if (fb.functionKind() != .normal or !fb.hasPrototype()) return null;
+        // Base class bytecode starts with OP_check_ctor, so it cannot match
+        // either ordinary push_this prefix accepted below. Keep the gate
+        // explicit so a future pattern broadening cannot accidentally bypass
+        // class call entry.
+        const code = fb.byteCode();
+        if (code.len == 0 or code[0] == op.check_ctor) return null;
+        if (fb.var_count > 1 or fb.closureVarCount() != 0 or fb.cpool_count != 0) return null;
+        // NOTE: argumentsAllowed() is NOT gated on — it is set for every
+        // non-arrow function (it means "`arguments` is in scope", not
+        // "used"), so gating on it made this fast path dead for all ordinary
+        // constructors. The bytecode pattern matched below is exhaustively
+        // `push_this; (get this; get_arg; put_field)*; return_undef`, which
+        // references neither `arguments` nor any local/closure, so a
+        // lazily-materialized arguments object is never observable — skipping
+        // the body is identical to running it.
+        if (fb.superCallAllowed() or fb.superAllowed() or fb.isDirectOrIndirectEval()) return null;
+
+        return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
+    }
+
+    fn simpleLocalThisFieldConstructorPattern(fb: *const FunctionBytecodeImpl) ?SimpleCtorFacts {
+        const op = opcode.op;
+        const code = fb.byteCode();
+        var pc: usize = 0;
+        var pattern = SimpleCtorFacts{};
+        if (pc >= code.len or code[pc] != op.push_this) return null;
+        pc += 1;
+        const this_local = decodeSimpleConstructorPutLoc(code, &pc) orelse return null;
+        while (pc < code.len) {
+            if (code[pc] == op.return_undef) {
+                pc += 1;
+                return if (pc == code.len and pattern.field_count != 0) pattern else null;
+            }
+            if (pattern.field_count == max_simple_ctor_fields) return null;
+            const local_index = decodeSimpleConstructorGetLoc(code, &pc) orelse return null;
+            if (local_index != this_local) return null;
+            tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
+        }
+        return null;
+    }
+
+    fn simpleStackThisFieldConstructorPattern(fb: *const FunctionBytecodeImpl) ?SimpleCtorFacts {
+        const op = opcode.op;
+        const code = fb.byteCode();
+        var pc: usize = 0;
+        var pattern = SimpleCtorFacts{};
+        if (pc >= code.len or code[pc] != op.push_this) return null;
+        pc += 1;
+        while (pc < code.len) {
+            if (code[pc] == op.return_undef) {
+                pc += 1;
+                return if (pc == code.len and pattern.field_count != 0) pattern else null;
+            }
+            if (pattern.field_count == max_simple_ctor_fields) return null;
+            const keeps_this_for_next_field = if (code[pc] == op.dup) blk: {
+                pc += 1;
+                break :blk true;
+            } else false;
+            tryAppendSimpleConstructorField(code, &pc, &pattern) orelse return null;
+            if (pc < code.len and code[pc] != op.return_undef and !keeps_this_for_next_field) return null;
+        }
+        return null;
+    }
+
+    fn tryAppendSimpleConstructorField(code: []const u8, pc: *usize, pattern: *SimpleCtorFacts) ?void {
+        const op = opcode.op;
+        const arg_index = decodeSimpleConstructorArgGet(code, pc) orelse return null;
+        if (pc.* + 5 > code.len or code[pc.*] != op.put_field) return null;
+        const atom_id = std.mem.readInt(u32, code[pc.* + 1 ..][0..4], .little);
+        pc.* += 5;
+        for (pattern.atoms[0..pattern.field_count]) |existing| {
+            if (existing == atom_id) return null;
+        }
+        pattern.atoms[pattern.field_count] = atom_id;
+        pattern.arg_indices[pattern.field_count] = arg_index;
+        pattern.field_count += 1;
+    }
+
+    fn decodeSimpleConstructorPutLoc(code: []const u8, pc: *usize) ?u16 {
+        const op = opcode.op;
+        if (pc.* >= code.len) return null;
+        const opcode_id = code[pc.*];
+        pc.* += 1;
+        if (opcode_id >= op.put_loc0 and opcode_id <= op.put_loc3) {
+            return @intCast(opcode_id - op.put_loc0);
+        }
+        if (opcode_id == op.put_loc) {
+            if (pc.* + 2 > code.len) return null;
+            const index = std.mem.readInt(u16, code[pc.*..][0..2], .little);
+            pc.* += 2;
+            return index;
+        }
+        return null;
+    }
+
+    fn decodeSimpleConstructorGetLoc(code: []const u8, pc: *usize) ?u16 {
+        const op = opcode.op;
+        if (pc.* >= code.len) return null;
+        const opcode_id = code[pc.*];
+        pc.* += 1;
+        if (opcode_id >= op.get_loc0 and opcode_id <= op.get_loc3) {
+            return @intCast(opcode_id - op.get_loc0);
+        }
+        if (opcode_id == op.get_loc) {
+            if (pc.* + 2 > code.len) return null;
+            const index = std.mem.readInt(u16, code[pc.*..][0..2], .little);
+            pc.* += 2;
+            return index;
+        }
+        return null;
+    }
+
+    fn decodeSimpleConstructorArgGet(code: []const u8, pc: *usize) ?u16 {
+        const op = opcode.op;
+        if (pc.* >= code.len) return null;
+        const opcode_id = code[pc.*];
+        pc.* += 1;
+        if (opcode_id >= op.get_arg0 and opcode_id <= op.get_arg3) {
+            return @intCast(opcode_id - op.get_arg0);
+        }
+        if (opcode_id == op.get_arg) {
+            if (pc.* + 2 > code.len) return null;
+            const index = std.mem.readInt(u16, code[pc.*..][0..2], .little);
+            pc.* += 2;
+            return index;
+        }
+        return null;
+    }
 
     /// Hot zjs-only state placed immediately after the exact code bytes. Code
     /// has byte alignment, so canonical access must use `*align(1)`. The
@@ -9954,6 +10114,21 @@ const function_mod = struct {
                 .is_direct_or_indirect_eval = source.flags.is_direct_or_indirect_eval,
             });
             self.function.setLegacyBytecodeAdapter(source);
+            self.function.func_name = source.name;
+            self.function.arg_count = source.arg_count;
+            self.function.var_count = source.var_count;
+            self.function.defined_arg_count = source.arg_count;
+            self.function.stack_size = source.stack_size;
+            self.function.var_ref_count = source.open_var_ref_count;
+            self.function.closure_var_count = @intCast(if (source.closure_var.len != 0) source.closure_var.len else source.var_ref_names.len);
+            self.function.cpool_count = @intCast(source.constants.values.len);
+            // Publish the execution snapshot LAST: the simple-field
+            // constructor classification reads the adapter code pointer
+            // (installed above) plus the var/closure/cpool counts, so this
+            // funnel matches publishExecutionFlags' code-bytes-final
+            // guarantee. The adapter borrows MUTABLE fixture bytecode, so the
+            // canonical-only Debug lockstep assertion in
+            // constructSimpleFieldConstructor deliberately excludes it.
             self.function.setExecutionFlags(.{
                 .has_mapped_arguments = source.flags.has_mapped_arguments,
                 .simple_inline_eligible = source.simple_inline_eligible,
@@ -9966,15 +10141,9 @@ const function_mod = struct {
                 .exact_args_leaf_kind = source.exact_args_leaf_kind,
                 .capture_leaf_kind = source.capture_leaf_kind,
                 .is_module = source.flags.is_module,
+                .simple_field_ctor = function_bytecode_mod
+                    .classifySimpleFieldConstructor(&self.function).state == .simple,
             });
-            self.function.func_name = source.name;
-            self.function.arg_count = source.arg_count;
-            self.function.var_count = source.var_count;
-            self.function.defined_arg_count = source.arg_count;
-            self.function.stack_size = source.stack_size;
-            self.function.var_ref_count = source.open_var_ref_count;
-            self.function.closure_var_count = @intCast(if (source.closure_var.len != 0) source.closure_var.len else source.var_ref_names.len);
-            self.function.cpool_count = @intCast(source.constants.values.len);
             return &self.function;
         }
     };
@@ -10048,6 +10217,17 @@ const function_mod = struct {
         const entry_code = fb.byteCode();
         const entry_rejects_plain_call = entry_code.len == 0 or
             entry_code[0] == opcode.op.check_ctor;
+        // Publication-time image of the simple-field constructor probe the
+        // construct path used to run per-`new`. The code bytes and every
+        // header fact the classifier reads (flags, var/closure/cpool counts)
+        // are final here — same argument as entry_rejects_plain_call above —
+        // so this is the identical predicate evaluated once. The runtime memo
+        // still re-derives the full SimpleCtorFacts lazily and
+        // constructSimpleFieldConstructor Debug-asserts both classifications
+        // agree, so a drift between this publication and the runtime scan
+        // cannot rot silently.
+        const simple_field_ctor =
+            function_bytecode_mod.classifySimpleFieldConstructor(fb).state == .simple;
 
         call_facts.execution = .{
             .has_mapped_arguments = has_mapped_arguments,
@@ -10062,6 +10242,7 @@ const function_mod = struct {
             .capture_leaf_kind = if (sloppy_capture) .sloppy else if (raw_capture) .raw_this else .none,
             .is_module = is_module,
             .entry_rejects_plain_call = entry_rejects_plain_call,
+            .simple_field_ctor = simple_field_ctor,
         };
         fb.hotExtensionRequiredMut().call_facts = call_facts;
         // Keep the header-resident hot mirror coherent with the authoritative

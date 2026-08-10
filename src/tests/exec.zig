@@ -756,6 +756,40 @@ test "ordinary spread calls enter eligible bytecode targets on the current Machi
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
 
+test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallbacks" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // S publishes simple_field_ctor = true; the first `new` takes the writer,
+    // then `S.prototype = 42` forces both the writer's prototype gate and the
+    // direct instance route to fall back to the authoritative
+    // createConstructorInstance (Object.prototype realm default). NS is
+    // non-simple (arg mutation after the store), so its `new` must skip the
+    // writer entirely and still honor a replaced prototype object.
+    const setup = try js.eval(
+        \\function S(a) { this.a = a; }
+        \\const before = new S(1);
+        \\const before_proto_hit = Object.getPrototypeOf(before) === S.prototype;
+        \\S.prototype = 42;
+        \\const after = new S(2);
+        \\function NS(a) { this.a = a; a = a + 1; }
+        \\NS.prototype = { marker: 7 };
+        \\const ns = new NS(3);
+        \\globalThis.__ctor_gate_result =
+        \\    (before.a === 1 && before_proto_hit &&
+        \\     after.a === 2 && Object.getPrototypeOf(after) === Object.prototype &&
+        \\     ns.a === 3 && ns.marker === 7) ? 1 : 0;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const result_key = try js.runtime.internAtom("__ctor_gate_result");
+    defer js.runtime.atoms.free(result_key);
+    const result = try global.getProperty(result_key);
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+}
+
 test "constructor spread preserves new target on the current Machine" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
