@@ -2595,8 +2595,7 @@ pub fn installFunctionPrototypeThrowTypeErrorAccessors(rt: *core.JSRuntime, glob
     const function_prototype = functionPrototypeFromGlobal(rt, global) orelse return;
     const arguments_key = core.atom.ids.arguments;
     try function_prototype.defineOwnProperty(rt, arguments_key, core.Descriptor.accessor(thrower, thrower, false, true));
-    const caller_key = (comptime core.atom.predefinedId("caller", .string)).?;
-    try function_prototype.defineOwnProperty(rt, caller_key, core.Descriptor.accessor(thrower, thrower, false, true));
+    try function_prototype.defineOwnProperty(rt, core.atom.ids.caller, core.Descriptor.accessor(thrower, thrower, false, true));
 }
 
 pub fn isThrowTypeErrorIntrinsicObject(object: *core.Object) bool {
@@ -2908,7 +2907,11 @@ noinline fn functionCallerArgumentsProperty(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!isFunctionLikeClass(object.class_id)) return null;
-    if (!value_ops.atomNameEql(ctx.runtime, atom_id, "caller") and !value_ops.atomNameEql(ctx.runtime, atom_id, "arguments")) return null;
+    // qjs gates the legacy accessors on an atom-id compare (`atom ==
+    // JS_ATOM_caller`); both spellings are predefined atoms, so interning makes
+    // the id test exact. Spelling out the bytes here made every property read
+    // on every function object pay an atom-table name lookup plus two memcmps.
+    if (atom_id != core.atom.ids.caller and atom_id != core.atom.ids.arguments) return null;
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |own_desc| {
         defer own_desc.destroy(ctx.runtime);
         switch (own_desc.kind) {

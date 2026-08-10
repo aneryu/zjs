@@ -1,0 +1,387 @@
+{
+ "tool": "zjs-zoo-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "temporary source copies set doWarmup=false and doDeterministic=true; both engines execute identical deterministicIterations/minIterations batches",
+ "iterationDivisor": 4,
+ "timestamp": "2026-08-10T03:02:41Z",
+ "samplesPerEnginePerBench": 6,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 3,
+  "zjs": 3
+ },
+ "firstPositionBalanced": true,
+ "cpu": 19,
+ "effectiveAffinity": [
+  19
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/home/aneryu/zjs/zig-out/bin/zjs",
+   "sha256": "ae3bb567a80b04dac4e995717c88b59a34a7cc7603cb834dbfa1c0fc10b0664f",
+   "repo": {
+    "path": "/home/aneryu/zjs",
+    "commit": "952f25ea65b522c8727dad809b314adab6da6184",
+    "dirty": true
+   }
+  },
+  "qjs": {
+   "path": "/home/aneryu/quickjs/qjs",
+   "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+   "repo": {
+    "path": "/home/aneryu/quickjs",
+    "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "raytrace": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/raytrace.js",
+    "sha256": "5a6110dddc78de04c9782ceb5047d3a23178fab23e7e50d38c4b8767128ace7d",
+    "fixedWorkSha256": "a9b55cec10d3a3a02e1734ac81a9495251fdae7661f21de2260c58484300455c"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 61325597005,
+       "cycles": 12751679598,
+       "branch-instructions": 10296723654,
+       "branch-misses": 28223628,
+       "cache-references": 23997820941,
+       "cache-misses": 30664863
+      },
+      "wallSeconds": 3.295074692927301,
+      "stdout": "RayTrace: 3395",
+      "scores": {
+       "RayTrace": 3395
+      }
+     },
+     {
+      "counters": {
+       "instructions": 61375626741,
+       "cycles": 12769162093,
+       "branch-instructions": 10312056902,
+       "branch-misses": 26675673,
+       "cache-references": 23988565270,
+       "cache-misses": 27826117
+      },
+      "wallSeconds": 3.283748157788068,
+      "stdout": "RayTrace: 3391",
+      "scores": {
+       "RayTrace": 3391
+      }
+     },
+     {
+      "counters": {
+       "instructions": 61358503804,
+       "cycles": 12747107867,
+       "branch-instructions": 10310768529,
+       "branch-misses": 26570572,
+       "cache-references": 23962235276,
+       "cache-misses": 21181811
+      },
+      "wallSeconds": 3.278161983937025,
+      "stdout": "RayTrace: 3397",
+      "scores": {
+       "RayTrace": 3397
+      }
+     },
+     {
+      "counters": {
+       "instructions": 61364882355,
+       "cycles": 12741056074,
+       "branch-instructions": 10310862455,
+       "branch-misses": 26498495,
+       "cache-references": 23977918320,
+       "cache-misses": 27241822
+      },
+      "wallSeconds": 3.276494944933802,
+      "stdout": "RayTrace: 3399",
+      "scores": {
+       "RayTrace": 3399
+      }
+     },
+     {
+      "counters": {
+       "instructions": 61317768446,
+       "cycles": 12739407748,
+       "branch-instructions": 10294759865,
+       "branch-misses": 26228875,
+       "cache-references": 23944905458,
+       "cache-misses": 25430383
+      },
+      "wallSeconds": 3.2760810521431267,
+      "stdout": "RayTrace: 3399",
+      "scores": {
+       "RayTrace": 3399
+      }
+     },
+     {
+      "counters": {
+       "instructions": 61346332595,
+       "cycles": 12730443468,
+       "branch-instructions": 10305651052,
+       "branch-misses": 25517937,
+       "cache-references": 23969744646,
+       "cache-misses": 24853358
+      },
+      "wallSeconds": 3.273983158171177,
+      "stdout": "RayTrace: 3402",
+      "scores": {
+       "RayTrace": 3402
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 106435191297,
+       "cycles": 22502941593,
+       "branch-instructions": 21128169147,
+       "branch-misses": 53943822,
+       "cache-references": 45762336271,
+       "cache-misses": 72952000
+      },
+      "wallSeconds": 5.779084677807987,
+      "stdout": "RayTrace: 1924",
+      "scores": {
+       "RayTrace": 1924
+      }
+     },
+     {
+      "counters": {
+       "instructions": 106477859889,
+       "cycles": 22542298546,
+       "branch-instructions": 21146164806,
+       "branch-misses": 53697414,
+       "cache-references": 45792718512,
+       "cache-misses": 72183606
+      },
+      "wallSeconds": 5.790044546127319,
+      "stdout": "RayTrace: 1920",
+      "scores": {
+       "RayTrace": 1920
+      }
+     },
+     {
+      "counters": {
+       "instructions": 106423141222,
+       "cycles": 22555199598,
+       "branch-instructions": 21125602493,
+       "branch-misses": 53071249,
+       "cache-references": 45719540299,
+       "cache-misses": 79914411
+      },
+      "wallSeconds": 5.79366061091423,
+      "stdout": "RayTrace: 1920",
+      "scores": {
+       "RayTrace": 1920
+      }
+     },
+     {
+      "counters": {
+       "instructions": 106520130937,
+       "cycles": 22598450585,
+       "branch-instructions": 21165167572,
+       "branch-misses": 53615429,
+       "cache-references": 45773883918,
+       "cache-misses": 90262465
+      },
+      "wallSeconds": 5.804713600780815,
+      "stdout": "RayTrace: 1916",
+      "scores": {
+       "RayTrace": 1916
+      }
+     },
+     {
+      "counters": {
+       "instructions": 106413542845,
+       "cycles": 22623706239,
+       "branch-instructions": 21120053156,
+       "branch-misses": 52891023,
+       "cache-references": 45725728427,
+       "cache-misses": 76589599
+      },
+      "wallSeconds": 5.810362047050148,
+      "stdout": "RayTrace: 1913",
+      "scores": {
+       "RayTrace": 1913
+      }
+     },
+     {
+      "counters": {
+       "instructions": 106418690561,
+       "cycles": 22474858606,
+       "branch-instructions": 21124361757,
+       "branch-misses": 53577249,
+       "cache-references": 45753503942,
+       "cache-misses": 74560459
+      },
+      "wallSeconds": 5.773062353022397,
+      "stdout": "RayTrace: 1926",
+      "scores": {
+       "RayTrace": 1926
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 61352418199.5,
+     "zjsMedian": 106429166259.5,
+     "pairedRatiosZjsOverQjs": [
+      1.7355752980003134,
+      1.7348557651122267,
+      1.7344481143469832,
+      1.7358483687913524,
+      1.7354438287935081,
+      1.7347196818359374
+     ],
+     "ratioMedian": 1.7351497969528675,
+     "ratioMAD": 0.00042780808218800814
+    },
+    "cycles": {
+     "qjsMedian": 12744081970.5,
+     "zjsMedian": 22548749072.0,
+     "pairedRatiosZjsOverQjs": [
+      1.7647041254494356,
+      1.765370224124384,
+      1.7694366309075809,
+      1.7736716998770192,
+      1.775883674227459,
+      1.7654419237235641
+     ],
+     "ratioMedian": 1.7674392773155725,
+     "ratioMAD": 0.0024021025286626863
+    },
+    "branch-instructions": {
+     "qjsMedian": 10308209790.5,
+     "zjsMedian": 21126885820.0,
+     "pairedRatiosZjsOverQjs": [
+      2.051931260560953,
+      2.050625302688036,
+      2.0488872806699394,
+      2.052705839532994,
+      2.051534317745837,
+      2.0497843028461973
+     ],
+     "ratioMedian": 2.0510798102169367,
+     "ratioMAD": 0.001073478857377852
+    },
+    "branch-misses": {
+     "qjsMedian": 26534533.5,
+     "zjsMedian": 53596339.0,
+     "pairedRatiosZjsOverQjs": [
+      1.9113000639039035,
+      2.0129731684745122,
+      1.9973694582111368,
+      2.023338646213681,
+      2.0165189319023407,
+      2.099591710724891
+     ],
+     "ratioMedian": 2.0147460501884265,
+     "ratioMAD": 0.012984594001272165
+    },
+    "cache-references": {
+     "qjsMedian": 23973831483.0,
+     "zjsMedian": 45757920106.5,
+     "pairedRatiosZjsOverQjs": [
+      1.9069371499816292,
+      1.9089394466316076,
+      1.907983114780264,
+      1.909001578332176,
+      1.909622424995753,
+      1.9088023096497697
+     ],
+     "ratioMedian": 1.9088708781406887,
+     "ratioMAD": 0.0004411235232758548
+    },
+    "cache-misses": {
+     "qjsMedian": 26336102.5,
+     "zjsMedian": 75575029.0,
+     "pairedRatiosZjsOverQjs": [
+      2.3790094871775556,
+      2.594095539812472,
+      3.7727846311158193,
+      3.313378414997352,
+      3.011735961664439,
+      3.000015490864454
+     ],
+     "ratioMedian": 3.0058757262644464,
+     "ratioMAD": 0.35964143759244016
+    },
+    "wallSeconds": {
+     "qjsMedian": 3.2773284644354135,
+     "zjsMedian": 5.791852578520775,
+     "pairedRatiosZjsOverQjs": [
+      1.7538554407317317,
+      1.7632425715702547,
+      1.767350313774345,
+      1.771622938029008,
+      1.7735709082194901,
+      1.7633146152917865
+     ],
+     "ratioMedian": 1.7653324645330657,
+     "ratioMAD": 0.004190183229376698
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.814188918552044,
+    "zjsIPC": 4.719958784394778,
+    "ipcRatioZjsOverQjs": 0.9804265815589124
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 5,
+   "order": "zjs->qjs"
+  }
+ ]
+}

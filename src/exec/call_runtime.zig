@@ -7669,7 +7669,10 @@ pub fn instanceofOp(
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     };
-    const has_instance_atom = core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.TypeError;
+    // qjs names this atom as the constant JS_ATOM_Symbol_hasInstance
+    // (quickjs.c:8139). Resolve it at comptime rather than hashing the spelling
+    // through the predefined-symbol map on every `instanceof`.
+    const has_instance_atom = (comptime core.atom.predefinedId("Symbol.hasInstance", .symbol)) orelse return error.TypeError;
     const has_instance = try object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
     defer has_instance.free(ctx.runtime);
     if (!has_instance.isUndefined() and !has_instance.isNull()) {

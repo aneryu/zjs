@@ -68,6 +68,7 @@ pub const ids = struct {
     pub const type_symbol: Atom = 75;
     pub const type_bigint: Atom = 143;
     pub const arguments: Atom = 78;
+    pub const caller: Atom = 80;
     pub const eval_code: Atom = 81;
     pub const ret: Atom = 82;
     pub const var_object: Atom = 83;
@@ -779,6 +780,11 @@ comptime {
     std.debug.assert(max_int_atom == tagged_int_bit - 1);
     std.debug.assert(predefined_count == 656);
     std.debug.assert(ids.zjs_last_startup_name == predefined_count);
+    // Legacy-function gates compare `caller`/`arguments` by id, the way qjs
+    // compares against JS_ATOM_caller. Pin both to the table so a renumbering
+    // fails the build instead of silently turning those gates into no-ops.
+    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.caller - 1].name, "caller"));
+    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.arguments - 1].name, "arguments"));
     std.debug.assert(first_dynamic_atom == predefined_count + 1);
 }
 

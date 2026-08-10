@@ -93,7 +93,10 @@ pub inline fn dataPropertyValueForFastPath(
 }
 
 pub fn functionOwnDataPropertyValueForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    const object = functionOwnDataPropertyObject(rt, value, atom_id) orelse return null;
+    // `rt` is retained for signature parity with the other fast-path probes; the
+    // legacy caller/arguments gate no longer needs the atom table to answer.
+    _ = rt;
+    const object = functionOwnDataPropertyObject(value, atom_id) orelse return null;
     return object.getOwnDataPropertyValue(atom_id);
 }
 
@@ -106,7 +109,7 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
 ) ?core.function.NativeBuiltinRef {
     _ = function;
     _ = site_pc;
-    const object = functionOwnDataPropertyObject(rt, value, atom_id) orelse return null;
+    const object = functionOwnDataPropertyObject(value, atom_id) orelse return null;
     if (object.hasExoticMethods()) return null;
 
     for (object.shapeProps(), 0..) |prop, index| {
@@ -128,10 +131,10 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
     return null;
 }
 
-fn functionOwnDataPropertyObject(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?*core.Object {
+fn functionOwnDataPropertyObject(value: core.JSValue, atom_id: core.Atom) ?*core.Object {
     const object = objectFromValue(value) orelse return null;
     if (!isFunctionLikeClassId(object.class_id)) return null;
-    if (atom_id == core.atom.ids.arguments or value_ops.atomNameEql(rt, atom_id, "caller")) return null;
+    if (atom_id == core.atom.ids.arguments or atom_id == core.atom.ids.caller) return null;
     return object;
 }
 
