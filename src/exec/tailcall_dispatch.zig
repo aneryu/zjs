@@ -105,16 +105,11 @@ pub const Vm = struct {
     /// through `function`. Still hot: every cold op's publish and every jump
     /// reads it, so it stays an eagerly republished per-frame mirror.
     code_base: [*]const u8,
-    /// RETIRED one-past-end mirror (F3): the hot `next` fall-off bounds check —
-    /// its only hot reader — is gone (explicit parser epilogues plus finalize's
-    /// reachable-falloff validation guarantee every dispatch lands on an opcode), and
-    /// the two cold readers (op_for_of_next operand peek, `next`'s Debug
-    /// assert) derive the bound from the authoritative `vm.function.byteCode()`. No
-    /// reader ⇒ every per-boundary publication (enterEntry / popAndResume /
-    /// reloadTop / reloadAfterPop / runTC init) is a dead store, deleted.
-    /// Field kept ONLY to preserve the measured Vm layout (same rationale as
-    /// `_dispatch_layout_padding` below).
-    code_end: [*]const u8 = undefined,
+    /// Current frame-chain dispatch mode. Normal frames point at the guardless
+    /// fast table; the legacy L0 stop seam points at the all-cold table so each
+    /// opcode reaches `coldNext`/`maybeStop`. This occupies the retired F3
+    /// `code_end` mirror slot, preserving the measured Vm layout.
+    active_dispatch_tbl: [*]const Handler = undefined,
     /// RETIRED operand-stack-base mirror (X-a): every reader now derives the
     /// base from the authoritative `stack.values` (one dependent load off the
     /// `vm.stack` pointer the call handlers already hold for setTopPtr), so the
@@ -151,11 +146,9 @@ pub const Vm = struct {
     /// Static-field atom paired with `property_holder` for the immediately
     /// following Proxy action. Duplicated by that action before re-entry.
     property_atom: core.Atom = core.atom.null_atom,
-    /// Frame-constant `(depth==0 and l0.stop_before_pc != null)` — the legacy
-    /// entry-boundary guard that blocks the local/var fast paths. Hoisted here
-    /// (set once per frame in the driver/reloadTop) so each loc op checks ONE
-    /// bool load instead of re-deriving machine.depth + l0.stop_before_pc per
-    /// op (mirrors dispatchLoop's `local_fast_blocked_by_generator`).
+    /// Frame-constant `(depth==0 and l0.stop_before_pc != null)`. Frame entry
+    /// uses it to select `active_dispatch_tbl`; only cold handlers whose
+    /// register-resident miss body could skip `maybeStop` read it afterward.
     local_fast_blocked: bool = false,
 
     /// Pointer to the CURRENT frame's catch-target slot. `reloadTop` re-points
@@ -259,12 +252,14 @@ inline fn arithmeticTailHandler(vm: *const Vm, comptime slot: ArithmeticTailSlot
 /// a terminator op, and jump-aware epilogues terminate branch-to-end paths).
 /// Reaching or passing `code_end` is an emission-invariant violation — Debug asserts it
 /// (derived from `vm.function.byteCode()`; the retired `vm.code_end` mirror is gone).
-/// `callconv(.c)` + non-inline so its `always_tail` to a handler matches signatures
-/// (the driver calls it as a normal entry; handlers tail-chain via `coldNext`).
+/// Its Handler-compatible signature keeps the tail transfer ABI exact.
+/// This is the frame-chain mode boundary: normal frames enter the guardless fast
+/// table, while an L0 stop seam enters the all-cold table so every opcode reaches
+/// `coldNext`/`maybeStop`. Opcode-to-opcode transitions use `cont`, not this hub.
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug)
         std.debug.assert(@intFromPtr(pc) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len));
-    return @call(.always_tail, dispatch_table[pc[0]], .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 // ===========================================================================
@@ -303,7 +298,7 @@ inline fn coldNext(vb: [*]JSValue, vm: *Vm) Outcome {
     // the authoritative `vm.stack.values` (no mirror to refresh), so the
     // pre-realloc dangling-base hazard cannot exist here.
     const npc = vm.code_base + vm.frame.pc;
-    return @call(.always_tail, dispatch_table[npc[0]], .{ npc, vm.stack.topPtr(), vb, vm });
+    return @call(.always_tail, vm.active_dispatch_tbl[npc[0]], .{ npc, vm.stack.topPtr(), vb, vm });
 }
 
 /// `Step`-returning helper (`.done`/`.continue_loop` — both re-dispatch in the
@@ -478,26 +473,17 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
     vm.code_base = code_ptr;
-    // Just pushed, so depth > 0; the generator stop-boundary cache is L0-only
-    // and must read false for the callee. Do NOT publish false unconditionally:
-    // the every-call `strb wzr` re-dirtied the Vm byte that the guarded
-    // loc/var handler heads immediately reload, so those guard loads paid a
-    // store-to-load forward off the still-draining store instead of a clean L1
-    // hit — per-call loop pollution with no qjs counterpart (qjs has no such
-    // per-op cache; its yield/return machinery is real opcodes, not a pc
-    // boundary checked in the dispatch hot path). The cache already reads
-    // false on every steady-state entry: run() derives it at L0 entry,
-    // reloadTop/reloadAfterPop re-derive it on every driver-loop frame switch,
-    // and depth>0 callees keep it false by this very invariant. The only true
-    // readers here are blocked-L0 legacy/synthetic stop seams whose body calls
-    // into another function, so only that arm stores, and the matching re-arm
-    // on return is reloadAfterPop's L0 stop-seam publication.
+    // Just pushed, so depth > 0; the generator stop mode is L0-only. Normal
+    // call chains already carry the fast table and need no store here. Only a
+    // blocked L0 fixture that calls another function switches the callee back
+    // to the fast table; reloadAfterPop re-arms the L0 cold table on return.
     if (vm.local_fast_blocked) {
         @branchHint(.unlikely);
         // Cache-coherence pin: a true cache at call entry means the CALLER was
         // L0 with an armed stop — never a depth>0 frame.
         std.debug.assert(entry.prev == null and vm.machine.l0.stop_before_pc != null);
         vm.local_fast_blocked = false;
+        vm.active_dispatch_tbl = &dispatch_table;
     }
     const pc2: [*]const u8 = code_ptr; // fresh frame: frame.pc == 0
     const sp2: [*]JSValue = vm.stack.topPtr();
@@ -2140,9 +2126,8 @@ pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // cold path's coldNext runs maybeStop (suspend at the body-start pc). `cont`
     // skips that check, so a `drop` that is the last param-init op would blow past the
     // suspend and execute the generator body eagerly (corrupting generator state — the
-    // runGeneratorParameterInit crash). Fall to the publishing cold op when blocked,
-    // exactly as opLoc/opLocCheck/op_update_loc do.
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // runGeneratorParameterInit crash). Blocked frame chains dispatch this
+    // opcode through `cold_table`; normal chains alone can enter this body.
     const v = (sp - 1)[0];
     if (v.isCatchOffset()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // Shrink the GC-traced operand window to exclude the slot we are about to free
@@ -2426,7 +2411,6 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
     return struct {
         // I-cache pin (see op_return).
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
-            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const idx: u16 = switch (idx_src) {
                 .c0 => 0,
                 .c1 => 1,
@@ -2486,7 +2470,6 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
 fn opLocCheckGeneric(comptime kind: LocKind) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const idx: u16 = readInt(u16, pc + 1);
             const old_v = var_buf[idx];
             if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -2517,7 +2500,6 @@ fn opLocCheckWithInt32SlotMove(comptime kind: LocKind) Handler {
     return struct {
         // I-cache pin (see op_return).
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
-            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const idx: u16 = readInt(u16, pc + 1);
             const old_v = var_buf[idx];
             if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -2548,11 +2530,10 @@ fn opLocCheckWithInt32SlotMove(comptime kind: LocKind) Handler {
 }
 
 /// TDZ state reset for a plain lexical local (qjs CASE(OP_set_loc_uninitialized),
-/// quickjs.c:18696-18702). The generator/eval stop-boundary and var-ref-cell guards
-/// keep the cold checkedLocVm path for the cases that must publish/rewrite through a
+/// quickjs.c:18696-18702). The active stop-boundary table and var-ref-cell checks
+/// keep the cold checkedLocVm path for cases that must publish/rewrite through a
 /// cell; a plain slot is exactly qjs's store-then-JS_FreeValue sequence.
 pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], JSValue.uninitialized());
     return cont(pc + 3, sp, var_buf, vm);
@@ -2564,7 +2545,6 @@ pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
 /// is observable; every other put_loc_check_init just writes the local (the
 /// opcode is also emitted for AnnexB block-function var copies that overwrite).
 pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm.function.isDerivedClassConstructor()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     const value = (sp - 1)[0];
@@ -2629,7 +2609,6 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
 pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const idx: u16 = switch (idx_src) {
                 .c0 => 0,
                 .c1 => 1,
@@ -2667,7 +2646,6 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
 /// handler would send every closure `let` initialization to the cold shell.
 /// No short forms exist for the check variant (qjs has none either).
 pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands are
     // finalize-validated, frames carry exactly closure_var_count cells —
@@ -2693,7 +2671,6 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
 pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const idx: u16 = switch (idx_src) {
                 .c0 => 0,
                 .c1 => 1,
@@ -2729,7 +2706,6 @@ pub fn op_push_i32(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 /// malformed/synthetic bytecode and generator/eval stop seams retain the
 /// existing published cold path.
 pub fn op_push_const(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const value = vm.function.constantAt(readInt(u32, pc + 1)) orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = value;
@@ -2737,7 +2713,6 @@ pub fn op_push_const(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 }
 
 pub fn op_push_const8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const value = vm.function.constantAt(pc[1]) orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = value;
@@ -2748,7 +2723,6 @@ pub fn op_push_const8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: 
 /// value directly in the register-resident dispatcher. A cached atom conversion
 /// cannot run user code; only the allocation/error path needs published state.
 pub fn op_push_atom_value(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const atom_id = readInt(u32, pc + 1);
     const value = vm.ctx.runtime.atoms.toStringValueForPush(vm.ctx.runtime, atom_id) catch |err| {
         vm.publish(pc, sp);
@@ -2765,7 +2739,7 @@ pub fn op_push_atom_value(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
 /// subtypes on the cold helper; the current-function arm is only one retained
 /// value push and cannot fail.
 pub fn op_special_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked or pc[1] != bytecode.opcode.special_object_subtype.current_function)
+    if (pc[1] != bytecode.opcode.special_object_subtype.current_function)
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = vm.frame.current_function.dup();
     return cont(pc + 2, sp + 1, var_buf, vm);
@@ -2793,7 +2767,6 @@ pub fn op_special_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
 /// uninitialized -> ReferenceError check stay on cold
 /// pushThisVm/materializeFrameThisBinding.
 pub fn op_push_this(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const v = vm.frame.this_value;
     if (v.isObject()) {
         sp[0] = v.dup();
@@ -2823,28 +2796,24 @@ pub fn op_push_this(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 /// next publish because these handlers advance only register `sp`; that window is
 /// safe here because null, undefined, booleans, and int32s are non-refcounted
 /// primitives, so the new slot needs no tracing. The atom-value handler above
-/// retains its value before advancing `sp`. The blocked guard is first because coldNext runs maybeStop at a generator
-/// parameter-init suspension boundary; cont would otherwise skip that boundary.
+/// retains its value before advancing `sp`. A blocked parameter-init chain uses
+/// the all-cold table, so these guardless bodies are normal-frame-only.
 pub fn op_undefined_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = JSValue.undefinedValue();
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 
 pub fn op_null_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = JSValue.nullValue();
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 
 pub fn op_push_false_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = JSValue.boolean(false);
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 
 pub fn op_push_true_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = JSValue.boolean(true);
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
@@ -4145,7 +4114,7 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
     // decrement lands at ≤0 and still triggers the reset+handler run.
     if (vm.ctx.pollInterruptTick())
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
+    return cont(jump8Target(pc, vm), sp, var_buf, vm);
 }
 // The QuickJS immediate-scalar fast path (int/bool/null/undefined) inlines; values
 // needing full ToBoolean route to cold_table[pc[0]] (the generic branch8 handler).
@@ -4166,7 +4135,7 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // the publishing poll (see op_goto8).
         if (vm.ctx.pollInterruptTick())
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
+        if (!b) return cont(jump8Target(pc, vm), sp - 1, var_buf, vm);
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
     if (value.isObject()) {
@@ -4188,7 +4157,7 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     if (value.asBranchImmediateBool()) |b| {
         if (vm.ctx.pollInterruptTick())
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
+        if (b) return cont(jump8Target(pc, vm), sp - 1, var_buf, vm);
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
     if (value.isObject()) {
@@ -4200,7 +4169,7 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
         value.free(vm.ctx.runtime);
-        return @call(.always_tail, next, .{ jump8Target(pc, vm), nsp, var_buf, vm });
+        return cont(jump8Target(pc, vm), nsp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
@@ -4209,7 +4178,6 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 // hottest loop ops (`i++`, `s += i`), so a cold miss here dominates loop regression.
 // int32-only; non-int / generator-boundary cases fall back to the cold op.
 pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx: u16 = pc[1];
     const old_v = var_buf[idx];
     // Frame locals are always plain ValueSlots, including captured bindings;
@@ -4256,7 +4224,6 @@ pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     return cont(pc + 2, sp, var_buf, vm);
 }
 pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx: u16 = pc[1];
     const old_v = var_buf[idx];
     // Frame locals are always plain ValueSlots; these checks select only qjs's
@@ -4338,7 +4305,6 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 // (TDZ or deleted binding parked at UNINITIALIZED, qjs
 // remove_global_object_property) condition falls back to the cold getVar resolver.
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     // Compile-time bounds contract (M2-刀4, see opGetVarRef): get_var /
     // get_var_undef are .var_ref-format ops, so finalize validates their
@@ -4435,7 +4401,6 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// the stack, and no state is published, so the shell observes exactly the entry
 /// state it saw when it owned the opcode outright.
 pub fn op_put_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     // Unlike op_get_var this keeps the operand bounds test: putVar's own
     // `ref_idx < frame.var_refs.len` branch is a live semantic arm (it routes an
@@ -4648,6 +4613,7 @@ fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) v
     vm.function = vm.frame.function;
     vm.code_base = vm.function.byteCode().ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
+    vm.active_dispatch_tbl = if (vm.local_fast_blocked) &cold_table else &dispatch_table;
     // NO `frame.pc += 1`: unlike reloadInlineTopFrame (which read+consumed the resume
     // opcode), our handlers read `pc[0]` themselves, so pc must point AT the resume op.
     pc.* = vm.code_base + vm.frame.pc;
@@ -4677,7 +4643,10 @@ inline fn reloadAfterPop(
         // value for an ordinary L0 caller; only the generator/eval stop seam
         // carries new information that must be published on return.
         std.debug.assert(!vm.local_fast_blocked);
-        if (vm.machine.l0.stop_before_pc != null) vm.local_fast_blocked = true;
+        if (vm.machine.l0.stop_before_pc != null) {
+            vm.local_fast_blocked = true;
+            vm.active_dispatch_tbl = &cold_table;
+        }
     }
     vm.function = vm.frame.function;
     vm.code_base = vm.function.byteCode().ptr;
@@ -4691,6 +4660,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
     vm.arithmetic_tail_tbl = &arithmetic_tail_table;
     vm.property_tail_tbl = &property_tail_table;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
+    vm.active_dispatch_tbl = if (vm.local_fast_blocked) &cold_table else &dispatch_table;
     var pc = vm.code_base + vm.frame.pc;
     var sp = vm.reloadSp();
     var var_buf = vm.frame.locals.ptr;
