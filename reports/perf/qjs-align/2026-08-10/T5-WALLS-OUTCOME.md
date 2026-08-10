@@ -148,3 +148,35 @@ re-deriving a specific sub-1% delta.
 
 Pinned references throughout: QuickJS `04be2460`, javascript-zoo `a17d4e0a`,
 CPU 19 (Cortex-X925), PMU `armv8_pmuv3_1`, exclusive `/tmp/zjs-host-heavy.lock`.
+
+### Tranche-7 adjudications completed after the fact
+
+**Shape clone memcpy — NO-GO (measured, not landed).** The tranche-6 round's
+only unconditional GO was carried to a full gate pass and then rejected on its
+own numbers. Implementation mirrored qjs `js_clone_shape` (qjs:5268) behind
+three gates (capacity, bucket geometry, proto), passed `test-exec` 416,
+`test-bytecode` 69, unified Debug and ReleaseSafe 2163, and `test262-gate`
+0/49,775. Eight-pair ABBA on `splay-fixed-d1`, the workload that performs 4.2M
+clones:
+
+| | clone | base | delta |
+|---|---:|---:|---:|
+| instructions | 29,189.2M (sd 15.2) | 29,238.1M (sd 18.8) | **−0.167%** (≈2.6σ) |
+| cycles | 7,898.2M (sd 96.3) | 7,893.0M (sd 124.5) | +0.066% (≈0.04σ) |
+
+That is ≈12 instructions and ≈3 cycles per clone against a predicted 14–21
+cycles — the removed memsets and per-prop loops were largely absorbed. An
+instruction-only win does not justify a second conditional path through
+shape cloning, so the knife is recorded rather than merged.
+
+**`getValueProperty` probe-first rider — NO-GO.** Reviewing the WIP found it
+called `findOwnDataValueFast` without the receiver-class guard every other
+caller of that primitive runs first (`needsSlowPropertyAccess` /
+`hasExoticMethods` / `proxyTarget`), which would let a shape slot answer on
+behalf of a proxy or exotic holder. Adding the guard is correct but
+self-defeating here: `mapped_arguments` is itself in
+`classNeedsSlowPropertyAccess`, and RayTrace's 666k `getValueProperty` entries
+are ~100% mapped-arguments `.length` — the exact case the guard excludes. The
+guarded rider measured +8M instructions on rt-fixed for no hit. Recovering it
+would need per-class reasoning about which named atoms are shape-authoritative
+on mapped arguments; not worth ~0.2%.
