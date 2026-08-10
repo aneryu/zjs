@@ -4460,6 +4460,59 @@ test "Function apply CreateListFromArrayLike observes array indexed gets" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "String.fromCodePoint through apply follows CreateListFromArrayLike" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // apply no longer special-cases the String.fromCodePoint receiver
+    // (qjs js_function_apply has no such probe): the argument list is
+    // materialized by CreateListFromArrayLike like any other apply target.
+    const result = try js.eval(
+        \\assert.sameValue(String.fromCodePoint.apply(null, { length: 2, 0: 65, 1: 66 }), "AB");
+        \\assert.sameValue(String.fromCodePoint.apply(null, [0x61, 0x1f600]), "a😀");
+        \\
+        \\var order = [];
+        \\var accessor = [];
+        \\Object.defineProperty(accessor, "0", {
+        \\    configurable: true,
+        \\    get: function() { order.push("get0"); return 67; }
+        \\});
+        \\Object.defineProperty(accessor, "1", {
+        \\    configurable: true,
+        \\    get: function() { order.push("get1"); return 68; }
+        \\});
+        \\accessor.length = 2;
+        \\assert.sameValue(String.fromCodePoint.apply(null, accessor), "CD");
+        \\assert.sameValue(order.join(","), "get0,get1");
+        \\
+        \\var trapOrder = [];
+        \\var proxy = new Proxy([69, 70], {
+        \\    get: function(target, key, receiver) {
+        \\        trapOrder.push(String(key));
+        \\        return Reflect.get(target, key, receiver);
+        \\    }
+        \\});
+        \\assert.sameValue(String.fromCodePoint.apply(null, proxy), "EF");
+        \\assert.sameValue(trapOrder.join(","), "length,0,1");
+        \\
+        \\assert.throws(RangeError, function() {
+        \\    String.fromCodePoint.apply(null, { length: 70000 });
+        \\});
+        \\assert.throws(RangeError, function() {
+        \\    String.fromCodePoint.apply(null, [0x110000]);
+        \\});
+        \\assert.throws(RangeError, function() {
+        \\    String.fromCodePoint.apply(null, [1.5]);
+        \\});
+        \\assert.throws(TypeError, function() {
+        \\    (function() {}).apply(null, 5);
+        \\});
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Function and Reflect apply preserve target classes and argument shapes" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
