@@ -7878,7 +7878,14 @@ pub const Object = extern struct {
 
         const old_phase = rt.gc.phase;
         rt.gc.phase = .remove_cycles;
-        defer rt.gc.phase = old_phase;
+        // Cold once-per-collection transition: keep the VM deinit-mirror bytes
+        // authoritative across the save/restore (old_phase could in principle
+        // be .deinit if a teardown pass ever ran cycle removal).
+        rt.syncGcDeinitMirrors(false);
+        defer {
+            rt.gc.phase = old_phase;
+            rt.syncGcDeinitMirrors(old_phase == .deinit);
+        }
 
         // STEP 3 (qjs faithful): no edge-nulling pre-pass. qjs has none — its
         // cascade defense is the REMOVE_CYCLES gate in __JS_FreeValueRT

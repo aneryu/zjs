@@ -157,6 +157,17 @@ pub const Vm = struct {
     /// bool load instead of re-deriving machine.depth + l0.stop_before_pc per
     /// op (mirrors dispatchLoop's `local_fast_blocked_by_generator`).
     local_fast_blocked: bool = false,
+    /// Vm-resident mirror of `rt.gc.phase == .deinit` — the release-path
+    /// deinit gate. Set once at driver entry (runTC, which also registers the
+    /// byte's address in `rt.gc_deinit_mirror_head`) and kept authoritative by
+    /// `JSRuntime.syncGcDeinitMirrors` at every phase transition that can
+    /// change the bit. Handlers hand it to the *WithDeinitMirror release
+    /// twins, so LLVM's hoisted per-handler-entry phase read collapses from a
+    /// vm→ctx→rt→gc.phase 3-level dependent load chain to one byte load off
+    /// the register-resident vm pointer (local_fast_blocked precedent). qjs's
+    /// JS_FreeValue fast path pays no gc_phase load (quickjs.c:6476 puts the
+    /// check in __JS_FreeValueRT's zero-ref leg).
+    gc_deinit: bool = false,
 
     /// Pointer to the CURRENT frame's catch-target slot. `reloadTop` re-points
     /// it through `Machine.loadCurrentLevel` on every frame switch, so a catch
@@ -2150,7 +2161,7 @@ pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // reachable from stack.values[0..len] if free() triggers a collection.
     const nsp = sp - 1;
     vm.stack.setTopPtr(nsp);
-    v.free(vm.ctx.runtime);
+    v.freeWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit);
     return cont(pc + 1, nsp, var_buf, vm);
 }
 fn op_drop(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -2447,12 +2458,12 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
                 },
                 .put => {
                     const value = (sp - 1)[0];
-                    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
+                    value_slot.replaceOwnedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], value);
                     return cont(pc + advance, sp - 1, var_buf, vm);
                 },
                 .set => {
                     const value = (sp - 1)[0];
-                    value_slot.replaceBorrowed(vm.ctx.runtime, &var_buf[idx], value);
+                    value_slot.replaceBorrowedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], value);
                     return cont(pc + advance, sp, var_buf, vm);
                 },
             }
@@ -2497,12 +2508,12 @@ fn opLocCheckGeneric(comptime kind: LocKind) Handler {
                 },
                 .put => {
                     const value = (sp - 1)[0];
-                    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
+                    value_slot.replaceOwnedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], value);
                     return cont(pc + 3, sp - 1, var_buf, vm);
                 },
                 .set => {
                     const value = (sp - 1)[0];
-                    value_slot.replaceBorrowed(vm.ctx.runtime, &var_buf[idx], value);
+                    value_slot.replaceBorrowedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], value);
                     return cont(pc + 3, sp, var_buf, vm);
                 },
             }
@@ -2531,7 +2542,7 @@ fn opLocCheckWithInt32SlotMove(comptime kind: LocKind) Handler {
                     if (var_buf[idx].trySetInt32FromSlot(&source[0]))
                         return cont(pc + 3, sp - 1, var_buf, vm);
                     const value = source[0];
-                    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
+                    value_slot.replaceOwnedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], value);
                     return cont(pc + 3, sp - 1, var_buf, vm);
                 },
                 .set => {
@@ -2539,7 +2550,7 @@ fn opLocCheckWithInt32SlotMove(comptime kind: LocKind) Handler {
                     if (var_buf[idx].trySetInt32FromSlot(&source[0]))
                         return cont(pc + 3, sp, var_buf, vm);
                     const value = source[0];
-                    value_slot.replaceBorrowed(vm.ctx.runtime, &var_buf[idx], value);
+                    value_slot.replaceBorrowedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], value);
                     return cont(pc + 3, sp, var_buf, vm);
                 },
             }
@@ -2554,7 +2565,7 @@ fn opLocCheckWithInt32SlotMove(comptime kind: LocKind) Handler {
 pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
-    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], JSValue.uninitialized());
+    value_slot.replaceOwnedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], JSValue.uninitialized());
     return cont(pc + 3, sp, var_buf, vm);
 }
 
@@ -2568,7 +2579,7 @@ pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     if (vm.function.isDerivedClassConstructor()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     const value = (sp - 1)[0];
-    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
+    value_slot.replaceOwnedWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit, &var_buf[idx], value);
     return cont(pc + 3, sp - 1, var_buf, vm);
 }
 
@@ -3064,7 +3075,7 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // callee-saved spill frame from every hit (qjs's shared interpreter
         // frame pays no per-op prologue for its inline JS_FreeValue either,
         // quickjs.c:19157).
-        if (receiver.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+        if (receiver.releaseObjectAssumeObjectNeedsDestroyWithDeinitMirror(rt, vm.gc_deinit)) {
             vm.property_holder = class_vm.objectFromValue(receiver) orelse unreachable;
             return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
         }
@@ -3171,14 +3182,14 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                             const slot = array_object.fastArraySlotAssumeCapacity(index);
                             const old_value = loadValueAsIntPair(slot);
                             storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
-                            if (old_value.releaseRefCountedNeedsDestroy(rt)) {
+                            if (old_value.releaseRefCountedNeedsDestroyWithDeinitMirror(rt, vm.gc_deinit)) {
                                 // Park the dying element in the now-dead value
                                 // slot so the tail completes both releases off
                                 // intact operands (op_put_field precedent).
                                 storeValueAsIntPair(&(sp - 1)[0], old_value);
                                 return @call(.always_tail, op_put_array_el_release_old_tail, .{ pc, sp, var_buf, vm });
                             }
-                            if (obj.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+                            if (obj.releaseObjectAssumeObjectNeedsDestroyWithDeinitMirror(rt, vm.gc_deinit)) {
                                 return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
                             }
                             return cont(pc + 1, sp - 3, var_buf, vm);
@@ -3320,13 +3331,13 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         const old_value = loadValueAsIntPair(slot);
         const value = loadValueAsIntPair(&(sp - 1)[0]);
         storeValueAsIntPair(slot, value); // consumes the stack's ref on value
-        if (old_value.releaseRefCountedNeedsDestroy(rt)) {
+        if (old_value.releaseRefCountedNeedsDestroyWithDeinitMirror(rt, vm.gc_deinit)) {
             // Park the dying old value (rc == 1) in the now-dead value slot;
             // the tail completes both releases off the still-intact operands.
             storeValueAsIntPair(&(sp - 1)[0], old_value);
             return @call(.always_tail, propertyTailHandler(vm, .put_field_release_old), .{ pc, sp, var_buf, vm });
         }
-        if (receiver.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+        if (receiver.releaseObjectAssumeObjectNeedsDestroyWithDeinitMirror(rt, vm.gc_deinit)) {
             return @call(.always_tail, propertyTailHandler(vm, .put_field_release_receiver), .{ pc, sp, var_buf, vm });
         }
         return cont(pc + 5, sp - 2, var_buf, vm);
@@ -3562,8 +3573,8 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     const obj = (sp - 2)[0];
     const rt = vm.ctx.runtime;
     if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
-        obj.free(rt);
-        key.free(rt);
+        obj.freeWithDeinitMirror(rt, vm.gc_deinit);
+        key.freeWithDeinitMirror(rt, vm.gc_deinit);
         (sp - 2)[0] = value; // owned (fastArrayElementDup dups)
         return cont(pc + 1, sp - 1, var_buf, vm);
     }
@@ -3583,13 +3594,13 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         // atom through toPropertyKeyAtom). A hole / accessor / prototype element
         // returns null and falls through unchanged.
         if (vm_property_field.fastArrayOwnIntElementValue(obj, key)) |value| {
-            obj.free(rt);
+            obj.freeWithDeinitMirror(rt, vm.gc_deinit);
             // key is an int (no refcount); nothing to free.
             (sp - 2)[0] = value;
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
         if (vm_property_field.fastTypedArrayElementValue(obj, key)) |value| {
-            obj.free(rt);
+            obj.freeWithDeinitMirror(rt, vm.gc_deinit);
             // key is an int (no refcount); nothing to free.
             (sp - 2)[0] = value;
             return cont(pc + 1, sp - 1, var_buf, vm);
@@ -3619,7 +3630,7 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         // would materialize the rope, turning an `s = s + x; s.length`
         // accumulator loop into O(n) per iteration.
         const len_val = JSValue.int32(@intCast(core.string.stringValueLen(value)));
-        value.free(vm.ctx.runtime);
+        value.freeWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
     }
@@ -3628,7 +3639,7 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // Exotic/subclassed arrays and all non-Array objects continue to the qjs
     // shape/action walk below.
     if (vm_property_field.fastArrayLengthValue(value)) |len_val| {
-        value.free(vm.ctx.runtime);
+        value.freeWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
     }
@@ -3639,7 +3650,7 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // non-string/non-Array object through the published cold resolver.
     if (vm_property_field.qjsGetLengthFieldFast(vm.ctx.runtime, value)) |borrowed| {
         const len_val = if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
-        value.free(vm.ctx.runtime);
+        value.freeWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
     }
@@ -4178,7 +4189,7 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
-        value.free(vm.ctx.runtime);
+        value.freeWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit);
         return cont(pc + 2, nsp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -4199,7 +4210,7 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
-        value.free(vm.ctx.runtime);
+        value.freeWithDeinitMirror(vm.ctx.runtime, vm.gc_deinit);
         return @call(.always_tail, next, .{ jump8Target(pc, vm), nsp, var_buf, vm });
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });

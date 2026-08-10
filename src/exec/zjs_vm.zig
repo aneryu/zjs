@@ -773,9 +773,10 @@ noinline fn initFreshEntryFrame(
 fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
     const level = m.currentLevel();
     const func = level.function();
+    const rt = m.ctx.runtime;
     var vm = tailcall_dispatch.Vm{
         .ctx = m.ctx,
-        .rt = m.ctx.runtime,
+        .rt = rt,
         .function = func,
         .global = m.global,
         .frame = level.frame,
@@ -784,6 +785,10 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .output = m.output,
         .code_base = func.byteCode().ptr,
         .catch_target = level.catch_target,
+        // Release-path deinit gate mirror (Vm.gc_deinit doc): seeded from the
+        // authoritative phase here, then kept in sync through the mirror node
+        // registered below for the driver's lifetime.
+        .gc_deinit = rt.gc.phase == .deinit,
         // Every consumer publishes these outcome/property payloads before
         // reading them. Avoid clearing cold scratch fields at each driver
         // entry, which is especially visible for short native callbacks.
@@ -795,6 +800,16 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .pending_error = undefined,
         .tail_is_reuse = undefined,
     };
+    // Register this Vm's mirror byte so any deinit-bit-changing phase
+    // transition (gc.Registry.deinit entry/exit, remove_cycles save/restore)
+    // rewrites it in place; nested drivers (native fence re-entry) chain
+    // through `prev` on their own native frames.
+    var mirror_node = core.JSRuntime.GcDeinitMirrorNode{
+        .flag = &vm.gc_deinit,
+        .prev = rt.gc_deinit_mirror_head,
+    };
+    rt.gc_deinit_mirror_head = &mirror_node;
+    defer rt.gc_deinit_mirror_head = mirror_node.prev;
     return tailcall_dispatch.run(&vm);
 }
 
