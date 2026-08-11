@@ -45,7 +45,6 @@ const iter_vm = @import("iterator_ops.zig");
 const regexp_vm = @import("vm_regexp.zig");
 const eval_module_vm = @import("vm_eval_module.zig");
 const gen_async_vm = @import("vm_gen_async.zig");
-const slot_ops = @import("slot_ops.zig");
 const value_slot = @import("value_slot.zig");
 const vm_property_ref = @import("vm_property_ref.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
@@ -110,16 +109,21 @@ pub const Vm = struct {
     /// opcode reaches `coldNext`/`maybeStop`. This occupies the retired F3
     /// `code_end` mirror slot, preserving the measured Vm layout.
     active_dispatch_tbl: [*]const Handler = undefined,
-    /// RETIRED operand-stack-base mirror (X-a): every reader now derives the
-    /// base from the authoritative `stack.values` (one dependent load off the
-    /// `vm.stack` pointer the call handlers already hold for setTopPtr), so the
-    /// per-boundary republication in enterEntry/reloadTop/reloadAfterPop/
-    /// popAndResume and the per-cold-op refresh in coldNext are gone — and with
-    /// them the whole stale-base-after-grow bug class (a heap-stack realloc
-    /// updates `stack.values` in place; there is no second copy to forget).
-    /// Field kept ONLY to preserve the measured Vm layout (same rationale as
-    /// `_dispatch_layout_padding` below).
-    stack_base: [*]JSValue = undefined,
+    /// Resident `frame.var_refs.ptr` mirror (T6-GETVAR-A) — qjs hoists
+    /// `var_refs = p->u.func.var_refs` into a JS_CallInternal local at frame
+    /// entry (quickjs.c:17844) and every OP_get_var_ref/OP_get_var reads
+    /// through that register; zjs's per-op chain was vm→frame→var_refs.ptr→
+    /// cell→pvalue (5 dependent loads). The mirror cuts it to vm→base→cell→
+    /// pvalue (4). Republished at every vm.frame publication seam (enterEntry,
+    /// the three flat leaf-return caller republications, reloadTop,
+    /// reloadAfterPop's two arms, run's prologue); generator park/unpark
+    /// mutate frame.var_refs outside the dispatch chain and re-enter through
+    /// runTC/reloadTop, so they are covered by those same seams. Each hot
+    /// reader asserts `var_refs_base == frame.var_refs.ptr` via
+    /// std.debug.assert — live in Debug AND ReleaseSafe, so the full
+    /// ReleaseSafe suite doubles as a seam-leak detector. Occupies the
+    /// RETIRED stack_base slot (X-a), preserving the measured Vm layout.
+    var_refs_base: [*]*core.VarRef = undefined,
     /// Resident `ctx.runtime` — invariant for the Vm's lifetime (a JSContext
     /// never changes runtime), set once at driver entry. The hot call/return
     /// legs (budget commit, leaf teardown frees, arena restore) previously
@@ -482,6 +486,7 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     std.debug.assert(code_ptr == entry.frame.function.byteCode().ptr);
     vm.function = entry.frame.function;
     vm.frame = &entry.frame;
+    vm.var_refs_base = entry.frame.var_refs.ptr;
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
     vm.code_base = code_ptr;
@@ -1119,6 +1124,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             std.debug.assert(resume_pc == caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
+            vm.var_refs_base = caller.frame.var_refs.ptr;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
@@ -1174,6 +1180,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             std.debug.assert(resume_pc == caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
+            vm.var_refs_base = caller.frame.var_refs.ptr;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
@@ -1212,6 +1219,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
                 const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
                 const resume_sp = caller.stack.topPtr();
                 vm.frame = &caller.frame;
+                vm.var_refs_base = caller.frame.var_refs.ptr;
                 vm.stack = &caller.stack;
                 vm.catch_target = &caller.catch_target;
                 vm.function = caller_function;
@@ -2605,10 +2613,14 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
             // (quickjs.c:18655). The assert covers the test-only legacy
             // adapter bridge, which bypasses finalize.
             std.debug.assert(idx < vm.frame.var_refs.len);
+            // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+            std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
             // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
             // "is this slot a cell" header load (guard #4) is deleted —
-            // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627).
-            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+            // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627),
+            // read through the Vm-resident base mirror (qjs's hoisted
+            // `var_refs` local, quickjs.c:17844).
+            const cell = vm.var_refs_base[idx];
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             // Guard #7 (nested-cell check) retired: a cell's VALUE is never
@@ -2646,7 +2658,9 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
             // are finalize-validated, frames carry exactly closure_var_count
             // cells — unchecked like qjs OP_put_var_ref (quickjs.c:18638).
             std.debug.assert(idx < vm.frame.var_refs.len);
-            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+            // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+            std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
+            const cell = vm.var_refs_base[idx];
             value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp - 1, var_buf, vm);
         }
@@ -2673,7 +2687,9 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     // finalize-validated, frames carry exactly closure_var_count cells —
     // unchecked like qjs OP_put_var_ref_check (quickjs.c:18670).
     std.debug.assert(idx < vm.frame.var_refs.len);
-    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+    std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
+    const cell = vm.var_refs_base[idx];
     // qjs 18675-18678: JS_IsUninitialized(*var_refs[idx]->pvalue) -> throw.
     if (cell.pvalue.*.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // qjs set_value: publish the owned TOS value, release the displaced cell
@@ -2708,7 +2724,9 @@ pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
             // are finalize-validated, frames carry exactly closure_var_count
             // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
             std.debug.assert(idx < vm.frame.var_refs.len);
-            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+            // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+            std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
+            const cell = vm.var_refs_base[idx];
             value_slot.replaceBorrowed(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp, var_buf, vm);
         }
@@ -4517,10 +4535,14 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     // qjs OP_get_var (quickjs.c:18461); the assert covers the test-only
     // legacy adapter bridge, which bypasses finalize.
     std.debug.assert(idx < vm.frame.var_refs.len);
+    // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+    std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
     // Slot is a cell by type: guard #4 (slot header load) deleted — qjs
     // OP_get_var is `*var_refs[idx]->pvalue` + one uninitialized check
-    // (18461-18488).
-    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    // (18461-18488), read through the Vm-resident base mirror (qjs's
+    // hoisted `var_refs` local, quickjs.c:17844): vm→base→cell→pvalue,
+    // 4 dependent loads instead of the 5-level vm→frame→ptr→cell→pvalue.
+    const cell = vm.var_refs_base[idx];
     const v = cell.pvalue.*;
     if (v.isUninitialized()) {
         // qjs OP_get_var uninitialized arm (quickjs.c:18469-18483): a
@@ -4610,7 +4632,9 @@ pub fn op_put_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     // unbound name to the global object), not a redundant guard, so the resident
     // handler declines rather than asserting.
     if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+    std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
+    const cell = vm.var_refs_base[idx];
     const current = cell.pvalue.*;
     // Same predicate as putVar's write-through arm, in the same order: not
     // uninitialized (TDZ / deleted binding), not const, not an indirect var-ref,
@@ -4814,6 +4838,7 @@ const arithmetic_tail_table = [1]Handler{
 
 fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) void {
     vm.machine.loadCurrentLevel(&vm.frame, &vm.stack, &vm.catch_target);
+    vm.var_refs_base = vm.frame.var_refs.ptr;
     vm.function = vm.frame.function;
     vm.code_base = vm.function.byteCode().ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
@@ -4837,10 +4862,12 @@ inline fn reloadAfterPop(
 ) void {
     if (caller_entry) |entry| {
         vm.frame = &entry.frame;
+        vm.var_refs_base = entry.frame.var_refs.ptr;
         vm.stack = &entry.stack;
         vm.catch_target = &entry.catch_target;
     } else {
         vm.frame = vm.machine.l0.level.frame;
+        vm.var_refs_base = vm.machine.l0.level.frame.var_refs.ptr;
         vm.stack = vm.machine.l0.level.stack;
         vm.catch_target = vm.machine.l0.level.catch_target;
         // Every inline callee entered with this cache false. Preserve that
@@ -4863,6 +4890,8 @@ inline fn reloadAfterPop(
 pub fn run(vm: *Vm) HostError!JSValue {
     vm.arithmetic_tail_tbl = &arithmetic_tail_table;
     vm.property_tail_tbl = &property_tail_table;
+    // qjs prologue hoist (quickjs.c:17844): `var_refs = p->u.func.var_refs`.
+    vm.var_refs_base = vm.frame.var_refs.ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     vm.active_dispatch_tbl = if (vm.local_fast_blocked) &cold_table else &dispatch_table;
     var pc = vm.code_base + vm.frame.pc;
