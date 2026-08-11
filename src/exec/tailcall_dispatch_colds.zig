@@ -926,6 +926,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // logicalNot assigned above (qjs reaches those via an out-of-line JS_ToBoolFree
     // bl too — pinned binary, JS_CallInternal+0x6abc).
     t[op.lnot] = td.op_lnot;
+    // qjs CASE(OP_is_null):20625-20630 compares the top-slot tag in place;
+    // set_true (20648-20650) overwrites null without a free, while
+    // free_and_set_false (20651-20654) releases only refcounted non-null values
+    // through JS_FreeValue's inline tag guard before overwriting with false.
+    t[op.is_null] = td.op_is_null;
     t[op.inc_loc] = td.op_update_loc;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field

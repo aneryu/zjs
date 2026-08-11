@@ -4259,7 +4259,11 @@ pub fn op_post_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 
 pub fn op_dup(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const v = (sp - 1)[0];
-    sp[0] = if (v.requiresRefCount()) v.dup() else v;
+    // qjs: quickjs.c:18038-18041 calls JS_DupValue exactly once; its
+    // quickjs.h:707-713 body owns the refcount-tag gate. JSValue.dup has the
+    // same contract, so a caller-side duplicate gate only forces this handler
+    // to materialize a selection temporary before storing the copied slot.
+    sp[0] = v.dup();
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
 pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -4414,6 +4418,34 @@ pub fn op_if_false(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
         return cont(pc + 5, nsp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+// qjs CASE(OP_is_null) (quickjs.c:20625-20630) compares the resident top-slot
+// tag with JS_TAG_NULL: a match overwrites the slot with true via set_true
+// (20648-20650), while every non-null value reaches free_and_set_false, whose
+// inline JS_FreeValue refcount-tag guard releases only owning values before the
+// false overwrite (20651-20654). zjs previously kept this opcode in the all-cold
+// table, so every execution paid coldStd publish -> noinline value_vm.isNull ->
+// coldNext even though the operation is stack-neutral and cannot throw.
+//
+// Keep the same three legs resident. Non-owning false values need only the bool
+// overwrite. An owning value is overwritten first so it is no longer a GC root,
+// then the authoritative stack window is pinned at the unchanged sp before the
+// active-bytecode release — the same root-window ordering used by op_lnot's
+// object leg. No interrupt poll: qjs's CASE has none, and neither did the cold
+// zjs helper.
+pub fn op_is_null(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    if (value.isNull()) {
+        (sp - 1)[0] = JSValue.boolean(true);
+        return cont(pc + 1, sp, var_buf, vm);
+    }
+    (sp - 1)[0] = JSValue.boolean(false);
+    if (value.requiresRefCount()) {
+        vm.stack.setTopPtr(sp);
+        value.freeDuringActiveBytecode(vm.ctx.runtime);
+    }
+    return cont(pc + 1, sp, var_buf, vm);
 }
 
 // qjs CASE(OP_lnot) (quickjs.c:19092-19105) classifies the operand with the same

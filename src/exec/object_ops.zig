@@ -2827,7 +2827,14 @@ pub fn getValueProperty(
                 if (object.getOwnDataPropertyValue(atom_id)) |own_data| return own_data;
             }
         }
-        if (isFunctionLikeClass(object.class_id)) {
+        // QuickJS's fixed `JS_ATOM_Symbol_hasInstance` lookup goes straight
+        // into the ordinary shape walk (quickjs.c:8139, 8268). Keep zjs's
+        // receiver-aware legacy compatibility helper ahead of that walk only
+        // for its two actual keys; unrelated function properties must not pay
+        // an outlined `caller`/`arguments` miss.
+        if (isFunctionLikeClass(object.class_id) and
+            (atom_id == core.atom.ids.caller or atom_id == core.atom.ids.arguments))
+        {
             if (try functionCallerArgumentsProperty(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |function_value| {
                 return function_value;
             }

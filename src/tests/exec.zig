@@ -16570,6 +16570,24 @@ test "Engine eval preserves resolve-label peephole semantics" {
     try std.testing.expectEqualStrings("3,3,9,false,true,true,true,true,true\n", stream.buffered());
 }
 
+test "resident is_null preserves qjs true and refcounted false legs" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const values = [null, undefined, false, true, 0, 1, 1.5, "", Symbol("s"), 1n, {}, [], function() {}];
+        \\for (let i = 0; i < values.length; i++) {
+        \\  assert.sameValue(values[i] === null, i === 0);
+        \\}
+        \\for (let i = 0; i < 1000; i++) {
+        \\  assert.sameValue(({ index: i }) === null, false);
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine generator return keeps finally rethrow control marker" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
