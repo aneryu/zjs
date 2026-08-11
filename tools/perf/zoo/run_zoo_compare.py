@@ -9,8 +9,8 @@ carries the same discipline as the whole-process microbench contract:
   * even sample count with a balanced first position (contract #3) -- an odd
     count is refused rather than rounded, since silently changing the sampling
     design behind the caller's back is the failure that contract exists to stop;
-  * effective CPU affinity pinned to a single core, verified rather than
-    requested (contract: an allowed-list containing the CPU is not pinning);
+  * effective CPU affinity pinned to either one serial core or the exact two
+    clusters requested for parallel comparison, verified rather than assumed;
   * the exclusive host lock held across the whole run, so no build or test
     perturbs the measurement;
   * full provenance in the artifact -- both binaries' SHA-256, both commits,
@@ -26,11 +26,17 @@ Usage:
     tools/perf/zoo/run_zoo_compare.py --zjs zig-out/bin/zjs \\
         --qjs /home/aneryu/quickjs/qjs --samples 4 --cpu 19 \\
         --output reports/.../zoo-compare.json
+
+    taskset -c 5-9,15-19 tools/perf/zoo/run_zoo_compare.py \\
+        --zjs zig-out/bin/zjs --qjs /home/aneryu/quickjs/qjs --samples 4 \\
+        --parallel-clusters 5-9 15-19 \\
+        --output reports/.../zoo-compare-parallel.json
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -69,6 +75,10 @@ DEFAULT_BENCHES = [
 LATENCY_KEYS = {"MandreelLatency", "SplayLatency"}
 
 SCORE_RE = re.compile(r"^([A-Za-z0-9_]+):\s+([0-9]+)\s*$")
+
+
+class RunFailure(RuntimeError):
+    """One engine invocation did not produce a trustworthy score."""
 
 
 def fail(message: str, code: int = 2) -> "NoReturn":  # type: ignore[valid-type]
@@ -125,20 +135,98 @@ def parse_scores(text: str) -> dict[str, int]:
     return scores
 
 
+def parse_cpu_list(spec: str) -> list[int]:
+    """Parse Linux cpulist syntax while preserving lane order."""
+    cpus: list[int] = []
+    seen: set[int] = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            raise ValueError(f"invalid empty CPU-list component in {spec!r}")
+        if "-" in part:
+            bounds = part.split("-")
+            if len(bounds) != 2 or not all(bound.isdigit() for bound in bounds):
+                raise ValueError(f"invalid CPU range {part!r}")
+            start, end = (int(bound) for bound in bounds)
+            if end < start:
+                raise ValueError(f"descending CPU range {part!r} is not allowed")
+            values = range(start, end + 1)
+        else:
+            if not part.isdigit():
+                raise ValueError(f"invalid CPU {part!r}")
+            values = (int(part),)
+        for cpu in values:
+            if cpu in seen:
+                raise ValueError(f"CPU {cpu} occurs more than once in {spec!r}")
+            cpus.append(cpu)
+            seen.add(cpu)
+    if not cpus:
+        raise ValueError("CPU list must not be empty")
+    return cpus
+
+
 def run_one(binary: Path, script: Path, cpu: int, timeout: int) -> tuple[dict[str, int], float]:
     started = time.monotonic()
-    proc = subprocess.run(
-        ["taskset", "-c", str(cpu), str(binary), str(script)],
-        capture_output=True, text=True, timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            ["taskset", "-c", str(cpu), str(binary), str(script)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RunFailure(
+            f"{binary.name} timed out after {timeout}s for {script.name} on CPU {cpu}"
+        ) from exc
     elapsed = time.monotonic() - started
     scores = parse_scores(proc.stdout + proc.stderr)
+    if proc.returncode != 0:
+        raise RunFailure(
+            f"{binary.name} exited {proc.returncode} for {script.name} on CPU {cpu}; "
+            f"stderr={proc.stderr.strip()[-400:]!r}"
+        )
     if not scores:
-        fail(
+        raise RunFailure(
             f"{binary.name} produced no parseable score for {script.name}; "
             f"exit={proc.returncode} stderr={proc.stderr.strip()[:200]!r}"
         )
     return scores, elapsed
+
+
+def parallel_assignments(
+    benches: list[str], sample: int, cluster_a: list[int], cluster_b: list[int]
+) -> list[tuple[str, str, int, str]]:
+    """Return (bench, engine, cpu, cluster) assignments for one batch."""
+    if len(benches) > len(cluster_a) or len(cluster_a) != len(cluster_b):
+        raise ValueError("parallel batch and cluster widths do not match")
+    engine_a, engine_b = ("qjs", "zjs") if sample % 2 == 0 else ("zjs", "qjs")
+    assignments: list[tuple[str, str, int, str]] = []
+    for lane, bench in enumerate(benches):
+        assignments.append((bench, engine_a, cluster_a[lane], "a"))
+        assignments.append((bench, engine_b, cluster_b[lane], "b"))
+    return assignments
+
+
+def run_parallel_batch(
+    assignments: list[tuple[str, str, int, str]],
+    binaries: dict[str, Path],
+    scripts: dict[str, Path],
+    timeout: int,
+) -> dict[tuple[str, str], tuple[dict[str, int], float, int, str]]:
+    """Launch all assignments concurrently and return results by benchmark/engine."""
+    outputs: dict[tuple[str, str], tuple[dict[str, int], float, int, str]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(assignments)) as pool:
+        futures = {
+            (bench, engine): (
+                pool.submit(run_one, binaries[engine], scripts[bench], cpu, timeout),
+                cpu,
+                cluster,
+            )
+            for bench, engine, cpu, cluster in assignments
+        }
+        for bench, engine, _, _ in assignments:
+            future, cpu, cluster = futures[(bench, engine)]
+            scores, elapsed = future.result()
+            outputs[(bench, engine)] = (scores, elapsed, cpu, cluster)
+    return outputs
 
 
 def geomean(values: list[float]) -> float:
@@ -156,6 +244,15 @@ def main() -> int:
     ap.add_argument("--zoo", default="/home/aneryu/javascript-zoo", help="javascript-zoo checkout")
     ap.add_argument("--samples", type=int, default=4, help="samples per engine per benchmark, must be even (default: 4)")
     ap.add_argument("--cpu", type=int, default=19)
+    ap.add_argument(
+        "--parallel-clusters",
+        nargs=2,
+        metavar=("CLUSTER_A", "CLUSTER_B"),
+        help=(
+            "run cluster-swapped parallel batches on two equal Linux cpulists "
+            "(example: 5-9 15-19); outer taskset affinity must equal their union"
+        ),
+    )
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--benches", nargs="*", default=None)
     ap.add_argument("--output")
@@ -171,13 +268,40 @@ def main() -> int:
     if args.samples < 2:
         fail("--samples must be at least 2")
 
+    parallel_clusters: tuple[list[int], list[int]] | None = None
+    if args.parallel_clusters:
+        try:
+            cluster_a = parse_cpu_list(args.parallel_clusters[0])
+            cluster_b = parse_cpu_list(args.parallel_clusters[1])
+        except ValueError as exc:
+            fail(f"invalid --parallel-clusters: {exc}")
+        if len(cluster_a) != len(cluster_b):
+            fail(
+                "--parallel-clusters must have equal widths; "
+                f"got {len(cluster_a)} and {len(cluster_b)} CPUs"
+            )
+        overlap = sorted(set(cluster_a) & set(cluster_b))
+        if overlap:
+            fail(f"--parallel-clusters must be disjoint; overlap: {overlap}")
+        parallel_clusters = (cluster_a, cluster_b)
+
     # Pinning must be effective, not merely requested. An allowed set that
-    # merely contains the CPU is not pinning.
+    # merely contains the requested CPUs is not pinning.
     affinity = effective_affinity()
-    if affinity != {args.cpu}:
+    expected_affinity = (
+        set(parallel_clusters[0]) | set(parallel_clusters[1])
+        if parallel_clusters
+        else {args.cpu}
+    )
+    if affinity != expected_affinity:
+        requested = (
+            ",".join(str(cpu) for cpu in sorted(expected_affinity))
+            if parallel_clusters
+            else str(args.cpu)
+        )
         fail(
             f"this process's effective affinity is {sorted(affinity)}, not exactly "
-            f"[{args.cpu}]; re-run under `taskset -c {args.cpu}` and the exclusive "
+            f"{sorted(expected_affinity)}; re-run under `taskset -c {requested}` and the exclusive "
             "host lock (measurement contract: affinity is attested, not requested)"
         )
 
@@ -195,25 +319,91 @@ def main() -> int:
     if missing:
         fail(f"missing benchmark sources: {', '.join(missing)}")
 
+    repo_root = Path(__file__).resolve().parents[3]
+    binary_info = {
+        "zjs": {"path": str(zjs), "sha256": sha256_of(zjs), "repo": git_describe(repo_root)},
+        "qjs": {"path": str(qjs), "sha256": sha256_of(qjs), "repo": git_describe(qjs.parent)},
+    }
+    zoo_info = git_describe(zoo)
+
     results: dict[str, dict] = {}
     order_log: list[dict] = []
+    per_bench: dict[str, dict] = {
+        bench: {
+            "scores": {"zjs": {}, "qjs": {}},
+            "wall": {"zjs": [], "qjs": []},
+        }
+        for bench in benches
+    }
+    scripts = {bench: bench_dir / f"{bench}.js" for bench in benches}
+    binaries = {"zjs": zjs, "qjs": qjs}
+
+    def record(bench: str, engine: str, scores: dict[str, int], elapsed: float) -> None:
+        per_bench[bench]["wall"][engine].append(elapsed)
+        for key, value in scores.items():
+            per_bench[bench]["scores"][engine].setdefault(key, []).append(value)
+
+    measurement_started = time.monotonic()
+    try:
+        if parallel_clusters:
+            cluster_a, cluster_b = parallel_clusters
+            width = len(cluster_a)
+            for sample in range(args.samples):
+                for batch_start in range(0, len(benches), width):
+                    batch = benches[batch_start : batch_start + width]
+                    assignments = parallel_assignments(batch, sample, cluster_a, cluster_b)
+                    outputs = run_parallel_batch(assignments, binaries, scripts, args.timeout)
+                    group = f"sample-{sample + 1}-batch-{batch_start // width + 1}"
+                    for bench in batch:
+                        cpu_assignments: dict[str, dict] = {}
+                        for engine in ("qjs", "zjs"):
+                            scores, elapsed, cpu, cluster = outputs[(bench, engine)]
+                            record(bench, engine, scores, elapsed)
+                            cpu_assignments[engine] = {"cpu": cpu, "cluster": cluster}
+                            print(
+                                f"  {bench:14} sample {sample + 1}/{args.samples} "
+                                f"{engine:4}@{cpu:<2} {scores}",
+                                file=sys.stderr,
+                            )
+                        order_log.append(
+                            {
+                                "bench": bench,
+                                "sample": sample,
+                                "concurrent": True,
+                                "simultaneousGroup": group,
+                                "cpuAssignments": cpu_assignments,
+                            }
+                        )
+        else:
+            for bench in benches:
+                for sample in range(args.samples):
+                    # Alternate the leading engine so each occupies each position equally.
+                    order = ["qjs", "zjs"] if sample % 2 == 0 else ["zjs", "qjs"]
+                    order_log.append({"bench": bench, "sample": sample, "order": "->".join(order)})
+                    for engine in order:
+                        scores, elapsed = run_one(binaries[engine], scripts[bench], args.cpu, args.timeout)
+                        record(bench, engine, scores, elapsed)
+                        print(
+                            f"  {bench:14} sample {sample + 1}/{args.samples} "
+                            f"{engine:4} {scores}",
+                            file=sys.stderr,
+                        )
+    except RunFailure as exc:
+        fail(str(exc), 1)
+
+    for engine, path in binaries.items():
+        final_hash = sha256_of(path)
+        if final_hash != binary_info[engine]["sha256"]:
+            fail(
+                f"{engine} binary changed during measurement: "
+                f"{binary_info[engine]['sha256']} -> {final_hash}",
+                1,
+            )
+    measurement_wall_seconds = time.monotonic() - measurement_started
 
     for bench in benches:
-        script = bench_dir / f"{bench}.js"
-        per_engine: dict[str, dict[str, list[int]]] = {"zjs": {}, "qjs": {}}
-        wall: dict[str, list[float]] = {"zjs": [], "qjs": []}
-        for sample in range(args.samples):
-            # Alternate the leading engine so each occupies each position equally.
-            order = ["qjs", "zjs"] if sample % 2 == 0 else ["zjs", "qjs"]
-            order_log.append({"bench": bench, "sample": sample, "order": "->".join(order)})
-            for engine in order:
-                binary = zjs if engine == "zjs" else qjs
-                scores, elapsed = run_one(binary, script, args.cpu, args.timeout)
-                wall[engine].append(elapsed)
-                for key, value in scores.items():
-                    per_engine[engine].setdefault(key, []).append(value)
-                print(f"  {bench:14} sample {sample + 1}/{args.samples} {engine:4} {scores}", file=sys.stderr)
-
+        per_engine = per_bench[bench]["scores"]
+        wall = per_bench[bench]["wall"]
         keys = sorted(set(per_engine["zjs"]) | set(per_engine["qjs"]))
         if set(per_engine["zjs"]) != set(per_engine["qjs"]):
             fail(
@@ -222,8 +412,20 @@ def main() -> int:
             )
         entry = {"scores": {}, "wallSecondsMedian": {}}
         for engine in ("zjs", "qjs"):
+            if len(wall[engine]) != args.samples:
+                fail(
+                    f"{bench}: {engine} produced {len(wall[engine])}/{args.samples} runs",
+                    1,
+                )
             entry["wallSecondsMedian"][engine] = median(wall[engine])
         for key in keys:
+            for engine in ("zjs", "qjs"):
+                if len(per_engine[engine][key]) != args.samples:
+                    fail(
+                        f"{bench}: {engine} score {key} has "
+                        f"{len(per_engine[engine][key])}/{args.samples} samples",
+                        1,
+                    )
             z = sorted(per_engine["zjs"][key])
             q = sorted(per_engine["qjs"][key])
             zm, qm = median(z), median(q)
@@ -248,24 +450,36 @@ def main() -> int:
         if entry["scores"][key]["isLatency"]
     }
 
+    is_parallel = parallel_clusters is not None
     artifact = {
         "tool": "zjs-zoo-compare",
         "schemaVersion": 2,
         "medianMethod": "statistics.median; even sample counts average the middle pair",
         "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "measurementWallSeconds": measurement_wall_seconds,
         "samplesPerEnginePerBench": args.samples,
-        "samplingOrder": "alternating by sample parity; each engine leads exactly half the samples",
-        "firstPositionBalanced": True,
-        "cpu": args.cpu,
+        "executionMode": "parallel-cluster-swap" if is_parallel else "serial-alternating",
+        "samplingOrder": (
+            "parallel cluster assignment swapped by sample parity; each engine occupies "
+            "each cluster exactly half the samples"
+            if is_parallel
+            else "alternating by sample parity; each engine leads exactly half the samples"
+        ),
+        "firstPositionBalanced": True if not is_parallel else None,
+        "clusterAssignmentBalanced": is_parallel,
+        "cpu": None if is_parallel else args.cpu,
+        "cpuClusters": (
+            {"a": parallel_clusters[0], "b": parallel_clusters[1]}
+            if parallel_clusters
+            else None
+        ),
+        "parallelLanes": len(parallel_clusters[0]) if parallel_clusters else 1,
         "effectiveAffinity": sorted(affinity),
         "kernel": platform.release(),
         "cpuModel": cpu_model(),
-        "binaries": {
-            "zjs": {"path": str(zjs), "sha256": sha256_of(zjs), "repo": git_describe(Path(__file__).resolve().parents[3])},
-            "qjs": {"path": str(qjs), "sha256": sha256_of(qjs), "repo": git_describe(qjs.parent)},
-        },
-        "zoo": git_describe(zoo),
+        "binaries": binary_info,
+        "zoo": zoo_info,
         "benchmarks": results,
         "summary": {
             "throughputGeomean": geomean(list(throughput.values())),
