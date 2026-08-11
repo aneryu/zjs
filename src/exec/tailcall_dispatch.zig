@@ -223,9 +223,9 @@ pub const Handler = *const fn (pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
 const PropertyTailSlot = enum(usize) {
     get_field_primitive,
     get_field2_primitive,
-    get_array_el_cached_string,
-    get_array_el_cached_getter,
-    get_array_el_cached_proxy,
+    get_array_el_atom_key,
+    get_array_el_atom_key_getter,
+    get_array_el_atom_key_proxy,
     get_field_cached_getter,
     get_field_property,
     get_static_cached_proxy,
@@ -3467,10 +3467,10 @@ fn op_put_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: 
     return cont(pc + 5, sp - 2, var_buf, vm);
 }
 
-fn op_get_array_el_cached_string(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+fn op_get_array_el_atom_key(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const key = (sp - 1)[0];
     const obj = (sp - 2)[0];
-    if (vm_property_field.cachedStringPropertyValueForFastPath(vm.ctx.runtime, vm.global, obj, key)) |result| {
+    if (vm_property_field.existingPropertyKeyValueForFastPath(vm.ctx.runtime, vm.global, obj, key)) |result| {
         const stack_value = switch (result) {
             .borrowed => |value| if (value.requiresRefCount()) value.dup() else value,
             .owned => |value| value,
@@ -3479,13 +3479,13 @@ fn op_get_array_el_cached_string(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
                     const owned_getter = getter.dup();
                     key.free(vm.ctx.runtime);
                     (sp - 1)[0] = owned_getter;
-                    return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_getter), .{ pc, sp, var_buf, vm });
+                    return @call(.always_tail, propertyTailHandler(vm, .get_array_el_atom_key_getter), .{ pc, sp, var_buf, vm });
                 }
                 break :blk JSValue.undefinedValue();
             },
             .proxy => |proxy| {
                 vm.property_holder = proxy;
-                return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_proxy), .{ pc, sp, var_buf, vm });
+                return @call(.always_tail, propertyTailHandler(vm, .get_array_el_atom_key_proxy), .{ pc, sp, var_buf, vm });
             },
         };
         obj.free(vm.ctx.runtime);
@@ -3537,7 +3537,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     return coldNext(var_buf, vm);
 }
 
-fn op_get_array_el_cached_getter(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+fn op_get_array_el_atom_key_getter(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     return op_get_property_cached_getter(1, pc, sp, var_buf, vm);
 }
 
@@ -3630,12 +3630,12 @@ inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, v
     return pushMovedAndEnter(var_buf, vm, &target, &moved, .proxy_get, atom_id, false);
 }
 
-fn op_get_array_el_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+fn op_get_array_el_atom_key_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
     const operand_len = vm.stack.len();
     const key = vm.stack.values[operand_len - 1];
     const receiver = vm.stack.values[operand_len - 2];
-    const atom_id = vm_property_field.cachedStringAtomForFastPath(key) orelse unreachable;
+    const atom_id = vm_property_field.existingPropertyKeyAtomForFastPath(key) orelse unreachable;
     if (tryInlineProxyTrap(true, var_buf, vm, vm.property_holder, atom_id)) |outcome| return outcome;
     const retained_atom = vm.ctx.runtime.atoms.dup(atom_id);
     defer vm.ctx.runtime.atoms.free(retained_atom);
@@ -3665,10 +3665,10 @@ fn op_get_array_el_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
 
 // Hot inline get_array_el — qjs OP_get_array_el's dense fast path: a[i] on a fast
 // array with a non-negative int32 index reads the element directly (dup'd) and pops
-// the [obj, key] pair to [value]. Holey/out-of-range/string-key/typed-array/proxy/
-// negative falls to the cold arrayElement. Atom-backed string keys tail-dispatch to
-// a separate ordinary-data shape walker before that cold resolver, mirroring qjs's
-// string-as-atom JS_GetProperty leg without inflating the dense-array handler.
+// the [obj, key] pair to [value]. Holey/out-of-range/other-key/typed-array/proxy/
+// negative falls to the cold arrayElement. Existing string/symbol atom keys
+// tail-dispatch to a separate ordinary-data shape walker before that cold resolver,
+// mirroring qjs JS_ValueToAtom -> JS_GetProperty without inflating this handler.
 // 1-byte op (operands are on the stack).
 pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const key = (sp - 1)[0];
@@ -3708,8 +3708,8 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
     }
-    if (key.isString()) {
-        return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_string), .{ pc, sp, var_buf, vm });
+    if (key.isString() or key.isSymbol()) {
+        return @call(.always_tail, propertyTailHandler(vm, .get_array_el_atom_key), .{ pc, sp, var_buf, vm });
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
@@ -3773,7 +3773,7 @@ fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
             .getter => |getter| blk: {
                 if (!getter.isUndefined()) {
                     sp[0] = getter.dup();
-                    return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_getter), .{ pc, sp + 1, var_buf, vm });
+                    return @call(.always_tail, propertyTailHandler(vm, .get_array_el_atom_key_getter), .{ pc, sp + 1, var_buf, vm });
                 }
                 break :blk JSValue.undefinedValue();
             },
@@ -4913,9 +4913,9 @@ fn profiledHandler(comptime profiled_op: u8, comptime real: Handler) Handler {
 const property_tail_table = [16]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
-    op_get_array_el_cached_string,
-    op_get_array_el_cached_getter,
-    op_get_array_el_cached_proxy,
+    op_get_array_el_atom_key,
+    op_get_array_el_atom_key_getter,
+    op_get_array_el_atom_key_proxy,
     op_get_field_cached_getter,
     op_get_field_property_tail,
     op_get_static_cached_proxy,

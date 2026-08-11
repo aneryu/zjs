@@ -810,31 +810,39 @@ pub inline fn atomPropertyValueForFastPath(
     return primitivePrototypePropertyForFastPath(rt, global, receiver, atom_id);
 }
 
-/// Computed-property twin of the field fast paths. qjs strings are atoms,
-/// so JS_ValueToAtom can pass an already-interned key straight into
-/// JS_GetProperty. zjs keeps a weak atom back-pointer on materialized strings;
-/// when it is present, indexed storage or an ordinary data hit can be resolved
-/// without publishing the VM or entering the allocating/general computed-key
-/// resolver. The operation cannot re-enter, so borrowing the weak id is safe.
-pub inline fn cachedStringPropertyValueForFastPath(
+/// Computed-property twin of the field fast paths. qjs `JS_ValueToAtom` turns a
+/// symbol value directly into its atom (quickjs.c:9012-9015), then sends strings
+/// and symbols through the same `JS_GetProperty` / `find_own_property` path. zjs
+/// can likewise borrow the atom carried by a live symbol body or the weak atom
+/// back-pointer on a materialized string. Indexed storage is string-only; both
+/// key kinds share the ordinary atom-keyed lookup below. The operation cannot
+/// re-enter, so borrowing either id is safe.
+pub inline fn existingPropertyKeyValueForFastPath(
     rt: *core.JSRuntime,
     global: *core.Object,
     receiver: core.JSValue,
     key: core.JSValue,
 ) ?PropertyFastValue {
-    const atom_id = string_ops.stringAtomId(key) orelse return null;
-    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
-        if (index <= @as(u32, @intCast(std.math.maxInt(i32)))) {
-            const index_value = core.JSValue.int32(@intCast(index));
-            if (fastDenseArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
-            if (fastStringIndexValue(rt, receiver, index_value)) |value| return .{ .owned = value };
-            if (fastTypedArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
+    const atom_id = existingPropertyKeyAtomForFastPath(key) orelse return null;
+    if (key.isString()) {
+        if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
+            if (index <= @as(u32, @intCast(std.math.maxInt(i32)))) {
+                const index_value = core.JSValue.int32(@intCast(index));
+                if (fastDenseArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
+                if (fastStringIndexValue(rt, receiver, index_value)) |value| return .{ .owned = value };
+                if (fastTypedArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
+            }
         }
     }
     return atomPropertyValueForFastPath(rt, global, receiver, atom_id);
 }
 
-pub inline fn cachedStringAtomForFastPath(value: core.JSValue) ?core.Atom {
+/// qjs `JS_ValueToAtom` handles an existing symbol before any general
+/// ToPropertyKey/string conversion (quickjs.c:9012-9015).  Both returned ids
+/// are borrowed from the still-live key value; a caller that can re-enter must
+/// retain the atom first.
+pub inline fn existingPropertyKeyAtomForFastPath(value: core.JSValue) ?core.Atom {
+    if (value.asSymbolAtom()) |atom_id| return atom_id;
     return string_ops.stringAtomId(value);
 }
 
@@ -1061,11 +1069,10 @@ pub noinline fn getArrayElement(
                 };
                 unreachable;
             }
-            if (string_ops.stringAtomId(key)) |atom_id| {
-                // String.atom_id is a weak cache. A Proxy getter can re-enter,
-                // destroy the last shape that owns this atom, and intern a new
-                // key that reuses the id before invariant validation resumes.
-                // Retain it across the complete (potentially re-entrant) lookup.
+            if (existingPropertyKeyAtomForFastPath(key)) |atom_id| {
+                // String.atom_id is a weak cache, while a symbol value carries
+                // its atom id in the live body. A Proxy/getter can re-enter;
+                // retain either borrowed id across the complete lookup.
                 const retained_atom = ctx.runtime.atoms.dup(atom_id);
                 defer ctx.runtime.atoms.free(retained_atom);
                 const value = object_ops.getValueProperty(ctx, output, global, obj, retained_atom, function, frame) catch |err| {

@@ -15529,6 +15529,27 @@ test "computed proxy bytecode trap continuations preserve nested calls throws an
 
     const result = try js.eval(
         \\const key = ["__zjs_computed_", "proxy_probe__"].join("");
+        \\const symbolKey = Symbol("computed proxy probe");
+        \\const symbolOwn = {};
+        \\Object.defineProperty(symbolOwn, symbolKey, { value: 29 });
+        \\assert.sameValue(symbolOwn[symbolKey], 29);
+        \\const symbolPrototype = {};
+        \\let symbolGetterReceiver;
+        \\Object.defineProperty(symbolPrototype, symbolKey, {
+        \\    get() { symbolGetterReceiver = this; return 30; },
+        \\});
+        \\const symbolChild = Object.create(symbolPrototype);
+        \\assert.sameValue(symbolChild[symbolKey], 30);
+        \\assert.sameValue(symbolGetterReceiver, symbolChild);
+        \\const symbolProxy = new Proxy({}, {
+        \\    get(target, propertyKey, receiver) {
+        \\        assert.sameValue(propertyKey, symbolKey);
+        \\        assert.sameValue(receiver, symbolProxy);
+        \\        return 31;
+        \\    },
+        \\});
+        \\assert.sameValue(symbolProxy[symbolKey], 31);
+        \\assert.sameValue({}[symbolKey], undefined);
         \\let trapCount = 0;
         \\let seenTarget;
         \\let seenKey;
