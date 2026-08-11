@@ -124,32 +124,18 @@ import re
 import sys
 
 expected = [
+    # Mirrors qjs JSObject (quickjs.c:1017): an intrusive header, the weak
+    # ref count, class_id, the packed flag word, the shape pointer, the
+    # property value array and the class payload union. Update this list
+    # only alongside a reviewed Object shape change -- it is the tripwire
+    # for one landing unnoticed.
     "header",
-    "gc",
+    "weakref_count",
     "class_id",
-    "class_payload",
-    "class_payload_kind",
+    "flags",
     "shape_ref",
-    "prototype",
-    "null_prototype",
-    "extensible",
-    "immutable_prototype",
-    "is_array",
-    "is_proxy",
-    "is_global",
-    "shared_lazy_native_functions",
-    "cached_iterator_next",
-    "is_html_dda",
-    "may_have_indexed_properties",
-    "length",
-    "length_writable",
-    "is_with_environment",
-    "is_prototype",
-    "reserved_class_payload_finalizer_slot",
-    "in_weak_cleanup",
-    "properties",
-    "property_capacity",
-    "exotic",
+    "prop_values",
+    "u",
 ]
 
 path = Path("src/core/object.zig")
@@ -164,7 +150,7 @@ in_object = False
 for line in lines:
     stripped = line.strip()
     if not in_object:
-        if stripped == "pub const Object = struct {":
+        if stripped in ("pub const Object = struct {", "pub const Object = extern struct {"):
             in_object = True
         continue
     if stripped.startswith("pub fn ") or stripped.startswith("fn "):
