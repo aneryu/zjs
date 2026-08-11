@@ -101,3 +101,108 @@ verdicts are provisional until re-run through lineages.
   two property writes +47.22, admission +43.70, teardown +30.60, `this` creation
   +14.57. **Frame construction itself is a zjs win** (11.38 vs 29.50 cyc of
   increment), matching the independently measured call-setup advantage.
+
+---
+
+# Second tranche: EarleyBoyer knives (`4fa7c0b3`)
+
+## Absolute baseline moved 0.8946 → 0.8958 (+0.14%)
+
+Causal A/B read **1.0034**; the absolute run read **+0.14%**. The gap is RegExp,
+which reads −2.20% causally and **−4.05%** absolutely.
+
+| benchmark | e9ab2cf5 | 4fa7c0b3 | |
+|---|---:|---:|---|
+| EarleyBoyer | 0.6450 | **0.6629** | +2.78% |
+| MandreelLatency | 0.9443 | 0.9609 | +1.76% |
+| zlib | 0.9016 | 0.9113 | +1.07% |
+| PdfJS | 0.7397 | 0.7457 | +0.80% |
+| Richards | 0.9003 | 0.9070 | +0.75% |
+| RayTrace | 0.7548 | 0.7587 | +0.52% |
+| Box2D | 0.9015 | 0.8955 | −0.66% |
+| **RegExp** | 1.1270 | **1.0814** | **−4.05%** |
+
+EarleyBoyer's +2.78% matches the causal +2.89%. The knives are:
+`is_null` resident handler (100% hit rate, 13.4 → 0.85 cyc, 15x),
+`instanceof` dead pre-filter removal (7,928,421 nominal, **0** measured hits),
+and `OP_dup` (−7.33 insn / −5.32 cyc per event).
+
+## ⚠️ A layout verdict does not undo the layout
+
+RegExp was adjudicated **LAYOUT** by the lineage runner, and that verdict is
+correct — but the three pads read:
+
+| pad | cycles (cand/base) | |
+|---:|---:|---|
+| 0 | **+0.721%** | candidate slower |
+| 3 | −2.871% | candidate faster |
+| 7 | −2.183% | candidate faster |
+
+**pad 0 is the default build — the binary that actually ships.** It is the one
+lineage out of three where RegExp loses; under the other two placements the
+candidate is ~2% *faster*. So "this is placement, not mechanism" is true and
+also does not help: the shipped artifact really did draw the bad ticket, and
+−4.05% of a 1.127 score is a real 4% of throughput on that benchmark.
+
+The correct reading of a LAYOUT verdict is **"a different placement removes
+it"**, not "it is not happening". Nothing in this campaign acted on that
+distinction, and the absolute baseline is where it showed up: causal +0.34%
+against absolute +0.14%.
+
+This is the first concrete instance of the placement lottery costing real score
+rather than merely confusing a measurement. It does not justify hand-tuning
+linker placement as a strategy (that remains an acceptance constraint, not a
+lever), but it does mean a LAYOUT verdict should be recorded with the shipped
+pad's own number, not just the median.
+
+## Day total
+
+```
+dec6961d   0.8849 (back-solved)
+e9ab2cf5   0.8946   T1 cold-boundary + T5 deinit-gate     causal 1.0110
+4fa7c0b3   0.8958   is_null + instanceof + dup            causal 1.0034
+                    net +1.23%, gap to parity 11.6%
+```
+
+Four gate rounds, `0/49775 errors / 44581 passed` every time, bit-identical to
+the campaign start.
+
+## Yield
+
+14 codex tasks produced 5 landed knives, 3 deep attributions, and 1 tool.
+Seven candidate knives were implemented; **four produced no reproducible cycle
+win**. Five of the eight adjudications required the lineage runner to avoid a
+wrong conclusion, including one that reversed a verdict this campaign had
+already issued (T7's `add_property`, concluded "not worth landing" on the
+ineffective two-cold-builds control, later re-adjudicated LAYOUT).
+
+The durable output of the day is the attribution work and the tool, not the
+implementation throughput.
+
+## Native boundary: investigated, largely closed
+
+`instanceof` is 23.1% of EarleyBoyer's excess cycles at 3.44x unit cost, and the
+native call boundary was the leading suspect. A full design study priced it:
+
+```
+direct boundary   zjs 59.5 vs qjs 32.7 cyc/call   1.82x, excess 26.8
+  entry/admission  +11.58    native frame +4.85    realm +3.93
+  return +3.14     params +2.17    actual body +1.24 (near parity)
+env_publish        0        ← T3's exec_direct ABI already removed it entirely
+```
+
+Forcing the same body back through the environment fallback costs **+51–52
+instructions / +25.1–26.9 cycles per call**, confirming T3's win is real and
+must not be double-counted. Three proposals were produced; the best has a
+conservative window of **3–4 cyc/call**, the second **2.2 cyc/call**.
+
+Each of `NativeCallEnvironment`'s nine fields was justified individually. Two
+are architectural necessities rather than overhead: `output: *std.Io.Writer`
+(zjs's host writer is not part of QuickJS's `JSContext` ABI) and the
+`caller_function`/`caller_frame` pair (zjs has no single C activation spanning
+all handlers, so the caller's Frame/Vm must be reified).
+
+The study also corrected a misuse of the attribution number: EarleyBoyer's
+84.54 cyc/event cannot be carried across to this host and concurrency
+condition. Measured J-shape excess is ~60–61 cyc, of which the boundary explains
+**26.8**; roughly **34 cyc remain outside the boundary** and are unlocated.
