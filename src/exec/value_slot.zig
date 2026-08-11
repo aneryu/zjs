@@ -26,16 +26,16 @@ pub inline fn replaceBorrowed(rt: anytype, slot: *core.JSValue, borrowed_next: c
     replaceOwned(rt, slot, borrowed_next.dup());
 }
 
-/// `replaceOwned` twin for tail-call dispatch handlers: the old value's
-/// release reads the Vm-resident deinit mirror byte (see
-/// JSValue.freeWithDeinitMirror) instead of `rt.gc.phase`.
-pub inline fn replaceOwnedWithDeinitMirror(rt: anytype, gc_deinit: bool, slot: *core.JSValue, owned_next: core.JSValue) void {
+/// `replaceOwned` twin for a slot owned by an active bytecode frame. The old
+/// value follows QuickJS's phase-blind non-zero release; the zero-ref tail
+/// retains the phase gate (quickjs.c:6431,6476).
+pub inline fn replaceOwnedDuringActiveBytecode(rt: anytype, slot: *core.JSValue, owned_next: core.JSValue) void {
     const old = slot.*;
     slot.* = owned_next;
-    old.freeWithDeinitMirror(rt, gc_deinit);
+    old.freeDuringActiveBytecode(rt);
 }
 
-/// `replaceBorrowed` twin; see `replaceOwnedWithDeinitMirror`.
-pub inline fn replaceBorrowedWithDeinitMirror(rt: anytype, gc_deinit: bool, slot: *core.JSValue, borrowed_next: core.JSValue) void {
-    replaceOwnedWithDeinitMirror(rt, gc_deinit, slot, borrowed_next.dup());
+/// `replaceBorrowed` twin; see `replaceOwnedDuringActiveBytecode`.
+pub inline fn replaceBorrowedDuringActiveBytecode(rt: anytype, slot: *core.JSValue, borrowed_next: core.JSValue) void {
+    replaceOwnedDuringActiveBytecode(rt, slot, borrowed_next.dup());
 }

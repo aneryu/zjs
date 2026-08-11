@@ -897,6 +897,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // independent CASE per opcode, quickjs.c:20268-20271/20340-20341/20397-20398 —
     // no runtime predicate select on the int fast path).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompare(o);
+    // qjs OP_neg keeps int/bool/null/float in its CASE and calls
+    // js_unary_arith_slow only for ToNumeric operands (quickjs.c:19940-19970).
+    t[op.neg] = td.op_neg;
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
     // qjs OP_post_inc/OP_post_dec int fast leg (quickjs.c:20009-20045). Every
     // `let` loop update emits post_inc+put_loc_check+drop (checked lvalues are

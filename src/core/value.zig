@@ -644,41 +644,6 @@ pub const JSValue = extern struct {
         self.releaseCommonRefCount(rt);
     }
 
-    /// `free` twin for a tail-call dispatch handler: the deinit-phase gate
-    /// reads the caller-supplied Vm-resident mirror byte
-    /// (tailcall_dispatch.Vm.gc_deinit, maintained by
-    /// JSRuntime.syncGcDeinitMirrors) instead of `rt.gc.phase`. LLVM hoists
-    /// the phase read into the entry of every handler containing a refcounted
-    /// release as a vm→ctx→rt→gc.phase 3-level dependent load chain; the
-    /// mirror is one byte load off the register-resident vm pointer. qjs's
-    /// JS_FreeValue fast path performs no gc_phase load at all — the check
-    /// sits in __JS_FreeValueRT's zero-ref leg (quickjs.c:6476). Semantics are
-    /// byte-identical to `free`; Debug/ReleaseSafe verify the mirror against
-    /// the authoritative phase.
-    pub inline fn freeWithDeinitMirror(self: JSValue, rt: anytype, gc_deinit: bool) void {
-        comptime {
-            @setEvalBranchQuota(10_000);
-        }
-        std.debug.assert(gc_deinit == (rt.gc.phase == .deinit));
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
-            if (gc_deinit and p >= NanBox.deinit_skip_min) return;
-            if (comptime build_options.zjs_enable_opcode_profile) {
-                if (rt.opcode_profile) |prof| prof.recordValueFree();
-            }
-            self.releaseCommonRefCount(rt);
-            return;
-        }
-        if (!self.requiresRefCount()) return;
-        const tag = self.tagOf();
-        if (gc_deinit and tag >= Tag.module and tag <= Tag.object) return;
-        if (comptime build_options.zjs_enable_opcode_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        self.releaseCommonRefCount(rt);
-    }
-
     /// QuickJS-shaped release for an owner held by an active bytecode frame.
     ///
     /// Runtime teardown hard-fails before entering `gc.deinit` while any
@@ -687,7 +652,9 @@ pub const JSValue = extern struct {
     /// entry instead of re-reading `gc.phase` for every `JS_FreeValue`-shaped
     /// release. Keep the proof explicit here: Debug/ReleaseSafe catch a caller
     /// outside that window, while ReleaseFast retains only QuickJS's tag-range
-    /// check, refcount decrement, profile hook, and zero-ref tail.
+    /// check, refcount decrement, profile hook, and zero-ref tail. That tail
+    /// keeps the phase gate in `gc.destroyZeroRef`, after the refcount reaches
+    /// zero, matching QuickJS `__JS_FreeValueRT` (quickjs.c:6431,6476).
     ///
     /// Generic/runtime teardown code must continue to use `free`.
     pub inline fn freeDuringActiveBytecode(self: JSValue, rt: anytype) void {
@@ -720,6 +687,25 @@ pub const JSValue = extern struct {
     pub inline fn freeObjectAssumeObject(self: JSValue, rt: anytype) void {
         std.debug.assert(self.tagOf() == Tag.object);
         if (rt.gc.phase == .deinit) return;
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
+        const hdr = self.refCountWordAssumeRefCounted();
+        std.debug.assert(hdr.rc > 0);
+        hdr.rc -= 1;
+        if (hdr.rc == 0) {
+            gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
+        }
+    }
+
+    /// Active-bytecode twin of `freeObjectAssumeObject`. Runtime teardown is
+    /// excluded while a bytecode owner is live, so the common decrement pays
+    /// no pre-release phase probe; a zero ref still reaches
+    /// `gc.destroyZeroRef` and its QuickJS-shaped phase gate (quickjs.c:6476).
+    pub inline fn freeObjectAssumeObjectDuringActiveBytecode(self: JSValue, rt: anytype) void {
+        std.debug.assert(self.tagOf() == Tag.object);
+        std.debug.assert(rt.hot.call_depth != 0);
+        std.debug.assert(rt.gc.phase != .deinit);
         if (comptime build_options.zjs_enable_opcode_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
@@ -816,13 +802,14 @@ pub const JSValue = extern struct {
         return false;
     }
 
-    /// Vm-deinit-mirror twin of `releaseObjectAssumeObjectNeedsDestroy` (see
-    /// `freeWithDeinitMirror` for the mirror-byte rationale). Semantics
-    /// byte-identical; Debug/ReleaseSafe verify the mirror.
-    pub inline fn releaseObjectAssumeObjectNeedsDestroyWithDeinitMirror(self: JSValue, rt: anytype, gc_deinit: bool) bool {
+    /// Active-bytecode twin of `releaseObjectAssumeObjectNeedsDestroy`.
+    /// The hot non-zero arm mirrors QuickJS `JS_FreeValue`: no GC-phase read;
+    /// the caller routes the zero-ref leg to the phase-aware destroy tail
+    /// (quickjs.c:6431,6476).
+    pub inline fn releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(self: JSValue, rt: anytype) bool {
         std.debug.assert(self.tagOf() == Tag.object);
-        std.debug.assert(gc_deinit == (rt.gc.phase == .deinit));
-        if (gc_deinit) return false;
+        std.debug.assert(rt.hot.call_depth != 0);
+        std.debug.assert(rt.gc.phase != .deinit);
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
@@ -833,15 +820,14 @@ pub const JSValue = extern struct {
         return false;
     }
 
-    /// Vm-deinit-mirror twin of `releaseRefCountedNeedsDestroy` (see
-    /// `freeWithDeinitMirror` for the mirror-byte rationale). Semantics
-    /// byte-identical; Debug/ReleaseSafe verify the mirror.
-    pub inline fn releaseRefCountedNeedsDestroyWithDeinitMirror(self: JSValue, rt: anytype, gc_deinit: bool) bool {
-        std.debug.assert(gc_deinit == (rt.gc.phase == .deinit));
+    /// Any-tag active-bytecode twin of
+    /// `releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode`.
+    pub inline fn releaseRefCountedNeedsDestroyDuringActiveBytecode(self: JSValue, rt: anytype) bool {
+        std.debug.assert(rt.hot.call_depth != 0);
+        std.debug.assert(rt.gc.phase != .deinit);
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
             if (p < NanBox.refcount_min or p > NanBox.refcount_max) return false;
-            if (gc_deinit and p >= NanBox.deinit_skip_min) return false;
             const hdr = self.refCountWordAssumeRefCounted();
             std.debug.assert(hdr.rc > 0);
             if (hdr.rc == 1) return true;
@@ -852,8 +838,6 @@ pub const JSValue = extern struct {
             return false;
         }
         if (!self.requiresRefCount()) return false;
-        const tag = self.tagOf();
-        if (gc_deinit and tag >= Tag.module and tag <= Tag.object) return false;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
