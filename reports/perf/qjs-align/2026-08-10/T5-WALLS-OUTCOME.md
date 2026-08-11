@@ -226,3 +226,43 @@ fixed source, so a second draw was not available to confirm by resampling;
 the instruction evidence is stronger anyway, since it shows the code is never
 executed. The wins, by contrast, are all on write-heavy benchmarks and are
 carried by real instruction reductions.
+
+**Vm-resident var_refs base mirror — LANDED** (`cc7c5b42`). QuickJS hoists
+`var_refs` into a `JS_CallInternal` local at frame entry (qjs:17844); zjs
+walked `vm -> frame -> var_refs.ptr -> cell -> pvalue`, five dependent loads
+per access. The mirror cuts it to four, republished at all seven `vm.frame`
+publication seams, with a `var_refs_base == frame.var_refs.ptr` assert live in
+ReleaseSafe so the suite doubles as a seam-leak detector. It occupies the
+retired `stack_base` slot pointer-for-pointer, leaving the Vm layout unchanged.
+
+Fixed work, 6 interleaved pairs against a same-base baseline:
+
+| workload | instructions | cycles |
+|---|---:|---:|
+| typescript-fixed | +0.307% | **−0.630%** |
+| rt-fixed-d64 | +0.131% | **−1.099%** |
+
+Instructions rise while cycles fall — the knife trades a few predictable
+per-seam stores for a shorter dependent-load chain, which is the shape that
+has historically over-realized here. Full-15 causal A/B: geomean **1.0036**,
+led by mandreel 1.023, raytrace 1.011, earley-boyer 1.009; the five sub-1.0
+readings (regexp 0.988 down to gbemu 0.999) are inside their own bands.
+
+*Measurement note.* The first pass at this knife was invalidated and redone.
+`main` had advanced under the working branch — an unrelated commit
+(`8c2b6738`, from a concurrent session) was already in the candidate but not
+in the frozen `/tmp/zjs-rt-t7` baseline, so the initial readings
+(zoo geomean 1.0151, all fifteen positive) credited this knife with another
+change's effect. A baseline was rebuilt from the same base and everything
+above is from that comparison. This is the same cross-version baseline error
+recorded earlier in this campaign; the lesson is that "frozen baseline" is not
+sufficient — it has to be frozen *from the candidate's own parent*.
+
+**Empty-constructor fast path — not evaluated.** The remaining rider extends
+`simpleFieldConstructorPattern` to zero-field bodies. It is a QuickJS-absent
+fast path whose only demonstrated benefit is the `L0` microbenchmark case,
+which it would itself turn into an artifact — the exact trap
+`constructSimpleFieldConstructor` set for `F`/`L3` earlier in this campaign
+(the WIP does add an `L0v` twin to preserve a generic control). Zoo does
+contain 55 empty function declarations, so a real effect is not impossible and
+the question is open rather than closed; it was left unmeasured.
