@@ -6429,7 +6429,16 @@ fn materializeArgsFromArrayLike(
     // unobservable; Proxy/exotic and every non-dense source still use the
     // full VM property path.
     const length = dense_array_length orelse blk: {
-        const length_value = try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
+        // qjs build_arg_list performs js_get_length64 after the object check
+        // (qjs:41171), whose JS_GetProperty starts with find_own_property's
+        // ordinary data-slot probe (qjs:8268). Use zjs's same general named
+        // property prefix; accessors, proxies, exotics, and misses retain the
+        // complete observable resolver.
+        const length_probe = object_ops.probePublicNamedDataPropertyFromObject(object, core.atom.ids.length);
+        const length_value = if (length_probe.slot) |slot|
+            slot.*.dup()
+        else
+            try getValueProperty(ctx, output, global, array_value, core.atom.ids.length, caller_function, caller_frame);
         defer length_value.free(ctx.runtime);
         break :blk try toLengthIndex(ctx, output, global, length_value);
     };

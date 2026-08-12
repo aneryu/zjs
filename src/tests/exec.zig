@@ -12827,6 +12827,54 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
     try std.testing.expect(result.isUndefined());
 }
 
+// qjs:41171 resolves length through ordinary [[Get]] before qjs:41182-41197
+// selects ARRAY/ARGUMENTS/MAPPED_ARGUMENTS or the observable element fallback.
+test "apply resolves arguments length and preserves observable fallback" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function signature() {
+        \\    return arguments.length + ":" + arguments[0] + ":" + arguments[arguments.length - 1];
+        \\}
+        \\function mapped(first, second, third) {
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\assert.sameValue(mapped(1, 2, 3), "3:1:3");
+        \\function unmapped(first, second, third) {
+        \\    "use strict";
+        \\    return Reflect.apply(signature, null, arguments);
+        \\}
+        \\assert.sameValue(unmapped(4, 5, 6), "3:4:6");
+        \\function rewrittenLength(first, second, third) {
+        \\    arguments.length = 1;
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\assert.sameValue(rewrittenLength(7, 8, 9), "1:7:7");
+        \\let lengthGets = 0;
+        \\function accessorLength(first, second, third) {
+        \\    Object.defineProperty(arguments, "length", {
+        \\        get: function() { lengthGets++; return 2; }
+        \\    });
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\assert.sameValue(accessorLength(10, 11, 12), "2:10:11");
+        \\assert.sameValue(lengthGets, 1);
+        \\function detached(first, second) {
+        \\    delete arguments[0];
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\Object.prototype[0] = 13;
+        \\try {
+        \\    assert.sameValue(detached(1, 14), "2:13:14");
+        \\} finally {
+        \\    delete Object.prototype[0];
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "resident generators preserve mapped arguments parameter aliases" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -1,0 +1,7111 @@
+{
+ "tool": "zjs-zoo-compare",
+ "schemaVersion": 2,
+ "medianMethod": "statistics.median; even sample counts average the middle pair",
+ "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
+ "timestamp": "2026-08-12T17:35:05Z",
+ "measurementWallSeconds": 1473.9634785586968,
+ "samplesPerEnginePerBench": 24,
+ "executionMode": "parallel-cluster-swap",
+ "samplingOrder": "parallel cluster assignment swapped by sample parity; each engine occupies each cluster exactly half the samples",
+ "firstPositionBalanced": null,
+ "clusterAssignmentBalanced": true,
+ "cpu": null,
+ "cpuClusters": {
+  "a": [
+   9,
+   15,
+   16
+  ],
+  "b": [
+   17,
+   18,
+   19
+  ]
+ },
+ "parallelLanes": 3,
+ "effectiveAffinity": [
+  9,
+  15,
+  16,
+  17,
+  18,
+  19
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/zjs-cand-slowprop",
+   "sha256": "e693a912504ed3f5c27268ba06f7cbef83c4aaf557122ea88733001131441021",
+   "repo": {
+    "path": "/home/aneryu/zjs",
+    "commit": "485a7c5a67566c0c26767f3dd5390a5fce131189",
+    "dirty": true
+   }
+  },
+  "qjs": {
+   "path": "/tmp/zjs-base-e31af460",
+   "sha256": "3854bf92713b743757ae8cd3ea3992c83081e99afcf5469a7c629e3138fd2930",
+   "repo": {
+    "path": "/tmp",
+    "commit": null,
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "box2d": {
+   "scores": {
+    "Box2D": {
+     "zjs": {
+      "median": 6594.0,
+      "min": 6423,
+      "max": 6644,
+      "samples": [
+       6625,
+       6423,
+       6576,
+       6582,
+       6638,
+       6594,
+       6638,
+       6546,
+       6601,
+       6582,
+       6638,
+       6570,
+       6594,
+       6533,
+       6594,
+       6558,
+       6619,
+       6576,
+       6625,
+       6619,
+       6638,
+       6588,
+       6644,
+       6594
+      ]
+     },
+     "qjs": {
+      "median": 6616.0,
+      "min": 6474,
+      "max": 6675,
+      "samples": [
+       6576,
+       6480,
+       6552,
+       6638,
+       6625,
+       6644,
+       6625,
+       6632,
+       6588,
+       6663,
+       6650,
+       6607,
+       6474,
+       6619,
+       6533,
+       6564,
+       6588,
+       6644,
+       6607,
+       6675,
+       6588,
+       6644,
+       6613,
+       6625
+      ]
+     },
+     "ratioZjsOverQjs": 0.9966747279322854,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.0836281494703144,
+    "qjs": 1.07900825352408
+   }
+  },
+  "code-load": {
+   "scores": {
+    "CodeLoad": {
+     "zjs": {
+      "median": 35262.0,
+      "min": 34582,
+      "max": 35437,
+      "samples": [
+       35437,
+       34582,
+       35025,
+       35273,
+       35356,
+       35219,
+       35343,
+       35173,
+       35206,
+       35188,
+       35287,
+       35219,
+       35005,
+       35106,
+       35293,
+       35075,
+       35310,
+       35282,
+       35378,
+       35345,
+       35234,
+       35251,
+       35297,
+       35295
+      ]
+     },
+     "qjs": {
+      "median": 35337.0,
+      "min": 34783,
+      "max": 35522,
+      "samples": [
+       35522,
+       34783,
+       35117,
+       35436,
+       35489,
+       35391,
+       35382,
+       35329,
+       35084,
+       35373,
+       35256,
+       35261,
+       34912,
+       35324,
+       35161,
+       35242,
+       35263,
+       35410,
+       35413,
+       35469,
+       35238,
+       35415,
+       35345,
+       35463
+      ]
+     },
+     "ratioZjsOverQjs": 0.9978775787418287,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0333769991993904,
+    "qjs": 2.0343086374923587
+   }
+  },
+  "crypto": {
+   "scores": {
+    "Crypto": {
+     "zjs": {
+      "median": 2302.5,
+      "min": 2270,
+      "max": 2320,
+      "samples": [
+       2289,
+       2270,
+       2299,
+       2304,
+       2308,
+       2299,
+       2287,
+       2319,
+       2302,
+       2303,
+       2289,
+       2280,
+       2280,
+       2312,
+       2305,
+       2303,
+       2299,
+       2303,
+       2304,
+       2296,
+       2284,
+       2310,
+       2309,
+       2320
+      ]
+     },
+     "qjs": {
+      "median": 2298.5,
+      "min": 2246,
+      "max": 2315,
+      "samples": [
+       2312,
+       2246,
+       2286,
+       2289,
+       2291,
+       2307,
+       2290,
+       2307,
+       2304,
+       2315,
+       2269,
+       2291,
+       2297,
+       2269,
+       2300,
+       2288,
+       2310,
+       2306,
+       2307,
+       2289,
+       2313,
+       2303,
+       2293,
+       2301
+      ]
+     },
+     "ratioZjsOverQjs": 1.0017402653904721,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 5.086256256559864,
+    "qjs": 5.092621203046292
+   }
+  },
+  "deltablue": {
+   "scores": {
+    "DeltaBlue": {
+     "zjs": {
+      "median": 1242.0,
+      "min": 1209,
+      "max": 1248,
+      "samples": [
+       1233,
+       1209,
+       1242,
+       1245,
+       1246,
+       1241,
+       1239,
+       1243,
+       1246,
+       1226,
+       1245,
+       1239,
+       1239,
+       1235,
+       1242,
+       1230,
+       1243,
+       1248,
+       1243,
+       1242,
+       1246,
+       1242,
+       1247,
+       1245
+      ]
+     },
+     "qjs": {
+      "median": 1243.0,
+      "min": 1212,
+      "max": 1248,
+      "samples": [
+       1212,
+       1227,
+       1245,
+       1245,
+       1245,
+       1242,
+       1243,
+       1242,
+       1248,
+       1243,
+       1243,
+       1245,
+       1233,
+       1243,
+       1233,
+       1226,
+       1235,
+       1247,
+       1242,
+       1245,
+       1246,
+       1245,
+       1224,
+       1246
+      ]
+     },
+     "ratioZjsOverQjs": 0.999195494770716,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.007346263155341,
+    "qjs": 2.0079910054337233
+   }
+  },
+  "earley-boyer": {
+   "scores": {
+    "EarleyBoyer": {
+     "zjs": {
+      "median": 3542.5,
+      "min": 3491,
+      "max": 3557,
+      "samples": [
+       3491,
+       3496,
+       3545,
+       3550,
+       3545,
+       3546,
+       3543,
+       3542,
+       3545,
+       3554,
+       3525,
+       3519,
+       3530,
+       3532,
+       3536,
+       3520,
+       3553,
+       3535,
+       3557,
+       3513,
+       3545,
+       3545,
+       3533,
+       3554
+      ]
+     },
+     "qjs": {
+      "median": 3544.5,
+      "min": 3476,
+      "max": 3567,
+      "samples": [
+       3533,
+       3506,
+       3557,
+       3558,
+       3564,
+       3549,
+       3555,
+       3476,
+       3542,
+       3543,
+       3509,
+       3555,
+       3522,
+       3540,
+       3536,
+       3543,
+       3555,
+       3546,
+       3567,
+       3555,
+       3560,
+       3535,
+       3536,
+       3557
+      ]
+     },
+     "ratioZjsOverQjs": 0.99943574552123,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 6.070367489242926,
+    "qjs": 6.082508516032249
+   }
+  },
+  "gbemu": {
+   "scores": {
+    "Gameboy": {
+     "zjs": {
+      "median": 11938.0,
+      "min": 11810,
+      "max": 12037,
+      "samples": [
+       11938,
+       11810,
+       11917,
+       11982,
+       11993,
+       11938,
+       11982,
+       11906,
+       11938,
+       11906,
+       11917,
+       11895,
+       11938,
+       11863,
+       11884,
+       11884,
+       11928,
+       11971,
+       11982,
+       11971,
+       11971,
+       11895,
+       12037,
+       11949
+      ]
+     },
+     "qjs": {
+      "median": 11928.0,
+      "min": 11601,
+      "max": 12037,
+      "samples": [
+       11928,
+       11852,
+       11895,
+       12037,
+       11917,
+       12004,
+       11928,
+       11601,
+       11917,
+       11622,
+       11949,
+       11971,
+       11863,
+       11884,
+       11852,
+       11949,
+       11917,
+       11949,
+       11949,
+       11960,
+       11938,
+       11917,
+       11960,
+       12004
+      ]
+     },
+     "ratioZjsOverQjs": 1.0008383635144198,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.1409404890146106,
+    "qjs": 1.1419182564131916
+   }
+  },
+  "mandreel": {
+   "scores": {
+    "Mandreel": {
+     "zjs": {
+      "median": 1823.5,
+      "min": 1746,
+      "max": 1837,
+      "samples": [
+       1816,
+       1799,
+       1830,
+       1825,
+       1746,
+       1823,
+       1819,
+       1824,
+       1826,
+       1828,
+       1818,
+       1823,
+       1819,
+       1801,
+       1815,
+       1810,
+       1833,
+       1828,
+       1827,
+       1822,
+       1837,
+       1828,
+       1830,
+       1827
+      ]
+     },
+     "qjs": {
+      "median": 1821.5,
+      "min": 1792,
+      "max": 1833,
+      "samples": [
+       1821,
+       1819,
+       1813,
+       1832,
+       1831,
+       1806,
+       1833,
+       1827,
+       1821,
+       1826,
+       1828,
+       1824,
+       1822,
+       1820,
+       1812,
+       1806,
+       1819,
+       1831,
+       1792,
+       1820,
+       1827,
+       1821,
+       1825,
+       1829
+      ]
+     },
+     "ratioZjsOverQjs": 1.0010979961570134,
+     "isLatency": false
+    },
+    "MandreelLatency": {
+     "zjs": {
+      "median": 12783.0,
+      "min": 12526,
+      "max": 12848,
+      "samples": [
+       12717,
+       12589,
+       12815,
+       12783,
+       12526,
+       12783,
+       12783,
+       12750,
+       12783,
+       12783,
+       12783,
+       12685,
+       12685,
+       12685,
+       12717,
+       12685,
+       12815,
+       12815,
+       12848,
+       12750,
+       12848,
+       12783,
+       12848,
+       12783
+      ]
+     },
+     "qjs": {
+      "median": 12815.0,
+      "min": 12526,
+      "max": 12882,
+      "samples": [
+       12750,
+       12717,
+       12783,
+       12848,
+       12815,
+       12589,
+       12848,
+       12848,
+       12526,
+       12882,
+       12848,
+       12783,
+       12750,
+       12783,
+       12750,
+       12815,
+       12783,
+       12848,
+       12815,
+       12882,
+       12815,
+       12848,
+       12815,
+       12882
+      ]
+     },
+     "ratioZjsOverQjs": 0.9975029262582911,
+     "isLatency": true
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 4.5800982364453375,
+    "qjs": 4.5783036320935935
+   }
+  },
+  "navier-stokes": {
+   "scores": {
+    "NavierStokes": {
+     "zjs": {
+      "median": 4137.0,
+      "min": 4070,
+      "max": 4155,
+      "samples": [
+       4098,
+       4070,
+       4082,
+       4139,
+       4151,
+       4147,
+       4147,
+       4130,
+       4139,
+       4143,
+       4151,
+       4106,
+       4106,
+       4110,
+       4114,
+       4118,
+       4147,
+       4135,
+       4147,
+       4135,
+       4143,
+       4135,
+       4155,
+       4147
+      ]
+     },
+     "qjs": {
+      "median": 4147.0,
+      "min": 4086,
+      "max": 4170,
+      "samples": [
+       4106,
+       4086,
+       4147,
+       4170,
+       4158,
+       4162,
+       4147,
+       4155,
+       4147,
+       4143,
+       4143,
+       4135,
+       4122,
+       4135,
+       4122,
+       4130,
+       4139,
+       4151,
+       4155,
+       4162,
+       4155,
+       4151,
+       4143,
+       4166
+      ]
+     },
+     "ratioZjsOverQjs": 0.9975886182782735,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0347643084824085,
+    "qjs": 2.0404316519852728
+   }
+  },
+  "pdfjs": {
+   "scores": {
+    "PdfJS": {
+     "zjs": {
+      "median": 7606.0,
+      "min": 7418,
+      "max": 7649,
+      "samples": [
+       7577,
+       7465,
+       7620,
+       7606,
+       7649,
+       7606,
+       7641,
+       7577,
+       7627,
+       7418,
+       7634,
+       7549,
+       7584,
+       7556,
+       7556,
+       7542,
+       7620,
+       7606,
+       7627,
+       7591,
+       7649,
+       7598,
+       7641,
+       7606
+      ]
+     },
+     "qjs": {
+      "median": 7556.0,
+      "min": 7404,
+      "max": 7620,
+      "samples": [
+       7500,
+       7465,
+       7521,
+       7584,
+       7570,
+       7620,
+       7549,
+       7404,
+       7514,
+       7591,
+       7570,
+       7535,
+       7500,
+       7542,
+       7500,
+       7563,
+       7514,
+       7591,
+       7563,
+       7613,
+       7577,
+       7507,
+       7570,
+       7598
+      ]
+     },
+     "ratioZjsOverQjs": 1.0066172578083643,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.1747297879774123,
+    "qjs": 1.184852598933503
+   }
+  },
+  "raytrace": {
+   "scores": {
+    "RayTrace": {
+     "zjs": {
+      "median": 2529.0,
+      "min": 2489,
+      "max": 2552,
+      "samples": [
+       2519,
+       2489,
+       2529,
+       2547,
+       2544,
+       2522,
+       2552,
+       2513,
+       2527,
+       2532,
+       2527,
+       2529,
+       2542,
+       2524,
+       2511,
+       2534,
+       2524,
+       2503,
+       2552,
+       2542,
+       2519,
+       2544,
+       2529,
+       2539
+      ]
+     },
+     "qjs": {
+      "median": 2543.0,
+      "min": 2522,
+      "max": 2575,
+      "samples": [
+       2564,
+       2522,
+       2564,
+       2567,
+       2562,
+       2544,
+       2559,
+       2522,
+       2544,
+       2534,
+       2527,
+       2527,
+       2552,
+       2564,
+       2527,
+       2554,
+       2547,
+       2524,
+       2532,
+       2537,
+       2542,
+       2539,
+       2575,
+       2529
+      ]
+     },
+     "ratioZjsOverQjs": 0.994494691309477,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.041921484982595,
+    "qjs": 2.03678242652677
+   }
+  },
+  "regexp": {
+   "scores": {
+    "RegExp": {
+     "zjs": {
+      "median": 879.0,
+      "min": 868,
+      "max": 887,
+      "samples": [
+       882,
+       876,
+       881,
+       886,
+       887,
+       879,
+       887,
+       873,
+       880,
+       878,
+       881,
+       868,
+       871,
+       869,
+       876,
+       869,
+       868,
+       883,
+       879,
+       881,
+       872,
+       883,
+       874,
+       879
+      ]
+     },
+     "qjs": {
+      "median": 887.5,
+      "min": 859,
+      "max": 896,
+      "samples": [
+       883,
+       859,
+       891,
+       891,
+       889,
+       888,
+       880,
+       883,
+       889,
+       896,
+       888,
+       882,
+       888,
+       887,
+       881,
+       884,
+       887,
+       866,
+       894,
+       888,
+       882,
+       886,
+       895,
+       892
+      ]
+     },
+     "ratioZjsOverQjs": 0.9904225352112676,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 3.2379804078955203,
+    "qjs": 3.20826738094911
+   }
+  },
+  "richards": {
+   "scores": {
+    "Richards": {
+     "zjs": {
+      "median": 1466.5,
+      "min": 1442,
+      "max": 1474,
+      "samples": [
+       1465,
+       1454,
+       1471,
+       1466,
+       1469,
+       1465,
+       1474,
+       1460,
+       1469,
+       1460,
+       1472,
+       1442,
+       1465,
+       1460,
+       1467,
+       1459,
+       1471,
+       1462,
+       1471,
+       1462,
+       1472,
+       1467,
+       1472,
+       1469
+      ]
+     },
+     "qjs": {
+      "median": 1465.5,
+      "min": 1457,
+      "max": 1476,
+      "samples": [
+       1462,
+       1462,
+       1466,
+       1469,
+       1464,
+       1472,
+       1471,
+       1458,
+       1462,
+       1472,
+       1465,
+       1466,
+       1462,
+       1472,
+       1457,
+       1464,
+       1464,
+       1473,
+       1466,
+       1465,
+       1460,
+       1476,
+       1467,
+       1473
+      ]
+     },
+     "ratioZjsOverQjs": 1.0006823609689526,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0044704091269523,
+    "qjs": 2.0051800485234708
+   }
+  },
+  "splay": {
+   "scores": {
+    "Splay": {
+     "zjs": {
+      "median": 6524.5,
+      "min": 6210,
+      "max": 6650,
+      "samples": [
+       6511,
+       6210,
+       6625,
+       6364,
+       6650,
+       6487,
+       6642,
+       6299,
+       6536,
+       6366,
+       6625,
+       6220,
+       6578,
+       6283,
+       6513,
+       6291,
+       6570,
+       6576,
+       6627,
+       6511,
+       6601,
+       6472,
+       6650,
+       6537
+      ]
+     },
+     "qjs": {
+      "median": 6532.5,
+      "min": 6332,
+      "max": 6690,
+      "samples": [
+       6479,
+       6381,
+       6454,
+       6666,
+       6511,
+       6674,
+       6373,
+       6560,
+       6421,
+       6633,
+       6536,
+       6576,
+       6350,
+       6480,
+       6332,
+       6479,
+       6527,
+       6602,
+       6529,
+       6633,
+       6601,
+       6642,
+       6593,
+       6690
+      ]
+     },
+     "ratioZjsOverQjs": 0.9987753539992346,
+     "isLatency": false
+    },
+    "SplayLatency": {
+     "zjs": {
+      "median": 15771.0,
+      "min": 14945,
+      "max": 16230,
+      "samples": [
+       15926,
+       15054,
+       16142,
+       15162,
+       16190,
+       15489,
+       16230,
+       15191,
+       16017,
+       15326,
+       16153,
+       14945,
+       15993,
+       14954,
+       15976,
+       14964,
+       15941,
+       15616,
+       16137,
+       15424,
+       16125,
+       15423,
+       16217,
+       15612
+      ]
+     },
+     "qjs": {
+      "median": 15749.0,
+      "min": 15077,
+      "max": 16343,
+      "samples": [
+       15383,
+       15814,
+       15345,
+       16221,
+       15558,
+       16254,
+       15303,
+       15992,
+       15296,
+       16128,
+       15451,
+       15969,
+       15125,
+       15889,
+       15077,
+       15865,
+       15330,
+       16162,
+       15533,
+       16041,
+       15621,
+       16126,
+       15684,
+       16343
+      ]
+     },
+     "ratioZjsOverQjs": 1.0013969140897834,
+     "isLatency": true
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.394056918565184,
+    "qjs": 2.393982543144375
+   }
+  },
+  "typescript": {
+   "scores": {
+    "Typescript": {
+     "zjs": {
+      "median": 19373.5,
+      "min": 19025,
+      "max": 19619,
+      "samples": [
+       19223,
+       19025,
+       19446,
+       19619,
+       19484,
+       19469,
+       19490,
+       19322,
+       19319,
+       19449,
+       19354,
+       19051,
+       19372,
+       19252,
+       19319,
+       19235,
+       19375,
+       19325,
+       19490,
+       19410,
+       19422,
+       19446,
+       19357,
+       19467
+      ]
+     },
+     "qjs": {
+      "median": 19306.0,
+      "min": 19053,
+      "max": 19392,
+      "samples": [
+       19068,
+       19053,
+       19360,
+       19197,
+       19387,
+       19390,
+       19384,
+       19252,
+       19258,
+       19340,
+       19246,
+       19105,
+       19182,
+       19200,
+       19171,
+       19142,
+       19299,
+       19322,
+       19351,
+       19319,
+       19342,
+       19360,
+       19313,
+       19392
+      ]
+     },
+     "ratioZjsOverQjs": 1.0034963223868227,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 6.646368521498516,
+    "qjs": 6.6670022355392575
+   }
+  },
+  "zlib": {
+   "scores": {
+    "zlib": {
+     "zjs": {
+      "median": 3629.0,
+      "min": 3542,
+      "max": 3658,
+      "samples": [
+       3582,
+       3630,
+       3599,
+       3627,
+       3632,
+       3654,
+       3635,
+       3622,
+       3542,
+       3574,
+       3622,
+       3658,
+       3622,
+       3638,
+       3628,
+       3602,
+       3619,
+       3620,
+       3643,
+       3647,
+       3655,
+       3643,
+       3640,
+       3636
+      ]
+     },
+     "qjs": {
+      "median": 3619.0,
+      "min": 3584,
+      "max": 3665,
+      "samples": [
+       3601,
+       3618,
+       3640,
+       3611,
+       3644,
+       3644,
+       3665,
+       3606,
+       3602,
+       3631,
+       3599,
+       3606,
+       3584,
+       3621,
+       3597,
+       3593,
+       3640,
+       3600,
+       3663,
+       3645,
+       3620,
+       3610,
+       3632,
+       3649
+      ]
+     },
+     "ratioZjsOverQjs": 1.002763194252556,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 42.134996867971495,
+    "qjs": 42.25411453610286
+   }
+  }
+ },
+ "summary": {
+  "throughputGeomean": 0.9994396763673898,
+  "throughputRatios": {
+   "box2d": 0.9966747279322854,
+   "code-load": 0.9978775787418287,
+   "crypto": 1.0017402653904721,
+   "deltablue": 0.999195494770716,
+   "earley-boyer": 0.99943574552123,
+   "gbemu": 1.0008383635144198,
+   "mandreel": 1.0010979961570134,
+   "navier-stokes": 0.9975886182782735,
+   "pdfjs": 1.0066172578083643,
+   "raytrace": 0.994494691309477,
+   "regexp": 0.9904225352112676,
+   "richards": 1.0006823609689526,
+   "splay": 0.9987753539992346,
+   "typescript": 1.0034963223868227,
+   "zlib": 1.002763194252556
+  },
+  "latencyRatios": {
+   "mandreel:MandreelLatency": 0.9975029262582911,
+   "splay:SplayLatency": 1.0013969140897834
+  },
+  "zjsFaster": [
+   "crypto",
+   "gbemu",
+   "mandreel",
+   "pdfjs",
+   "richards",
+   "typescript",
+   "zlib"
+  ],
+  "zjsSlower": [
+   "box2d",
+   "code-load",
+   "deltablue",
+   "earley-boyer",
+   "navier-stokes",
+   "raytrace",
+   "regexp",
+   "splay"
+  ]
+ },
+ "orderLog": [
+  {
+   "bench": "box2d",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 0,
+   "concurrent": true,
+   "simultaneousGroup": "sample-1-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 1,
+   "concurrent": true,
+   "simultaneousGroup": "sample-2-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 2,
+   "concurrent": true,
+   "simultaneousGroup": "sample-3-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 3,
+   "concurrent": true,
+   "simultaneousGroup": "sample-4-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 4,
+   "concurrent": true,
+   "simultaneousGroup": "sample-5-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 5,
+   "concurrent": true,
+   "simultaneousGroup": "sample-6-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 6,
+   "concurrent": true,
+   "simultaneousGroup": "sample-7-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 7,
+   "concurrent": true,
+   "simultaneousGroup": "sample-8-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 8,
+   "concurrent": true,
+   "simultaneousGroup": "sample-9-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 9,
+   "concurrent": true,
+   "simultaneousGroup": "sample-10-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 10,
+   "concurrent": true,
+   "simultaneousGroup": "sample-11-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 11,
+   "concurrent": true,
+   "simultaneousGroup": "sample-12-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 12,
+   "concurrent": true,
+   "simultaneousGroup": "sample-13-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 13,
+   "concurrent": true,
+   "simultaneousGroup": "sample-14-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 14,
+   "concurrent": true,
+   "simultaneousGroup": "sample-15-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 15,
+   "concurrent": true,
+   "simultaneousGroup": "sample-16-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 16,
+   "concurrent": true,
+   "simultaneousGroup": "sample-17-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 17,
+   "concurrent": true,
+   "simultaneousGroup": "sample-18-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 18,
+   "concurrent": true,
+   "simultaneousGroup": "sample-19-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 19,
+   "concurrent": true,
+   "simultaneousGroup": "sample-20-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 20,
+   "concurrent": true,
+   "simultaneousGroup": "sample-21-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 21,
+   "concurrent": true,
+   "simultaneousGroup": "sample-22-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 9,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 17,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 15,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 18,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 22,
+   "concurrent": true,
+   "simultaneousGroup": "sample-23-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 16,
+     "cluster": "a"
+    },
+    "zjs": {
+     "cpu": 19,
+     "cluster": "b"
+    }
+   }
+  },
+  {
+   "bench": "box2d",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "code-load",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "crypto",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-1",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "deltablue",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "gbemu",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-2",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "mandreel",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-3",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "raytrace",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "regexp",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "richards",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-4",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "splay",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 17,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 9,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "typescript",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 18,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 15,
+     "cluster": "a"
+    }
+   }
+  },
+  {
+   "bench": "zlib",
+   "sample": 23,
+   "concurrent": true,
+   "simultaneousGroup": "sample-24-batch-5",
+   "cpuAssignments": {
+    "qjs": {
+     "cpu": 19,
+     "cluster": "b"
+    },
+    "zjs": {
+     "cpu": 16,
+     "cluster": "a"
+    }
+   }
+  }
+ ]
+}
