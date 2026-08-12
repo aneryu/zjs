@@ -601,6 +601,52 @@ pub noinline fn tailCall(
 /// `miss` falls through to the forwarding arm / `callMethod`.
 pub const NativeFastDispatchResult = enum { hit, caught, miss };
 
+/// Resolve the C-function record carried by a concrete native method object.
+/// QuickJS reaches the same terminal through the class call hook, which reads
+/// `p->u.cfunc.c_function` directly (quickjs.c:17746-17791). Keep the record
+/// memoization shared by every opcode that already holds the method object.
+pub inline fn resolvedNativeMethodRecord(
+    ctx: *core.JSContext,
+    method_obj: *core.Object,
+) ?*const core.host_function.InternalRecord {
+    if (method_obj.class_id != core.class.ids.c_function) return null;
+    return method_obj.nativeRecord() orelse blk: {
+        const native_id = method_obj.nativeFunctionId();
+        const nref = core.function.decodeNativeBuiltinId(native_id) orelse return null;
+        const record = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return null;
+        method_obj.nativeRecordSlot().* = record;
+        break :blk record;
+    };
+}
+
+/// Call a record returned by `resolvedNativeMethodRecord`. The caller owns the
+/// single call-entry interrupt poll and must keep receiver, method, and args
+/// rooted across this observable call.
+pub inline fn callResolvedNativeMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    method_obj: *core.Object,
+    record: *const core.host_function.InternalRecord,
+    receiver: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    return builtin_dispatch.callInternalRecordDirect(
+        ctx,
+        output,
+        global,
+        &.{},
+        method_obj,
+        receiver,
+        record,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
 /// Outlined native c_function fast dispatch for `op_call_method`. Mirrors
 /// `callMethod`'s native leg exactly (pollInterrupt → fastNativeMethodCall →
 /// popOwnedStackRegion → dropUnusedCallResult → push) but skips callMethod's
@@ -632,13 +678,7 @@ pub noinline fn nativeMethodFastDispatch(
     // it is safe to do before the interrupt poll. On miss, no poll was done
     // and pc is untouched, so the fallthrough to callMethod sees the exact
     // same state as if this arm never ran — no double-poll hazard.
-    const rec = method_obj.nativeRecord() orelse blk: {
-        const native_id = method_obj.nativeFunctionId();
-        const nref = core.function.decodeNativeBuiltinId(native_id) orelse return .miss;
-        const r = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return .miss;
-        method_obj.nativeRecordSlot().* = r;
-        break :blk r;
-    };
+    const rec = resolvedNativeMethodRecord(ctx, method_obj) orelse return .miss;
     // Protect the forwarding optimization: Function.prototype.call's record
     // has forwards_call=true. Return miss so the forwarding arm in
     // op_call_method handles it with the fused-frame optimization.
@@ -651,14 +691,13 @@ pub noinline fn nativeMethodFastDispatch(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .caught;
         return err;
     };
-    const result = builtin_dispatch.callInternalRecordDirect(
+    const result = callResolvedNativeMethod(
         ctx,
         output,
         global,
-        &.{},
         method_obj,
-        receiver,
         rec,
+        receiver,
         args,
         function,
         frame,
@@ -891,13 +930,8 @@ inline fn fastNativeMethodCall(
     // `pub const` in `rt.internal_builtins` (rodata) — program-lifetime stable,
     // identical across runtimes, never dangles, so the memo can never go stale.
     // A MISS falls through to null exactly as the pre-memo decode/probe did.
-    const rec = function_object.nativeRecord() orelse blk: {
-        const nref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
-        const r = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return null;
-        function_object.nativeRecordSlot().* = r;
-        break :blk r;
-    };
-    return try builtin_dispatch.callInternalRecordDirect(ctx, output, global, &.{}, function_object, this_value, rec, args, caller_function, caller_frame);
+    const rec = resolvedNativeMethodRecord(ctx, function_object) orelse return null;
+    return try callResolvedNativeMethod(ctx, output, global, function_object, rec, this_value, args, caller_function, caller_frame);
 }
 
 pub noinline fn apply(

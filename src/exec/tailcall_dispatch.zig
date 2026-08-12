@@ -586,7 +586,8 @@ inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// split; the miss constructor keeps first-use Entry allocation, chunk
 /// switching, heap fallback, OOM, and stack-overflow recovery out of the
 /// fixed handler body.
-inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, comptime return_action: inline_calls.ReturnAction, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    comptime std.debug.assert(return_action == .next or return_action == .to_boolean);
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, call_facts, captures, region_start, argc)) {
@@ -594,6 +595,7 @@ inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThi
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
+    if (comptime return_action != .next) entry.return_action = return_action;
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -649,13 +651,15 @@ inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [
 /// shared discrimination head on the established sloppy method arm; one bl
 /// into the authoritative constructor still beats the generic three-deep
 /// chain, and the resume record and return epilogue are identical from there.
-inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, code_ptr: [*]const u8) Outcome {
+inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, comptime return_action: inline_calls.ReturnAction, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, code_ptr: [*]const u8) Outcome {
+    comptime std.debug.assert(return_action == .next or return_action == .to_boolean);
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
+    if (comptime return_action != .next) entry.return_action = return_action;
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -937,6 +941,14 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     vm.return_payload = 0;
     switch (action) {
         .proxy_get => completeProxyGetContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
+        .to_boolean => {
+            std.debug.assert(payload == 0);
+            const bool_result = JSValue.boolean(coercion_ops.valueTruthy(result));
+            result.free(vm.rt);
+            sp[0] = bool_result;
+            vm.stack.setTopPtr(sp + 1);
+            if (!vm.local_fast_blocked) return @call(.always_tail, next, .{ pc, sp + 1, var_buf, vm });
+        },
         .for_of_next => {
             fast: {
                 // Legacy stop-boundary fixtures suspend through coldNext's
@@ -1163,6 +1175,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         const resume_pc = dying.emptyLeafResumePc();
         const resume_sp = dying.emptyLeafResumeSp();
         const caller_opt = dying.prev;
+        const return_action = dying.return_action;
+        std.debug.assert(return_action == .next or return_action == .to_boolean);
+        const delivered_value = if (return_action == .to_boolean) blk: {
+            const boolean = JSValue.boolean(coercion_ops.valueTruthy(value));
+            value.free(vm.rt);
+            break :blk boolean;
+        } else value;
         machine.popReturnedExactArgsLeaf(vm.rt);
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
@@ -1176,12 +1195,12 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.function = caller_function;
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
-            resume_sp[0] = value;
+            resume_sp[0] = delivered_value;
             caller.stack.setTopPtr(resume_sp + 1);
             return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
         }
         reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
-        vm.stack.pushOwnedAssumeCapacity(value);
+        vm.stack.pushOwnedAssumeCapacity(delivered_value);
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
@@ -1447,7 +1466,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                         if (leaf_kind != .none) {
                             if (argc == resolved.fb.arg_count) {
                                 if (leaf_kind == .sloppy) {
-                                    return pushWarmExactArgsLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 1, resolved.fb.byteCode().ptr);
+                                    return pushWarmExactArgsLeafAndEnter(.sloppy_global, .next, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 1, resolved.fb.byteCode().ptr);
                                 }
                                 return pushWarmOutlineExactArgsLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 1, resolved.fb.byteCode().ptr);
                             }
@@ -1634,9 +1653,9 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     if (leaf_kind != .none) {
                         if (argc == resolved.fb.arg_count) {
                             if (leaf_kind == .sloppy) {
-                                return pushWarmExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
+                                return pushWarmExactArgsLeafAndEnter(.receiver, .next, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
                             }
-                            return pushExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, resolved.fb.byteCode().ptr);
+                            return pushExactArgsLeafAndEnter(.receiver, .next, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, resolved.fb.byteCode().ptr);
                         }
                         // The padded method sibling (`recv.one()` against
                         // `function one(value)`) falls through to the generic
@@ -4193,6 +4212,254 @@ pub fn opCompareCold(comptime opc: u8) Handler {
     }.hnd;
 }
 
+/// QJS OP_instanceof keeps `sp` in the interpreter activation, calls
+/// JS_IsInstanceOf with borrowed operands, then frees/replaces the two slots in
+/// place (quickjs.c:16005-16017, 20412-20417). Keep the outer zjs stack rooted
+/// across observable property/call work, but avoid the generic cold shell's
+/// pop/defer/push and `coldNext` re-derivation on success.
+fn op_instanceof_lookup_error(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+) callconv(.c) Outcome {
+    _ = sp;
+    const err = vm.pending_error;
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, vm.stack.len() - 2);
+    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+    if (!caught) return vm.fail(err);
+    _ = pc;
+    return coldNext(var_buf, vm);
+}
+
+const InternalMethodDispatch = enum { completed, caught, threw };
+
+inline fn transformInternalCallResult(
+    comptime return_action: inline_calls.ReturnAction,
+    rt: *core.JSRuntime,
+    result: JSValue,
+) JSValue {
+    comptime std.debug.assert(return_action == .next or return_action == .to_boolean);
+    if (comptime return_action == .to_boolean) {
+        const boolean = JSValue.boolean(coercion_ops.valueTruthy(result));
+        result.free(rt);
+        return boolean;
+    }
+    return result;
+}
+
+noinline fn recoverOwnedInternalCallRegion(
+    vm: *Vm,
+    region_base: usize,
+    err: HostError,
+) InternalMethodDispatch {
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
+        vm.pending_error = e2;
+        return .threw;
+    };
+    if (caught) return .caught;
+    vm.pending_error = err;
+    return .threw;
+}
+
+/// Native adapter behind the internal method-call seam. The caller supplies a
+/// standard owned method region `[receiver, callable, args...]`. Keeping the
+/// wide call environment and error union inside this outlined implementation
+/// preserves the compact single-enum ABI used by resident opcode handlers.
+noinline fn dispatchInternalNativeMethod(
+    comptime return_action: inline_calls.ReturnAction,
+    comptime argc: u16,
+    vm: *Vm,
+    method_object: *core.Object,
+    record: *const core.host_function.InternalRecord,
+    region_base: usize,
+) InternalMethodDispatch {
+    comptime std.debug.assert(return_action == .next or return_action == .to_boolean);
+    const stack = vm.stack;
+    const region_count = @as(usize, argc) + 2;
+    if (stack.len() != region_base + region_count) {
+        vm.pending_error = error.InvalidBytecode;
+        return .threw;
+    }
+    const receiver = stack.values[region_base];
+    const args = stack.values[region_base + 2 ..][0..argc];
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        return recoverOwnedInternalCallRegion(vm, region_base, err);
+    };
+    const native_result = call_vm.callResolvedNativeMethod(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        method_object,
+        record,
+        receiver,
+        args,
+        vm.function,
+        vm.frame,
+    ) catch |err| {
+        return recoverOwnedInternalCallRegion(vm, region_base, err);
+    };
+    const result = transformInternalCallResult(return_action, vm.rt, native_result);
+    call_runtime.popOwnedStackRegion(vm.rt, stack, region_base);
+    stack.pushOwnedAssumeCapacity(result);
+    return .completed;
+}
+
+/// Enter a same-Machine bytecode method whose source already occupies the
+/// standard retreated `[receiver, callable, args...]` region. The call frame
+/// remains authoritative; this adapter adds only semantic post-call work.
+inline fn pushInternalMethodAndEnter(
+    comptime return_action: inline_calls.ReturnAction,
+    comptime argc: u16,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+    target: *const inline_calls.InlineTarget,
+    region_start: [*]JSValue,
+) Outcome {
+    comptime std.debug.assert(return_action != .next);
+    const source_count = @as(usize, argc) + 2;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
+    const entry = vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(var_buf, vm);
+    };
+    entry.return_action = return_action;
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+}
+
+/// Generate the deep remainder for one internal method-call shape after a
+/// resident caller has attempted the generic resolved-native leg. The result
+/// action and arity are compile-time properties, while every instance keeps
+/// exact `Handler` ABI for stackless must-tail dispatch.
+fn internalMethodRemainderHandler(
+    comptime return_action: inline_calls.ReturnAction,
+    comptime argc: u16,
+) Handler {
+    comptime std.debug.assert(return_action != .next);
+    return struct {
+        fn hnd(resume_pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            const stack = vm.stack;
+            const region_count = @as(usize, argc) + 2;
+            const region_start = sp - region_count;
+            std.debug.assert(stack.topPtr() == sp);
+            const region_base = stack.len() - region_count;
+            const receiver = region_start[0];
+            const method = region_start[1];
+
+            if (class_vm.objectFromValue(method)) |method_object| {
+                if (method_object.class_id == core.class.ids.bytecode_function) {
+                    if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_object)) |resolved| {
+                        stack.setTopPtr(region_start);
+                        const execution = resolved.call_facts.execution;
+                        const leaf_kind = execution.exact_args_leaf_kind;
+                        if (leaf_kind != .none and argc == resolved.fb.arg_count) {
+                            const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
+                            if (leaf_kind == .sloppy) {
+                                return pushWarmExactArgsLeafAndEnter(.receiver, return_action, var_buf, vm, resolved.fb, resolved.call_facts, captures, region_start, argc, resume_pc, resolved.fb.byteCode().ptr);
+                            }
+                            return pushExactArgsLeafAndEnter(.receiver, return_action, var_buf, vm, resolved.fb, resolved.call_facts, captures, region_start, argc, resolved.fb.byteCode().ptr);
+                        }
+                        const target = resolved.bind(receiver, method);
+                        return pushInternalMethodAndEnter(return_action, argc, var_buf, vm, &target, region_start);
+                    }
+                }
+            }
+
+            const args = region_start[2..][0..argc];
+            const call_result = call_runtime.callValueOrBytecodeRoot(vm.ctx, vm.output, vm.global, receiver, method, args, vm.function, vm.frame) catch |err| {
+                return switch (recoverOwnedInternalCallRegion(vm, region_base, err)) {
+                    .caught => coldNext(var_buf, vm),
+                    .threw => .threw,
+                    .completed => unreachable,
+                };
+            };
+            const result = transformInternalCallResult(return_action, vm.rt, call_result);
+            call_runtime.popOwnedStackRegion(vm.rt, stack, region_base);
+            stack.pushOwnedAssumeCapacity(result);
+            return cont(resume_pc, stack.topPtr(), var_buf, vm);
+        }
+    }.hnd;
+}
+
+/// Zig 0.16 otherwise folds the private remainder into its sole resident
+/// caller, inflating that opcode by several KiB. Loading the private Handler
+/// through this explicit dispatch slot preserves the same stackless must-tail
+/// ABI without exporting a symbol or retaining an interpreter activation.
+const InternalMethodBoundary = struct {
+    var to_boolean_one: Handler = internalMethodRemainderHandler(.to_boolean, 1);
+
+    inline fn toBooleanOne() Handler {
+        const slot: *volatile Handler = &to_boolean_one;
+        return slot.*;
+    }
+};
+
+/// Authoritative slow completion for the null-method legacy arm, primitive
+/// RHS rejection, and the rare stack-without-a-spare-slot case.
+noinline fn completeInstanceofSlow(vm: *Vm, has_instance: JSValue) InternalMethodDispatch {
+    defer has_instance.free(vm.rt);
+    const region_base = vm.stack.len() - 2;
+    const lhs = vm.stack.values[region_base];
+    const rhs = vm.stack.values[region_base + 1];
+    const result = call_runtime.instanceofValueWithMethod(vm.ctx, vm.output, vm.global, lhs, rhs, has_instance, vm.function, vm.frame) catch |err| {
+        return recoverOwnedInternalCallRegion(vm, region_base, err);
+    };
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+    vm.stack.pushOwnedAssumeCapacity(JSValue.boolean(result));
+    return .completed;
+}
+
+pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    vm.publish(pc, sp);
+    const rhs = loadValueAsIntPair(&(sp - 1)[0]);
+    const rhs_object = class_vm.objectFromValue(rhs) orelse {
+        switch (completeInstanceofSlow(vm, JSValue.undefinedValue())) {
+            .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
+            .caught => return coldNext(var_buf, vm),
+            .threw => return .threw,
+        }
+    };
+    const has_instance_atom = comptime core.atom.predefinedId("Symbol.hasInstance", .symbol).?;
+    const fast_method = class_vm.probePublicNamedDataPropertyFromObject(rhs_object, has_instance_atom);
+    const has_instance = if (fast_method.slot) |slot|
+        loadValueAsIntPair(slot).dup()
+    else if (!fast_method.needs_slow)
+        JSValue.undefinedValue()
+    else
+        call_runtime.instanceofMethodSlow(vm.ctx, vm.output, vm.global, rhs, vm.function, vm.frame) catch |err| {
+            vm.pending_error = err;
+            return @call(.always_tail, op_instanceof_lookup_error, .{ pc, sp, var_buf, vm });
+        };
+    if (has_instance.isUndefined() or has_instance.isNull() or vm.stack.len() == vm.stack.capacity) {
+        switch (completeInstanceofSlow(vm, has_instance)) {
+            .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
+            .caught => return coldNext(var_buf, vm),
+            .threw => return .threw,
+        }
+    }
+    // Transfer `[lhs, rhs]` plus the owned method into the one standard method
+    // region used by native, exact-leaf, and general same-Machine calls. Each
+    // owner moves once; no result or method is cached across the operation.
+    const region_start = sp - 2;
+    const lhs = region_start[0];
+    region_start[0] = rhs;
+    region_start[1] = has_instance;
+    region_start[2] = lhs;
+    vm.stack.setTopPtr(region_start + 3);
+    if (class_vm.objectFromValue(has_instance)) |method_object| {
+        if (call_vm.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
+            switch (dispatchInternalNativeMethod(.to_boolean, 1, vm, method_object, record, vm.stack.len() - 3)) {
+                .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
+                .caught => return coldNext(var_buf, vm),
+                .threw => return .threw,
+            }
+        }
+    }
+    return @call(.always_tail, InternalMethodBoundary.toBooleanOne(), .{ pc + 1, region_start + 3, var_buf, vm });
+}
+
 /// QJS OP_neg's local numeric CASE arms (quickjs.c:19940-19970). Int, bool and
 /// null share the integer-payload arm, with zero and INT32_MIN promoted to a
 /// bare float64; float64 is negated in place. Only values requiring ToNumeric
@@ -5015,6 +5282,12 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 switch (continuation.action) {
                     .proxy_get => try completeProxyGetContinuation(vm, result, continuation.takeAtom()),
                     .for_of_next => try completeForOfNextContinuation(vm, result, continuation.takeForOfDepth()),
+                    .to_boolean => {
+                        std.debug.assert(continuation.payload == 0);
+                        const bool_result = JSValue.boolean(coercion_ops.valueTruthy(result));
+                        result.free(vm.rt);
+                        vm.stack.pushOwnedAssumeCapacity(bool_result);
+                    },
                     .native_boundary => return result,
                     .constructor => unreachable,
                     .next => unreachable,
