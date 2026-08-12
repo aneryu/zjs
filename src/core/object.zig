@@ -7507,10 +7507,6 @@ pub const Object = extern struct {
         }
     }
 
-    inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.metaConst().flags.kind == .object or header.metaConst().flags.kind == .function_bytecode or header.metaConst().flags.kind == .var_ref or header.metaConst().flags.kind == .shape or header.metaConst().flags.kind == .realm_context or header.metaConst().flags.kind == .module;
-    }
-
     const DecrefVisitor = struct {
         registry: *gc.Registry,
         garbage: *gc.HeaderList,
@@ -7555,7 +7551,11 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
-            if (h.meta().rc == 0) return;
+            // Every owned edge contributes one ref, so it cannot already be
+            // zero before its matching trial decrement. QuickJS makes the same
+            // invariant explicit in gc_decref_child and performs the decrement
+            // without a production branch.
+            std.debug.assert(h.meta().rc > 0);
             h.meta().rc -= 1;
             // QuickJS gc_decref_child immediately moves an already-scanned
             // child whose trial refcount reaches zero to tmp_obj_list.
@@ -7612,7 +7612,10 @@ pub const Object = extern struct {
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
             const was_zero = h.meta().rc == 0;
             h.meta().rc += 1;
-            if (was_zero and headerHasTraceableChildren(h) and h.meta().flags.mark) {
+            // mark implies membership in the cycle-candidate set; the kind
+            // recheck was redundant with the same invariant used by QuickJS's
+            // gc_scan_incref_child.
+            if (was_zero and h.meta().flags.mark) {
                 self.garbage.remove(h);
                 h.meta().flags.mark = false;
                 // Moving a newly revived zero-ref node to the main-list tail
