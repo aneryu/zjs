@@ -7758,6 +7758,15 @@ pub fn setFrameVarRefValue(
 }
 
 pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix: ?[]const u8) !core.JSValue {
+    // qjs JS_AtomToString duplicates the atom's string body directly. The
+    // common function-declaration/expression case has no prefix and no public
+    // Symbol bracket syntax, so use the AtomTable's identical cached-string
+    // conversion instead of allocating an ArrayList plus a fresh JSString for
+    // every closure. Prefix and public-Symbol names still need composition.
+    if (prefix == null and !rt.atoms.isPublicSymbol(atom_id)) {
+        return rt.atoms.toStringValueForPush(rt, atom_id);
+    }
+
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     if (prefix) |text| {

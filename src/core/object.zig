@@ -9832,10 +9832,23 @@ pub const Object = extern struct {
     }
 
     pub fn defineOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        if (self.exoticMethods(rt)) |methods| {
-            if (methods.define_own_property) |hook| {
-                if (!hook(self, atom_id, desc)) return error.IncompatibleDescriptor;
-                return;
+        // qjs JS_DefineProperty resolves a real own shape entry first; only a
+        // miss reaches JS_CreateProperty's exotic/array create machinery.
+        // Ordinary classes therefore pay one slow-property classification,
+        // not the module/mapped/array prelude on every define.
+        if (!self.needsSlowPropertyAccess()) {
+            try self.defineOrdinaryOwnProperty(rt, atom_id, desc);
+            return;
+        }
+        // Exotic [[DefineOwnProperty]] is a create-on-miss hook in qjs:
+        // actual shape entries are updated by JS_DefineProperty before it
+        // reaches JS_CreateProperty.
+        if (self.findProperty(atom_id) == null) {
+            if (self.exoticMethods(rt)) |methods| {
+                if (methods.define_own_property) |hook| {
+                    if (!hook(self, atom_id, desc)) return error.IncompatibleDescriptor;
+                    return;
+                }
             }
         }
         if (try self.defineModuleNamespaceProperty(rt, atom_id, desc)) return;
@@ -11421,18 +11434,34 @@ pub const Object = extern struct {
     }
 
     fn defineOrdinaryOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        try self.materializeMappedArgumentsProperty(rt, atom_id);
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
-            const element_index: usize = @intCast(array_index);
-            if (element_index < self.arrayElements().len) {
-                try self.convertDenseArrayElementsToSparseProperties(rt);
-            }
-        }
         if (self.findProperty(atom_id)) |index| {
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
             return;
+        }
+
+        if (self.class_id == class.ids.mapped_arguments) {
+            try self.materializeMappedArgumentsProperty(rt, atom_id);
+            if (self.findProperty(atom_id)) |index| {
+                try self.materializeAutoInitEntryForMutation(index);
+                if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
+                try self.replaceProperty(rt, index, desc);
+                return;
+            }
+        }
+        if (classOwnsIndexedElementStorage(self.class_id)) {
+            if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
+                const element_index: usize = @intCast(array_index);
+                if (element_index < self.arrayElements().len) {
+                    try self.convertDenseArrayElementsToSparseProperties(rt);
+                    const index = self.findProperty(atom_id) orelse unreachable;
+                    try self.materializeAutoInitEntryForMutation(index);
+                    if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
+                    try self.replaceProperty(rt, index, desc);
+                    return;
+                }
+            }
         }
 
         if (!self.flags.extensible) return error.NotExtensible;
