@@ -7529,6 +7529,22 @@ pub fn instanceofOp(
     defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
+    const result = try instanceofValue(ctx, output, global, lhs, rhs, caller_function, caller_frame);
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(result));
+}
+
+/// Value-level `JS_IsInstanceOf` twin for the register-resident opcode shell.
+/// The caller keeps both borrowed operands rooted until this returns; the
+/// helper owns only the values it obtains from property lookup/call results.
+pub fn instanceofValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    lhs: core.JSValue,
+    rhs: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
     _ = property_ops.expectObject(rhs) catch {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
@@ -7536,22 +7552,59 @@ pub fn instanceofOp(
     // qjs names this atom as the constant JS_ATOM_Symbol_hasInstance
     // (quickjs.c:8139). Resolve it at comptime rather than hashing the spelling
     // through the predefined-symbol map on every `instanceof`.
-    const has_instance_atom = (comptime core.atom.predefinedId("Symbol.hasInstance", .symbol)) orelse return error.TypeError;
-    const has_instance = try object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
+    const has_instance = try instanceofMethod(ctx, output, global, rhs, caller_function, caller_frame);
     defer has_instance.free(ctx.runtime);
+    return instanceofValueWithMethod(ctx, output, global, lhs, rhs, has_instance, caller_function, caller_frame);
+}
+
+pub fn instanceofMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    rhs: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const has_instance_atom = (comptime core.atom.predefinedId("Symbol.hasInstance", .symbol)) orelse return error.TypeError;
+    const fast = object_ops.probeNamedDataProperty(ctx.runtime, rhs, has_instance_atom);
+    if (fast.slot) |slot| return slot.*.dup();
+    if (!fast.needs_slow) return core.JSValue.undefinedValue();
+    return instanceofMethodSlow(ctx, output, global, rhs, caller_function, caller_frame);
+}
+
+pub noinline fn instanceofMethodSlow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    rhs: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const has_instance_atom = (comptime core.atom.predefinedId("Symbol.hasInstance", .symbol)) orelse return error.TypeError;
+    return object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
+}
+
+pub fn instanceofValueWithMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    lhs: core.JSValue,
+    rhs: core.JSValue,
+    has_instance: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
     if (!has_instance.isUndefined() and !has_instance.isNull()) {
         const result = try callValueOrBytecodeRoot(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
         defer result.free(ctx.runtime);
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
-        return;
+        return coercion_ops.valueTruthy(result);
     }
     if (!isCallableValue(rhs)) {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     }
     if (!lhs.isObject()) {
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
-        return;
+        return false;
     }
     const object = try property_ops.expectObject(lhs);
     const proto_value = try object_ops.getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
@@ -7563,12 +7616,11 @@ pub fn instanceofOp(
     var current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
     while (current) |candidate| {
         if (candidate == proto) {
-            stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
-            return;
+            return true;
         }
         current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
     }
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+    return false;
 }
 
 pub fn constructorNameEqlLocal(rt: *core.JSRuntime, object: *core.Object, expected: []const u8) !bool {

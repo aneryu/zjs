@@ -2852,6 +2852,48 @@ pub fn getValueProperty(
     return getValuePropertyNonObject(ctx, output, global, value, atom_id, caller_function, caller_frame);
 }
 
+/// QJS `JS_GetPropertyInternal` starts a named-atom read with the ordinary
+/// `find_own_property` shape walk and enters class/exotic handling only after a
+/// miss (quickjs.c:8268-8330). Internal algorithms already carry an atom, so
+/// they can use the same data-only prefix without paying the VM computed-key
+/// conversion or the general resolver's representation-specific index cases.
+///
+/// A complete ordinary miss is distinct from a slow/exotic lookup: QJS returns
+/// undefined immediately after exhausting the ordinary prototype chain, while
+/// accessors, auto-init/var-ref entries, proxies, class exotics, private names,
+/// and integer-index atoms must enter the full observable resolver.
+pub const NamedDataPropertyProbe = struct {
+    slot: ?*const core.JSValue = null,
+    needs_slow: bool = false,
+};
+
+pub inline fn probeNamedDataProperty(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) NamedDataPropertyProbe {
+    if (core.atom.isTaggedInt(atom_id) or rt.atoms.mightBePrivate(atom_id)) return .{ .needs_slow = true };
+    const object = objectFromValueTrustedExpression(receiver) orelse return .{ .needs_slow = true };
+    return probePublicNamedDataPropertyFromObject(object, atom_id);
+}
+
+/// Object-unpacked twin for internal algorithms that carry a known public,
+/// non-index atom. JS_IsInstanceOf has already required an Object RHS before
+/// requesting the predefined public Symbol.hasInstance key, exactly as QJS
+/// does before JS_GetProperty (quickjs.c:8136-8139).
+pub inline fn probePublicNamedDataPropertyFromObject(
+    initial_object: *core.Object,
+    atom_id: core.Atom,
+) NamedDataPropertyProbe {
+    var object = initial_object;
+    while (true) {
+        var slow_property = false;
+        if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return .{ .slot = slot };
+        if (slow_property or object.needsSlowPropertyAccess()) return .{ .needs_slow = true };
+        object = object.getPrototype() orelse return .{};
+    }
+}
+
 /// Object-property fallback after the real shape/prototype chain missed. QJS
 /// reaches the equivalent cases only from the cold exotic/missing-property
 /// arms of JS_GetPropertyInternal; keeping them out of the common frame avoids

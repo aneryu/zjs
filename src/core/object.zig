@@ -12104,8 +12104,10 @@ pub const Object = extern struct {
     /// Mirrors qjs find_own_property + the JS_PROP_TMASK guard feeding
     /// JS_DupValue(pr->u.value) (quickjs.c:6135, 19125-19133).
     pub inline fn findOwnDataSlotFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?*const JSValue {
-        const props = self.shape_ref.props().ptr;
-        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        const object_shape = self.shape_ref;
+        if (!object_shape.hasPropertyHash()) return null;
+        const props = object_shape.props().ptr;
+        var shape_index = object_shape.firstPropertyIndexAssumeHash(atom_id);
         while (shape_index != shape.no_property_index) {
             const index: usize = @intCast(shape_index);
             const prop = props[index];

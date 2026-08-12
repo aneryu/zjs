@@ -9122,6 +9122,123 @@ test "qjs alignment C4 Array instanceof follows prototype chain" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "instanceof resident dispatch preserves GetMethod and result coercion semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const candidate = { marker: 7 };
+        \\function Truthy() {}
+        \\Object.defineProperty(Truthy, Symbol.hasInstance, {
+        \\  value: function(value) { return value.marker; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof Truthy, true);
+        \\function Falsy() {}
+        \\Object.defineProperty(Falsy, Symbol.hasInstance, {
+        \\  value: function() { return 0; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof Falsy, false);
+        \\function UndefinedResult() {}
+        \\Object.defineProperty(UndefinedResult, Symbol.hasInstance, {
+        \\  value: function() { return undefined; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof UndefinedResult, false);
+        \\function ObjectResult() {}
+        \\Object.defineProperty(ObjectResult, Symbol.hasInstance, {
+        \\  value: function() { return {}; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof ObjectResult, true);
+        \\
+        \\let seenThis;
+        \\let seenValue;
+        \\function Observed() {}
+        \\Object.defineProperty(Observed, Symbol.hasInstance, {
+        \\  value: function(value) {
+        \\    seenThis = this;
+        \\    seenValue = value;
+        \\    return "yes";
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof Observed, true);
+        \\assert.sameValue(seenThis, Observed);
+        \\assert.sameValue(seenValue, candidate);
+        \\
+        \\function StrictObserved() {}
+        \\Object.defineProperty(StrictObserved, Symbol.hasInstance, {
+        \\  value: function(value) {
+        \\    "use strict";
+        \\    return this === StrictObserved && value === candidate;
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof StrictObserved, true);
+        \\
+        \\function makeCapturedHasInstance(expected) {
+        \\  return value => value === expected;
+        \\}
+        \\function ArrowBacked() {}
+        \\Object.defineProperty(ArrowBacked, Symbol.hasInstance, {
+        \\  value: makeCapturedHasInstance(candidate),
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof ArrowBacked, true);
+        \\
+        \\let getterCalls = 0;
+        \\function GetterBacked() {}
+        \\Object.defineProperty(GetterBacked, Symbol.hasInstance, {
+        \\  get: function() {
+        \\    getterCalls++;
+        \\    return function(value) { return value.marker === 7; };
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof GetterBacked, true);
+        \\assert.sameValue(getterCalls, 1);
+        \\
+        \\function Throwing() {}
+        \\Object.defineProperty(Throwing, Symbol.hasInstance, {
+        \\  value: function() { throw new RangeError("instanceof sentinel"); },
+        \\  configurable: true
+        \\});
+        \\let caught = false;
+        \\try {
+        \\  candidate instanceof Throwing;
+        \\} catch (error) {
+        \\  caught = error instanceof RangeError && error.message === "instanceof sentinel";
+        \\}
+        \\assert.sameValue(caught, true);
+        \\
+        \\let primitiveGetterCalls = 0;
+        \\Object.defineProperty(Number.prototype, Symbol.hasInstance, {
+        \\  get: function() {
+        \\    primitiveGetterCalls++;
+        \\    return function() { return true; };
+        \\  },
+        \\  configurable: true
+        \\});
+        \\try {
+        \\  let primitiveCaught = false;
+        \\  try {
+        \\    candidate instanceof 1;
+        \\  } catch (error) {
+        \\    primitiveCaught = error instanceof TypeError;
+        \\  }
+        \\  assert.sameValue(primitiveCaught, true);
+        \\  assert.sameValue(primitiveGetterCalls, 0);
+        \\} finally {
+        \\  delete Number.prototype[Symbol.hasInstance];
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "local reference-tail lowering preserves binding semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -288,6 +288,10 @@ pub const ReturnAction = enum(u8) {
     next,
     proxy_get,
     for_of_next,
+    /// Apply ToBoolean to an internal call result before resuming the caller.
+    /// This names the completion semantics rather than the opcode that asked
+    /// for them, so any specification operation can reuse the same call seam.
+    to_boolean,
     constructor,
     /// Return to the still-running native builtin that synchronously entered
     /// this bytecode frame. The result must not reach the suspended outer
@@ -298,7 +302,7 @@ pub const ReturnAction = enum(u8) {
 pub const ReturnContinuation = struct {
     action: ReturnAction,
     /// Tagged by `action`: an owned Atom for `.proxy_get`, the for-of bytecode
-    /// depth operand for `.for_of_next`, and zero for `.next`.
+    /// depth operand for `.for_of_next`, and zero for `.next`/`.to_boolean`.
     payload: u32,
 
     pub fn deinit(self: *ReturnContinuation, rt: *core.JSRuntime) void {
@@ -3865,6 +3869,7 @@ pub const Machine = struct {
             .next => 0,
             .proxy_get => self.ctx.runtime.atoms.dup(@intCast(continuation_payload)),
             .for_of_next => continuation_payload,
+            .to_boolean => 0,
             .native_boundary => 0,
             .constructor => unreachable,
         };
@@ -4460,14 +4465,16 @@ pub const Machine = struct {
 
     /// Exact-args twin of `popReturnedEmptyLeaf`. Its inline epilogue adds
     /// only the caller-region args release loop; abrupt completion still
-    /// inspects and releases the callee through general teardown.
+    /// inspects and releases the callee through general teardown. Internal
+    /// method adapters can share this geometry and apply their semantic result
+    /// transform immediately after teardown.
     pub inline fn popReturnedExactArgsLeaf(self: *Machine, rt: *core.JSRuntime) void {
         const dying = self.topEntry();
         // Vm-resident rt (see popReturnedEmptyLeaf).
         std.debug.assert(rt == self.ctx.runtime);
         std.debug.assert(dying.isExactArgsLeaf());
         std.debug.assert(!dying.teardown.tail_chain);
-        std.debug.assert(dying.return_action == .next);
+        std.debug.assert(dying.return_action == .next or dying.return_action == .to_boolean);
         std.debug.assert(dying.continuation_payload == 0);
         // This bit also covers the capture (argc==0) family, so the release
         // stays argc-aware; only the copy_argv pricing select is statically
