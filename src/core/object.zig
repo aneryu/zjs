@@ -8318,6 +8318,12 @@ pub const Object = extern struct {
                 },
             }
         }
+        // QuickJS `mark_children` stops after the shape/property scan for
+        // JS_CLASS_OBJECT; only non-ordinary classes consult their class GC
+        // marker (quickjs.c:6586-6591). A payload-less ordinary object has no
+        // remaining out-of-line edges below, so keep the same boundary instead
+        // of probing every specialized payload kind on each collector pass.
+        if (self.class_id == class.ids.object and self.flags.class_payload_kind == .none) return;
         if (self.ordinaryPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.callsite_file);
             try Helper.traceOptValue(visitor, &payload.callsite_function);
