@@ -2768,6 +2768,37 @@ pub fn op_push_const8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: 
     return cont(pc + 2, sp + 1, var_buf, vm);
 }
 
+/// qjs OP_fclosure/OP_fclosure8 decode the constant-pool index in their
+/// resident CASE and write `js_closure(...)` straight into `*sp++`
+/// (qjs:17914-17915,18165-18170). `js_closure` consumes the duplicated
+/// bytecode value and constructs the ordinary function object before returning
+/// it (qjs:17369-17409); keep the same ownership and publication boundary here.
+/// The constructor may allocate/collect, so pc and the live pre-result stack
+/// remain authoritative roots, but success continues from the register-resident
+/// pc/sp instead of paying coldStd -> vm_call.closure -> Stack.push -> coldNext.
+pub fn opFclosure(comptime wide_index: bool) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            const advance: usize = if (wide_index) 5 else 2;
+            const index: usize = if (wide_index) readInt(u32, pc + 1) else pc[1];
+            vm.syncPc(pc, advance);
+            vm.syncSp(sp);
+            const bytecode_value = vm.function.constantAt(index) orelse return vm.fail(error.InvalidBytecode);
+            const closure_value = class_vm.createBytecodeFunctionObject(vm.ctx, vm.frame, vm.global, bytecode_value) catch |err|
+                return vm.fail(err);
+            // qjs's `*sp++` is safe because JS_CallInternal's operand stack is
+            // alloca'd inside the activation and never moves. zjs's Stack can
+            // relocate (`Stack.reserveAdditional` rewrites `self.values`), and
+            // the constructor above allocates, so the published top is the
+            // authority for the result slot — the same re-derivation every
+            // other allocating resident handler performs.
+            const result_sp = vm.stack.topPtr();
+            result_sp[0] = closure_value;
+            return cont(pc + advance, result_sp + 1, var_buf, vm);
+        }
+    }.h;
+}
+
 /// qjs OP_push_atom_value: decode the atom and push its retained string/symbol
 /// value directly in the register-resident dispatcher. A cached atom conversion
 /// cannot run user code; only the allocation/error path needs published state.

@@ -863,6 +863,13 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }) |e| t[e.o] = e.h;
     t[op.set_loc_uninitialized] = td.op_set_loc_uninitialized;
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
+    // qjs OP_fclosure/OP_fclosure8 keep the operand decode and `*sp++ =
+    // js_closure(...)` in JS_CallInternal (qjs:17914-17915,18165-18170).
+    // The resident zjs twins preserve the allocating constructor/rooting path
+    // while continuing with their register pc/sp; the all-cold table above
+    // remains the stop-boundary implementation.
+    t[op.fclosure] = td.opFclosure(true);
+    t[op.fclosure8] = td.opFclosure(false);
     t[op.get_arg] = td.op_get_arg;
     t[op.get_arg0] = td.op_get_arg0_fast;
     t[op.get_arg1] = td.op_get_arg1_fast;

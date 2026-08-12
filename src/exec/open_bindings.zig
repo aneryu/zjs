@@ -19,7 +19,11 @@ pub const Table = struct {
     ///
     /// The table retains the initial reference; the returned pointer is a
     /// separate caller-owned reference.
-    pub fn acquire(
+    /// qjs get_var_ref (qjs:16997-17044) owns this indexed existing-cell-or-
+    /// create operation inside the local/argument capture helper. Force this
+    /// small table body into Frame.captureLocal/captureArg so the nested
+    /// js_closure2 loop retains the same single helper boundary.
+    pub inline fn acquire(
         self: *Table,
         rt: anytype,
         binding_index: u16,

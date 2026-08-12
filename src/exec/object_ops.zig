@@ -415,7 +415,10 @@ pub fn createRootGlobalClosureCell(
     return ownedClosureCell(ctx.runtime, cell_value);
 }
 
-fn resolveNestedClosureCell(
+/// One qjs js_closure2 closure-type arm (qjs:17297-17331). This is only the
+/// tagged dispatch around the real capture/global helpers, so keep it inside
+/// the capture loop rather than materializing another call-chain level.
+inline fn resolveNestedClosureCell(
     ctx: *core.JSContext,
     frame: *frame_mod.Frame,
     global: *core.Object,
@@ -446,11 +449,11 @@ fn resolveNestedClosureCell(
     };
 }
 
-/// Shared js_closure2 core for nested and ordinary root functions. It allocates
-/// the final pointer array once, performs root GLOBAL_DECL pass 1 before the
-/// first cell, fills in closure order, and transfers the completed array to the
-/// already-bytecode-backed object. No function property or side adapter is
-/// published across this transaction.
+/// Shared js_closure2 core (qjs:17262-17331) for nested and ordinary root
+/// functions. It allocates the final pointer array once, performs root
+/// GLOBAL_DECL pass 1 before the first cell, fills in closure order, and
+/// transfers the completed array to the already-bytecode-backed object. No
+/// function property or side adapter is published across this transaction.
 fn attachFunctionCaptures(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -458,9 +461,10 @@ fn attachFunctionCaptures(
     object: *core.Object,
     source: ClosureCaptureSource,
 ) HostError!void {
-    if (fb.closureVar().len == 0) return;
+    const closure_vars = fb.closureVar();
+    if (closure_vars.len == 0) return;
 
-    const captures = try ctx.runtime.memory.alloc(*core.VarRef, fb.closureVar().len);
+    const captures = try ctx.runtime.memory.alloc(*core.VarRef, closure_vars.len);
     var captures_transferred = false;
     errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
     var rooted_captures: []*core.VarRef = captures[0..0];
@@ -473,19 +477,32 @@ fn attachFunctionCaptures(
         rooted_captures = &.{};
     };
 
+    // qjs js_closure2 has one capture source (`sf`/`cur_var_refs`) and switches
+    // only on closure_type inside the loop (qjs:17297-17331). Root construction
+    // needs two additional zjs sources, but their tag is closure-wide: select it
+    // once instead of re-testing the same union for every capture.
     switch (source) {
-        .nested_frame => {},
-        .root_global, .custom => try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval()),
-    }
-
-    for (fb.closureVar(), 0..) |cv, idx| {
-        captures[idx] = switch (source) {
-            .nested_frame => |frame| try resolveNestedClosureCell(ctx, frame, global, cv),
-            .root_global => try createRootGlobalClosureCell(ctx, global, fb, cv),
-            .custom => |resolver| try resolver.resolve(resolver.context, ctx, global, fb, idx, cv),
-        };
-        initialized += 1;
-        rooted_captures = captures[0..initialized];
+        .nested_frame => |frame| for (closure_vars, 0..) |cv, idx| {
+            captures[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
+            initialized += 1;
+            rooted_captures = captures[0..initialized];
+        },
+        .root_global => {
+            try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
+            for (closure_vars, 0..) |cv, idx| {
+                captures[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
+                initialized += 1;
+                rooted_captures = captures[0..initialized];
+            }
+        },
+        .custom => |resolver| {
+            try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
+            for (closure_vars, 0..) |cv, idx| {
+                captures[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
+                initialized += 1;
+                rooted_captures = captures[0..initialized];
+            }
+        },
     }
 
     captures_transferred = true;
