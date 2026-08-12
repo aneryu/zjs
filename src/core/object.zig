@@ -9908,6 +9908,33 @@ pub const Object = extern struct {
         try self.addProperty(rt, atom_id, desc);
     }
 
+    /// Publish one new C_W_E data property whose atom is independently rooted
+    /// by immutable bytecode for the whole call. This is the ownership shape
+    /// of qjs OP_put_field/add_property: the bytecode owns the operand atom and
+    /// the new Shape takes the sole additional reference. The value remains a
+    /// borrow, so the installed slot retains it exactly as the descriptor path
+    /// does. Callers must prove the atom root and the ordinary/new-property
+    /// preconditions; this entry deliberately performs no duplicate probe.
+    pub fn defineOwnDataPropertyAssumingNewFromRootedAtom(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        data_value: JSValue,
+    ) !void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.supportsPlainNamedPropertyStorage());
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            rt,
+            atom_id,
+            comptime property.Flags.data(true, true, true),
+            .{ .data = data_value.dup() },
+        );
+    }
+
     /// Fast-path property define for freshly-created ordinary objects or
     /// arrays when the caller can guarantee the key is brand-new and is not
     /// an array index / `length`. This keeps array length and indexed storage
@@ -11214,7 +11241,18 @@ pub const Object = extern struct {
         // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890). The
         // prepared slot takes the caller's ref; on append failure the errdefer
         // inside destroys it (owned contract).
-        try self.appendPreparedPropertyEntry(rt, atom_id, property.Flags.data(true, true, true), .{ .data = new_value });
+        // Both callers decode `atom_id` from the active immutable bytecode's
+        // OP_put_field operand, whose FunctionBytecode owns the atom across
+        // this allocation/GC window. qjs add_property relies on that same
+        // operand root and retains only the Shape's reference.
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            rt,
+            atom_id,
+            comptime property.Flags.data(true, true, true),
+            .{ .data = new_value },
+        );
         return true;
     }
 
@@ -11712,17 +11750,16 @@ pub const Object = extern struct {
         return self.appendPreparedPropertyEntryImpl(false, false, rt, atom_id, entry_flags, slot);
     }
 
-    /// `caller_holds_atom_ref == true` is the trusted leg: the caller already
-    /// holds a live `atom_id` ref for the whole call (the object-literal
-    /// `OP_define_field` path via definePlainDataPropertyKnownFast, whose atom
-    /// is the executing function bytecode's inline operand — rooted by the
-    /// finalized-bytecode atom-retention walk + the frame's `current_function`
-    /// ref). With that external root the local dup/free guard is pure redundancy
-    /// (the atom cannot reach ref_count 0 under a GC from the shape allocations),
-    /// so elide it. qjs add_property likewise relies on the single caller-held
-    /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
-    /// per-property guard. MUST NOT be used with a transient/just-interned atom
-    /// that has no other root than the (elided) guard.
+    /// `caller_holds_atom_ref == true` is the trusted bytecode-operand leg: the
+    /// caller already holds a live `atom_id` ref for the whole call. That is
+    /// true for OP_define_field, OP_put_field, and the simple-constructor field
+    /// table: all three borrow atoms from immutable FunctionBytecode retained
+    /// by the active function/frame. With that external root the local dup/free
+    /// guard is pure redundancy (the atom cannot reach ref_count 0 under a GC
+    /// from the shape allocations), so elide it. qjs add_property likewise
+    /// relies on the caller-held bytecode atom and takes only the Shape's owning
+    /// JS_DupAtom. MUST NOT be used with a transient/just-interned atom that has
+    /// no other root than the elided guard.
     ///
     /// `slot_borrowed_until_commit == true` (the definePlainDataPropertyKnownFast
     /// leg only): the slot's data value is a BORROW of the caller's live ref
@@ -11833,13 +11870,13 @@ pub const Object = extern struct {
     }
 
     fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, is_array_index: bool) !void {
-        // No local atom guard: the sole caller `appendPreparedPropertyEntry`
-        // already holds an `atoms.dup(atom_id)` guard live across this entire
-        // call (its `defer atoms.free` runs only after we return), so `atom_id`
-        // cannot be collected under a GC triggered by the shape allocations
-        // below. A second dup/free here just duplicated that root — qjs
-        // add_property likewise relies on the single caller-held atom ref
-        // through add_shape_property (which does the one owning JS_DupAtom).
+        // No local atom guard: appendPreparedPropertyEntryImpl reaches this
+        // either with its own `atoms.dup(atom_id)` guard or through a trusted
+        // bytecode-operand leg whose FunctionBytecode independently roots the
+        // atom. In both cases `atom_id` survives any GC triggered by the shape
+        // allocations below. A second dup/free here would duplicate that root;
+        // qjs add_property likewise relies on the caller-held atom while
+        // add_shape_property takes the one new owning JS_DupAtom.
         // Indexed properties mutate a unique sparse shape in place. Named
         // properties reach here only after the caller's inline
         // `tryCachedTransition` probe MISSED (qjs add_property cache-hit leg,

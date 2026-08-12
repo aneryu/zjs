@@ -2942,7 +2942,10 @@ fn constructSimpleFieldConstructor(
     defer call_depth_guard.deinit();
     for (field_atoms, field_args) |atom_id, arg_index| {
         const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
-        try instance.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, true, true, true));
+        // `field_atoms` point into immutable FunctionBytecode owned by the
+        // active constructor object, so the operand atom stays rooted across
+        // property/shape allocation just as it does for qjs OP_put_field.
+        try instance.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, atom_id, value);
     }
     return instance.value();
 }
