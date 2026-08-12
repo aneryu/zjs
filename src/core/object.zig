@@ -7847,17 +7847,13 @@ pub const Object = extern struct {
 
         sweepCycleGarbageWeakCollectionEntries(rt);
 
-        var garbage_count: usize = 0;
-        {
-            var cursor = garbage.head;
-            while (cursor) |h| : (cursor = h.next) {
-                if (h.meta().flags.kind == .object or h.meta().flags.kind == .var_ref or h.meta().flags.kind == .shape or h.meta().flags.kind == .realm_context or h.meta().flags.kind == .module) garbage_count += 1;
-            }
-        }
-
         // No fallible operation is allowed after this point. Split the detached
         // partition by teardown order, reusing the same header links for each
-        // staging list and later for Registry's Pass-B deferred list.
+        // staging list and later for Registry's Pass-B deferred list. Count the
+        // collected value-bearing nodes while consuming that list instead of
+        // making a separate full pass; QuickJS likewise consumes tmp_obj_list
+        // directly in gc_free_cycles.
+        var garbage_count: usize = 0;
         var garbage_objects: gc.HeaderList = .{};
         var garbage_bytecodes: gc.HeaderList = .{};
         var garbage_var_refs: gc.HeaderList = .{};
@@ -7866,12 +7862,27 @@ pub const Object = extern struct {
         var garbage_modules: gc.HeaderList = .{};
         while (garbage.popFront()) |h| {
             switch (h.meta().flags.kind) {
-                .object => garbage_objects.append(h),
+                .object => {
+                    garbage_count += 1;
+                    garbage_objects.append(h);
+                },
                 .function_bytecode => garbage_bytecodes.append(h),
-                .var_ref => garbage_var_refs.append(h),
-                .shape => garbage_shapes.append(h),
-                .realm_context => garbage_contexts.append(h),
-                .module => garbage_modules.append(h),
+                .var_ref => {
+                    garbage_count += 1;
+                    garbage_var_refs.append(h);
+                },
+                .shape => {
+                    garbage_count += 1;
+                    garbage_shapes.append(h);
+                },
+                .realm_context => {
+                    garbage_count += 1;
+                    garbage_contexts.append(h);
+                },
+                .module => {
+                    garbage_count += 1;
+                    garbage_modules.append(h);
+                },
                 else => unreachable,
             }
         }
