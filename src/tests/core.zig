@@ -4426,6 +4426,43 @@ test "ordinary object additions reuse transition shapes" {
     try std.testing.expectEqual(@as(?i32, 4), (try second.getProperty(b)).asInt32());
 }
 
+test "pure property value replacement preserves a shared shape until flags change" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    defer first.value().free(rt);
+    const second = try core.Object.create(rt, core.class.ids.object, null);
+    defer second.value().free(rt);
+
+    const key = try rt.internAtom("shared_replace");
+    defer rt.atoms.free(key);
+
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
+    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
+    const shared_shape = first.shape_ref;
+    try std.testing.expectEqual(shared_shape, second.shape_ref);
+
+    // QuickJS updates only the per-object JSProperty value when the metadata
+    // flags are unchanged. The shared JSShape remains valid for both owners.
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(3), true, false, true));
+    try std.testing.expectEqual(shared_shape, first.shape_ref);
+    try std.testing.expectEqual(shared_shape, second.shape_ref);
+    try std.testing.expectEqual(@as(?i32, 3), (try first.getProperty(key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try second.getProperty(key)).asInt32());
+
+    // Metadata mutation still requires clone-before-write so the peer keeps
+    // the original writable shape.
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(4), false, false, true));
+    try std.testing.expect(first.shape_ref != second.shape_ref);
+    const first_desc = (try first.getOwnProperty(rt, key)).?;
+    defer first_desc.destroy(rt);
+    const second_desc = (try second.getOwnProperty(rt, key)).?;
+    defer second_desc.destroy(rt);
+    try std.testing.expectEqual(false, first_desc.writable.?);
+    try std.testing.expectEqual(true, second_desc.writable.?);
+}
+
 test "unique transition shape appends in place across FAM relocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

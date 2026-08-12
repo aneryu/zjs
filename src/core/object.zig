@@ -11863,15 +11863,16 @@ pub const Object = extern struct {
             const cell = self.prop_values[index].slot.var_ref;
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
             errdefer next_value.free(rt);
-            try self.ensureUniqueShapeForMutation(rt);
+            const stored_flags = next_flags.withKind(.var_ref);
+            if (old_flags.bits() != stored_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
             cell.setVarRefValue(rt, next_value);
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.withKind(.var_ref).bits());
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, stored_flags.bits());
             return;
         }
         const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
         errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_flags, next_slot);
-        try self.ensureUniqueShapeForMutation(rt);
+        if (old_flags.bits() != next_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
         const old_slot = self.prop_values[index].slot;
         self.prop_values[index] = .{ .slot = next_slot };
         next_owned = false;
