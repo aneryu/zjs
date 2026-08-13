@@ -13,7 +13,11 @@ zoo throughput geomean   0.9137   (15 基准 × 每侧 24 samples，3 车道并�
 基线 zjs fb680e41  vs  qjs 04be2460
 ```
 
-**今天净落地两刀，geomean 0.9111 → 0.9137（+0.29%）。**
+**今天净落地两刀，geomean 0.9111 → 0.9137（+0.29%）。** 其后 `42b6160f`
+（resident `insert2`/`insert3`/`perm3` + int32 TypedArray store）已通过正式
+7-lineage Zoo 门：中位 **+1.384 log-pp**，最坏 pad **+1.070**，`S/MDE = 4.98×`。
+见 `2026-08-13/STACK3-TYPED-INT-FORMAL-LINEAGE.md`。这是因果 zjs/zjs，还不是
+新的 zjs/qjs 绝对基线。
 
 | commit | 内容 | 实测效果 |
 |---|---|---|

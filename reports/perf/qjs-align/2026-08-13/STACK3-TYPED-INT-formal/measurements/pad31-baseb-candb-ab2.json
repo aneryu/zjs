@@ -1,0 +1,737 @@
+{
+ "tool": "zjs-zoo-compare",
+ "schemaVersion": 2,
+ "medianMethod": "statistics.median; even sample counts average the middle pair",
+ "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
+ "timestamp": "2026-08-13T17:31:59Z",
+ "measurementWallSeconds": 342.13125482480973,
+ "samplesPerEnginePerBench": 2,
+ "executionMode": "serial-alternating",
+ "samplingOrder": "alternating by sample parity; each engine leads exactly half the samples",
+ "firstPositionBalanced": true,
+ "clusterAssignmentBalanced": false,
+ "cpu": 19,
+ "cpuClusters": null,
+ "parallelLanes": 1,
+ "effectiveAffinity": [
+  19
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad31/candidate-b/zjs",
+   "sha256": "a07f733317133506d892bc59c57cabcbef5cfa918cfaf08b7cbec2663baee5f5",
+   "repo": {
+    "path": "/home/aneryu/zjs",
+    "commit": "42b6160f0e7a20a38039e191e0ff499f542198e2",
+    "dirty": false
+   }
+  },
+  "qjs": {
+   "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad31/base-b/zjs",
+   "sha256": "901610873f5f6b83f279e9ad15249ba5b9f146f332fae3d43a5564ec65de120f",
+   "repo": {
+    "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad31/base-b",
+    "commit": null,
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "box2d": {
+   "scores": {
+    "Box2D": {
+     "zjs": {
+      "median": 6701.5,
+      "min": 6638,
+      "max": 6765,
+      "samples": [
+       6638,
+       6765
+      ]
+     },
+     "qjs": {
+      "median": 6651.0,
+      "min": 6576,
+      "max": 6726,
+      "samples": [
+       6576,
+       6726
+      ]
+     },
+     "ratioZjsOverQjs": 1.0075928431814765,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.066063801990822,
+    "qjs": 1.0757530315313488
+   }
+  },
+  "code-load": {
+   "scores": {
+    "CodeLoad": {
+     "zjs": {
+      "median": 35462.0,
+      "min": 35455,
+      "max": 35469,
+      "samples": [
+       35455,
+       35469
+      ]
+     },
+     "qjs": {
+      "median": 35481.5,
+      "min": 35334,
+      "max": 35629,
+      "samples": [
+       35629,
+       35334
+      ]
+     },
+     "ratioZjsOverQjs": 0.9994504178233727,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.031647556228563,
+    "qjs": 2.0341694701928645
+   }
+  },
+  "crypto": {
+   "scores": {
+    "Crypto": {
+     "zjs": {
+      "median": 2250.0,
+      "min": 2240,
+      "max": 2260,
+      "samples": [
+       2240,
+       2260
+      ]
+     },
+     "qjs": {
+      "median": 2247.0,
+      "min": 2239,
+      "max": 2255,
+      "samples": [
+       2255,
+       2239
+      ]
+     },
+     "ratioZjsOverQjs": 1.0013351134846462,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 5.062583633931354,
+    "qjs": 5.073768811766058
+   }
+  },
+  "deltablue": {
+   "scores": {
+    "DeltaBlue": {
+     "zjs": {
+      "median": 1240.5,
+      "min": 1239,
+      "max": 1242,
+      "samples": [
+       1242,
+       1239
+      ]
+     },
+     "qjs": {
+      "median": 1225.5,
+      "min": 1212,
+      "max": 1239,
+      "samples": [
+       1212,
+       1239
+      ]
+     },
+     "ratioZjsOverQjs": 1.0122399020807833,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0091458768583834,
+    "qjs": 2.010688441572711
+   }
+  },
+  "earley-boyer": {
+   "scores": {
+    "EarleyBoyer": {
+     "zjs": {
+      "median": 3532.5,
+      "min": 3530,
+      "max": 3535,
+      "samples": [
+       3530,
+       3535
+      ]
+     },
+     "qjs": {
+      "median": 3537.0,
+      "min": 3536,
+      "max": 3538,
+      "samples": [
+       3538,
+       3536
+      ]
+     },
+     "ratioZjsOverQjs": 0.9987277353689568,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 6.101814094698057,
+    "qjs": 6.083516387268901
+   }
+  },
+  "gbemu": {
+   "scores": {
+    "Gameboy": {
+     "zjs": {
+      "median": 12488.5,
+      "min": 12483,
+      "max": 12494,
+      "samples": [
+       12494,
+       12483
+      ]
+     },
+     "qjs": {
+      "median": 11810.0,
+      "min": 11789,
+      "max": 11831,
+      "samples": [
+       11831,
+       11789
+      ]
+     },
+     "ratioZjsOverQjs": 1.0574513124470788,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.0927884145639837,
+    "qjs": 1.1534298188053071
+   }
+  },
+  "mandreel": {
+   "scores": {
+    "Mandreel": {
+     "zjs": {
+      "median": 1833.5,
+      "min": 1830,
+      "max": 1837,
+      "samples": [
+       1837,
+       1830
+      ]
+     },
+     "qjs": {
+      "median": 1788.0,
+      "min": 1782,
+      "max": 1794,
+      "samples": [
+       1794,
+       1782
+      ]
+     },
+     "ratioZjsOverQjs": 1.025447427293065,
+     "isLatency": false
+    },
+    "MandreelLatency": {
+     "zjs": {
+      "median": 13329.0,
+      "min": 13329,
+      "max": 13329,
+      "samples": [
+       13329,
+       13329
+      ]
+     },
+     "qjs": {
+      "median": 12669.0,
+      "min": 12621,
+      "max": 12717,
+      "samples": [
+       12717,
+       12621
+      ]
+     },
+     "ratioZjsOverQjs": 1.052095666587734,
+     "isLatency": true
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 4.5364450288470834,
+    "qjs": 4.650854378705844
+   }
+  },
+  "navier-stokes": {
+   "scores": {
+    "NavierStokes": {
+     "zjs": {
+      "median": 4421.0,
+      "min": 4412,
+      "max": 4430,
+      "samples": [
+       4430,
+       4412
+      ]
+     },
+     "qjs": {
+      "median": 4050.0,
+      "min": 4046,
+      "max": 4054,
+      "samples": [
+       4046,
+       4054
+      ]
+     },
+     "ratioZjsOverQjs": 1.0916049382716049,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0267430839594454,
+    "qjs": 2.06796735082753
+   }
+  },
+  "pdfjs": {
+   "scores": {
+    "PdfJS": {
+     "zjs": {
+      "median": 7641.5,
+      "min": 7634,
+      "max": 7649,
+      "samples": [
+       7634,
+       7649
+      ]
+     },
+     "qjs": {
+      "median": 7584.5,
+      "min": 7542,
+      "max": 7627,
+      "samples": [
+       7542,
+       7627
+      ]
+     },
+     "ratioZjsOverQjs": 1.0075153273122817,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.1708409145940095,
+    "qjs": 1.1804096393752843
+   }
+  },
+  "raytrace": {
+   "scores": {
+    "RayTrace": {
+     "zjs": {
+      "median": 2610.5,
+      "min": 2596,
+      "max": 2625,
+      "samples": [
+       2596,
+       2625
+      ]
+     },
+     "qjs": {
+      "median": 2627.0,
+      "min": 2622,
+      "max": 2632,
+      "samples": [
+       2622,
+       2632
+      ]
+     },
+     "ratioZjsOverQjs": 0.9937190711838599,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0308759545441717,
+    "qjs": 2.031037962064147
+   }
+  },
+  "regexp": {
+   "scores": {
+    "RegExp": {
+     "zjs": {
+      "median": 898.0,
+      "min": 897,
+      "max": 899,
+      "samples": [
+       897,
+       899
+      ]
+     },
+     "qjs": {
+      "median": 887.5,
+      "min": 879,
+      "max": 896,
+      "samples": [
+       879,
+       896
+      ]
+     },
+     "ratioZjsOverQjs": 1.011830985915493,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 3.1663651519920677,
+    "qjs": 3.2178227140102535
+   }
+  },
+  "richards": {
+   "scores": {
+    "Richards": {
+     "zjs": {
+      "median": 1460.0,
+      "min": 1451,
+      "max": 1469,
+      "samples": [
+       1451,
+       1469
+      ]
+     },
+     "qjs": {
+      "median": 1463.0,
+      "min": 1462,
+      "max": 1464,
+      "samples": [
+       1462,
+       1464
+      ]
+     },
+     "ratioZjsOverQjs": 0.9979494190020506,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0039397389627993,
+    "qjs": 2.0058878804557025
+   }
+  },
+  "splay": {
+   "scores": {
+    "Splay": {
+     "zjs": {
+      "median": 6397.0,
+      "min": 6340,
+      "max": 6454,
+      "samples": [
+       6454,
+       6340
+      ]
+     },
+     "qjs": {
+      "median": 6584.0,
+      "min": 6364,
+      "max": 6804,
+      "samples": [
+       6804,
+       6364
+      ]
+     },
+     "ratioZjsOverQjs": 0.9715978128797084,
+     "isLatency": false
+    },
+    "SplayLatency": {
+     "zjs": {
+      "median": 15811.5,
+      "min": 15124,
+      "max": 16499,
+      "samples": [
+       16499,
+       15124
+      ]
+     },
+     "qjs": {
+      "median": 16157.0,
+      "min": 15171,
+      "max": 17143,
+      "samples": [
+       17143,
+       15171
+      ]
+     },
+     "ratioZjsOverQjs": 0.9786160797177694,
+     "isLatency": true
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.402848787372932,
+    "qjs": 2.3896726856473833
+   }
+  },
+  "typescript": {
+   "scores": {
+    "Typescript": {
+     "zjs": {
+      "median": 19336.5,
+      "min": 19319,
+      "max": 19354,
+      "samples": [
+       19319,
+       19354
+      ]
+     },
+     "qjs": {
+      "median": 19243.5,
+      "min": 19142,
+      "max": 19345,
+      "samples": [
+       19142,
+       19345
+      ]
+     },
+     "ratioZjsOverQjs": 1.004832800685946,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 6.6588080178480595,
+    "qjs": 6.691011987160891
+   }
+  },
+  "zlib": {
+   "scores": {
+    "zlib": {
+     "zjs": {
+      "median": 3516.5,
+      "min": 3504,
+      "max": 3529,
+      "samples": [
+       3529,
+       3504
+      ]
+     },
+     "qjs": {
+      "median": 3433.0,
+      "min": 3418,
+      "max": 3448,
+      "samples": [
+       3448,
+       3418
+      ]
+     },
+     "ratioZjsOverQjs": 1.0243227497815321,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 43.47893864568323,
+    "qjs": 44.543399883201346
+   }
+  }
+ },
+ "summary": {
+  "throughputGeomean": 1.0133426070050657,
+  "throughputRatios": {
+   "box2d": 1.0075928431814765,
+   "code-load": 0.9994504178233727,
+   "crypto": 1.0013351134846462,
+   "deltablue": 1.0122399020807833,
+   "earley-boyer": 0.9987277353689568,
+   "gbemu": 1.0574513124470788,
+   "mandreel": 1.025447427293065,
+   "navier-stokes": 1.0916049382716049,
+   "pdfjs": 1.0075153273122817,
+   "raytrace": 0.9937190711838599,
+   "regexp": 1.011830985915493,
+   "richards": 0.9979494190020506,
+   "splay": 0.9715978128797084,
+   "typescript": 1.004832800685946,
+   "zlib": 1.0243227497815321
+  },
+  "latencyRatios": {
+   "mandreel:MandreelLatency": 1.052095666587734,
+   "splay:SplayLatency": 0.9786160797177694
+  },
+  "zjsFaster": [
+   "box2d",
+   "crypto",
+   "deltablue",
+   "gbemu",
+   "mandreel",
+   "navier-stokes",
+   "pdfjs",
+   "regexp",
+   "typescript",
+   "zlib"
+  ],
+  "zjsSlower": [
+   "code-load",
+   "earley-boyer",
+   "raytrace",
+   "richards",
+   "splay"
+  ]
+ },
+ "orderLog": [
+  {
+   "bench": "box2d",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 1,
+   "order": "zjs->qjs"
+  }
+ ]
+}

@@ -64,6 +64,7 @@ geomean 0.9137     总 log deficit 1.3539     追平需相对提升 9.45%
 
 | 机制 | 预计 Zoo 价值 | 状态 |
 |---|---:|---|
+| stack3 + int typed store（`42b6160f`） | 正式 7-lineage 中位 **+1.384 pp** | **PASS**，已落地；最坏 pad +1.070 |
 | native-backtrace-publication | ~+0.04 pp | CANDIDATE BLOCKED（语义资格） |
 | rope-strict-equality | ~+0.03 pp | CANDIDATE BLOCKED（上游未命名） |
 | tail_call/tail_call_method 发射 | 未定价，DeltaBlue −0.484% 方向有利 | INCONCLUSIVE（新判据下未达精度） |

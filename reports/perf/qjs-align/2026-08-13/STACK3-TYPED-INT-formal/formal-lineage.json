@@ -1,0 +1,1627 @@
+{
+  "builds": {
+    "pad0/base-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.38168430328369,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad0-base-a.log",
+      "pad": 0,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad0/base-a/zjs",
+      "seed": 0,
+      "sha256": "1958ab13751b0499dfebbcecfa8c75a7ac779b6dc28811afb775e273da1d9d78",
+      "side": "base"
+    },
+    "pad0/base-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.72165250778198,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad0-base-b.log",
+      "pad": 0,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad0/base-b/zjs",
+      "seed": 0,
+      "sha256": "9a2344ab3c34d6f70d31273f10d436003363846b69d88a8f83c51e4d20e91d07",
+      "side": "base"
+    },
+    "pad0/candidate-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.57447123527527,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad0-candidate-a.log",
+      "pad": 0,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad0/candidate-a/zjs",
+      "seed": 0,
+      "sha256": "a5e3742cf85fc25e0436028be75826bea9cd278ad9e3e57e545f0baad94ef670",
+      "side": "candidate"
+    },
+    "pad0/candidate-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.88954591751099,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad0-candidate-b.log",
+      "pad": 0,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad0/candidate-b/zjs",
+      "seed": 0,
+      "sha256": "685e3d397053ddab4fe3bdecceadc8e4f5e137daea62d6cf0be82fc81347e60c",
+      "side": "candidate"
+    },
+    "pad1/base-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.85728001594543,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad1-base-a.log",
+      "pad": 1,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad1/base-a/zjs",
+      "seed": 0,
+      "sha256": "9455c1b9c87a975f39f6ff1b26e217f40bdcd413f4dc75aa4f64388fa6f70ace",
+      "side": "base"
+    },
+    "pad1/base-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.99321866035461,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad1-base-b.log",
+      "pad": 1,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad1/base-b/zjs",
+      "seed": 0,
+      "sha256": "880dd0e859eca6d0c676451baaf6cbf0fdad9019d158ad69a5218d16ec0c5b15",
+      "side": "base"
+    },
+    "pad1/candidate-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.7528145313263,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad1-candidate-a.log",
+      "pad": 1,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad1/candidate-a/zjs",
+      "seed": 0,
+      "sha256": "cd4f59610a149ff8bd98d7758dba285f29c4d1199482662a00d7d6ced1f7193f",
+      "side": "candidate"
+    },
+    "pad1/candidate-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 93.19405388832092,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad1-candidate-b.log",
+      "pad": 1,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad1/candidate-b/zjs",
+      "seed": 0,
+      "sha256": "7e8f897a524a1d23897a3f1b62fe3291d2dce8071e608d71d11dd898f6303234",
+      "side": "candidate"
+    },
+    "pad15/base-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.9288501739502,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad15-base-a.log",
+      "pad": 15,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad15/base-a/zjs",
+      "seed": 0,
+      "sha256": "a0d3467014c6352bc231d2b5a2b1b0cc92e53d4c89af312ea7cb14021a25f3dc",
+      "side": "base"
+    },
+    "pad15/base-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 95.80133819580078,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad15-base-b.log",
+      "pad": 15,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad15/base-b/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "08391857c3f8cc489564d18594e4d1c6f22a041d0be1c1488f864450bc294f1f",
+      "side": "base",
+      "sourceHead": "e3e8190a2ee50968602dc2f1d5c758379e5c37db"
+    },
+    "pad15/candidate-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 95.98724341392517,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad15-candidate-a.log",
+      "pad": 15,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad15/candidate-a/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "40414d2d6b2978bb0778f05def1952c10e7325a7e3e6668184f3dd114e9d8a37",
+      "side": "candidate",
+      "sourceHead": "42b6160f0e7a20a38039e191e0ff499f542198e2"
+    },
+    "pad15/candidate-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 94.53886723518372,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad15-candidate-b.log",
+      "pad": 15,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad15/candidate-b/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "c78eccdbfd208e2bfb98df7f3f8850a9a473810568b06c22b4e42172ea997420",
+      "side": "candidate",
+      "sourceHead": "42b6160f0e7a20a38039e191e0ff499f542198e2"
+    },
+    "pad3/base-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 93.20344185829163,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad3-base-a.log",
+      "pad": 3,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad3/base-a/zjs",
+      "seed": 0,
+      "sha256": "4fc30b6a33a190ae5b8b4403db8319cd2679b0993f3bfe645aea47cc94ea134c",
+      "side": "base"
+    },
+    "pad3/base-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 93.38473701477051,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad3-base-b.log",
+      "pad": 3,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad3/base-b/zjs",
+      "seed": 0,
+      "sha256": "5b372f02d39f32306a92306a7c2f0b64f444699b6ba1600b61a85a2dc25cb415",
+      "side": "base"
+    },
+    "pad3/candidate-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 93.01583456993103,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad3-candidate-a.log",
+      "pad": 3,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad3/candidate-a/zjs",
+      "seed": 0,
+      "sha256": "44eadb89989c484cc4e3d944524b9bf8ea8501a8d061f64af11ff5d21b907a50",
+      "side": "candidate"
+    },
+    "pad3/candidate-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 93.01476407051086,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad3-candidate-b.log",
+      "pad": 3,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad3/candidate-b/zjs",
+      "seed": 0,
+      "sha256": "cfe8a97a1aeac8379cf7e2574190820306f5ae3be3fd06ad576e6d80ac2c43d9",
+      "side": "candidate"
+    },
+    "pad31/base-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 100.97947597503662,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad31-base-a.log",
+      "pad": 31,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad31/base-a/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "3622201e795fcf765f4155587af9eb104b23a3214e93055228eed178517471a8",
+      "side": "base",
+      "sourceHead": "e3e8190a2ee50968602dc2f1d5c758379e5c37db"
+    },
+    "pad31/base-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 100.85697031021118,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad31-base-b.log",
+      "pad": 31,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad31/base-b/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "901610873f5f6b83f279e9ad15249ba5b9f146f332fae3d43a5564ec65de120f",
+      "side": "base",
+      "sourceHead": "e3e8190a2ee50968602dc2f1d5c758379e5c37db"
+    },
+    "pad31/candidate-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 101.26247000694275,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad31-candidate-a.log",
+      "pad": 31,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad31/candidate-a/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "d759104ba19cf7fb6c971a92d57eb4e750f342c30edc927161b5e4572975612e",
+      "side": "candidate",
+      "sourceHead": "42b6160f0e7a20a38039e191e0ff499f542198e2"
+    },
+    "pad31/candidate-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 98.71681141853333,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad31-candidate-b.log",
+      "pad": 31,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad31/candidate-b/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "a07f733317133506d892bc59c57cabcbef5cfa918cfaf08b7cbec2663baee5f5",
+      "side": "candidate",
+      "sourceHead": "42b6160f0e7a20a38039e191e0ff499f542198e2"
+    },
+    "pad63/base-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 95.99938893318176,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad63-base-a.log",
+      "pad": 63,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad63/base-a/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "c5bd2243c738922a83583dd9c4d6cefd11f831708a44a4e128e26a695760e512",
+      "side": "base",
+      "sourceHead": "e3e8190a2ee50968602dc2f1d5c758379e5c37db"
+    },
+    "pad63/base-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 94.61985421180725,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad63-base-b.log",
+      "pad": 63,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad63/base-b/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "08d985e1ce4824d524f380588afa4a1f79e6588142a66eea5c31e15305cf1f54",
+      "side": "base",
+      "sourceHead": "e3e8190a2ee50968602dc2f1d5c758379e5c37db"
+    },
+    "pad63/candidate-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 96.4493670463562,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad63-candidate-a.log",
+      "pad": 63,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad63/candidate-a/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "76a5adc72f82e46f88750692fa344e29f098dfcf39e5f7dc1ab9a0a7d3c964a2",
+      "side": "candidate",
+      "sourceHead": "42b6160f0e7a20a38039e191e0ff499f542198e2"
+    },
+    "pad63/candidate-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 95.17310190200806,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad63-candidate-b.log",
+      "pad": 63,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad63/candidate-b/zjs",
+      "resumedAfterLanding": true,
+      "seed": 0,
+      "sha256": "68f6124e83abc00563664b863b0bdfb24a6d08947290191c4319b04dd7cf3183",
+      "side": "candidate",
+      "sourceHead": "42b6160f0e7a20a38039e191e0ff499f542198e2"
+    },
+    "pad7/base-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.76137447357178,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad7-base-a.log",
+      "pad": 7,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad7/base-a/zjs",
+      "seed": 0,
+      "sha256": "09074d0aed4f78ecd5fa716be451a320acdf169e7e8e0b7bc2742e64f790063a",
+      "side": "base"
+    },
+    "pad7/base-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.94177913665771,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad7-base-b.log",
+      "pad": 7,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad7/base-b/zjs",
+      "seed": 0,
+      "sha256": "e1ea2064bb82b3b34445ceb1fc8505fa2570c890fc139faf1aec66bf7f3605ec",
+      "side": "base"
+    },
+    "pad7/candidate-a": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.9107711315155,
+      "instance": "a",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad7-candidate-a.log",
+      "pad": 7,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad7/candidate-a/zjs",
+      "seed": 0,
+      "sha256": "7965e926596871df63903e7bf9e07ae69abb2b995500ede52d643c7a46f3e803",
+      "side": "candidate"
+    },
+    "pad7/candidate-b": {
+      "coldGlobalCache": true,
+      "coldLocalCache": true,
+      "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+      "durationSeconds": 92.8583357334137,
+      "instance": "b",
+      "log": "/tmp/zjs-stacktyped-formal-20260813/logs/build-pad7-candidate-b.log",
+      "pad": 7,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/binaries/pad7/candidate-b/zjs",
+      "seed": 0,
+      "sha256": "17c301f2e88406e482a6b0998d3b777209430579ced53306a5d2478228ae7a9b",
+      "side": "candidate"
+    }
+  },
+  "completedUnix": 1786642324.8301108,
+  "configuration": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off",
+  "createdUnix": 1786634357.5101933,
+  "decision": {
+    "lineageMadLogPercentagePoints": 0.05472758422174406,
+    "mdeLogPercentagePoints": 0.278,
+    "medianEffectLogPercentagePoints": 1.3838320681109701,
+    "observedRobustSigmaLogPercentagePoints": 0.08113911636715775,
+    "ordinaryMedianFactor": 1.0139345134440185,
+    "passesEffectGate": true,
+    "passesWorstPadGate": true,
+    "signalOverMde": 4.977813194643777,
+    "tauLogPercentagePoints": 0.045478878222634904,
+    "verdict": "PASS",
+    "withinLineageRobustSigmaLogPercentagePoints": 0.190057419543756,
+    "worstPadEffectLogPercentagePoints": 1.0704170430661228
+  },
+  "lineages": {
+    "0": {
+      "combinationEffectRangeLogPercentagePoints": [
+        1.548946781866256,
+        1.8514403062258593
+      ],
+      "combinationResults": [
+        {
+          "baseInstance": "a",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            8
+          ],
+          "logEffectPercentagePoints": 1.548946781866256,
+          "measurementWallSeconds": 336.0801333342679,
+          "pad": 0,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-basea-canda-ab2.json",
+          "sha256": "28731dc6b8a41c2b630f28775508342004086db66223bfc93a1cdecc62e7a268",
+          "throughputGeomean": 1.0156100514127517
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            8
+          ],
+          "logEffectPercentagePoints": 1.595715077438265,
+          "measurementWallSeconds": 334.27812107792124,
+          "pad": 0,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-baseb-canda-ab2.json",
+          "sha256": "2276fe80b6ede71f3a86c3b803ce0080bd9a1127ab5888406f022afef866b08f",
+          "throughputGeomean": 1.016085146011619
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            8
+          ],
+          "logEffectPercentagePoints": 1.8514403062258593,
+          "measurementWallSeconds": 335.0445350599475,
+          "pad": 0,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-baseb-candb-ab2.json",
+          "sha256": "cb999863f1a2a001eb23836611b3923c40f5577faf43d16e23dfbfc2eb84d00f",
+          "throughputGeomean": 1.0186868572741405
+        },
+        {
+          "baseInstance": "a",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            8
+          ],
+          "logEffectPercentagePoints": 1.784746236323283,
+          "measurementWallSeconds": 335.9674607142806,
+          "pad": 0,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-basea-candb-ab2.json",
+          "sha256": "0a5b47fd522a13a27b331e58281e9c672a91f8bec520e1d3f59c0daae2d10f1c",
+          "throughputGeomean": 1.0180076800601001
+        }
+      ],
+      "effectLogPercentagePoints": 1.65424140894366,
+      "fullColdBuildCombinations": true,
+      "pad": 0,
+      "pairedGlobalLogEffects": [
+        1.6409070014994087,
+        1.4569413016583717,
+        1.5245871119633563,
+        1.667575816387911,
+        2.2198697473507836,
+        1.4841619868973748,
+        1.7892567884541275,
+        1.784466160115266
+      ],
+      "ratioFromPairedMedian": 1.016679997427927,
+      "ratioOfMediansGeomean": 1.0160207014868632,
+      "ratioOfMediansLogPercentagePoints": 1.5893724427908942,
+      "samplesPerSide": 8,
+      "throughputRatiosFromCombinedMedians": {
+        "box2d": 1.0048805738371662,
+        "code-load": 1.0018844490128056,
+        "crypto": 1.0034699631316417,
+        "deltablue": 1.0012057877813505,
+        "earley-boyer": 0.9980102330869812,
+        "gbemu": 1.0430602179949438,
+        "mandreel": 1.0336709553791403,
+        "navier-stokes": 1.0956112852664577,
+        "pdfjs": 1.0062693898655637,
+        "raytrace": 1.0091133472565028,
+        "regexp": 1.0236087689713322,
+        "richards": 0.99527983816588,
+        "splay": 1.0056231003039513,
+        "typescript": 1.0017378673514383,
+        "zlib": 1.0213453166690072
+      }
+    },
+    "1": {
+      "combinationEffectRangeLogPercentagePoints": [
+        1.2641893240106978,
+        1.4616866879501473
+      ],
+      "combinationResults": [
+        {
+          "baseInstance": "a",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            6
+          ],
+          "logEffectPercentagePoints": 1.2641893240106978,
+          "measurementWallSeconds": 341.28900072397664,
+          "pad": 1,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-basea-candb-ab2.json",
+          "sha256": "fa4b662400f1cc15c934de9baefcd74fbb9d5158b07cf3da65946dd82b4a7aad",
+          "throughputGeomean": 1.0127221397719393
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            7
+          ],
+          "logEffectPercentagePoints": 1.4616866879501473,
+          "measurementWallSeconds": 341.47883231705055,
+          "pad": 1,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-baseb-candb-ab2.json",
+          "sha256": "27a19aaddbaf4994f8d9fba0a6e1d570110fb099b286290c5ef8d81846e9c7fb",
+          "throughputGeomean": 1.0147242156748246
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            8
+          ],
+          "logEffectPercentagePoints": 1.456578634906478,
+          "measurementWallSeconds": 340.38869319623336,
+          "pad": 1,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-baseb-canda-ab2.json",
+          "sha256": "ae98da160b47375050426544aa9ce131877f2737484a097b4c4c92ab772b4d69",
+          "throughputGeomean": 1.0146723843474381
+        },
+        {
+          "baseInstance": "a",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            9
+          ],
+          "logEffectPercentagePoints": 1.3333882887796864,
+          "measurementWallSeconds": 342.5798694579862,
+          "pad": 1,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-basea-canda-ab2.json",
+          "sha256": "667be95833f54f576ab1e255a55fa41ae14eea4f97f77d218002dd4096130a51",
+          "throughputGeomean": 1.013423175535419
+        }
+      ],
+      "effectLogPercentagePoints": 1.4385596523327142,
+      "fullColdBuildCombinations": true,
+      "pad": 1,
+      "pairedGlobalLogEffects": [
+        1.2646230788148363,
+        1.2635167606064495,
+        1.4904348979288737,
+        1.4337193422867733,
+        1.4656458953811375,
+        1.4489441085039152,
+        1.2241902772394642,
+        1.4433999623786549
+      ],
+      "ratioFromPairedMedian": 1.0144895671787133,
+      "ratioOfMediansGeomean": 1.0137732208999708,
+      "ratioOfMediansLogPercentagePoints": 1.3679232128399605,
+      "samplesPerSide": 8,
+      "throughputRatiosFromCombinedMedians": {
+        "box2d": 1.0053266257305615,
+        "code-load": 1.0027028224555807,
+        "crypto": 0.9997782705099778,
+        "deltablue": 1.0032232070910556,
+        "earley-boyer": 0.9982686481027269,
+        "gbemu": 1.0473746713037577,
+        "mandreel": 1.0349591203834225,
+        "navier-stokes": 1.0946789907569323,
+        "pdfjs": 1.0070804658549497,
+        "raytrace": 1.0009604302727622,
+        "regexp": 1.0118845500848896,
+        "richards": 0.9925068119891008,
+        "splay": 0.998003659956746,
+        "typescript": 1.002431724653947,
+        "zlib": 1.0121376552905899
+      }
+    },
+    "15": {
+      "combinationEffectRangeLogPercentagePoints": [
+        1.2049525988349197,
+        1.466950989160272
+      ],
+      "combinationResults": [
+        {
+          "baseInstance": "a",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            16
+          ],
+          "logEffectPercentagePoints": 1.466950989160272,
+          "measurementWallSeconds": 342.81203706003726,
+          "pad": 15,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-basea-canda-ab2.json",
+          "sha256": "a001d06ba11b4ebd9c986b8be09f262340a512ea6b09a358ae1f92393f1c66ce",
+          "throughputGeomean": 1.0147776352200604
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            9
+          ],
+          "logEffectPercentagePoints": 1.216893766100264,
+          "measurementWallSeconds": 342.1801859801635,
+          "pad": 15,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-baseb-canda-ab2.json",
+          "sha256": "689caa27159a96edc846e4ae70f5f45b57d273ec53cdb38b64570bfaf21fefb0",
+          "throughputGeomean": 1.0122432804343755
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            17
+          ],
+          "logEffectPercentagePoints": 1.2049525988349197,
+          "measurementWallSeconds": 342.37763241911307,
+          "pad": 15,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-baseb-candb-ab2.json",
+          "sha256": "90e08373999368196b3f17dbf800c8e0beec3baab364b8b7605418eef031a95e",
+          "throughputGeomean": 1.0121224139877025
+        },
+        {
+          "baseInstance": "a",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            15
+          ],
+          "logEffectPercentagePoints": 1.3882235235921865,
+          "measurementWallSeconds": 343.35476989811286,
+          "pad": 15,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-basea-candb-ab2.json",
+          "sha256": "46f18f606f7461d7e764e96bc884f0ec19a71a290583c78167a5ba589cb53874",
+          "throughputGeomean": 1.0139790409044798
+        }
+      ],
+      "effectLogPercentagePoints": 1.3573230746041416,
+      "fullColdBuildCombinations": true,
+      "pad": 15,
+      "pairedGlobalLogEffects": [
+        1.7066045505269263,
+        1.2305934250799855,
+        1.4516527311433602,
+        0.9856666430724242,
+        1.479829510176162,
+        0.9298416165619879,
+        1.514131943984553,
+        1.2629934180649232
+      ],
+      "ratioFromPairedMedian": 1.013665765232483,
+      "ratioOfMediansGeomean": 1.0138504638057355,
+      "ratioOfMediansLogPercentagePoints": 1.3755422702010207,
+      "samplesPerSide": 8,
+      "throughputRatiosFromCombinedMedians": {
+        "box2d": 1.0047804003585301,
+        "code-load": 1.0035544008907413,
+        "crypto": 0.9959358771731768,
+        "deltablue": 1.0028432168968318,
+        "earley-boyer": 0.9932837953701057,
+        "gbemu": 1.0470378845664887,
+        "mandreel": 1.030808366308649,
+        "navier-stokes": 1.0888778550148956,
+        "pdfjs": 1.0080432489451476,
+        "raytrace": 0.9965470938039517,
+        "regexp": 1.0256849315068493,
+        "richards": 0.9965858654831,
+        "splay": 0.9987604586303068,
+        "typescript": 0.9980022831050228,
+        "zlib": 1.021505376344086
+      }
+    },
+    "3": {
+      "combinationEffectRangeLogPercentagePoints": [
+        1.1938924690761963,
+        1.370324480064259
+      ],
+      "combinationResults": [
+        {
+          "baseInstance": "a",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            15
+          ],
+          "logEffectPercentagePoints": 1.2443622785431188,
+          "measurementWallSeconds": 342.71688474016264,
+          "pad": 3,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-basea-canda-ab2.json",
+          "sha256": "7c9b7bd641747ec8591139a7b773efcaf6571cf37b26526c3363f0934cced119",
+          "throughputGeomean": 1.0125213667971587
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            16
+          ],
+          "logEffectPercentagePoints": 1.3569919126348793,
+          "measurementWallSeconds": 342.35169161623344,
+          "pad": 3,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-baseb-canda-ab2.json",
+          "sha256": "0a479e9bf1558a26f18ab8f1a298050e1e407e4b6bd570ee0d73d0e1ad17be7f",
+          "throughputGeomean": 1.0136624083625314
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            17
+          ],
+          "logEffectPercentagePoints": 1.1938924690761963,
+          "measurementWallSeconds": 342.69978497968987,
+          "pad": 3,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-baseb-candb-ab2.json",
+          "sha256": "556a5f11a9d78b1265a6399106addf0aafe5d1ad33d7702663bb9a90fcd6e73f",
+          "throughputGeomean": 1.0120104781256383
+        },
+        {
+          "baseInstance": "a",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            19
+          ],
+          "logEffectPercentagePoints": 1.370324480064259,
+          "measurementWallSeconds": 341.3660791916773,
+          "pad": 3,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-basea-candb-ab2.json",
+          "sha256": "2a411f18d64e467978cc97e44d7092cc581c0a28a7459ce6f54c6bc9d47be37a",
+          "throughputGeomean": 1.0137975645963304
+        }
+      ],
+      "effectLogPercentagePoints": 1.3269842234948606,
+      "fullColdBuildCombinations": true,
+      "pad": 3,
+      "pairedGlobalLogEffects": [
+        1.1663247527310088,
+        1.3224320029650127,
+        1.3817416168948733,
+        1.3315364440247084,
+        1.2516012841185358,
+        1.1337298869739858,
+        1.3580343708940819,
+        1.3839456209337202
+      ],
+      "ratioFromPairedMedian": 1.01335827733173,
+      "ratioOfMediansGeomean": 1.0131715513184565,
+      "ratioOfMediansLogPercentagePoints": 1.3085560699920453,
+      "samplesPerSide": 8,
+      "throughputRatiosFromCombinedMedians": {
+        "box2d": 1.0038266244756788,
+        "code-load": 1.0038802265367552,
+        "crypto": 1.0017640573318634,
+        "deltablue": 1.0004014452027299,
+        "earley-boyer": 1.0014253135689852,
+        "gbemu": 1.0439463392068633,
+        "mandreel": 1.0269435868650014,
+        "navier-stokes": 1.0949304174950298,
+        "pdfjs": 1.0051275308966605,
+        "raytrace": 0.9980872226472839,
+        "regexp": 1.0073696145124718,
+        "richards": 0.9959016393442623,
+        "splay": 0.999379941094404,
+        "typescript": 0.9992444965481307,
+        "zlib": 1.0198521953340096
+      }
+    },
+    "31": {
+      "combinationEffectRangeLogPercentagePoints": [
+        0.9737764442987015,
+        1.7586686887513272
+      ],
+      "combinationResults": [
+        {
+          "baseInstance": "a",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            8
+          ],
+          "logEffectPercentagePoints": 1.429464606941118,
+          "measurementWallSeconds": 342.4578925049864,
+          "pad": 31,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-basea-candb-ab2.json",
+          "sha256": "2c706ca2748c0f37e3e315b8608a09c6cb08acc47abd0f29dea93d2075738eb6",
+          "throughputGeomean": 1.0143973030878795
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            19
+          ],
+          "logEffectPercentagePoints": 1.3254378357880467,
+          "measurementWallSeconds": 342.13125482480973,
+          "pad": 31,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-baseb-candb-ab2.json",
+          "sha256": "31d1ea2a0506afcf11b1c3b17b90c80e1a4137cffffde687208d8947a412a652",
+          "throughputGeomean": 1.0133426070050657
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            7
+          ],
+          "logEffectPercentagePoints": 0.9737764442987015,
+          "measurementWallSeconds": 341.6290279328823,
+          "pad": 31,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-baseb-canda-ab2.json",
+          "sha256": "a2b7938d3bd87ba2ef34a0c20e6890676803d329a8b4b60315a16cfe5d683f4d",
+          "throughputGeomean": 1.0097853307422622
+        },
+        {
+          "baseInstance": "a",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            9
+          ],
+          "logEffectPercentagePoints": 1.7586686887513272,
+          "measurementWallSeconds": 341.990482468158,
+          "pad": 31,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-basea-canda-ab2.json",
+          "sha256": "44e1161b7135c31d38b8b24aed0f2035996b9f5052503235a16aeca8ceadc316",
+          "throughputGeomean": 1.0177422432342578
+        }
+      ],
+      "effectLogPercentagePoints": 1.4348432263273967,
+      "fullColdBuildCombinations": true,
+      "pad": 31,
+      "pairedGlobalLogEffects": [
+        1.233025570132246,
+        1.6287699691734079,
+        1.2225017050929747,
+        1.4370526331809235,
+        0.5063209352099116,
+        1.43263381947387,
+        1.5719517450885228,
+        1.9504088868850005
+      ],
+      "ratioFromPairedMedian": 1.0144518651252061,
+      "ratioOfMediansGeomean": 1.0130847189300962,
+      "ratioOfMediansLogPercentagePoints": 1.2999853487374458,
+      "samplesPerSide": 8,
+      "throughputRatiosFromCombinedMedians": {
+        "box2d": 1.0046613036613787,
+        "code-load": 1.0019349113286875,
+        "crypto": 0.9932870888341911,
+        "deltablue": 1.0073469387755103,
+        "earley-boyer": 1.0008691873098652,
+        "gbemu": 1.0549788542868128,
+        "mandreel": 1.0288054221971195,
+        "navier-stokes": 1.0903209753670067,
+        "pdfjs": 1.0088959702582487,
+        "raytrace": 0.9936974789915967,
+        "regexp": 1.0234018264840183,
+        "richards": 0.9982882574460801,
+        "splay": 0.972287118343672,
+        "typescript": 1.0036356881269572,
+        "zlib": 1.0192750287686996
+      }
+    },
+    "63": {
+      "combinationEffectRangeLogPercentagePoints": [
+        0.973125526142604,
+        1.2076732789157563
+      ],
+      "combinationResults": [
+        {
+          "baseInstance": "a",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            6
+          ],
+          "logEffectPercentagePoints": 0.9791130992766388,
+          "measurementWallSeconds": 341.38790233107284,
+          "pad": 63,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-basea-canda-ab2.json",
+          "sha256": "5bc40885b2fd2038cad422887c1e5f5ce4fdf166313c20c7fd26dfa78cbf7b81",
+          "throughputGeomean": 1.0098392209393359
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            17
+          ],
+          "logEffectPercentagePoints": 1.2076732789157563,
+          "measurementWallSeconds": 342.5430587474257,
+          "pad": 63,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-baseb-canda-ab2.json",
+          "sha256": "8922f7a69ada2340db05d28d0e9e4bad1f48a1c3537685e5f8289a50c50922a4",
+          "throughputGeomean": 1.0121499509752085
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            16
+          ],
+          "logEffectPercentagePoints": 0.973125526142604,
+          "measurementWallSeconds": 341.95266469102353,
+          "pad": 63,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-baseb-candb-ab2.json",
+          "sha256": "6582a39db479d7acd5fdb1dae9e470de4096af1fa3d2659f6f40b356a974f90c",
+          "throughputGeomean": 1.0097787578875987
+        },
+        {
+          "baseInstance": "a",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            15
+          ],
+          "logEffectPercentagePoints": 1.0941230286057653,
+          "measurementWallSeconds": 342.856162102893,
+          "pad": 63,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-basea-candb-ab2.json",
+          "sha256": "cd89837437b2e05baea51b59f5dbaecc388a7763503cd460c8c32e53476b2c63",
+          "throughputGeomean": 1.0110013044412898
+        }
+      ],
+      "effectLogPercentagePoints": 1.0704170430661228,
+      "fullColdBuildCombinations": true,
+      "pad": 63,
+      "pairedGlobalLogEffects": [
+        1.2607164218043763,
+        0.6980710771730358,
+        1.1252795467694663,
+        1.290027578313164,
+        0.9303021257082345,
+        1.0155545393627794,
+        1.2196096605446016,
+        0.9714358529241407
+      ],
+      "ratioFromPairedMedian": 1.0107616650238185,
+      "ratioOfMediansGeomean": 1.0102162831731616,
+      "ratioOfMediansLogPercentagePoints": 1.016444968370062,
+      "samplesPerSide": 8,
+      "throughputRatiosFromCombinedMedians": {
+        "box2d": 1.0004500450045004,
+        "code-load": 1.0060625035578072,
+        "crypto": 0.9970740490659464,
+        "deltablue": 0.9979724249797243,
+        "earley-boyer": 0.9964239736804463,
+        "gbemu": 1.0418796864349011,
+        "mandreel": 1.0310099573257467,
+        "navier-stokes": 1.0889220069547938,
+        "pdfjs": 1.0019110378912686,
+        "raytrace": 0.9965437788018433,
+        "regexp": 1.0,
+        "richards": 0.99556162512803,
+        "splay": 0.9840721851706552,
+        "typescript": 0.9999480559956367,
+        "zlib": 1.0200693040716142
+      }
+    },
+    "7": {
+      "combinationEffectRangeLogPercentagePoints": [
+        1.3370494809445477,
+        1.5085328101556499
+      ],
+      "combinationResults": [
+        {
+          "baseInstance": "a",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            8
+          ],
+          "logEffectPercentagePoints": 1.3467980268340447,
+          "measurementWallSeconds": 341.5908379191533,
+          "pad": 7,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-basea-candb-ab2.json",
+          "sha256": "76ff728914ca0779af142bc0ed998baad027ee8f7ba99c92ae6039dd7ac406ba",
+          "throughputGeomean": 1.01355908204079
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "b",
+          "effectiveAffinity": [
+            6
+          ],
+          "logEffectPercentagePoints": 1.5085328101556499,
+          "measurementWallSeconds": 343.7150204409845,
+          "pad": 7,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-baseb-candb-ab2.json",
+          "sha256": "f2c1eac998c0aadedce5330f457ae53205c8a2cb1e865ee8ab6a4fa1bce293fb",
+          "throughputGeomean": 1.0151996859819536
+        },
+        {
+          "baseInstance": "b",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            19
+          ],
+          "logEffectPercentagePoints": 1.415100501705635,
+          "measurementWallSeconds": 341.1493149558082,
+          "pad": 7,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-baseb-canda-ab2.json",
+          "sha256": "72aa1fd677869cf2cd1b7695063491af520c51ed4fc4eb2a1f06bfda384db8a3",
+          "throughputGeomean": 1.014251604456161
+        },
+        {
+          "baseInstance": "a",
+          "candidateInstance": "a",
+          "effectiveAffinity": [
+            7
+          ],
+          "logEffectPercentagePoints": 1.3370494809445477,
+          "measurementWallSeconds": 341.42106556519866,
+          "pad": 7,
+          "parallelDispatch": true,
+          "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-basea-canda-ab2.json",
+          "sha256": "b1ed58cb0dc9518b39502dbce53102ed55983052b6c2d337c78a6f3df8c6c5ce",
+          "throughputGeomean": 1.0134602795845398
+        }
+      ],
+      "effectLogPercentagePoints": 1.3838320681109701,
+      "fullColdBuildCombinations": true,
+      "pad": 7,
+      "pairedGlobalLogEffects": [
+        1.2463743099469269,
+        1.4506176830857442,
+        1.2734222553230237,
+        1.7569150245344782,
+        1.4529661284188005,
+        1.3797977510433488,
+        1.2889648346706277,
+        1.3878663851785917
+      ],
+      "ratioFromPairedMedian": 1.0139345134440185,
+      "ratioOfMediansGeomean": 1.0131386687091932,
+      "ratioOfMediansLogPercentagePoints": 1.3053105048321656,
+      "samplesPerSide": 8,
+      "throughputRatiosFromCombinedMedians": {
+        "box2d": 1.0062167627893042,
+        "code-load": 0.9983740309514822,
+        "crypto": 0.9955257270693513,
+        "deltablue": 1.003657049979683,
+        "earley-boyer": 0.9994210450137502,
+        "gbemu": 1.0464850205517182,
+        "mandreel": 1.0312324141812044,
+        "navier-stokes": 1.0863095238095237,
+        "pdfjs": 1.0079846905107563,
+        "raytrace": 1.0015366884364194,
+        "regexp": 1.0222095671981777,
+        "richards": 0.9969293756397134,
+        "splay": 0.9883002389387823,
+        "typescript": 1.0030851884358627,
+        "zlib": 1.0140683318977892
+      }
+    }
+  },
+  "measurementDispatch": {
+    "cores": [
+      6,
+      7,
+      8,
+      9,
+      15,
+      16,
+      17,
+      19
+    ],
+    "mode": "independent-serial-abba2-on-distinct-x925-cores",
+    "pendingAtDispatch": [
+      "pad1/base-a_cand-b",
+      "pad1/base-b_cand-b",
+      "pad1/base-b_cand-a",
+      "pad1/base-a_cand-a",
+      "pad3/base-a_cand-a",
+      "pad3/base-b_cand-a",
+      "pad3/base-b_cand-b",
+      "pad3/base-a_cand-b",
+      "pad7/base-a_cand-b",
+      "pad7/base-b_cand-b",
+      "pad7/base-b_cand-a",
+      "pad7/base-a_cand-a",
+      "pad15/base-a_cand-a",
+      "pad15/base-b_cand-a",
+      "pad15/base-b_cand-b",
+      "pad15/base-a_cand-b",
+      "pad31/base-a_cand-b",
+      "pad31/base-b_cand-b",
+      "pad31/base-b_cand-a",
+      "pad31/base-a_cand-a",
+      "pad63/base-a_cand-a",
+      "pad63/base-b_cand-a",
+      "pad63/base-b_cand-b",
+      "pad63/base-a_cand-b"
+    ],
+    "reusedBeforeDispatch": [
+      "pad0/base-a_cand-a",
+      "pad0/base-b_cand-a",
+      "pad0/base-b_cand-b",
+      "pad0/base-a_cand-b"
+    ],
+    "startedUnix": 1786641294.8244772
+  },
+  "measurementDispatchCompletedUnix": 1786642324.278095,
+  "measurements": {
+    "pad0/base-a_cand-a": {
+      "baseInstance": "a",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        8
+      ],
+      "logEffectPercentagePoints": 1.548946781866256,
+      "measurementWallSeconds": 336.0801333342679,
+      "pad": 0,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-basea-canda-ab2.json",
+      "sha256": "28731dc6b8a41c2b630f28775508342004086db66223bfc93a1cdecc62e7a268",
+      "throughputGeomean": 1.0156100514127517
+    },
+    "pad0/base-a_cand-b": {
+      "baseInstance": "a",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        8
+      ],
+      "logEffectPercentagePoints": 1.784746236323283,
+      "measurementWallSeconds": 335.9674607142806,
+      "pad": 0,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-basea-candb-ab2.json",
+      "sha256": "0a5b47fd522a13a27b331e58281e9c672a91f8bec520e1d3f59c0daae2d10f1c",
+      "throughputGeomean": 1.0180076800601001
+    },
+    "pad0/base-b_cand-a": {
+      "baseInstance": "b",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        8
+      ],
+      "logEffectPercentagePoints": 1.595715077438265,
+      "measurementWallSeconds": 334.27812107792124,
+      "pad": 0,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-baseb-canda-ab2.json",
+      "sha256": "2276fe80b6ede71f3a86c3b803ce0080bd9a1127ab5888406f022afef866b08f",
+      "throughputGeomean": 1.016085146011619
+    },
+    "pad0/base-b_cand-b": {
+      "baseInstance": "b",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        8
+      ],
+      "logEffectPercentagePoints": 1.8514403062258593,
+      "measurementWallSeconds": 335.0445350599475,
+      "pad": 0,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad0-baseb-candb-ab2.json",
+      "sha256": "cb999863f1a2a001eb23836611b3923c40f5577faf43d16e23dfbfc2eb84d00f",
+      "throughputGeomean": 1.0186868572741405
+    },
+    "pad1/base-a_cand-a": {
+      "baseInstance": "a",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        9
+      ],
+      "logEffectPercentagePoints": 1.3333882887796864,
+      "measurementWallSeconds": 342.5798694579862,
+      "pad": 1,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-basea-canda-ab2.json",
+      "sha256": "667be95833f54f576ab1e255a55fa41ae14eea4f97f77d218002dd4096130a51",
+      "throughputGeomean": 1.013423175535419
+    },
+    "pad1/base-a_cand-b": {
+      "baseInstance": "a",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        6
+      ],
+      "logEffectPercentagePoints": 1.2641893240106978,
+      "measurementWallSeconds": 341.28900072397664,
+      "pad": 1,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-basea-candb-ab2.json",
+      "sha256": "fa4b662400f1cc15c934de9baefcd74fbb9d5158b07cf3da65946dd82b4a7aad",
+      "throughputGeomean": 1.0127221397719393
+    },
+    "pad1/base-b_cand-a": {
+      "baseInstance": "b",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        8
+      ],
+      "logEffectPercentagePoints": 1.456578634906478,
+      "measurementWallSeconds": 340.38869319623336,
+      "pad": 1,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-baseb-canda-ab2.json",
+      "sha256": "ae98da160b47375050426544aa9ce131877f2737484a097b4c4c92ab772b4d69",
+      "throughputGeomean": 1.0146723843474381
+    },
+    "pad1/base-b_cand-b": {
+      "baseInstance": "b",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        7
+      ],
+      "logEffectPercentagePoints": 1.4616866879501473,
+      "measurementWallSeconds": 341.47883231705055,
+      "pad": 1,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad1-baseb-candb-ab2.json",
+      "sha256": "27a19aaddbaf4994f8d9fba0a6e1d570110fb099b286290c5ef8d81846e9c7fb",
+      "throughputGeomean": 1.0147242156748246
+    },
+    "pad15/base-a_cand-a": {
+      "baseInstance": "a",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        16
+      ],
+      "logEffectPercentagePoints": 1.466950989160272,
+      "measurementWallSeconds": 342.81203706003726,
+      "pad": 15,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-basea-canda-ab2.json",
+      "sha256": "a001d06ba11b4ebd9c986b8be09f262340a512ea6b09a358ae1f92393f1c66ce",
+      "throughputGeomean": 1.0147776352200604
+    },
+    "pad15/base-a_cand-b": {
+      "baseInstance": "a",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        15
+      ],
+      "logEffectPercentagePoints": 1.3882235235921865,
+      "measurementWallSeconds": 343.35476989811286,
+      "pad": 15,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-basea-candb-ab2.json",
+      "sha256": "46f18f606f7461d7e764e96bc884f0ec19a71a290583c78167a5ba589cb53874",
+      "throughputGeomean": 1.0139790409044798
+    },
+    "pad15/base-b_cand-a": {
+      "baseInstance": "b",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        9
+      ],
+      "logEffectPercentagePoints": 1.216893766100264,
+      "measurementWallSeconds": 342.1801859801635,
+      "pad": 15,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-baseb-canda-ab2.json",
+      "sha256": "689caa27159a96edc846e4ae70f5f45b57d273ec53cdb38b64570bfaf21fefb0",
+      "throughputGeomean": 1.0122432804343755
+    },
+    "pad15/base-b_cand-b": {
+      "baseInstance": "b",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        17
+      ],
+      "logEffectPercentagePoints": 1.2049525988349197,
+      "measurementWallSeconds": 342.37763241911307,
+      "pad": 15,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad15-baseb-candb-ab2.json",
+      "sha256": "90e08373999368196b3f17dbf800c8e0beec3baab364b8b7605418eef031a95e",
+      "throughputGeomean": 1.0121224139877025
+    },
+    "pad3/base-a_cand-a": {
+      "baseInstance": "a",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        15
+      ],
+      "logEffectPercentagePoints": 1.2443622785431188,
+      "measurementWallSeconds": 342.71688474016264,
+      "pad": 3,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-basea-canda-ab2.json",
+      "sha256": "7c9b7bd641747ec8591139a7b773efcaf6571cf37b26526c3363f0934cced119",
+      "throughputGeomean": 1.0125213667971587
+    },
+    "pad3/base-a_cand-b": {
+      "baseInstance": "a",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        19
+      ],
+      "logEffectPercentagePoints": 1.370324480064259,
+      "measurementWallSeconds": 341.3660791916773,
+      "pad": 3,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-basea-candb-ab2.json",
+      "sha256": "2a411f18d64e467978cc97e44d7092cc581c0a28a7459ce6f54c6bc9d47be37a",
+      "throughputGeomean": 1.0137975645963304
+    },
+    "pad3/base-b_cand-a": {
+      "baseInstance": "b",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        16
+      ],
+      "logEffectPercentagePoints": 1.3569919126348793,
+      "measurementWallSeconds": 342.35169161623344,
+      "pad": 3,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-baseb-canda-ab2.json",
+      "sha256": "0a479e9bf1558a26f18ab8f1a298050e1e407e4b6bd570ee0d73d0e1ad17be7f",
+      "throughputGeomean": 1.0136624083625314
+    },
+    "pad3/base-b_cand-b": {
+      "baseInstance": "b",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        17
+      ],
+      "logEffectPercentagePoints": 1.1938924690761963,
+      "measurementWallSeconds": 342.69978497968987,
+      "pad": 3,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad3-baseb-candb-ab2.json",
+      "sha256": "556a5f11a9d78b1265a6399106addf0aafe5d1ad33d7702663bb9a90fcd6e73f",
+      "throughputGeomean": 1.0120104781256383
+    },
+    "pad31/base-a_cand-a": {
+      "baseInstance": "a",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        9
+      ],
+      "logEffectPercentagePoints": 1.7586686887513272,
+      "measurementWallSeconds": 341.990482468158,
+      "pad": 31,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-basea-canda-ab2.json",
+      "sha256": "44e1161b7135c31d38b8b24aed0f2035996b9f5052503235a16aeca8ceadc316",
+      "throughputGeomean": 1.0177422432342578
+    },
+    "pad31/base-a_cand-b": {
+      "baseInstance": "a",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        8
+      ],
+      "logEffectPercentagePoints": 1.429464606941118,
+      "measurementWallSeconds": 342.4578925049864,
+      "pad": 31,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-basea-candb-ab2.json",
+      "sha256": "2c706ca2748c0f37e3e315b8608a09c6cb08acc47abd0f29dea93d2075738eb6",
+      "throughputGeomean": 1.0143973030878795
+    },
+    "pad31/base-b_cand-a": {
+      "baseInstance": "b",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        7
+      ],
+      "logEffectPercentagePoints": 0.9737764442987015,
+      "measurementWallSeconds": 341.6290279328823,
+      "pad": 31,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-baseb-canda-ab2.json",
+      "sha256": "a2b7938d3bd87ba2ef34a0c20e6890676803d329a8b4b60315a16cfe5d683f4d",
+      "throughputGeomean": 1.0097853307422622
+    },
+    "pad31/base-b_cand-b": {
+      "baseInstance": "b",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        19
+      ],
+      "logEffectPercentagePoints": 1.3254378357880467,
+      "measurementWallSeconds": 342.13125482480973,
+      "pad": 31,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad31-baseb-candb-ab2.json",
+      "sha256": "31d1ea2a0506afcf11b1c3b17b90c80e1a4137cffffde687208d8947a412a652",
+      "throughputGeomean": 1.0133426070050657
+    },
+    "pad63/base-a_cand-a": {
+      "baseInstance": "a",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        6
+      ],
+      "logEffectPercentagePoints": 0.9791130992766388,
+      "measurementWallSeconds": 341.38790233107284,
+      "pad": 63,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-basea-canda-ab2.json",
+      "sha256": "5bc40885b2fd2038cad422887c1e5f5ce4fdf166313c20c7fd26dfa78cbf7b81",
+      "throughputGeomean": 1.0098392209393359
+    },
+    "pad63/base-a_cand-b": {
+      "baseInstance": "a",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        15
+      ],
+      "logEffectPercentagePoints": 1.0941230286057653,
+      "measurementWallSeconds": 342.856162102893,
+      "pad": 63,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-basea-candb-ab2.json",
+      "sha256": "cd89837437b2e05baea51b59f5dbaecc388a7763503cd460c8c32e53476b2c63",
+      "throughputGeomean": 1.0110013044412898
+    },
+    "pad63/base-b_cand-a": {
+      "baseInstance": "b",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        17
+      ],
+      "logEffectPercentagePoints": 1.2076732789157563,
+      "measurementWallSeconds": 342.5430587474257,
+      "pad": 63,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-baseb-canda-ab2.json",
+      "sha256": "8922f7a69ada2340db05d28d0e9e4bad1f48a1c3537685e5f8289a50c50922a4",
+      "throughputGeomean": 1.0121499509752085
+    },
+    "pad63/base-b_cand-b": {
+      "baseInstance": "b",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        16
+      ],
+      "logEffectPercentagePoints": 0.973125526142604,
+      "measurementWallSeconds": 341.95266469102353,
+      "pad": 63,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad63-baseb-candb-ab2.json",
+      "sha256": "6582a39db479d7acd5fdb1dae9e470de4096af1fa3d2659f6f40b356a974f90c",
+      "throughputGeomean": 1.0097787578875987
+    },
+    "pad7/base-a_cand-a": {
+      "baseInstance": "a",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        7
+      ],
+      "logEffectPercentagePoints": 1.3370494809445477,
+      "measurementWallSeconds": 341.42106556519866,
+      "pad": 7,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-basea-canda-ab2.json",
+      "sha256": "b1ed58cb0dc9518b39502dbce53102ed55983052b6c2d337c78a6f3df8c6c5ce",
+      "throughputGeomean": 1.0134602795845398
+    },
+    "pad7/base-a_cand-b": {
+      "baseInstance": "a",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        8
+      ],
+      "logEffectPercentagePoints": 1.3467980268340447,
+      "measurementWallSeconds": 341.5908379191533,
+      "pad": 7,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-basea-candb-ab2.json",
+      "sha256": "76ff728914ca0779af142bc0ed998baad027ee8f7ba99c92ae6039dd7ac406ba",
+      "throughputGeomean": 1.01355908204079
+    },
+    "pad7/base-b_cand-a": {
+      "baseInstance": "b",
+      "candidateInstance": "a",
+      "effectiveAffinity": [
+        19
+      ],
+      "logEffectPercentagePoints": 1.415100501705635,
+      "measurementWallSeconds": 341.1493149558082,
+      "pad": 7,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-baseb-canda-ab2.json",
+      "sha256": "72aa1fd677869cf2cd1b7695063491af520c51ed4fc4eb2a1f06bfda384db8a3",
+      "throughputGeomean": 1.014251604456161
+    },
+    "pad7/base-b_cand-b": {
+      "baseInstance": "b",
+      "candidateInstance": "b",
+      "effectiveAffinity": [
+        6
+      ],
+      "logEffectPercentagePoints": 1.5085328101556499,
+      "measurementWallSeconds": 343.7150204409845,
+      "pad": 7,
+      "parallelDispatch": true,
+      "path": "/tmp/zjs-stacktyped-formal-20260813/measurements/pad7-baseb-candb-ab2.json",
+      "sha256": "f2c1eac998c0aadedce5330f457ae53205c8a2cb1e865ee8ab6a4fa1bce293fb",
+      "throughputGeomean": 1.0151996859819536
+    }
+  },
+  "preRegisteredDesign": {
+    "buildCombinationsPerPad": 4,
+    "coldBuildsPerSidePerPad": 2,
+    "cpu": 8,
+    "effect": "100 * ln(candidate/base causal Zoo throughput geomean)",
+    "executionMode": "serial-alternating",
+    "mdeLogPercentagePoints": 0.278,
+    "pads": [
+      0,
+      1,
+      3,
+      7,
+      15,
+      31,
+      63
+    ],
+    "passRule": "median effect > MDE and worst pad >= 0",
+    "samplesPerSidePerCombination": 2,
+    "samplesPerSidePerPad": 8
+  },
+  "resumeNote": "Frozen binaries reused by SHA. Remaining builds use clean e3e8190 base and landed 42b6160f candidate. Engine-file diff SHA is 700847c37ecf8b0203a20ad60413d068b154e9ced0a8256df5be8b66cda53869.",
+  "resumeUnix": 1786641294.8146038,
+  "schemaVersion": 1,
+  "sources": {
+    "base": {
+      "head": "e3e8190a2ee50968602dc2f1d5c758379e5c37db",
+      "path": "/home/aneryu/zjs",
+      "status": []
+    },
+    "candidate": {
+      "diffSha256": "1849f111488d10652c4604bc39ebba0787074a1af59fe6d4fc387b8931adb6fa",
+      "head": "e3e8190a2ee50968602dc2f1d5c758379e5c37db",
+      "path": "/home/aneryu/worktree-stack-permute-typed-int",
+      "status": [
+        " M src/core/typed_array.zig",
+        " M src/exec/tailcall_dispatch.zig",
+        " M src/exec/tailcall_dispatch_colds.zig",
+        " M src/exec/vm_property_field.zig",
+        " M src/tests/exec.zig"
+      ]
+    },
+    "zoo": {
+      "head": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+      "path": "/home/aneryu/javascript-zoo",
+      "status": []
+    }
+  },
+  "sourcesAtFreeze": {
+    "base": {
+      "head": "e3e8190a2ee50968602dc2f1d5c758379e5c37db",
+      "path": "/home/aneryu/zjs",
+      "status": []
+    },
+    "candidate": {
+      "diffSha256": "1849f111488d10652c4604bc39ebba0787074a1af59fe6d4fc387b8931adb6fa",
+      "head": "e3e8190a2ee50968602dc2f1d5c758379e5c37db",
+      "path": "/home/aneryu/worktree-stack-permute-typed-int",
+      "status": [
+        " M src/core/typed_array.zig",
+        " M src/exec/tailcall_dispatch.zig",
+        " M src/exec/tailcall_dispatch_colds.zig",
+        " M src/exec/vm_property_field.zig",
+        " M src/tests/exec.zig"
+      ]
+    },
+    "zoo": {
+      "head": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+      "path": "/home/aneryu/javascript-zoo",
+      "status": []
+    }
+  },
+  "sourcesAtResume": {
+    "base": {
+      "head": "e3e8190a2ee50968602dc2f1d5c758379e5c37db",
+      "path": "/tmp/zjs-stacktyped-formal-base-e3e8190",
+      "status": []
+    },
+    "candidate": {
+      "engineDiffSha256": "700847c37ecf8b0203a20ad60413d068b154e9ced0a8256df5be8b66cda53869",
+      "head": "42b6160f0e7a20a38039e191e0ff499f542198e2",
+      "landedCommit": "42b6160f0e7a20a38039e191e0ff499f542198e2",
+      "path": "/home/aneryu/zjs",
+      "status": []
+    },
+    "zoo": {
+      "head": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+      "path": "/home/aneryu/javascript-zoo",
+      "status": []
+    }
+  },
+  "tool": "zjs-formal-zoo-lineage-2x2"
+}

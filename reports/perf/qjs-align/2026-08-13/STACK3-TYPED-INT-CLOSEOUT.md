@@ -1,7 +1,7 @@
 # stack3 + typed-int closeout
 
-Status: **reviewed local-merge candidate; staged promotion evidence accepted,
-but not a formal 7-lineage PASS**.
+Status: **landed on `42b6160f`; formal 7-lineage Zoo gate is PASS**.
+See `STACK3-TYPED-INT-FORMAL-LINEAGE.md`.
 
 ## Outcome first
 
@@ -191,9 +191,9 @@ The pad0 2x2 cold-build result is accepted as staged robustness for this local
 increment, so it may be committed and fast-forwarded without resuming broad
 exploration.
 
-This decision does not upgrade the result to a formal D10 `7×8` PASS. If that
-label is needed later, resume the saved lineage campaign and report it as a
-separate measurement. Do not push implicitly.
+The formal D10 `7×8` campaign was resumed after landing and is recorded in
+`STACK3-TYPED-INT-FORMAL-LINEAGE.md`: median **+1.3838 log-pp**, worst pad
+**+1.0704 log-pp**, verdict **PASS**. Do not push implicitly.
 
 Parity has not been reached. This package is the strongest validated increment
 found, but even the optimistic projection leaves about 7.9% relative work.
