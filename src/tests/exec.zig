@@ -9122,6 +9122,123 @@ test "qjs alignment C4 Array instanceof follows prototype chain" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "instanceof resident dispatch preserves GetMethod and result coercion semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const candidate = { marker: 7 };
+        \\function Truthy() {}
+        \\Object.defineProperty(Truthy, Symbol.hasInstance, {
+        \\  value: function(value) { return value.marker; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof Truthy, true);
+        \\function Falsy() {}
+        \\Object.defineProperty(Falsy, Symbol.hasInstance, {
+        \\  value: function() { return 0; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof Falsy, false);
+        \\function UndefinedResult() {}
+        \\Object.defineProperty(UndefinedResult, Symbol.hasInstance, {
+        \\  value: function() { return undefined; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof UndefinedResult, false);
+        \\function ObjectResult() {}
+        \\Object.defineProperty(ObjectResult, Symbol.hasInstance, {
+        \\  value: function() { return {}; },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof ObjectResult, true);
+        \\
+        \\let seenThis;
+        \\let seenValue;
+        \\function Observed() {}
+        \\Object.defineProperty(Observed, Symbol.hasInstance, {
+        \\  value: function(value) {
+        \\    seenThis = this;
+        \\    seenValue = value;
+        \\    return "yes";
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof Observed, true);
+        \\assert.sameValue(seenThis, Observed);
+        \\assert.sameValue(seenValue, candidate);
+        \\
+        \\function StrictObserved() {}
+        \\Object.defineProperty(StrictObserved, Symbol.hasInstance, {
+        \\  value: function(value) {
+        \\    "use strict";
+        \\    return this === StrictObserved && value === candidate;
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof StrictObserved, true);
+        \\
+        \\function makeCapturedHasInstance(expected) {
+        \\  return value => value === expected;
+        \\}
+        \\function ArrowBacked() {}
+        \\Object.defineProperty(ArrowBacked, Symbol.hasInstance, {
+        \\  value: makeCapturedHasInstance(candidate),
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof ArrowBacked, true);
+        \\
+        \\let getterCalls = 0;
+        \\function GetterBacked() {}
+        \\Object.defineProperty(GetterBacked, Symbol.hasInstance, {
+        \\  get: function() {
+        \\    getterCalls++;
+        \\    return function(value) { return value.marker === 7; };
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(candidate instanceof GetterBacked, true);
+        \\assert.sameValue(getterCalls, 1);
+        \\
+        \\function Throwing() {}
+        \\Object.defineProperty(Throwing, Symbol.hasInstance, {
+        \\  value: function() { throw new RangeError("instanceof sentinel"); },
+        \\  configurable: true
+        \\});
+        \\let caught = false;
+        \\try {
+        \\  candidate instanceof Throwing;
+        \\} catch (error) {
+        \\  caught = error instanceof RangeError && error.message === "instanceof sentinel";
+        \\}
+        \\assert.sameValue(caught, true);
+        \\
+        \\let primitiveGetterCalls = 0;
+        \\Object.defineProperty(Number.prototype, Symbol.hasInstance, {
+        \\  get: function() {
+        \\    primitiveGetterCalls++;
+        \\    return function() { return true; };
+        \\  },
+        \\  configurable: true
+        \\});
+        \\try {
+        \\  let primitiveCaught = false;
+        \\  try {
+        \\    candidate instanceof 1;
+        \\  } catch (error) {
+        \\    primitiveCaught = error instanceof TypeError;
+        \\  }
+        \\  assert.sameValue(primitiveCaught, true);
+        \\  assert.sameValue(primitiveGetterCalls, 0);
+        \\} finally {
+        \\  delete Number.prototype[Symbol.hasInstance];
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "local reference-tail lowering preserves binding semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -12710,6 +12827,54 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
     try std.testing.expect(result.isUndefined());
 }
 
+// qjs:41171 resolves length through ordinary [[Get]] before qjs:41182-41197
+// selects ARRAY/ARGUMENTS/MAPPED_ARGUMENTS or the observable element fallback.
+test "apply resolves arguments length and preserves observable fallback" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function signature() {
+        \\    return arguments.length + ":" + arguments[0] + ":" + arguments[arguments.length - 1];
+        \\}
+        \\function mapped(first, second, third) {
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\assert.sameValue(mapped(1, 2, 3), "3:1:3");
+        \\function unmapped(first, second, third) {
+        \\    "use strict";
+        \\    return Reflect.apply(signature, null, arguments);
+        \\}
+        \\assert.sameValue(unmapped(4, 5, 6), "3:4:6");
+        \\function rewrittenLength(first, second, third) {
+        \\    arguments.length = 1;
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\assert.sameValue(rewrittenLength(7, 8, 9), "1:7:7");
+        \\let lengthGets = 0;
+        \\function accessorLength(first, second, third) {
+        \\    Object.defineProperty(arguments, "length", {
+        \\        get: function() { lengthGets++; return 2; }
+        \\    });
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\assert.sameValue(accessorLength(10, 11, 12), "2:10:11");
+        \\assert.sameValue(lengthGets, 1);
+        \\function detached(first, second) {
+        \\    delete arguments[0];
+        \\    return signature.apply(null, arguments);
+        \\}
+        \\Object.prototype[0] = 13;
+        \\try {
+        \\    assert.sameValue(detached(1, 14), "2:13:14");
+        \\} finally {
+        \\    delete Object.prototype[0];
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "resident generators preserve mapped arguments parameter aliases" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -15529,6 +15694,27 @@ test "computed proxy bytecode trap continuations preserve nested calls throws an
 
     const result = try js.eval(
         \\const key = ["__zjs_computed_", "proxy_probe__"].join("");
+        \\const symbolKey = Symbol("computed proxy probe");
+        \\const symbolOwn = {};
+        \\Object.defineProperty(symbolOwn, symbolKey, { value: 29 });
+        \\assert.sameValue(symbolOwn[symbolKey], 29);
+        \\const symbolPrototype = {};
+        \\let symbolGetterReceiver;
+        \\Object.defineProperty(symbolPrototype, symbolKey, {
+        \\    get() { symbolGetterReceiver = this; return 30; },
+        \\});
+        \\const symbolChild = Object.create(symbolPrototype);
+        \\assert.sameValue(symbolChild[symbolKey], 30);
+        \\assert.sameValue(symbolGetterReceiver, symbolChild);
+        \\const symbolProxy = new Proxy({}, {
+        \\    get(target, propertyKey, receiver) {
+        \\        assert.sameValue(propertyKey, symbolKey);
+        \\        assert.sameValue(receiver, symbolProxy);
+        \\        return 31;
+        \\    },
+        \\});
+        \\assert.sameValue(symbolProxy[symbolKey], 31);
+        \\assert.sameValue({}[symbolKey], undefined);
         \\let trapCount = 0;
         \\let seenTarget;
         \\let seenKey;
@@ -16568,6 +16754,24 @@ test "Engine eval preserves resolve-label peephole semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3,3,9,false,true,true,true,true,true\n", stream.buffered());
+}
+
+test "resident is_null preserves qjs true and refcounted false legs" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const values = [null, undefined, false, true, 0, 1, 1.5, "", Symbol("s"), 1n, {}, [], function() {}];
+        \\for (let i = 0; i < values.length; i++) {
+        \\  assert.sameValue(values[i] === null, i === 0);
+        \\}
+        \\for (let i = 0; i < 1000; i++) {
+        \\  assert.sameValue(({ index: i }) === null, false);
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine generator return keeps finally rethrow control marker" {

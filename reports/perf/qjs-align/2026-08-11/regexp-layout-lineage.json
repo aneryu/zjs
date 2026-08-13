@@ -1,0 +1,142 @@
+{
+ "tool": "zjs-layout-lineage",
+ "schemaVersion": 1,
+ "rationale": "pad lineages hold source fixed and move layout; two cold builds do not, because Zig is deterministic for a fixed source",
+ "padSlots": [
+  0,
+  3,
+  7
+ ],
+ "samplesPerSide": 4,
+ "cpu": 6,
+ "pmu": "armv8_pmuv3_1",
+ "baseWorktree": "/tmp/wt-baseline",
+ "candWorktree": "/home/aneryu/zjs",
+ "lineages": [
+  {
+   "pad": 0,
+   "baseSha256": "ac56166b30d113b23191ca0ac485bfce125e313603dbd0d67bd945ed3fbf44a8",
+   "candSha256": "de966c9ec57fa58b1c8d85b64551d4c02f56b4ade9f129f610faba322961c1ba",
+   "benches": {
+    "regexp": {
+     "instructions": {
+      "ratio": 0.9958974096017061,
+      "mad": 1.2781511632420361e-06
+     },
+     "cycles": {
+      "ratio": 1.0341756056552103,
+      "mad": 0.00789597862485203
+     },
+     "branch-instructions": {
+      "ratio": 0.9967320830448407,
+      "mad": 1.158853811300542e-06
+     },
+     "branch-misses": {
+      "ratio": 1.038509858116103,
+      "mad": 0.00495340897886265
+     },
+     "cache-references": {
+      "ratio": 0.9972448572021223,
+      "mad": 0.0002068348765214556
+     },
+     "cache-misses": {
+      "ratio": 1.026639294332799,
+      "mad": 0.04370342486812351
+     },
+     "ipc": {
+      "ratio": 0.962331987985094,
+      "mad": 0.0
+     }
+    }
+   }
+  },
+  {
+   "pad": 3,
+   "baseSha256": "7d26ddebf9c787ba96cf47517871cbdb59c10bc3ec3ef9c34963a86eda2125eb",
+   "candSha256": "b22f75811403af3c673319c98b17e83aad84e7c74a6465ac9e9059339b65639e",
+   "benches": {
+    "regexp": {
+     "instructions": {
+      "ratio": 0.9961948920391843,
+      "mad": 8.99742449544938e-07
+     },
+     "cycles": {
+      "ratio": 1.0257591867399831,
+      "mad": 0.0019755945194543933
+     },
+     "branch-instructions": {
+      "ratio": 0.9967255255930698,
+      "mad": 3.3081601136242256e-07
+     },
+     "branch-misses": {
+      "ratio": 1.001895031598607,
+      "mad": 0.004535303189118267
+     },
+     "cache-references": {
+      "ratio": 0.9945754379589511,
+      "mad": 0.00027455224408862167
+     },
+     "cache-misses": {
+      "ratio": 0.9740663198032844,
+      "mad": 0.08263097464930391
+     },
+     "ipc": {
+      "ratio": 0.9704411982240609,
+      "mad": 0.0
+     }
+    }
+   }
+  },
+  {
+   "pad": 7,
+   "baseSha256": "ac789eaaba8e9a6be4427fed22099c21f31902249afc8598affc585c7622a9e2",
+   "candSha256": "1329711eeabff874ade58354f8150119cb5a54b3f87fe5689c53729a8ed18c79",
+   "benches": {
+    "regexp": {
+     "instructions": {
+      "ratio": 0.995892665120047,
+      "mad": 4.4854655889547956e-07
+     },
+     "cycles": {
+      "ratio": 1.0345714658323235,
+      "mad": 0.0015869097595081483
+     },
+     "branch-instructions": {
+      "ratio": 0.9967276778132814,
+      "mad": 9.741673354657365e-07
+     },
+     "branch-misses": {
+      "ratio": 1.0394917900686664,
+      "mad": 0.0011573119964675138
+     },
+     "cache-references": {
+      "ratio": 0.9975915272605897,
+      "mad": 0.00020268459992223153
+     },
+     "cache-misses": {
+      "ratio": 0.8854200166761124,
+      "mad": 0.05286018282602617
+     },
+     "ipc": {
+      "ratio": 0.9639961244459618,
+      "mad": 0.0
+     }
+    }
+   }
+  }
+ ],
+ "verdicts": {
+  "regexp": {
+   "instructions": {
+    "verdict": "SEMANTIC (stable across lineages)",
+    "medianPercent": -0.41025903982938594,
+    "spreadPercent": 0.030222691913728283
+   },
+   "cycles": {
+    "verdict": "SEMANTIC (stable across lineages)",
+    "medianPercent": 3.4175605655210273,
+    "spreadPercent": 0.8812279092340392
+   }
+  }
+ }
+}

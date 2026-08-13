@@ -82,6 +82,25 @@ if [[ -n "$anyerror_matches" ]]; then
   status=1
 fi
 
+qjs_absent_matches="$(
+  awk '
+    /^\+\+\+ b\/src\/(builtins|bytecode|core|exec|libs|parser\.zig|root\.zig)/ { in_engine = 1; next }
+    /^\+\+\+ b\// { in_engine = 0 }
+    in_engine && /^\+[^+]/ && tolower($0) ~ /(zjs-only|zjs only).*(fast path|bypass|fastpath)|(fast path|bypass|fastpath).*(zjs-only|zjs only)|quickjs has no counterpart|qjs has no counterpart/ {
+      print FNR ":" $0
+    }
+  ' "$tmp_diff"
+)"
+
+if [[ -n "$qjs_absent_matches" ]]; then
+  echo "anti-goal violation: new QuickJS-absent fast path in engine code" >&2
+  echo "  zjs is a faithful reimplementation: a specialization QuickJS does not" >&2
+  echo "  have distorts the benchmarks that are supposed to price the generic" >&2
+  echo "  route (see the constructSimpleFieldConstructor / L0-L3 precedent)." >&2
+  echo "$qjs_absent_matches" >&2
+  status=1
+fi
+
 runtime_field_matches="$(
   awk '
     /^\+\+\+ b\/src\/core\/runtime\.zig$/ { in_runtime = 1; next }
@@ -105,32 +124,18 @@ import re
 import sys
 
 expected = [
+    # Mirrors qjs JSObject (quickjs.c:1017): an intrusive header, the weak
+    # ref count, class_id, the packed flag word, the shape pointer, the
+    # property value array and the class payload union. Update this list
+    # only alongside a reviewed Object shape change -- it is the tripwire
+    # for one landing unnoticed.
     "header",
-    "gc",
+    "weakref_count",
     "class_id",
-    "class_payload",
-    "class_payload_kind",
+    "flags",
     "shape_ref",
-    "prototype",
-    "null_prototype",
-    "extensible",
-    "immutable_prototype",
-    "is_array",
-    "is_proxy",
-    "is_global",
-    "shared_lazy_native_functions",
-    "cached_iterator_next",
-    "is_html_dda",
-    "may_have_indexed_properties",
-    "length",
-    "length_writable",
-    "is_with_environment",
-    "is_prototype",
-    "reserved_class_payload_finalizer_slot",
-    "in_weak_cleanup",
-    "properties",
-    "property_capacity",
-    "exotic",
+    "prop_values",
+    "u",
 ]
 
 path = Path("src/core/object.zig")
@@ -145,7 +150,7 @@ in_object = False
 for line in lines:
     stripped = line.strip()
     if not in_object:
-        if stripped == "pub const Object = struct {":
+        if stripped in ("pub const Object = struct {", "pub const Object = extern struct {"):
             in_object = True
         continue
     if stripped.startswith("pub fn ") or stripped.startswith("fn "):

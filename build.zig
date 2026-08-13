@@ -239,6 +239,14 @@ pub fn build(b: *std.Build) void {
         .name = "zjs",
         .root_module = zjs_cli_mod,
     });
+    // The AArch64 tail-threaded dispatcher is layout-sensitive: each source
+    // opcode needs its own indirect-branch site, but placing same-shaped sites
+    // at identical cache-line offsets creates predictor conflicts. Keep the
+    // measured get_arg0..3 island stable without imposing ELF linker-script or
+    // AArch64 code-size assumptions on other targets.
+    if (target.result.cpu.arch == .aarch64 and target.result.ofmt == .elf) {
+        zjs_exe.setLinkerScript(b.path("src/exec/tail_hot_layout_aarch64.ld"));
+    }
     const install_zjs = b.addInstallArtifact(zjs_exe, .{});
     const zjs_step = b.step("zjs", "Build and install zjs");
     zjs_step.dependOn(&install_zjs.step);

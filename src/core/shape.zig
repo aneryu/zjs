@@ -150,6 +150,11 @@ pub const Shape = extern struct {
 
     pub fn firstPropertyIndex(self: *const Shape, atom_id: atom.Atom) u32 {
         if (!self.hasPropertyHash()) return no_property_index;
+        return self.firstPropertyIndexAssumeHash(atom_id);
+    }
+
+    pub inline fn firstPropertyIndexAssumeHash(self: *const Shape, atom_id: atom.Atom) u32 {
+        std.debug.assert(self.hasPropertyHash());
         const bucket = propertyBucketIndex(self.hash, atom_id, self.prop_hash_mask);
         return self.hashBuckets()[bucket];
     }

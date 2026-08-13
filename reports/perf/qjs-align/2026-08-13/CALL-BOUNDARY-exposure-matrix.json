@@ -1,0 +1,852 @@
+{
+  "schema": "call-boundary-exposure-matrix-v1",
+  "inputs": {
+    "counts": "reports/perf/qjs-align/2026-08-13/CALL-BOUNDARY-counts-ab8.json",
+    "pmu": "reports/perf/qjs-align/2026-08-13/CALL-BOUNDARY-pmu-ab8.json",
+    "sampling": "reports/perf/qjs-align/2026-08-13/CALL-BOUNDARY-sampling-p65521-ab8.json",
+    "p3Ablation": "reports/perf/qjs-align/2026-08-13/PDFJS-DIAG-p3-native-backtrace-ablate-ab8.json"
+  },
+  "namedBacktraceModel": {
+    "pdfjsCausalCycles": 14073683.5,
+    "pdfjsCausalCyclesMAD": 2194063.5,
+    "pdfjsExposure": 2455127.0,
+    "cyclesPerScopePair": 5.732364761578525,
+    "cyclesPerScopePairMAD": 0.8936659895801724,
+    "ppCalibrationFactor": 0.48933304416126644,
+    "calibration": "23.689M PdfJS cycles ~= 0.06 pp supplied by task",
+    "crossZooPredictedCyclesRawSum": 132236669.56785278,
+    "crossZooPredictedContributionPp": 0.13546533846491687
+  },
+  "samplingDirection": {
+    "entryStablePositiveBenchmarks": 5,
+    "returnStablePositiveBenchmarks": 13,
+    "stableMeans": "8/8 paired deltas positive"
+  },
+  "benchmarks": {
+    "box2d": {
+      "qSemanticCalls": 2261622.0,
+      "zSemanticCalls": 2173441.0,
+      "pmuPerCall": {
+        "qInstructions": 2391.046713597586,
+        "zInstructions": 2536.086345108977,
+        "qCycles": 521.3507115689536,
+        "zCycles": 585.5350968809367,
+        "qBackendStall": 173.9323290983197,
+        "zBackendStall": 166.99907911003794
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 75316389.5,
+        "qjsMADApproxCycles": 458647.0,
+        "zjsMedianApproxCycles": 87011888.0,
+        "zjsMADApproxCycles": 491407.5,
+        "pairedDeltaMedian": 11793780.0,
+        "pairedDeltaMAD": 982815.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          8648772,
+          11466175,
+          15987124,
+          12514511,
+          11662738,
+          11924822,
+          10548881,
+          13562847
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 3767457.5,
+        "qjsMADApproxCycles": 393126.0,
+        "zjsMedianApproxCycles": 40229894.0,
+        "zjsMADApproxCycles": 1015575.5,
+        "pairedDeltaMedian": 36527957.5,
+        "pairedDeltaMAD": 1212138.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          39443642,
+          38788432,
+          37609054,
+          37084886,
+          35971029,
+          35971029,
+          35184777,
+          34070920
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 704366.0,
+        "predictedCycles": 4037682.8376540192,
+        "predictedZooContributionPp": 0.010366557460841627
+      }
+    },
+    "code-load": {
+      "qSemanticCalls": 9606.0,
+      "zSemanticCalls": 8743.0,
+      "pmuPerCall": {
+        "qInstructions": 122212.58406204455,
+        "zInstructions": 109207.8275763468,
+        "qCycles": 30688.056162814908,
+        "zCycles": 28583.10774333753,
+        "qBackendStall": 5358.755517384968,
+        "zBackendStall": 4177.822429372069
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 327605.0,
+        "qjsMADApproxCycles": 98281.5,
+        "zjsMedianApproxCycles": 950054.5,
+        "zjsMADApproxCycles": 229323.5,
+        "pairedDeltaMedian": 655210.0,
+        "pairedDeltaMAD": 229323.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          1310420,
+          720731,
+          589689,
+          458647,
+          393126,
+          1244899,
+          262084,
+          720731
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 65521.0,
+        "qjsMADApproxCycles": 0.0,
+        "zjsMedianApproxCycles": 393126.0,
+        "zjsMADApproxCycles": 32760.5,
+        "pairedDeltaMedian": 327605.0,
+        "pairedDeltaMAD": 65521.0,
+        "positiveDeltaSamples": 7,
+        "pairedDeltas": [
+          393126,
+          0,
+          327605,
+          131042,
+          327605,
+          327605,
+          393126,
+          458647
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 5828.0,
+        "predictedCycles": 33408.22183047965,
+        "predictedZooContributionPp": 0.00043613983215193817
+      }
+    },
+    "crypto": {
+      "qSemanticCalls": 2504468.5,
+      "zSemanticCalls": 2504534.5,
+      "pmuPerCall": {
+        "qInstructions": 14336.827433844746,
+        "zInstructions": 11559.543633557454,
+        "qCycles": 2223.919042104143,
+        "zCycles": 2138.0884405864645,
+        "qBackendStall": 473.2367867673321,
+        "zBackendStall": 306.37529069773245
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 75709515.5,
+        "qjsMADApproxCycles": 720731.0,
+        "zjsMedianApproxCycles": 63751933.0,
+        "zjsMADApproxCycles": 1375941.0,
+        "pairedDeltaMedian": -12514511.0,
+        "pairedDeltaMAD": 1736306.5,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -12973158,
+          -14676704,
+          -15987124,
+          -11073049,
+          -12055864,
+          -13628368,
+          -10483360,
+          -10221276
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 6290016.0,
+        "qjsMADApproxCycles": 294844.5,
+        "zjsMedianApproxCycles": 79083847.0,
+        "zjsMADApproxCycles": 1474222.5,
+        "pairedDeltaMedian": 72761070.5,
+        "pairedDeltaMAD": 819012.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          73186957,
+          71942058,
+          72531747,
+          71942058,
+          76004360,
+          72990394,
+          75152587,
+          69845386
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 561143.5,
+        "predictedCycles": 3216679.225588839,
+        "predictedZooContributionPp": 0.0019601929713814513
+      }
+    },
+    "deltablue": {
+      "qSemanticCalls": 32375537.0,
+      "zSemanticCalls": 32375529.0,
+      "pmuPerCall": {
+        "qInstructions": 598.1631866214296,
+        "zInstructions": 792.1390485851211,
+        "qCycles": 153.31066641458332,
+        "zCycles": 175.6982672468456,
+        "qBackendStall": 82.55393272704634,
+        "zBackendStall": 80.37867602101575
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 1172268971.5,
+        "qjsMADApproxCycles": 4914075.0,
+        "zjsMedianApproxCycles": 585495656.0,
+        "zjsMADApproxCycles": 2063911.5,
+        "pairedDeltaMedian": -592408121.5,
+        "pairedDeltaMAD": 7731478.0,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -584512841,
+          -589295874,
+          -595520369,
+          -596503184,
+          -602727679,
+          -575798548,
+          -600434444,
+          -584840446
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 49009708.0,
+        "qjsMADApproxCycles": 425886.5,
+        "zjsMedianApproxCycles": 584643883.0,
+        "zjsMADApproxCycles": 4815793.5,
+        "pairedDeltaMedian": 535077246.5,
+        "pairedDeltaMAD": 5307201.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          523840395,
+          537010116,
+          525871546,
+          539958561,
+          540810334,
+          536354906,
+          523381748,
+          533799587
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 1212493.0,
+        "predictedCycles": 6950452.14686063,
+        "predictedZooContributionPp": 0.0039884803260265035
+      }
+    },
+    "earley-boyer": {
+      "qSemanticCalls": 22957506.0,
+      "zSemanticCalls": 18253336.0,
+      "pmuPerCall": {
+        "qInstructions": 1119.8825172037416,
+        "zInstructions": 1625.4792355490524,
+        "qCycles": 226.67562519639546,
+        "zCycles": 350.8642591962368,
+        "qBackendStall": 74.94685430987147,
+        "zBackendStall": 102.34763571437024
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 611474732.5,
+        "qjsMADApproxCycles": 1310420.0,
+        "zjsMedianApproxCycles": 425722697.5,
+        "zjsMADApproxCycles": 3734697.0,
+        "pairedDeltaMedian": -184081249.5,
+        "pairedDeltaMAD": 3079487.0,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -165309483,
+          -193745597,
+          -180903481,
+          -181100044,
+          -198332067,
+          -182541506,
+          -185620993,
+          -186800371
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 23947925.5,
+        "qjsMADApproxCycles": 327605.0,
+        "zjsMedianApproxCycles": 296941172.0,
+        "zjsMADApproxCycles": 2489798.0,
+        "pairedDeltaMedian": 273976061.5,
+        "pairedDeltaMAD": 3734697.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          275515805,
+          267784327,
+          270274125,
+          356368719,
+          274991637,
+          272960486,
+          278791855,
+          270208604
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 7948281.0,
+        "predictedCycles": 45562445.91952412,
+        "predictedZooContributionPp": 0.023291012175045943
+      }
+    },
+    "gbemu": {
+      "qSemanticCalls": 4775911.0,
+      "zSemanticCalls": 2965543.0,
+      "pmuPerCall": {
+        "qInstructions": 1960.285898124986,
+        "zInstructions": 3360.884904720653,
+        "qCycles": 367.00606282236,
+        "zCycles": 662.7528938207944,
+        "qBackendStall": 114.75223554207773,
+        "zBackendStall": 167.9263374363481
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 124457139.5,
+        "qjsMADApproxCycles": 1179378.0,
+        "zjsMedianApproxCycles": 40754062.0,
+        "zjsMADApproxCycles": 1015575.5,
+        "pairedDeltaMedian": -82621981.0,
+        "pairedDeltaMAD": 1441462.0,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -87405014,
+          -85701468,
+          -84587611,
+          -81639166,
+          -80918435,
+          -82032292,
+          -81442603,
+          -83211670
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 3243289.5,
+        "qjsMADApproxCycles": 327605.0,
+        "zjsMedianApproxCycles": 44718082.5,
+        "zjsMADApproxCycles": 1081096.5,
+        "pairedDeltaMedian": 41638595.5,
+        "pairedDeltaMAD": 917294.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          41671356,
+          42261045,
+          40426457,
+          38526348,
+          41605835,
+          39640205,
+          43571465,
+          42064482
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 552285.0,
+        "predictedCycles": 3165899.072348396,
+        "predictedZooContributionPp": 0.005259016190784958
+      }
+    },
+    "mandreel": {
+      "qSemanticCalls": 13588367.0,
+      "zSemanticCalls": 13548569.0,
+      "pmuPerCall": {
+        "qInstructions": 2754.8270281852115,
+        "zInstructions": 2813.546429921861,
+        "qCycles": 462.97783773429137,
+        "zCycles": 500.011768955083,
+        "qBackendStall": 96.295831721354,
+        "zBackendStall": 100.73932092016507
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 411602922.0,
+        "qjsMADApproxCycles": 1670785.5,
+        "zjsMedianApproxCycles": 18247598.5,
+        "zjsMADApproxCycles": 687970.5,
+        "pairedDeltaMedian": -394370899.0,
+        "pairedDeltaMAD": 2882924.0,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -401119562,
+          -392077664,
+          -397843512,
+          -387687757,
+          -392143185,
+          -403936965,
+          -395157151,
+          -393584647
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 13005918.5,
+        "qjsMADApproxCycles": 524168.0,
+        "zjsMedianApproxCycles": 226178492.0,
+        "zjsMADApproxCycles": 3996781.0,
+        "pairedDeltaMedian": 213238094.5,
+        "pairedDeltaMAD": 4488188.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          203573747,
+          209339595,
+          206849797,
+          212025956,
+          216415863,
+          218315972,
+          225064635,
+          214450233
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 354589.0,
+        "predictedCycles": 2032633.4884433676,
+        "predictedZooContributionPp": 0.0009789575711789049
+      }
+    },
+    "navier-stokes": {
+      "qSemanticCalls": 1846.0,
+      "zSemanticCalls": 1845.0,
+      "pmuPerCall": {
+        "qInstructions": 5062254.356988083,
+        "zInstructions": 4884271.103794038,
+        "qCycles": 881234.0782773565,
+        "zCycles": 930102.145799458,
+        "qBackendStall": 196577.20747562297,
+        "zBackendStall": 308022.14525745256
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 65521.0,
+        "qjsMADApproxCycles": 65521.0,
+        "zjsMedianApproxCycles": 65521.0,
+        "zjsMADApproxCycles": 65521.0,
+        "pairedDeltaMedian": 0.0,
+        "pairedDeltaMAD": 98281.5,
+        "positiveDeltaSamples": 3,
+        "pairedDeltas": [
+          196563,
+          0,
+          -65521,
+          -131042,
+          196563,
+          0,
+          -65521,
+          131042
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 0.0,
+        "qjsMADApproxCycles": 0.0,
+        "zjsMedianApproxCycles": 65521.0,
+        "zjsMADApproxCycles": 65521.0,
+        "pairedDeltaMedian": 32760.5,
+        "pairedDeltaMAD": 32760.5,
+        "positiveDeltaSamples": 4,
+        "pairedDeltas": [
+          0,
+          262084,
+          65521,
+          196563,
+          0,
+          393126,
+          0,
+          0
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 142.0,
+        "predictedCycles": 813.9957961441505,
+        "predictedZooContributionPp": 1.5474211674074246e-06
+      }
+    },
+    "pdfjs": {
+      "qSemanticCalls": 2830238.0,
+      "zSemanticCalls": 2787103.0,
+      "pmuPerCall": {
+        "qInstructions": 2067.9636166640403,
+        "zInstructions": 2226.4059220272807,
+        "qCycles": 380.50211748976585,
+        "zCycles": 464.65042716397636,
+        "qBackendStall": 83.64206384763402,
+        "zBackendStall": 111.37377413034251
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 62146668.5,
+        "qjsMADApproxCycles": 196563.0,
+        "zjsMedianApproxCycles": 125669278.0,
+        "zjsMADApproxCycles": 1015575.5,
+        "pairedDeltaMedian": 63850214.5,
+        "pairedDeltaMAD": 1408701.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          69845386,
+          66241731,
+          64014017,
+          62375992,
+          63751933,
+          51433985,
+          62507034,
+          63948496
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 1638025.0,
+        "qjsMADApproxCycles": 163802.5,
+        "zjsMedianApproxCycles": 17592388.5,
+        "zjsMADApproxCycles": 393126.0,
+        "pairedDeltaMedian": 16019884.5,
+        "pairedDeltaMAD": 262084.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          14480141,
+          16314729,
+          15987124,
+          16707855,
+          16183687,
+          14545662,
+          15790561,
+          16052645
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 2455127.0,
+        "predictedCycles": 14073683.5,
+        "predictedZooContributionPp": 0.03564612309510744
+      }
+    },
+    "raytrace": {
+      "qSemanticCalls": 8571759.0,
+      "zSemanticCalls": 8571758.0,
+      "pmuPerCall": {
+        "qInstructions": 1812.9789336704403,
+        "zInstructions": 2484.1202734024923,
+        "qCycles": 376.066310193742,
+        "zCycles": 534.7079481245271,
+        "qBackendStall": 127.2457202774833,
+        "zBackendStall": 110.15861600385826
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 348211354.5,
+        "qjsMADApproxCycles": 3145008.0,
+        "zjsMedianApproxCycles": 594078907.0,
+        "zjsMADApproxCycles": 4389907.0,
+        "pairedDeltaMedian": 244786456.0,
+        "pairedDeltaMAD": 4881314.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          245834792,
+          240134465,
+          244065725,
+          255531900,
+          249897094,
+          239151650,
+          245507187,
+          223623173
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 14938788.0,
+        "qjsMADApproxCycles": 687970.5,
+        "zjsMedianApproxCycles": 277317632.5,
+        "zjsMADApproxCycles": 1965630.0,
+        "pairedDeltaMedian": 262182281.5,
+        "pairedDeltaMAD": 2522558.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          261756395,
+          262608168,
+          253828354,
+          264180672,
+          251535119,
+          265229008,
+          262804731,
+          251862724
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 2935176.0,
+        "predictedCycles": 16825499.47143101,
+        "predictedZooContributionPp": 0.011997563946829258
+      }
+    },
+    "regexp": {
+      "qSemanticCalls": 3558383.0,
+      "zSemanticCalls": 3551957.0,
+      "pmuPerCall": {
+        "qInstructions": 3638.4676878514765,
+        "zInstructions": 2819.945335486888,
+        "qCycles": 627.6316312774651,
+        "zCycles": 575.43887707537,
+        "qBackendStall": 69.57452120808806,
+        "zBackendStall": 103.92840299023891
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 60312080.5,
+        "qjsMADApproxCycles": 819012.5,
+        "zjsMedianApproxCycles": 146668758.5,
+        "zjsMADApproxCycles": 2260474.5,
+        "pairedDeltaMedian": 85832510.0,
+        "pairedDeltaMAD": 2784642.5,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          83539275,
+          87470535,
+          84653132,
+          81704687,
+          82556460,
+          93629509,
+          92384610,
+          87011888
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 1343180.5,
+        "qjsMADApproxCycles": 229323.5,
+        "zjsMedianApproxCycles": 13562847.0,
+        "zjsMADApproxCycles": 1015575.5,
+        "pairedDeltaMedian": 12350708.5,
+        "pairedDeltaMAD": 1179378.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          12186906,
+          13497326,
+          10548881,
+          11400654,
+          14021494,
+          11007528,
+          13562847,
+          12514511
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 3094533.0,
+        "predictedCycles": 17738991.92274188,
+        "predictedZooContributionPp": 0.028435885719410473
+      }
+    },
+    "richards": {
+      "qSemanticCalls": 20777054.0,
+      "zSemanticCalls": 20776027.0,
+      "pmuPerCall": {
+        "qInstructions": 887.500541992142,
+        "zInstructions": 1045.178437990093,
+        "qCycles": 207.4152800729112,
+        "zCycles": 229.1428886283215,
+        "qBackendStall": 103.48099432190917,
+        "zBackendStall": 99.91083896839372
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 752082798.5,
+        "qjsMADApproxCycles": 6388297.5,
+        "zjsMedianApproxCycles": 356172156.0,
+        "zjsMADApproxCycles": 4029541.5,
+        "pairedDeltaMedian": -395451995.5,
+        "pairedDeltaMAD": 5896890.0,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -389129219,
+          -396271008,
+          -399022890,
+          -394632983,
+          -384018581,
+          -400922999,
+          -405116343,
+          -383297850
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 22571984.5,
+        "qjsMADApproxCycles": 982815.0,
+        "zjsMedianApproxCycles": 450915522.0,
+        "zjsMADApproxCycles": 6519339.5,
+        "pairedDeltaMedian": 428900466.0,
+        "pairedDeltaMAD": 5241680.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          420710341,
+          427131399,
+          420579299,
+          434862877,
+          427983172,
+          433421415,
+          437025070,
+          429817760
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 8224.0,
+        "predictedCycles": 47142.96779922179,
+        "predictedZooContributionPp": 3.230453321820842e-05
+      }
+    },
+    "splay": {
+      "qSemanticCalls": 1300322.0,
+      "zSemanticCalls": 1234087.0,
+      "pmuPerCall": {
+        "qInstructions": 2848.8815516464383,
+        "zInstructions": 3216.9901822156785,
+        "qCycles": 901.3613320392949,
+        "zCycles": 1097.990131165793,
+        "qBackendStall": 477.60197858684234,
+        "zBackendStall": 597.853037103543
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 43997351.5,
+        "qjsMADApproxCycles": 1441462.0,
+        "zjsMedianApproxCycles": 11695498.5,
+        "zjsMADApproxCycles": 262084.0,
+        "pairedDeltaMedian": -32793260.5,
+        "pairedDeltaMAD": 1146617.5,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -33350189,
+          -32432895,
+          -31908727,
+          -30794870,
+          -33153626,
+          -29549971,
+          -34201962,
+          -34660609
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 1965630.0,
+        "qjsMADApproxCycles": 131042.0,
+        "zjsMedianApproxCycles": 27944706.5,
+        "zjsMADApproxCycles": 556928.5,
+        "pairedDeltaMedian": 25848034.5,
+        "pairedDeltaMAD": 458647.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          26601526,
+          25749753,
+          25946316,
+          25160064,
+          25553190,
+          26470484,
+          25684232,
+          27453299
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 24169.0,
+        "predictedCycles": 138545.52392259138,
+        "predictedZooContributionPp": 0.00033356753366563637
+      }
+    },
+    "typescript": {
+      "qSemanticCalls": 13792375.0,
+      "zSemanticCalls": 13785013.0,
+      "pmuPerCall": {
+        "qInstructions": 1160.7459047118425,
+        "zInstructions": 1301.4752982822722,
+        "qCycles": 317.87195087865575,
+        "zCycles": 334.4571344618971,
+        "qBackendStall": 152.66173440034802,
+        "zBackendStall": 126.16832595660229
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 463102428.0,
+        "qjsMADApproxCycles": 3538134.0,
+        "zjsMedianApproxCycles": 355418664.5,
+        "zjsMADApproxCycles": 2063911.5,
+        "pairedDeltaMedian": -110108040.5,
+        "pairedDeltaMAD": 4226104.5,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -96446912,
+          -105947457,
+          -111516742,
+          -101557550,
+          -114203103,
+          -114399666,
+          -115579044,
+          -108699339
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 17133741.5,
+        "qjsMADApproxCycles": 491407.5,
+        "zjsMedianApproxCycles": 285671560.0,
+        "zjsMADApproxCycles": 1081096.5,
+        "pairedDeltaMedian": 268799902.5,
+        "pairedDeltaMAD": 1048336.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          269029226,
+          269029226,
+          263459941,
+          280626443,
+          269880999,
+          265360050,
+          268570579,
+          267784327
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 3105018.0,
+        "predictedCycles": 17799095.76726703,
+        "predictedZooContributionPp": 0.012618369539483972
+      }
+    },
+    "zlib": {
+      "qSemanticCalls": 551475.0,
+      "zSemanticCalls": 551449.0,
+      "pmuPerCall": {
+        "qInstructions": 162065.76024661137,
+        "zInstructions": 155590.52367308672,
+        "qCycles": 27505.70140804207,
+        "zCycles": 30350.405637692696,
+        "qBackendStall": 2205.3678172174623,
+        "zBackendStall": 1653.831822163065
+      },
+      "entry": {
+        "qjsMedianApproxCycles": 29713773.5,
+        "qjsMADApproxCycles": 786252.0,
+        "zjsMedianApproxCycles": 7207310.0,
+        "zjsMADApproxCycles": 458647.0,
+        "pairedDeltaMedian": -22571984.5,
+        "pairedDeltaMAD": 1048336.0,
+        "positiveDeltaSamples": 0,
+        "pairedDeltas": [
+          -21687451,
+          -20442552,
+          -32432895,
+          -20835678,
+          -22080577,
+          -23718602,
+          -23063392,
+          -23522039
+        ]
+      },
+      "return": {
+        "qjsMedianApproxCycles": 1310420.0,
+        "qjsMADApproxCycles": 65521.0,
+        "zjsMedianApproxCycles": 26339442.0,
+        "zjsMADApproxCycles": 950054.5,
+        "pairedDeltaMedian": 24865219.5,
+        "pairedDeltaMAD": 655210.0,
+        "positiveDeltaSamples": 8,
+        "pairedDeltas": [
+          24766938,
+          26404963,
+          24373812,
+          24046207,
+          25291106,
+          24963501,
+          26142879,
+          23653081
+        ]
+      },
+      "namedBacktrace": {
+        "exposure": 107058.0,
+        "predictedCycles": 613695.5066450738,
+        "predictedZooContributionPp": 0.00011962014862317621
+      }
+    }
+  }
+}

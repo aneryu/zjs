@@ -1,0 +1,619 @@
+{
+  "tool": "PDFJS-DIAG-p0-alloc",
+  "schemaVersion": 1,
+  "warning": "frequency only; counter-build executions are not timing evidence",
+  "workload": "PdfJS deterministic fixed work, iteration divisor 16",
+  "samplesPerEngine": 8,
+  "samplingOrder": "qjs->zjs, zjs->qjs repeated (ABBA)",
+  "orderLog": [
+    {
+      "sample": 1,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 2,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 3,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 4,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 5,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 6,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 7,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 8,
+      "order": "zjs->qjs"
+    }
+  ],
+  "cpu": 19,
+  "effectiveAffinity": [
+    19
+  ],
+  "parallelism": 1,
+  "inputs": {
+    "binaries": {
+      "qjs": {
+        "path": "/tmp/pdfjs-diagnosis-20260813/pristine/qjs-b76d",
+        "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d"
+      },
+      "zjs": {
+        "path": "/tmp/pdfjs-diagnosis-20260813/pristine/zjs-c0ad",
+        "sha256": "c0ad7c3e1650bbab33cc8e4022dddf1813630e9b55ad40528cde580aeac65f96"
+      }
+    },
+    "script": {
+      "path": "/tmp/pdfjs-diagnosis-20260813/pdfjs-fixed-d16.js",
+      "sha256": "1a7ebe21975991190a0e3e57d2682fe340306b8a5b4e403f3b2f5ef302ea5deb"
+    },
+    "shim": {
+      "path": "/tmp/pdfjs-diagnosis-20260813/alloc_counter.so",
+      "sha256": "974ef849bca51a1fc3e8f7f715cacdd4fe59aaa0c9c4724115a20adc95f8c3a1"
+    }
+  },
+  "runs": {
+    "qjs": [
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9926",
+        "stdoutSha256": "383e326c4693407caa278b89c2171e20ad9557257bd831fdf498c6f2af9a52e0",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9926",
+        "stdoutSha256": "383e326c4693407caa278b89c2171e20ad9557257bd831fdf498c6f2af9a52e0",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9975",
+        "stdoutSha256": "55c392d4dc672001503bddad5e4491d1105db81b1c19aa667b96e3ffdcc871c1",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9975",
+        "stdoutSha256": "55c392d4dc672001503bddad5e4491d1105db81b1c19aa667b96e3ffdcc871c1",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9975",
+        "stdoutSha256": "55c392d4dc672001503bddad5e4491d1105db81b1c19aa667b96e3ffdcc871c1",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9926",
+        "stdoutSha256": "383e326c4693407caa278b89c2171e20ad9557257bd831fdf498c6f2af9a52e0",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9975",
+        "stdoutSha256": "55c392d4dc672001503bddad5e4491d1105db81b1c19aa667b96e3ffdcc871c1",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 505132,
+          "malloc_bytes": 1789274967,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 6323,
+          "realloc_bytes": 62262844,
+          "free": 505131,
+          "free_usable_bytes": 1813812672,
+          "memset_calls": 490511,
+          "memset_bytes": 12270323,
+          "allocation_calls": 511455,
+          "requested_bytes": 1851537811
+        },
+        "stdout": "PdfJS: 9830",
+        "stdoutSha256": "199b4ddbdc8d6a3858334f9abc2a54cd8688a87bf05f86288f4f8b719c4a7fff",
+        "exitCode": 0
+      }
+    ],
+    "zjs": [
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7700",
+        "stdoutSha256": "f9e3a883bfbefe3e5dec1cd3b0f82376da3029fa5d20c3fbeafcbf9c59cc73c6",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7729",
+        "stdoutSha256": "e89f17884c2ad5c02eb780eba679074969e1dcc13dce3a6814560d68b445fa53",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7700",
+        "stdoutSha256": "f9e3a883bfbefe3e5dec1cd3b0f82376da3029fa5d20c3fbeafcbf9c59cc73c6",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7729",
+        "stdoutSha256": "e89f17884c2ad5c02eb780eba679074969e1dcc13dce3a6814560d68b445fa53",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7729",
+        "stdoutSha256": "e89f17884c2ad5c02eb780eba679074969e1dcc13dce3a6814560d68b445fa53",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7729",
+        "stdoutSha256": "e89f17884c2ad5c02eb780eba679074969e1dcc13dce3a6814560d68b445fa53",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7700",
+        "stdoutSha256": "f9e3a883bfbefe3e5dec1cd3b0f82376da3029fa5d20c3fbeafcbf9c59cc73c6",
+        "exitCode": 0
+      },
+      {
+        "counts": {
+          "malloc": 530825,
+          "malloc_bytes": 1876556947,
+          "calloc": 0,
+          "calloc_bytes": 0,
+          "realloc": 5736,
+          "realloc_bytes": 52528812,
+          "free": 528525,
+          "free_usable_bytes": 1882250608,
+          "memset_calls": 0,
+          "memset_bytes": 0,
+          "allocation_calls": 536561,
+          "requested_bytes": 1929085759
+        },
+        "stdout": "PdfJS: 7729",
+        "stdoutSha256": "e89f17884c2ad5c02eb780eba679074969e1dcc13dce3a6814560d68b445fa53",
+        "exitCode": 0
+      }
+    ]
+  },
+  "metrics": {
+    "malloc": {
+      "qjsMedian": 505132.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 530825.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0508639325958364,
+        1.0508639325958364,
+        1.0508639325958364,
+        1.0508639325958364,
+        1.0508639325958364,
+        1.0508639325958364,
+        1.0508639325958364,
+        1.0508639325958364
+      ],
+      "ratioMedian": 1.0508639325958364,
+      "ratioMAD": 0.0,
+      "deltaMedian": 25693.0,
+      "deltaMAD": 0.0
+    },
+    "malloc_bytes": {
+      "qjsMedian": 1789274967.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 1876556947.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0487806411031066,
+        1.0487806411031066,
+        1.0487806411031066,
+        1.0487806411031066,
+        1.0487806411031066,
+        1.0487806411031066,
+        1.0487806411031066,
+        1.0487806411031066
+      ],
+      "ratioMedian": 1.0487806411031066,
+      "ratioMAD": 0.0,
+      "deltaMedian": 87281980.0,
+      "deltaMAD": 0.0
+    },
+    "calloc": {
+      "qjsMedian": 0.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 0.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "ratioMedian": null,
+      "ratioMAD": null,
+      "deltaMedian": 0.0,
+      "deltaMAD": 0.0
+    },
+    "calloc_bytes": {
+      "qjsMedian": 0.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 0.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "ratioMedian": null,
+      "ratioMAD": null,
+      "deltaMedian": 0.0,
+      "deltaMAD": 0.0
+    },
+    "realloc": {
+      "qjsMedian": 6323.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 5736.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        0.9071643207338289,
+        0.9071643207338289,
+        0.9071643207338289,
+        0.9071643207338289,
+        0.9071643207338289,
+        0.9071643207338289,
+        0.9071643207338289,
+        0.9071643207338289
+      ],
+      "ratioMedian": 0.9071643207338289,
+      "ratioMAD": 0.0,
+      "deltaMedian": -587.0,
+      "deltaMAD": 0.0
+    },
+    "realloc_bytes": {
+      "qjsMedian": 62262844.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 52528812.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        0.8436622650902358,
+        0.8436622650902358,
+        0.8436622650902358,
+        0.8436622650902358,
+        0.8436622650902358,
+        0.8436622650902358,
+        0.8436622650902358,
+        0.8436622650902358
+      ],
+      "ratioMedian": 0.8436622650902358,
+      "ratioMAD": 0.0,
+      "deltaMedian": -9734032.0,
+      "deltaMAD": 0.0
+    },
+    "free": {
+      "qjsMedian": 505131.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 528525.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0463127386757098,
+        1.0463127386757098,
+        1.0463127386757098,
+        1.0463127386757098,
+        1.0463127386757098,
+        1.0463127386757098,
+        1.0463127386757098,
+        1.0463127386757098
+      ],
+      "ratioMedian": 1.0463127386757098,
+      "ratioMAD": 0.0,
+      "deltaMedian": 23394.0,
+      "deltaMAD": 0.0
+    },
+    "free_usable_bytes": {
+      "qjsMedian": 1813812672.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 1882250608.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0377315348252236,
+        1.0377315348252236,
+        1.0377315348252236,
+        1.0377315348252236,
+        1.0377315348252236,
+        1.0377315348252236,
+        1.0377315348252236,
+        1.0377315348252236
+      ],
+      "ratioMedian": 1.0377315348252236,
+      "ratioMAD": 0.0,
+      "deltaMedian": 68437936.0,
+      "deltaMAD": 0.0
+    },
+    "memset_calls": {
+      "qjsMedian": 490511.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 0.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "ratioMedian": 0.0,
+      "ratioMAD": 0.0,
+      "deltaMedian": -490511.0,
+      "deltaMAD": 0.0
+    },
+    "memset_bytes": {
+      "qjsMedian": 12270323.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 0.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "ratioMedian": 0.0,
+      "ratioMAD": 0.0,
+      "deltaMedian": -12270323.0,
+      "deltaMAD": 0.0
+    },
+    "allocation_calls": {
+      "qjsMedian": 511455.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 536561.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0490874074943055,
+        1.0490874074943055,
+        1.0490874074943055,
+        1.0490874074943055,
+        1.0490874074943055,
+        1.0490874074943055,
+        1.0490874074943055,
+        1.0490874074943055
+      ],
+      "ratioMedian": 1.0490874074943055,
+      "ratioMAD": 0.0,
+      "deltaMedian": 25106.0,
+      "deltaMAD": 0.0
+    },
+    "requested_bytes": {
+      "qjsMedian": 1851537811.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 1929085759.0,
+      "zjsMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0418829945244905,
+        1.0418829945244905,
+        1.0418829945244905,
+        1.0418829945244905,
+        1.0418829945244905,
+        1.0418829945244905,
+        1.0418829945244905,
+        1.0418829945244905
+      ],
+      "ratioMedian": 1.0418829945244905,
+      "ratioMAD": 0.0,
+      "deltaMedian": 77547948.0,
+      "deltaMAD": 0.0
+    }
+  }
+}

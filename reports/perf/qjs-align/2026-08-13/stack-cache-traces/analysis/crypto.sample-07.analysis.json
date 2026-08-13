@@ -1,0 +1,523 @@
+{
+  "benchmark": "crypto",
+  "cache": {
+    "0": {
+      "baseline": {
+        "loads": 1224502597,
+        "stores": 1224543364,
+        "total": 2449045961
+      },
+      "capacity": 0,
+      "control_flow_joins": {
+        "cost_shapes": {},
+        "dynamic_edges_canonicalized": 0,
+        "materialized_slots": 0,
+        "observed_join_points": 75,
+        "requiring_canonicalization": 0
+      },
+      "dataflow_iterations": 1,
+      "eliminable": {
+        "fraction_of_baseline": 0.0,
+        "loads": 0,
+        "stores": 0,
+        "total": 0
+      },
+      "entry_cache_depth_distribution": {
+        "0": 1381425545
+      },
+      "exit_cache_depth_distribution": {
+        "0": 1381425545
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 2503600,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "canonical_publication": {
+          "boundary_hits": 17811,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "cold_helper": {
+          "boundary_hits": 2514334,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "return": {
+          "boundary_hits": 2006421,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        }
+      },
+      "modeled": {
+        "loads": 1224502597,
+        "stores": 1224543364,
+        "total": 2449045961
+      }
+    },
+    "1": {
+      "baseline": {
+        "loads": 1224502597,
+        "stores": 1224543364,
+        "total": 2449045961
+      },
+      "capacity": 1,
+      "control_flow_joins": {
+        "cost_shapes": {
+          "1->0": 44
+        },
+        "dynamic_edges_canonicalized": 44,
+        "materialized_slots": 44,
+        "observed_join_points": 75,
+        "requiring_canonicalization": 2
+      },
+      "dataflow_iterations": 3,
+      "eliminable": {
+        "fraction_of_baseline": 0.5749213932371766,
+        "loads": 704004458,
+        "stores": 704004458,
+        "total": 1408008916
+      },
+      "entry_cache_depth_distribution": {
+        "0": 206172994,
+        "1": 1175252551
+      },
+      "exit_cache_depth_distribution": {
+        "0": 206172994,
+        "1": 1175252551
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 2503600,
+          "materialized_slots": 2476380,
+          "materializing_events": 2476380
+        },
+        "canonical_publication": {
+          "boundary_hits": 17811,
+          "materialized_slots": 12361,
+          "materializing_events": 12361
+        },
+        "capacity_evict": {
+          "boundary_hits": 505995221,
+          "materialized_slots": 505995221,
+          "materializing_events": 505995221
+        },
+        "cold_helper": {
+          "boundary_hits": 2514334,
+          "materialized_slots": 1927991,
+          "materializing_events": 1927991
+        },
+        "control_flow_join": {
+          "boundary_hits": 44,
+          "materialized_slots": 44,
+          "materializing_events": 44
+        },
+        "return": {
+          "boundary_hits": 2006421,
+          "materialized_slots": 1788541,
+          "materializing_events": 1788541
+        }
+      },
+      "modeled": {
+        "loads": 520498139,
+        "stores": 520538906,
+        "total": 1041037045
+      }
+    },
+    "2": {
+      "baseline": {
+        "loads": 1224502597,
+        "stores": 1224543364,
+        "total": 2449045961
+      },
+      "capacity": 2,
+      "control_flow_joins": {
+        "cost_shapes": {},
+        "dynamic_edges_canonicalized": 0,
+        "materialized_slots": 0,
+        "observed_join_points": 75,
+        "requiring_canonicalization": 0
+      },
+      "dataflow_iterations": 12,
+      "eliminable": {
+        "fraction_of_baseline": 0.8470779426095059,
+        "loads": 1037266407,
+        "stores": 1037266407,
+        "total": 2074532814
+      },
+      "entry_cache_depth_distribution": {
+        "0": 167518718,
+        "1": 680905291,
+        "2": 533001536
+      },
+      "exit_cache_depth_distribution": {
+        "0": 167518718,
+        "1": 680905291,
+        "2": 533001536
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 2503600,
+          "materialized_slots": 4567902,
+          "materializing_events": 2503464
+        },
+        "canonical_publication": {
+          "boundary_hits": 17811,
+          "materialized_slots": 22162,
+          "materializing_events": 12365
+        },
+        "capacity_evict": {
+          "boundary_hits": 169959007,
+          "materialized_slots": 169959007,
+          "materializing_events": 169959007
+        },
+        "cold_helper": {
+          "boundary_hits": 2514334,
+          "materialized_slots": 2598593,
+          "materializing_events": 1928000
+        },
+        "return": {
+          "boundary_hits": 2006421,
+          "materialized_slots": 1788787,
+          "materializing_events": 1788787
+        }
+      },
+      "modeled": {
+        "loads": 187236190,
+        "stores": 187276957,
+        "total": 374513147
+      }
+    }
+  },
+  "local_round_trips": {
+    "access_executions": {
+      "get": 323270381,
+      "put": 67500261,
+      "set": 22106152
+    },
+    "eliminable_by_pure_tos_cache": false,
+    "get_after_last_put_by_opcode_distance": {
+      "all": 297619251,
+      "distance_le_1": 1667498,
+      "distance_le_32": 125828000,
+      "distance_le_8": 41138967
+    },
+    "get_after_last_set_by_opcode_distance": {
+      "all": 25651130,
+      "distance_le_32": 22971622,
+      "distance_le_8": 1932198
+    },
+    "immediate_put_to_any_get": 61608820,
+    "immediate_put_to_same_local_get": 1667498,
+    "immediate_set_to_same_local_get": 0,
+    "local_load_store_operations_for_same_local_put_get": 3334996,
+    "top_same_local_pairs": [
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 115,
+        "local_index": 4,
+        "write_access": "set",
+        "write_pc": 92
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 84,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 17
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 40,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 10
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 111,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 17
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 49,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 10
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 103,
+        "local_index": 3,
+        "write_access": "put",
+        "write_pc": 28
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 70,
+        "local_index": 2,
+        "write_access": "put",
+        "write_pc": 23
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 60,
+        "local_index": 4,
+        "write_access": "put",
+        "write_pc": 47
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 65,
+        "local_index": 2,
+        "write_access": "put",
+        "write_pc": 23
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 104,
+        "local_index": 5,
+        "write_access": "put",
+        "write_pc": 57
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 59,
+        "local_index": 3,
+        "write_access": "put",
+        "write_pc": 28
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 63,
+        "local_index": 5,
+        "write_access": "put",
+        "write_pc": 57
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 74,
+        "local_index": 6,
+        "write_access": "put",
+        "write_pc": 68
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 97,
+        "local_index": 6,
+        "write_access": "put",
+        "write_pc": 68
+      },
+      {
+        "count": 19305004,
+        "function": "0x40cd6c8",
+        "get_pc": 71,
+        "local_index": 4,
+        "write_access": "put",
+        "write_pc": 47
+      },
+      {
+        "count": 1368426,
+        "function": "0x40cd6c8",
+        "get_pc": 3,
+        "local_index": 7,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 827700,
+        "function": "0x40d9d54",
+        "get_pc": 50,
+        "local_index": 2,
+        "write_access": "put",
+        "write_pc": 26
+      },
+      {
+        "count": 827700,
+        "function": "0x40d9d54",
+        "get_pc": 51,
+        "local_index": 3,
+        "write_access": "set",
+        "write_pc": 45
+      },
+      {
+        "count": 827700,
+        "function": "0x40d9d54",
+        "get_pc": 43,
+        "local_index": 3,
+        "write_access": "set",
+        "write_pc": 45
+      },
+      {
+        "count": 507096,
+        "function": "0x40da860",
+        "get_pc": 46,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 45
+      }
+    ]
+  },
+  "method": {
+    "boundary_policy": "materialize before boundary opcode and leave depth zero",
+    "cache_shape": "contiguous logical TOS",
+    "join_policy": "minimum observed incoming cache depth",
+    "local_slot_traffic_in_tos_coverage": false,
+    "local_write_distance_bucket_upper_bounds": [
+      1,
+      8,
+      32,
+      4294967295
+    ],
+    "traffic_unit": "one JSValue slot load or store"
+  },
+  "one_slot_failure": {
+    "definition": "two-pop non-boundary execution where cache=1 loads more stack slots than cache=2",
+    "dynamic_executions": 333259107,
+    "eligible_two_pop_executions": 455371521,
+    "extra_loads_vs_two_slot": 333259107,
+    "fraction_of_eligible_two_pop_executions": 0.7318400287048253,
+    "top_sites": [
+      {
+        "count": 20673430,
+        "opcode": "gte",
+        "site": "pc=37"
+      },
+      {
+        "count": 19305004,
+        "opcode": "mul",
+        "site": "pc=106"
+      },
+      {
+        "count": 19305004,
+        "opcode": "and",
+        "site": "pc=79"
+      },
+      {
+        "count": 19305004,
+        "opcode": "mul",
+        "site": "pc=73"
+      },
+      {
+        "count": 19305004,
+        "opcode": "shl",
+        "site": "pc=82"
+      },
+      {
+        "count": 19305004,
+        "opcode": "get_array_el",
+        "site": "pc=53"
+      },
+      {
+        "count": 19305004,
+        "opcode": "get_array_el",
+        "site": "pc=42"
+      },
+      {
+        "count": 19305004,
+        "opcode": "mul",
+        "site": "pc=62"
+      },
+      {
+        "count": 19305004,
+        "opcode": "get_array_el",
+        "site": "pc=86"
+      },
+      {
+        "count": 19305004,
+        "opcode": "sar",
+        "site": "pc=96"
+      },
+      {
+        "count": 19305004,
+        "opcode": "and",
+        "site": "pc=46"
+      },
+      {
+        "count": 19305004,
+        "opcode": "add",
+        "site": "pc=91"
+      },
+      {
+        "count": 19305004,
+        "opcode": "sar",
+        "site": "pc=101"
+      },
+      {
+        "count": 19305004,
+        "opcode": "mul",
+        "site": "pc=66"
+      },
+      {
+        "count": 19305004,
+        "opcode": "and",
+        "site": "pc=122"
+      },
+      {
+        "count": 19305004,
+        "opcode": "sar",
+        "site": "pc=56"
+      },
+      {
+        "count": 1368426,
+        "opcode": "and",
+        "site": "pc=22"
+      },
+      {
+        "count": 1368426,
+        "opcode": "sar",
+        "site": "pc=27"
+      },
+      {
+        "count": 845786,
+        "opcode": "gte",
+        "site": "pc=47"
+      },
+      {
+        "count": 797956,
+        "opcode": "put_array_el",
+        "site": "pc=53"
+      }
+    ]
+  },
+  "schema": 1,
+  "significance": {
+    "absolute_traffic_threshold": 1000000,
+    "fraction_threshold": 0.05,
+    "two_slot_passes": true
+  },
+  "source_trace": "raw trace not retained; sha256=672771565d60cdc7c53c6718589fb079b2eeb87c92e23d469c485d0e76fc7f2d",
+  "trace": {
+    "local_history_overflowed": false,
+    "opcodes_executed": 1381425545,
+    "overflowed": false,
+    "raw_boundary_hits": {
+      "canonical_publication": 4549339,
+      "cold_helper": 2514334
+    },
+    "total_edges": 1381425545,
+    "unique_edges": 8875
+  },
+  "validation": {
+    "boundary_stack_effect_mismatches": 3,
+    "edge_opcode_count_conserved": true,
+    "nonboundary_stack_effect_mismatches": 0
+  }
+}

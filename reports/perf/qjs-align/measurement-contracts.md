@@ -132,3 +132,43 @@ const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", ...) orelse target_defau
 在 aarch64（64 位）上默认为 **false**，即**默认表示是 16 字节 payload+tag，NaN boxing 才是
 alternate**。P7-60 §8.3 把两者说反了。任何涉及 JSValue 表示的结论都必须写明测的是哪一种，
 并跑 `-Dzjs_nan_boxing=true` 门禁。
+
+## 12. 分布型 trace 必须先用小工作量 pilot 验证收敛
+
+**来源**：STACK-CACHE-SIM（2026-08-13）
+
+对 **edge mix、shape mix、cache-depth、flush-reason** 这类**比例分布型** trace，
+必须先用**缩小工作量的 pilot** 验证分布收敛。默认采用**单个完整样本 + 较高 iteration divisor**；
+只有当关键归一化比例超过预设稳定性阈值时，才增加工作量或重复样本。
+**不得直接沿用 PMU / cycles 实验的完整工作量与固定多样本模板。**
+
+**事故**：STACK-CACHE-SIM 对确定性的归一化 edge 分布使用了完整的 `divisor=16` 工作量
+和每基准 5–8 个样本。**所有观测到的决策指标 Δ = 0.0000** —— 重复的完整 trace
+只增加了成本，没有增加任何信息。该任务因此耗时约 3 小时，
+其中 15 个基准的 edge trace 是主要开销；而按本条款只需十几分钟。
+（叠加后果：终止时 `final-data` 仅完成 9/15 的归约，另 6 个只剩不可互操作的
+`pre-stack-identity` 旧方法学 trace，导致 full-Zoo 聚合无法归档。）
+
+**可执行流程**：
+
+1. 用 `divisor=256` 或同量级配置跑 **1 个** sample。
+2. 再用不同起始条件或 `divisor=64` 跑第 2 个 pilot。
+3. 比较：关键决策比例（如 A1/A2/B1/B2）、cache-depth 分布、flush-reason 分布、
+   edge-distribution 距离。
+4. 若关键决策指标差异低于阈值**且 GO/NO-GO 不翻转**，**停止采样**。
+5. 只有不收敛时才增加 sample 或工作量。
+
+**稳定性阈值**：
+
+```
+关键比例绝对差 <= 0.5 percentage point
+dominant flush reason 不翻转
+GO / NO-GO 不翻转
+```
+
+对更高维的 edge distribution，可附加 Jensen–Shannon divergence 或 total variation
+distance，但**不作为所有任务的强制要求**。
+
+⚠️ **推论**：绝对事件数**不得**跨样本直接合并；必须先按总 opcode、
+总 stack read/write 或总 edge 数**归一化**再检查稳定性。
+point estimate 取一个完整的 canonical sample，其余样本**只用于收敛证明**。

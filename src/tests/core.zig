@@ -1918,6 +1918,14 @@ test "atom table retains its cached string until the atom dies" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
+    const predefined = try rt.atoms.toStringValueForPush(rt, core.atom.ids.name);
+    defer predefined.free(rt);
+    const predefined_allocations = rt.memory.allocation_count;
+    const predefined_again = try rt.atoms.toStringValueForPush(rt, core.atom.ids.name);
+    defer predefined_again.free(rt);
+    try std.testing.expect(predefined_again.asStringBodyRaw() == predefined.asStringBodyRaw());
+    try std.testing.expectEqual(predefined_allocations, rt.memory.allocation_count);
+
     const atom_id = try rt.internAtom("ownedAtomName");
     const atom_string = try core.string.String.createAtomBacked(rt, atom_id);
     // The table caches the materialized string; repeat conversions reuse it.
@@ -4424,6 +4432,43 @@ test "ordinary object additions reuse transition shapes" {
     try std.testing.expectEqual(@as(usize, 2), first.shape_ref.prop_count);
     try std.testing.expectEqual(@as(?i32, 1), (try first.getProperty(a)).asInt32());
     try std.testing.expectEqual(@as(?i32, 4), (try second.getProperty(b)).asInt32());
+}
+
+test "pure property value replacement preserves a shared shape until flags change" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    defer first.value().free(rt);
+    const second = try core.Object.create(rt, core.class.ids.object, null);
+    defer second.value().free(rt);
+
+    const key = try rt.internAtom("shared_replace");
+    defer rt.atoms.free(key);
+
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
+    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
+    const shared_shape = first.shape_ref;
+    try std.testing.expectEqual(shared_shape, second.shape_ref);
+
+    // QuickJS updates only the per-object JSProperty value when the metadata
+    // flags are unchanged. The shared JSShape remains valid for both owners.
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(3), true, false, true));
+    try std.testing.expectEqual(shared_shape, first.shape_ref);
+    try std.testing.expectEqual(shared_shape, second.shape_ref);
+    try std.testing.expectEqual(@as(?i32, 3), (try first.getProperty(key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try second.getProperty(key)).asInt32());
+
+    // Metadata mutation still requires clone-before-write so the peer keeps
+    // the original writable shape.
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(4), false, false, true));
+    try std.testing.expect(first.shape_ref != second.shape_ref);
+    const first_desc = (try first.getOwnProperty(rt, key)).?;
+    defer first_desc.destroy(rt);
+    const second_desc = (try second.getOwnProperty(rt, key)).?;
+    defer second_desc.destroy(rt);
+    try std.testing.expectEqual(false, first_desc.writable.?);
+    try std.testing.expectEqual(true, second_desc.writable.?);
 }
 
 test "unique transition shape appends in place across FAM relocation" {
@@ -10137,10 +10182,27 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     exotic_delete_calls = 0;
     const key = try rt.internAtom("hooked");
     defer rt.atoms.free(key);
+    const real_key = try rt.internAtom("real-own");
+    defer rt.atoms.free(real_key);
 
     const desc = (try obj.getOwnProperty(rt, key)).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 99), desc.value.asInt32());
+
+    // qjs JS_DefineProperty updates an actual own shape entry before the
+    // JS_CreateProperty exotic hook. Seed one with dispatch disabled, then
+    // prove redefining it bypasses the hook while a miss still calls it.
+    obj.flags.has_exotic_methods = false;
+    try obj.defineOwnProperty(rt, real_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    obj.flags.has_exotic_methods = true;
+    try obj.defineOwnProperty(rt, real_key, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try std.testing.expectEqual(@as(usize, 0), exotic_define_calls);
+    obj.flags.has_exotic_methods = false;
+    const real_desc = (try obj.getOwnProperty(rt, real_key)).?;
+    defer real_desc.destroy(rt);
+    try std.testing.expectEqual(@as(?i32, 2), real_desc.value.asInt32());
+    obj.flags.has_exotic_methods = true;
+
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try std.testing.expectEqual(@as(usize, 1), exotic_define_calls);
     try std.testing.expect(obj.deleteProperty(rt, key));

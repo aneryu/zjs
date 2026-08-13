@@ -36,6 +36,36 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
 Build `zjs` first — a stale binary has produced wrong campaign conclusions
 before.
 
+### Parallel cluster-swapped comparison
+
+For a faster macro-score comparison, two equal CPU lists can be used as paired
+lanes. Each benchmark runs zjs and QuickJS simultaneously on matching lane
+positions, then the engines swap clusters on the next sample. For example,
+five lanes use ten CPUs and run five benchmarks per batch:
+
+```bash
+flock -x /tmp/zjs-host-heavy.lock taskset -c 5-9,15-19 \
+  python3 tools/perf/zoo/run_zoo_compare.py \
+    --zjs zig-out/bin/zjs \
+    --qjs /home/aneryu/quickjs/qjs \
+    --samples 4 \
+    --parallel-clusters 5-9 15-19 \
+    --output reports/perf/qjs-align/<date>/zoo-compare-parallel.json
+```
+
+The lists must be disjoint and the same width. Their order defines paired
+lanes: CPU 5 is paired with CPU 15, CPU 6 with CPU 16, and so on. The runner
+requires its effective affinity to equal the union of both lists, records every
+engine/CPU assignment, and verifies that neither binary changed during the
+measurement.
+
+Parallel execution can expose shared-cache or memory contention that serial
+execution does not. Calibrate a host and lane count against the default serial
+runner before using parallel results as an acceptance gate. A one-lane form,
+such as `--parallel-clusters 9 19` under `taskset -c 9,19`, keeps the paired
+engine overlap while avoiding cross-benchmark contention. Fixed-work PMU
+attribution remains serial; `run_zoo_fixed_pmu.py` does not use this mode.
+
 ## Fixed-work PMU attribution
 
 The normal Octane protocol runs each benchmark for roughly one second. Faster
@@ -73,19 +103,28 @@ attribution. The ordinary throughput runner remains the macro acceptance gate.
   parity, so an odd count leaves one engine leading more often; measurement
   contract #3 exists because that has voided headline numbers twice. Silently
   adjusting the count would change the measurement design behind the caller.
-- **Affinity that is not exactly the requested CPU.** An allowed-list that
-  merely *contains* CPU 19 is not pinning; the tool reads its own effective
-  affinity and refuses if it is not exactly `{19}`.
-- **A benchmark that prints no parseable score**, or where the two engines
-  report different score keys — either means the comparison is not like-for-like.
+- **Affinity that is not exactly the requested CPU set.** Serial mode requires
+  exactly `{--cpu}`. Parallel mode requires exactly the union of both clusters;
+  a wider allowed-list is refused.
+- **A benchmark that exits nonzero, times out, or prints no parseable score**,
+  or where the two engines report different score keys — any of these means the
+  comparison is not like-for-like.
+- **A binary that changes during the run.** Both full-file SHA-256 values are
+  captured before the first sample and verified again after the last sample.
 
 ## Artifact
 
 The JSON records both binaries' SHA-256 and repository commit and dirty state,
 the zoo checkout's commit, kernel, CPU model, effective affinity, the sample
-count, the full execution order log, every raw score, and per-benchmark median /
-min / max. Provenance is the point: a score without the binary identity that
-produced it cannot be compared against a later run.
+count, total measurement wall time, the full execution order log, every raw
+score, and per-benchmark median / min / max. Provenance is the point: a score
+without the binary identity that produced it cannot be compared against a later
+run.
+
+Parallel artifacts additionally name `executionMode`, the ordered CPU lists,
+lane count, simultaneous batch groups, and the per-sample engine/CPU mapping.
+The serial artifact shape remains backward compatible; the added mode fields
+are additive.
 
 Schema 2 uses `statistics.median`; with the required even sample count this
 averages the two middle values. Historical schema-1 artifacts selected the

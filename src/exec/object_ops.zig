@@ -415,7 +415,10 @@ pub fn createRootGlobalClosureCell(
     return ownedClosureCell(ctx.runtime, cell_value);
 }
 
-fn resolveNestedClosureCell(
+/// One qjs js_closure2 closure-type arm (qjs:17297-17331). This is only the
+/// tagged dispatch around the real capture/global helpers, so keep it inside
+/// the capture loop rather than materializing another call-chain level.
+inline fn resolveNestedClosureCell(
     ctx: *core.JSContext,
     frame: *frame_mod.Frame,
     global: *core.Object,
@@ -446,11 +449,11 @@ fn resolveNestedClosureCell(
     };
 }
 
-/// Shared js_closure2 core for nested and ordinary root functions. It allocates
-/// the final pointer array once, performs root GLOBAL_DECL pass 1 before the
-/// first cell, fills in closure order, and transfers the completed array to the
-/// already-bytecode-backed object. No function property or side adapter is
-/// published across this transaction.
+/// Shared js_closure2 core (qjs:17262-17331) for nested and ordinary root
+/// functions. It allocates the final pointer array once, performs root
+/// GLOBAL_DECL pass 1 before the first cell, fills in closure order, and
+/// transfers the completed array to the already-bytecode-backed object. No
+/// function property or side adapter is published across this transaction.
 fn attachFunctionCaptures(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -458,9 +461,10 @@ fn attachFunctionCaptures(
     object: *core.Object,
     source: ClosureCaptureSource,
 ) HostError!void {
-    if (fb.closureVar().len == 0) return;
+    const closure_vars = fb.closureVar();
+    if (closure_vars.len == 0) return;
 
-    const captures = try ctx.runtime.memory.alloc(*core.VarRef, fb.closureVar().len);
+    const captures = try ctx.runtime.memory.alloc(*core.VarRef, closure_vars.len);
     var captures_transferred = false;
     errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
     var rooted_captures: []*core.VarRef = captures[0..0];
@@ -473,19 +477,32 @@ fn attachFunctionCaptures(
         rooted_captures = &.{};
     };
 
+    // qjs js_closure2 has one capture source (`sf`/`cur_var_refs`) and switches
+    // only on closure_type inside the loop (qjs:17297-17331). Root construction
+    // needs two additional zjs sources, but their tag is closure-wide: select it
+    // once instead of re-testing the same union for every capture.
     switch (source) {
-        .nested_frame => {},
-        .root_global, .custom => try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval()),
-    }
-
-    for (fb.closureVar(), 0..) |cv, idx| {
-        captures[idx] = switch (source) {
-            .nested_frame => |frame| try resolveNestedClosureCell(ctx, frame, global, cv),
-            .root_global => try createRootGlobalClosureCell(ctx, global, fb, cv),
-            .custom => |resolver| try resolver.resolve(resolver.context, ctx, global, fb, idx, cv),
-        };
-        initialized += 1;
-        rooted_captures = captures[0..initialized];
+        .nested_frame => |frame| for (closure_vars, 0..) |cv, idx| {
+            captures[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
+            initialized += 1;
+            rooted_captures = captures[0..initialized];
+        },
+        .root_global => {
+            try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
+            for (closure_vars, 0..) |cv, idx| {
+                captures[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
+                initialized += 1;
+                rooted_captures = captures[0..initialized];
+            }
+        },
+        .custom => |resolver| {
+            try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
+            for (closure_vars, 0..) |cv, idx| {
+                captures[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
+                initialized += 1;
+                rooted_captures = captures[0..initialized];
+            }
+        },
     }
 
     captures_transferred = true;
@@ -2827,7 +2844,14 @@ pub fn getValueProperty(
                 if (object.getOwnDataPropertyValue(atom_id)) |own_data| return own_data;
             }
         }
-        if (isFunctionLikeClass(object.class_id)) {
+        // QuickJS's fixed `JS_ATOM_Symbol_hasInstance` lookup goes straight
+        // into the ordinary shape walk (quickjs.c:8139, 8268). Keep zjs's
+        // receiver-aware legacy compatibility helper ahead of that walk only
+        // for its two actual keys; unrelated function properties must not pay
+        // an outlined `caller`/`arguments` miss.
+        if (isFunctionLikeClass(object.class_id) and
+            (atom_id == core.atom.ids.caller or atom_id == core.atom.ids.arguments))
+        {
             if (try functionCallerArgumentsProperty(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |function_value| {
                 return function_value;
             }
@@ -2843,6 +2867,48 @@ pub fn getValueProperty(
         return getValuePropertyObjectMiss(ctx, global, value, object, atom_id);
     }
     return getValuePropertyNonObject(ctx, output, global, value, atom_id, caller_function, caller_frame);
+}
+
+/// QJS `JS_GetPropertyInternal` starts a named-atom read with the ordinary
+/// `find_own_property` shape walk and enters class/exotic handling only after a
+/// miss (quickjs.c:8268-8330). Internal algorithms already carry an atom, so
+/// they can use the same data-only prefix without paying the VM computed-key
+/// conversion or the general resolver's representation-specific index cases.
+///
+/// A complete ordinary miss is distinct from a slow/exotic lookup: QJS returns
+/// undefined immediately after exhausting the ordinary prototype chain, while
+/// accessors, auto-init/var-ref entries, proxies, class exotics, private names,
+/// and integer-index atoms must enter the full observable resolver.
+pub const NamedDataPropertyProbe = struct {
+    slot: ?*const core.JSValue = null,
+    needs_slow: bool = false,
+};
+
+pub inline fn probeNamedDataProperty(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) NamedDataPropertyProbe {
+    if (core.atom.isTaggedInt(atom_id) or rt.atoms.mightBePrivate(atom_id)) return .{ .needs_slow = true };
+    const object = objectFromValueTrustedExpression(receiver) orelse return .{ .needs_slow = true };
+    return probePublicNamedDataPropertyFromObject(object, atom_id);
+}
+
+/// Object-unpacked twin for internal algorithms that carry a known public,
+/// non-index atom. JS_IsInstanceOf has already required an Object RHS before
+/// requesting the predefined public Symbol.hasInstance key, exactly as QJS
+/// does before JS_GetProperty (quickjs.c:8136-8139).
+pub inline fn probePublicNamedDataPropertyFromObject(
+    initial_object: *core.Object,
+    atom_id: core.Atom,
+) NamedDataPropertyProbe {
+    var object = initial_object;
+    while (true) {
+        var slow_property = false;
+        if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return .{ .slot = slot };
+        if (slow_property or object.needsSlowPropertyAccess()) return .{ .needs_slow = true };
+        object = object.getPrototype() orelse return .{};
+    }
 }
 
 /// Object-property fallback after the real shape/prototype chain missed. QJS

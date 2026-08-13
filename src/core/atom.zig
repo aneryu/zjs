@@ -1441,12 +1441,15 @@ pub const AtomTable = struct {
 
     /// QJS `OP_push_atom_value` indexes `atom_array[atom]` and duplicates the
     /// already-materialized JSString directly. zjs keeps atoms and strings in
-    /// separate structures, but after the first conversion the dynamic entry
-    /// has the same direct pointer. Inline that steady-state lookup so a string
-    /// literal push does not repeat tagged/const/name/liveness/cache dispatch
-    /// on every loop iteration. The slow path preserves tagged-int, predefined,
-    /// symbol-description and first-materialization behavior.
+    /// separate structures, but after the first conversion the predefined or
+    /// dynamic entry has the same direct pointer. Inline that steady-state
+    /// lookup so hot atom-to-string users do not repeat tagged/const/name/
+    /// liveness/cache dispatch. The slow path preserves tagged-int, symbol-
+    /// description and first-materialization behavior.
     pub inline fn toStringValueForPush(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
+        if (atom_id > null_atom and atom_id < first_dynamic_atom) {
+            if (self.predefined_str[atom_id - 1]) |cached| return cached.value().dup();
+        }
         if (atom_id >= first_dynamic_atom and atom_id < tagged_int_bit) {
             const idx: usize = @intCast(atom_id - first_dynamic_atom);
             if (idx < self.entries.len) {

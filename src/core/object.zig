@@ -7507,10 +7507,6 @@ pub const Object = extern struct {
         }
     }
 
-    inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.metaConst().flags.kind == .object or header.metaConst().flags.kind == .function_bytecode or header.metaConst().flags.kind == .var_ref or header.metaConst().flags.kind == .shape or header.metaConst().flags.kind == .realm_context or header.metaConst().flags.kind == .module;
-    }
-
     const DecrefVisitor = struct {
         registry: *gc.Registry,
         garbage: *gc.HeaderList,
@@ -7555,7 +7551,11 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
-            if (h.meta().rc == 0) return;
+            // Every owned edge contributes one ref, so it cannot already be
+            // zero before its matching trial decrement. QuickJS makes the same
+            // invariant explicit in gc_decref_child and performs the decrement
+            // without a production branch.
+            std.debug.assert(h.meta().rc > 0);
             h.meta().rc -= 1;
             // QuickJS gc_decref_child immediately moves an already-scanned
             // child whose trial refcount reaches zero to tmp_obj_list.
@@ -7612,7 +7612,10 @@ pub const Object = extern struct {
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
             const was_zero = h.meta().rc == 0;
             h.meta().rc += 1;
-            if (was_zero and headerHasTraceableChildren(h) and h.meta().flags.mark) {
+            // mark implies membership in the cycle-candidate set; the kind
+            // recheck was redundant with the same invariant used by QuickJS's
+            // gc_scan_incref_child.
+            if (was_zero and h.meta().flags.mark) {
                 self.garbage.remove(h);
                 h.meta().flags.mark = false;
                 // Moving a newly revived zero-ref node to the main-list tail
@@ -7847,17 +7850,13 @@ pub const Object = extern struct {
 
         sweepCycleGarbageWeakCollectionEntries(rt);
 
-        var garbage_count: usize = 0;
-        {
-            var cursor = garbage.head;
-            while (cursor) |h| : (cursor = h.next) {
-                if (h.meta().flags.kind == .object or h.meta().flags.kind == .var_ref or h.meta().flags.kind == .shape or h.meta().flags.kind == .realm_context or h.meta().flags.kind == .module) garbage_count += 1;
-            }
-        }
-
         // No fallible operation is allowed after this point. Split the detached
         // partition by teardown order, reusing the same header links for each
-        // staging list and later for Registry's Pass-B deferred list.
+        // staging list and later for Registry's Pass-B deferred list. Count the
+        // collected value-bearing nodes while consuming that list instead of
+        // making a separate full pass; QuickJS likewise consumes tmp_obj_list
+        // directly in gc_free_cycles.
+        var garbage_count: usize = 0;
         var garbage_objects: gc.HeaderList = .{};
         var garbage_bytecodes: gc.HeaderList = .{};
         var garbage_var_refs: gc.HeaderList = .{};
@@ -7866,25 +7865,35 @@ pub const Object = extern struct {
         var garbage_modules: gc.HeaderList = .{};
         while (garbage.popFront()) |h| {
             switch (h.meta().flags.kind) {
-                .object => garbage_objects.append(h),
+                .object => {
+                    garbage_count += 1;
+                    garbage_objects.append(h);
+                },
                 .function_bytecode => garbage_bytecodes.append(h),
-                .var_ref => garbage_var_refs.append(h),
-                .shape => garbage_shapes.append(h),
-                .realm_context => garbage_contexts.append(h),
-                .module => garbage_modules.append(h),
+                .var_ref => {
+                    garbage_count += 1;
+                    garbage_var_refs.append(h);
+                },
+                .shape => {
+                    garbage_count += 1;
+                    garbage_shapes.append(h);
+                },
+                .realm_context => {
+                    garbage_count += 1;
+                    garbage_contexts.append(h);
+                },
+                .module => {
+                    garbage_count += 1;
+                    garbage_modules.append(h);
+                },
                 else => unreachable,
             }
         }
 
         const old_phase = rt.gc.phase;
         rt.gc.phase = .remove_cycles;
-        // Cold once-per-collection transition: keep the VM deinit-mirror bytes
-        // authoritative across the save/restore (old_phase could in principle
-        // be .deinit if a teardown pass ever ran cycle removal).
-        rt.syncGcDeinitMirrors(false);
         defer {
             rt.gc.phase = old_phase;
-            rt.syncGcDeinitMirrors(old_phase == .deinit);
         }
 
         // STEP 3 (qjs faithful): no edge-nulling pre-pass. qjs has none — its
@@ -8312,6 +8321,12 @@ pub const Object = extern struct {
                 },
             }
         }
+        // QuickJS `mark_children` stops after the shape/property scan for
+        // JS_CLASS_OBJECT; only non-ordinary classes consult their class GC
+        // marker (quickjs.c:6586-6591). A payload-less ordinary object has no
+        // remaining out-of-line edges below, so keep the same boundary instead
+        // of probing every specialized payload kind on each collector pass.
+        if (self.class_id == class.ids.object and self.flags.class_payload_kind == .none) return;
         if (self.ordinaryPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.callsite_file);
             try Helper.traceOptValue(visitor, &payload.callsite_function);
@@ -9826,10 +9841,23 @@ pub const Object = extern struct {
     }
 
     pub fn defineOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        if (self.exoticMethods(rt)) |methods| {
-            if (methods.define_own_property) |hook| {
-                if (!hook(self, atom_id, desc)) return error.IncompatibleDescriptor;
-                return;
+        // qjs JS_DefineProperty resolves a real own shape entry first; only a
+        // miss reaches JS_CreateProperty's exotic/array create machinery.
+        // Ordinary classes therefore pay one slow-property classification,
+        // not the module/mapped/array prelude on every define.
+        if (!self.needsSlowPropertyAccess()) {
+            try self.defineOrdinaryOwnProperty(rt, atom_id, desc);
+            return;
+        }
+        // Exotic [[DefineOwnProperty]] is a create-on-miss hook in qjs:
+        // actual shape entries are updated by JS_DefineProperty before it
+        // reaches JS_CreateProperty.
+        if (self.findProperty(atom_id) == null) {
+            if (self.exoticMethods(rt)) |methods| {
+                if (methods.define_own_property) |hook| {
+                    if (!hook(self, atom_id, desc)) return error.IncompatibleDescriptor;
+                    return;
+                }
             }
         }
         if (try self.defineModuleNamespaceProperty(rt, atom_id, desc)) return;
@@ -9881,6 +9909,33 @@ pub const Object = extern struct {
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
         try self.addProperty(rt, atom_id, desc);
+    }
+
+    /// Publish one new C_W_E data property whose atom is independently rooted
+    /// by immutable bytecode for the whole call. This is the ownership shape
+    /// of qjs OP_put_field/add_property: the bytecode owns the operand atom and
+    /// the new Shape takes the sole additional reference. The value remains a
+    /// borrow, so the installed slot retains it exactly as the descriptor path
+    /// does. Callers must prove the atom root and the ordinary/new-property
+    /// preconditions; this entry deliberately performs no duplicate probe.
+    pub fn defineOwnDataPropertyAssumingNewFromRootedAtom(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        data_value: JSValue,
+    ) !void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.supportsPlainNamedPropertyStorage());
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            rt,
+            atom_id,
+            comptime property.Flags.data(true, true, true),
+            .{ .data = data_value.dup() },
+        );
     }
 
     /// Fast-path property define for freshly-created ordinary objects or
@@ -11189,7 +11244,18 @@ pub const Object = extern struct {
         // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890). The
         // prepared slot takes the caller's ref; on append failure the errdefer
         // inside destroys it (owned contract).
-        try self.appendPreparedPropertyEntry(rt, atom_id, property.Flags.data(true, true, true), .{ .data = new_value });
+        // Both callers decode `atom_id` from the active immutable bytecode's
+        // OP_put_field operand, whose FunctionBytecode owns the atom across
+        // this allocation/GC window. qjs add_property relies on that same
+        // operand root and retains only the Shape's reference.
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            rt,
+            atom_id,
+            comptime property.Flags.data(true, true, true),
+            .{ .data = new_value },
+        );
         return true;
     }
 
@@ -11415,18 +11481,34 @@ pub const Object = extern struct {
     }
 
     fn defineOrdinaryOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        try self.materializeMappedArgumentsProperty(rt, atom_id);
-        if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
-            const element_index: usize = @intCast(array_index);
-            if (element_index < self.arrayElements().len) {
-                try self.convertDenseArrayElementsToSparseProperties(rt);
-            }
-        }
         if (self.findProperty(atom_id)) |index| {
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
             return;
+        }
+
+        if (self.class_id == class.ids.mapped_arguments) {
+            try self.materializeMappedArgumentsProperty(rt, atom_id);
+            if (self.findProperty(atom_id)) |index| {
+                try self.materializeAutoInitEntryForMutation(index);
+                if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
+                try self.replaceProperty(rt, index, desc);
+                return;
+            }
+        }
+        if (classOwnsIndexedElementStorage(self.class_id)) {
+            if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
+                const element_index: usize = @intCast(array_index);
+                if (element_index < self.arrayElements().len) {
+                    try self.convertDenseArrayElementsToSparseProperties(rt);
+                    const index = self.findProperty(atom_id) orelse unreachable;
+                    try self.materializeAutoInitEntryForMutation(index);
+                    if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
+                    try self.replaceProperty(rt, index, desc);
+                    return;
+                }
+            }
         }
 
         if (!self.flags.extensible) return error.NotExtensible;
@@ -11671,17 +11753,16 @@ pub const Object = extern struct {
         return self.appendPreparedPropertyEntryImpl(false, false, rt, atom_id, entry_flags, slot);
     }
 
-    /// `caller_holds_atom_ref == true` is the trusted leg: the caller already
-    /// holds a live `atom_id` ref for the whole call (the object-literal
-    /// `OP_define_field` path via definePlainDataPropertyKnownFast, whose atom
-    /// is the executing function bytecode's inline operand — rooted by the
-    /// finalized-bytecode atom-retention walk + the frame's `current_function`
-    /// ref). With that external root the local dup/free guard is pure redundancy
-    /// (the atom cannot reach ref_count 0 under a GC from the shape allocations),
-    /// so elide it. qjs add_property likewise relies on the single caller-held
-    /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
-    /// per-property guard. MUST NOT be used with a transient/just-interned atom
-    /// that has no other root than the (elided) guard.
+    /// `caller_holds_atom_ref == true` is the trusted bytecode-operand leg: the
+    /// caller already holds a live `atom_id` ref for the whole call. That is
+    /// true for OP_define_field, OP_put_field, and the simple-constructor field
+    /// table: all three borrow atoms from immutable FunctionBytecode retained
+    /// by the active function/frame. With that external root the local dup/free
+    /// guard is pure redundancy (the atom cannot reach ref_count 0 under a GC
+    /// from the shape allocations), so elide it. qjs add_property likewise
+    /// relies on the caller-held bytecode atom and takes only the Shape's owning
+    /// JS_DupAtom. MUST NOT be used with a transient/just-interned atom that has
+    /// no other root than the elided guard.
     ///
     /// `slot_borrowed_until_commit == true` (the definePlainDataPropertyKnownFast
     /// leg only): the slot's data value is a BORROW of the caller's live ref
@@ -11792,13 +11873,13 @@ pub const Object = extern struct {
     }
 
     fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, is_array_index: bool) !void {
-        // No local atom guard: the sole caller `appendPreparedPropertyEntry`
-        // already holds an `atoms.dup(atom_id)` guard live across this entire
-        // call (its `defer atoms.free` runs only after we return), so `atom_id`
-        // cannot be collected under a GC triggered by the shape allocations
-        // below. A second dup/free here just duplicated that root — qjs
-        // add_property likewise relies on the single caller-held atom ref
-        // through add_shape_property (which does the one owning JS_DupAtom).
+        // No local atom guard: appendPreparedPropertyEntryImpl reaches this
+        // either with its own `atoms.dup(atom_id)` guard or through a trusted
+        // bytecode-operand leg whose FunctionBytecode independently roots the
+        // atom. In both cases `atom_id` survives any GC triggered by the shape
+        // allocations below. A second dup/free here would duplicate that root;
+        // qjs add_property likewise relies on the caller-held atom while
+        // add_shape_property takes the one new owning JS_DupAtom.
         // Indexed properties mutate a unique sparse shape in place. Named
         // properties reach here only after the caller's inline
         // `tryCachedTransition` probe MISSED (qjs add_property cache-hit leg,
@@ -11857,15 +11938,16 @@ pub const Object = extern struct {
             const cell = self.prop_values[index].slot.var_ref;
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
             errdefer next_value.free(rt);
-            try self.ensureUniqueShapeForMutation(rt);
+            const stored_flags = next_flags.withKind(.var_ref);
+            if (old_flags.bits() != stored_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
             cell.setVarRefValue(rt, next_value);
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.withKind(.var_ref).bits());
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, stored_flags.bits());
             return;
         }
         const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
         errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_flags, next_slot);
-        try self.ensureUniqueShapeForMutation(rt);
+        if (old_flags.bits() != next_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
         const old_slot = self.prop_values[index].slot;
         self.prop_values[index] = .{ .slot = next_slot };
         next_owned = false;
@@ -12109,8 +12191,10 @@ pub const Object = extern struct {
     /// Mirrors qjs find_own_property + the JS_PROP_TMASK guard feeding
     /// JS_DupValue(pr->u.value) (quickjs.c:6135, 19125-19133).
     pub inline fn findOwnDataSlotFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?*const JSValue {
-        const props = self.shape_ref.props().ptr;
-        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        const object_shape = self.shape_ref;
+        if (!object_shape.hasPropertyHash()) return null;
+        const props = object_shape.props().ptr;
+        var shape_index = object_shape.firstPropertyIndexAssumeHash(atom_id);
         while (shape_index != shape.no_property_index) {
             const index: usize = @intCast(shape_index);
             const prop = props[index];

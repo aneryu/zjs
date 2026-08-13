@@ -1,0 +1,570 @@
+{
+  "tool": "PDFJS-DIAG-p0-perf",
+  "schemaVersion": 1,
+  "label": "stricteq-flatten-vs-baseline",
+  "timestampUtc": "2026-08-13T05:15:18Z",
+  "workload": "PdfJS deterministic fixed work, iteration divisor 16",
+  "script": {
+    "path": "/tmp/pdfjs-diagnosis-20260813/pdfjs-fixed-d16.js",
+    "sha256": "1a7ebe21975991190a0e3e57d2682fe340306b8a5b4e403f3b2f5ef302ea5deb"
+  },
+  "samplesPerEngine": 8,
+  "samplingOrder": "qjs->zjs, zjs->qjs repeated (ABBA)",
+  "orderLog": [
+    {
+      "sample": 1,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 2,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 3,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 4,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 5,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 6,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 7,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 8,
+      "order": "zjs->qjs"
+    }
+  ],
+  "firstPositionCounts": {
+    "qjs": 4,
+    "zjs": 4
+  },
+  "cpu": 19,
+  "effectiveAffinity": [
+    19
+  ],
+  "parallelism": 1,
+  "pmu": "armv8_pmuv3_1",
+  "events": [
+    "instructions",
+    "cycles",
+    "stall_frontend",
+    "stall_backend",
+    "stall_backend_mem",
+    "branch-instructions",
+    "branch-misses"
+  ],
+  "kernel": "6.17.0-1014-nvidia",
+  "machine": "aarch64",
+  "binaries": {
+    "qjs": {
+      "path": "/tmp/pdfjs-diagnosis-20260813/pristine/zjs-c0ad",
+      "sha256": "c0ad7c3e1650bbab33cc8e4022dddf1813630e9b55ad40528cde580aeac65f96"
+    },
+    "zjs": {
+      "path": "/tmp/pdfjs-diagnosis-20260813/zint-stricteq-flatten/zig-out/bin/zjs",
+      "sha256": "336f98b77f956e6d91ecf84ca5feca64004f99dd59c6c6a76cdecb82afa2d1e7"
+    }
+  },
+  "runs": {
+    "qjs": [
+      {
+        "counters": {
+          "instructions": 6239463720,
+          "cycles": 1321725814,
+          "stall_frontend": 129967891,
+          "stall_backend": 330125925,
+          "stall_backend_mem": 9991649,
+          "branch-instructions": 1223814479,
+          "branch-misses": 4319062
+        },
+        "wallSeconds": 0.36984567902982235,
+        "stdout": "PdfJS: 7759",
+        "stdoutSha256": "c8878d4d7ee7399ac235d13e12f87ebbd6e679d73f821400ae1f438496e8d6d6",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6237437610,
+          "cycles": 1323410882,
+          "stall_frontend": 131759588,
+          "stall_backend": 328612213,
+          "stall_backend_mem": 7773741,
+          "branch-instructions": 1223135675,
+          "branch-misses": 4333503
+        },
+        "wallSeconds": 0.36121530225500464,
+        "stdout": "PdfJS: 7759",
+        "stdoutSha256": "c8878d4d7ee7399ac235d13e12f87ebbd6e679d73f821400ae1f438496e8d6d6",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6237304539,
+          "cycles": 1318937298,
+          "stall_frontend": 127582316,
+          "stall_backend": 331466953,
+          "stall_backend_mem": 7794615,
+          "branch-instructions": 1223053334,
+          "branch-misses": 4328368
+        },
+        "wallSeconds": 0.3496245527639985,
+        "stdout": "PdfJS: 7788",
+        "stdoutSha256": "50ab560aa04157062539baf0751a73939d24ce2310ac71109432a8d59df06412",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6238505558,
+          "cycles": 1322527759,
+          "stall_frontend": 131638913,
+          "stall_backend": 328732232,
+          "stall_backend_mem": 7760090,
+          "branch-instructions": 1223518456,
+          "branch-misses": 4322884
+        },
+        "wallSeconds": 0.34974191430956125,
+        "stdout": "PdfJS: 7759",
+        "stdoutSha256": "c8878d4d7ee7399ac235d13e12f87ebbd6e679d73f821400ae1f438496e8d6d6",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6237871965,
+          "cycles": 1320804219,
+          "stall_frontend": 129746796,
+          "stall_backend": 328928768,
+          "stall_backend_mem": 7680211,
+          "branch-instructions": 1223282648,
+          "branch-misses": 4331147
+        },
+        "wallSeconds": 0.35806102538481355,
+        "stdout": "PdfJS: 7788",
+        "stdoutSha256": "50ab560aa04157062539baf0751a73939d24ce2310ac71109432a8d59df06412",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6238385999,
+          "cycles": 1347652809,
+          "stall_frontend": 129093471,
+          "stall_backend": 356546601,
+          "stall_backend_mem": 7849783,
+          "branch-instructions": 1223470922,
+          "branch-misses": 4353311
+        },
+        "wallSeconds": 0.3569420571438968,
+        "stdout": "PdfJS: 7584",
+        "stdoutSha256": "90b549e8585d03e283fad2b97f19c49c83219e48e8257a8f36817501ed40e989",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6237496750,
+          "cycles": 1317170009,
+          "stall_frontend": 128516896,
+          "stall_backend": 329174646,
+          "stall_backend_mem": 7715262,
+          "branch-instructions": 1223132182,
+          "branch-misses": 4314415
+        },
+        "wallSeconds": 0.3487235871143639,
+        "stdout": "PdfJS: 7788",
+        "stdoutSha256": "50ab560aa04157062539baf0751a73939d24ce2310ac71109432a8d59df06412",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6237375652,
+          "cycles": 1319030670,
+          "stall_frontend": 128323122,
+          "stall_backend": 330948201,
+          "stall_backend_mem": 7611359,
+          "branch-instructions": 1223066708,
+          "branch-misses": 4322309
+        },
+        "wallSeconds": 0.34926167130470276,
+        "stdout": "PdfJS: 7788",
+        "stdoutSha256": "50ab560aa04157062539baf0751a73939d24ce2310ac71109432a8d59df06412",
+        "exitCode": 0
+      }
+    ],
+    "zjs": [
+      {
+        "counters": {
+          "instructions": 6276179964,
+          "cycles": 1329307017,
+          "stall_frontend": 138036273,
+          "stall_backend": 311958303,
+          "stall_backend_mem": 7666864,
+          "branch-instructions": 1232776773,
+          "branch-misses": 4415617
+        },
+        "wallSeconds": 0.35078118508681655,
+        "stdout": "PdfJS: 7670",
+        "stdoutSha256": "0115ad2219326b50692532a5480f33b00ffc5bfe199c38a5604bdc08f3e28a26",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6276644861,
+          "cycles": 1326419727,
+          "stall_frontend": 136398126,
+          "stall_backend": 310398668,
+          "stall_backend_mem": 7735994,
+          "branch-instructions": 1232930358,
+          "branch-misses": 4422025
+        },
+        "wallSeconds": 0.35118518816307187,
+        "stdout": "PdfJS: 7700",
+        "stdoutSha256": "f9e3a883bfbefe3e5dec1cd3b0f82376da3029fa5d20c3fbeafcbf9c59cc73c6",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6276635541,
+          "cycles": 1330835683,
+          "stall_frontend": 134968676,
+          "stall_backend": 318153598,
+          "stall_backend_mem": 7517708,
+          "branch-instructions": 1232898783,
+          "branch-misses": 4413914
+        },
+        "wallSeconds": 0.3519211933016777,
+        "stdout": "PdfJS: 7729",
+        "stdoutSha256": "e89f17884c2ad5c02eb780eba679074969e1dcc13dce3a6814560d68b445fa53",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6276298402,
+          "cycles": 1338966097,
+          "stall_frontend": 138465528,
+          "stall_backend": 321340396,
+          "stall_backend_mem": 7725666,
+          "branch-instructions": 1232770018,
+          "branch-misses": 4422748
+        },
+        "wallSeconds": 0.35383584490045905,
+        "stdout": "PdfJS: 7641",
+        "stdoutSha256": "2473acac2ac58c6affc638236cf41d247109792b017b3c34ebdc67b6aaae544b",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6276615325,
+          "cycles": 1335855999,
+          "stall_frontend": 138144923,
+          "stall_backend": 317105986,
+          "stall_backend_mem": 7949923,
+          "branch-instructions": 1232912365,
+          "branch-misses": 4429990
+        },
+        "wallSeconds": 0.3535842439159751,
+        "stdout": "PdfJS: 7641",
+        "stdoutSha256": "2473acac2ac58c6affc638236cf41d247109792b017b3c34ebdc67b6aaae544b",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6276272925,
+          "cycles": 1333125196,
+          "stall_frontend": 139032566,
+          "stall_backend": 314302944,
+          "stall_backend_mem": 7803420,
+          "branch-instructions": 1232675675,
+          "branch-misses": 4408288
+        },
+        "wallSeconds": 0.35195199167355895,
+        "stdout": "PdfJS: 7700",
+        "stdoutSha256": "f9e3a883bfbefe3e5dec1cd3b0f82376da3029fa5d20c3fbeafcbf9c59cc73c6",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6275544736,
+          "cycles": 1333584482,
+          "stall_frontend": 138768858,
+          "stall_backend": 315181634,
+          "stall_backend_mem": 7569425,
+          "branch-instructions": 1232451791,
+          "branch-misses": 4420083
+        },
+        "wallSeconds": 0.3530087508261204,
+        "stdout": "PdfJS: 7700",
+        "stdoutSha256": "f9e3a883bfbefe3e5dec1cd3b0f82376da3029fa5d20c3fbeafcbf9c59cc73c6",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "instructions": 6276182336,
+          "cycles": 1337448008,
+          "stall_frontend": 137194533,
+          "stall_backend": 320158860,
+          "stall_backend_mem": 7760510,
+          "branch-instructions": 1232713277,
+          "branch-misses": 4437332
+        },
+        "wallSeconds": 0.35464871395379305,
+        "stdout": "PdfJS: 7670",
+        "stdoutSha256": "0115ad2219326b50692532a5480f33b00ffc5bfe199c38a5604bdc08f3e28a26",
+        "exitCode": 0
+      }
+    ]
+  },
+  "metrics": {
+    "instructions": {
+      "qjsMedian": 6237684357.5,
+      "qjsMAD": 344262.0,
+      "zjsMedian": 6276285663.5,
+      "zjsMAD": 217680.5,
+      "pairedRatiosZjsOverQjs": [
+        1.0058845191906973,
+        1.0062857944963075,
+        1.0063057690632349,
+        1.0060579963660585,
+        1.0062109899365337,
+        1.0060731936122698,
+        1.0060998806933246,
+        1.0062216364966823
+      ],
+      "ratioMedian": 1.0061554353149291,
+      "ratioMAD": 8.984032576497825e-05,
+      "pairedDeltasZjsMinusQjs": [
+        36716244,
+        39207251,
+        39331002,
+        37792844,
+        38743360,
+        37886926,
+        38047986,
+        38806684
+      ],
+      "deltaMedian": 38395673.0,
+      "deltaMAD": 555788.0
+    },
+    "cycles": {
+      "qjsMedian": 1321265016.5,
+      "qjsMAD": 2190106.0,
+      "zjsMedian": 1333354839.0,
+      "zjsMAD": 3283489.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0057358363737003,
+        1.0022735531654787,
+        1.0090211907859779,
+        1.0124294842872934,
+        1.0113959205940422,
+        0.9892200625391194,
+        1.012461924343739,
+        1.013962782230075
+      ],
+      "ratioMedian": 1.01020855569001,
+      "ratioMAD": 0.003003797596896951,
+      "pairedDeltasZjsMinusQjs": [
+        7581203,
+        3008845,
+        11898385,
+        16438338,
+        15051780,
+        -14527613,
+        16414473,
+        18417338
+      ],
+      "deltaMedian": 13475082.5,
+      "deltaMAD": 3952755.5
+    },
+    "stall_frontend": {
+      "qjsMedian": 129420133.5,
+      "qjsMAD": 1000124.5,
+      "zjsMedian": 138090598.0,
+      "zjsMAD": 787162.5,
+      "pairedRatiosZjsOverQjs": [
+        1.062079810158649,
+        1.0352045575613062,
+        1.057894857465983,
+        1.0518586400056342,
+        1.0647270472867785,
+        1.0769914614814253,
+        1.079771316605717,
+        1.0691333787842225
+      ],
+      "ratioMedian": 1.0634034287227139,
+      "ratioMAD": 0.008637369389294158,
+      "pairedDeltasZjsMinusQjs": [
+        8068382,
+        4638538,
+        7386360,
+        6826615,
+        8398127,
+        9939095,
+        10251962,
+        8871411
+      ],
+      "deltaMedian": 8233254.5,
+      "deltaMAD": 1126767.0
+    },
+    "stall_backend": {
+      "qjsMedian": 329650285.5,
+      "qjsMAD": 978063.0,
+      "zjsMedian": 316143810.0,
+      "zjsMAD": 3012419.0,
+      "pairedRatiosZjsOverQjs": [
+        0.9449675998635975,
+        0.9445743515320899,
+        0.9598350457579402,
+        0.9775141124585557,
+        0.9640567102966197,
+        0.881519955928566,
+        0.957490614268026,
+        0.9673987017684378
+      ],
+      "ratioMedian": 0.9586628300129831,
+      "ratioMAD": 0.011215550952420161,
+      "pairedDeltasZjsMinusQjs": [
+        -18167622,
+        -18213545,
+        -13313355,
+        -7391836,
+        -11822782,
+        -42243657,
+        -13993012,
+        -10789341
+      ],
+      "deltaMedian": -13653183.5,
+      "deltaMAD": 3689140.5
+    },
+    "stall_backend_mem": {
+      "qjsMedian": 7766915.5,
+      "qjsMAD": 67260.5,
+      "zjsMedian": 7730830.0,
+      "zjsMAD": 68278.0,
+      "pairedRatiosZjsOverQjs": [
+        0.7673271949404948,
+        0.9951442941049875,
+        0.9644745763581652,
+        0.9955639689745867,
+        1.0351177851754334,
+        0.9940937220812346,
+        0.9810975959079549,
+        1.0195958435280743
+      ],
+      "ratioMedian": 0.994619008093111,
+      "ratioMAD": 0.01924912381005972,
+      "pairedDeltasZjsMinusQjs": [
+        -2324785,
+        -37747,
+        -276907,
+        -34424,
+        269712,
+        -46363,
+        -145837,
+        149151
+      ],
+      "deltaMedian": -42055.0,
+      "deltaMAD": 147494.0
+    },
+    "branch-instructions": {
+      "qjsMedian": 1223209161.5,
+      "qjsMAD": 149140.5,
+      "zjsMedian": 1232773395.5,
+      "zjsMAD": 111554.0,
+      "pairedRatiosZjsOverQjs": [
+        1.0073232456011822,
+        1.0080078467174134,
+        1.008049893431712,
+        1.0075614404953446,
+        1.007872029424879,
+        1.0075234750859081,
+        1.0076194618514256,
+        1.0078871977602712
+      ],
+      "ratioMedian": 1.0077457456381524,
+      "ratioMAD": 0.0002032878475261013,
+      "pairedDeltasZjsMinusQjs": [
+        8962294,
+        9794683,
+        9845449,
+        9251562,
+        9629717,
+        9204753,
+        9319609,
+        9646569
+      ],
+      "deltaMedian": 9474663.0,
+      "deltaMAD": 246505.5
+    },
+    "branch-misses": {
+      "qjsMedian": 4325626.0,
+      "qjsMAD": 6042.5,
+      "zjsMedian": 4421054.0,
+      "zjsMAD": 6288.5,
+      "pairedRatiosZjsOverQjs": [
+        1.0223555484964095,
+        1.0204273540366766,
+        1.0197640311544676,
+        1.0231012444469942,
+        1.0228214373698237,
+        1.0126287784171635,
+        1.0244918488369803,
+        1.0266114708596725
+      ],
+      "ratioMedian": 1.0225884929331166,
+      "ratioMAD": 0.002032247400151843,
+      "pairedDeltasZjsMinusQjs": [
+        96555,
+        88522,
+        85546,
+        99864,
+        98843,
+        54977,
+        105668,
+        115023
+      ],
+      "deltaMedian": 97699.0,
+      "deltaMAD": 8573.0
+    },
+    "wallSeconds": {
+      "qjsMedian": 0.35334198572672904,
+      "qjsMAD": 0.004349356517195702,
+      "zjsMedian": 0.35248037124983966,
+      "zjsMAD": 0.0011995278764516115,
+      "pairedRatiosZjsOverQjs": [
+        0.9484528412147042,
+        0.9722323112301264,
+        1.0065688765835317,
+        1.0117055760931022,
+        0.9874971550896187,
+        0.9860199565434616,
+        1.0122881384285347,
+        1.0154240877018266
+      ],
+      "ratioMedian": 0.9970330158365752,
+      "ratioMAD": 0.01496384142424323,
+      "pairedDeltasZjsMinusQjs": [
+        -0.0190644939430058,
+        -0.010030114091932774,
+        0.0022966405376791954,
+        0.0040939305908977985,
+        -0.004476781468838453,
+        -0.004990065470337868,
+        0.004285163711756468,
+        0.00538704264909029
+      ],
+      "deltaMedian": -0.001090070465579629,
+      "deltaMAD": 0.005279617616906762
+    }
+  },
+  "derived": {
+    "qjsIPC": 4.720994107619287,
+    "zjsIPC": 4.707138325014172
+  }
+}

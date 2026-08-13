@@ -1,0 +1,1800 @@
+{
+  "edge_mix": {
+    "conditional_mismatch_fraction": 0.023681522056810605,
+    "global_total_variation": 0.02190547213426326,
+    "qjs_edges": 96822846,
+    "top_absolute_edge_deltas": [
+      {
+        "delta_z_minus_q": 719198,
+        "from": 169,
+        "from_name": "strict_eq",
+        "qjs": 505081,
+        "to": 232,
+        "to_name": "if_false8",
+        "zjs": 1224279
+      },
+      {
+        "delta_z_minus_q": -716192,
+        "from": 169,
+        "from_name": "strict_eq",
+        "qjs": 977496,
+        "to": 233,
+        "to_name": "if_true8",
+        "zjs": 261304
+      },
+      {
+        "delta_z_minus_q": 713152,
+        "from": 232,
+        "from_name": "if_false8",
+        "qjs": 294650,
+        "to": 17,
+        "to_name": "dup",
+        "zjs": 1007802
+      },
+      {
+        "delta_z_minus_q": -713152,
+        "from": 233,
+        "from_name": "if_true8",
+        "qjs": 968132,
+        "to": 17,
+        "to_name": "dup",
+        "zjs": 254980
+      },
+      {
+        "delta_z_minus_q": -242420,
+        "from": 36,
+        "from_name": "call_method",
+        "qjs": 279320,
+        "to": 14,
+        "to_name": "drop",
+        "zjs": 36900
+      },
+      {
+        "delta_z_minus_q": -186694,
+        "from": 14,
+        "from_name": "drop",
+        "qjs": 187046,
+        "to": 145,
+        "to_name": "inc_loc",
+        "zjs": 352
+      },
+      {
+        "delta_z_minus_q": 186694,
+        "from": 36,
+        "from_name": "call_method",
+        "qjs": 0,
+        "to": 145,
+        "to_name": "inc_loc",
+        "zjs": 186694
+      },
+      {
+        "delta_z_minus_q": 51032,
+        "from": 36,
+        "from_name": "call_method",
+        "qjs": 568,
+        "to": 40,
+        "to_name": "return",
+        "zjs": 51600
+      },
+      {
+        "delta_z_minus_q": 43272,
+        "from": 67,
+        "from_name": "get_array_el",
+        "qjs": 531861,
+        "to": 36,
+        "to_name": "call_method",
+        "zjs": 575133
+      },
+      {
+        "delta_z_minus_q": -43272,
+        "from": 67,
+        "from_name": "get_array_el",
+        "qjs": 43272,
+        "to": 37,
+        "to_name": "tail_call_method",
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": 33410,
+        "from": 36,
+        "from_name": "call_method",
+        "qjs": 0,
+        "to": 181,
+        "to_name": "push_2",
+        "zjs": 33410
+      },
+      {
+        "delta_z_minus_q": -33410,
+        "from": 14,
+        "from_name": "drop",
+        "qjs": 33410,
+        "to": 181,
+        "to_name": "push_2",
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": -26293,
+        "from": 73,
+        "from_name": "define_field",
+        "qjs": 37028,
+        "to": 188,
+        "to_name": "push_i16",
+        "zjs": 10735
+      },
+      {
+        "delta_z_minus_q": -24560,
+        "from": 188,
+        "from_name": "push_i16",
+        "qjs": 33863,
+        "to": 73,
+        "to_name": "define_field",
+        "zjs": 9303
+      },
+      {
+        "delta_z_minus_q": 20752,
+        "from": 188,
+        "from_name": "push_i16",
+        "qjs": 574,
+        "to": 188,
+        "to_name": "push_i16",
+        "zjs": 21326
+      },
+      {
+        "delta_z_minus_q": -16528,
+        "from": 73,
+        "from_name": "define_field",
+        "qjs": 22107,
+        "to": 1,
+        "to_name": "push_i32",
+        "zjs": 5579
+      },
+      {
+        "delta_z_minus_q": -15554,
+        "from": 1,
+        "from_name": "push_i32",
+        "qjs": 19630,
+        "to": 73,
+        "to_name": "define_field",
+        "zjs": 4076
+      },
+      {
+        "delta_z_minus_q": 11797,
+        "from": 1,
+        "from_name": "push_i32",
+        "qjs": 2711,
+        "to": 1,
+        "to_name": "push_i32",
+        "zjs": 14508
+      },
+      {
+        "delta_z_minus_q": 10348,
+        "from": 36,
+        "from_name": "call_method",
+        "qjs": 121532,
+        "to": 234,
+        "to_name": "goto8",
+        "zjs": 131880
+      },
+      {
+        "delta_z_minus_q": -10326,
+        "from": 14,
+        "from_name": "drop",
+        "qjs": 108605,
+        "to": 234,
+        "to_name": "goto8",
+        "zjs": 98279
+      },
+      {
+        "delta_z_minus_q": 10278,
+        "from": 168,
+        "from_name": "neq",
+        "qjs": 4872,
+        "to": 232,
+        "to_name": "if_false8",
+        "zjs": 15150
+      },
+      {
+        "delta_z_minus_q": -10274,
+        "from": 168,
+        "from_name": "neq",
+        "qjs": 10274,
+        "to": 233,
+        "to_name": "if_true8",
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": -6688,
+        "from": 38,
+        "from_name": "array_from",
+        "qjs": 6789,
+        "to": 73,
+        "to_name": "define_field",
+        "zjs": 101
+      },
+      {
+        "delta_z_minus_q": 6594,
+        "from": 232,
+        "from_name": "if_false8",
+        "qjs": 148739,
+        "to": 197,
+        "to_name": "get_loc2",
+        "zjs": 155333
+      },
+      {
+        "delta_z_minus_q": -6594,
+        "from": 233,
+        "from_name": "if_true8",
+        "qjs": 6594,
+        "to": 197,
+        "to_name": "get_loc2",
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": -6373,
+        "from": 73,
+        "from_name": "define_field",
+        "qjs": 6422,
+        "to": 73,
+        "to_name": "define_field",
+        "zjs": 49
+      },
+      {
+        "delta_z_minus_q": -5636,
+        "from": 192,
+        "from_name": "get_loc8",
+        "qjs": 5636,
+        "to": 234,
+        "to_name": "goto8",
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": 5636,
+        "from": 192,
+        "from_name": "get_loc8",
+        "qjs": 188967,
+        "to": 17,
+        "to_name": "dup",
+        "zjs": 194603
+      },
+      {
+        "delta_z_minus_q": -5636,
+        "from": 234,
+        "from_name": "goto8",
+        "qjs": 5636,
+        "to": 17,
+        "to_name": "dup",
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": 4392,
+        "from": 197,
+        "from_name": "get_loc2",
+        "qjs": 111146,
+        "to": 36,
+        "to_name": "call_method",
+        "zjs": 115538
+      },
+      {
+        "delta_z_minus_q": -4392,
+        "from": 197,
+        "from_name": "get_loc2",
+        "qjs": 4392,
+        "to": 37,
+        "to_name": "tail_call_method",
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": -4145,
+        "from": 14,
+        "from_name": "drop",
+        "qjs": 336915,
+        "to": 192,
+        "to_name": "get_loc8",
+        "zjs": 332770
+      },
+      {
+        "delta_z_minus_q": 4127,
+        "from": 36,
+        "from_name": "call_method",
+        "qjs": 6744,
+        "to": 192,
+        "to_name": "get_loc8",
+        "zjs": 10871
+      },
+      {
+        "delta_z_minus_q": 3748,
+        "from": 234,
+        "from_name": "goto8",
+        "qjs": 1549854,
+        "to": 192,
+        "to_name": "get_loc8",
+        "zjs": 1553602
+      },
+      {
+        "delta_z_minus_q": 3684,
+        "from": 232,
+        "from_name": "if_false8",
+        "qjs": 808201,
+        "to": 196,
+        "to_name": "get_loc1",
+        "zjs": 811885
+      },
+      {
+        "delta_z_minus_q": -3658,
+        "from": 234,
+        "from_name": "goto8",
+        "qjs": 366616,
+        "to": 196,
+        "to_name": "get_loc1",
+        "zjs": 362958
+      },
+      {
+        "delta_z_minus_q": -3550,
+        "from": 233,
+        "from_name": "if_true8",
+        "qjs": 3604,
+        "to": 192,
+        "to_name": "get_loc8",
+        "zjs": 54
+      },
+      {
+        "delta_z_minus_q": -3170,
+        "from": 233,
+        "from_name": "if_true8",
+        "qjs": 3680,
+        "to": 234,
+        "to_name": "goto8",
+        "zjs": 510
+      },
+      {
+        "delta_z_minus_q": 3147,
+        "from": 36,
+        "from_name": "call_method",
+        "qjs": 0,
+        "to": 195,
+        "to_name": "get_loc0",
+        "zjs": 3147
+      },
+      {
+        "delta_z_minus_q": -3147,
+        "from": 14,
+        "from_name": "drop",
+        "qjs": 14107,
+        "to": 195,
+        "to_name": "get_loc0",
+        "zjs": 10960
+      }
+    ],
+    "top_conditional_mismatches": [
+      {
+        "conditional_tv": 0.45654755896824534,
+        "name": "strict_eq",
+        "opcode": 169,
+        "qjs_outgoing": 1575297,
+        "weighted_mismatch": 719198.0,
+        "zjs_outgoing": 1575297
+      },
+      {
+        "conditional_tv": 0.11121470234438362,
+        "name": "if_false8",
+        "opcode": 232,
+        "qjs_outgoing": 5348912,
+        "weighted_mismatch": 594877.6559463016,
+        "zjs_outgoing": 6078400
+      },
+      {
+        "conditional_tv": 0.30490383707232394,
+        "name": "if_true8",
+        "opcode": 233,
+        "qjs_outgoing": 1831936,
+        "weighted_mismatch": 337063.26438369026,
+        "zjs_outgoing": 1105474
+      },
+      {
+        "conditional_tv": 0.12076637962145101,
+        "name": "call_method",
+        "opcode": 36,
+        "qjs_outgoing": 2355843,
+        "weighted_mismatch": 284506.630066538,
+        "zjs_outgoing": 2406895
+      },
+      {
+        "conditional_tv": 0.1857910439852078,
+        "name": "drop",
+        "opcode": 14,
+        "qjs_outgoing": 1199426,
+        "weighted_mismatch": 177803.88700428372,
+        "zjs_outgoing": 957010
+      },
+      {
+        "conditional_tv": 0.012436251708217126,
+        "name": "get_array_el",
+        "opcode": 67,
+        "qjs_outgoing": 3479505,
+        "weighted_mismatch": 43272.00000000003,
+        "zjs_outgoing": 3479505
+      },
+      {
+        "conditional_tv": 0.0332784630912946,
+        "name": "push_i16",
+        "opcode": 188,
+        "qjs_outgoing": 738105,
+        "weighted_mismatch": 24563.0,
+        "zjs_outgoing": 738105
+      },
+      {
+        "conditional_tv": 0.3182284225063118,
+        "name": "define_field",
+        "opcode": 73,
+        "qjs_outgoing": 112542,
+        "weighted_mismatch": 17482.833075651757,
+        "zjs_outgoing": 54938
+      },
+      {
+        "conditional_tv": 0.06530410029473754,
+        "name": "push_i32",
+        "opcode": 1,
+        "qjs_outgoing": 238178,
+        "weighted_mismatch": 15553.999999999998,
+        "zjs_outgoing": 238178
+      },
+      {
+        "conditional_tv": 0.11382577094983275,
+        "name": "neq",
+        "opcode": 168,
+        "qjs_outgoing": 90290,
+        "weighted_mismatch": 10277.328859060399,
+        "zjs_outgoing": 90294
+      },
+      {
+        "conditional_tv": 0.002681084891260207,
+        "name": "goto8",
+        "opcode": 234,
+        "qjs_outgoing": 3290609,
+        "weighted_mismatch": 8810.953840459177,
+        "zjs_outgoing": 3286339
+      },
+      {
+        "conditional_tv": 0.12216856492027335,
+        "name": "array_from",
+        "opcode": 38,
+        "qjs_outgoing": 54875,
+        "weighted_mismatch": 6704.0,
+        "zjs_outgoing": 54875
+      },
+      {
+        "conditional_tv": 0.00041706957502671613,
+        "name": "get_loc8",
+        "opcode": 192,
+        "qjs_outgoing": 13533262,
+        "weighted_mismatch": 5644.311831065206,
+        "zjs_outgoing": 13533270
+      },
+      {
+        "conditional_tv": 0.0011178413637868,
+        "name": "get_loc2",
+        "opcode": 197,
+        "qjs_outgoing": 3937734,
+        "weighted_mismatch": 4401.761944789651,
+        "zjs_outgoing": 3937742
+      },
+      {
+        "conditional_tv": 0.003455433459566483,
+        "name": "if_false",
+        "opcode": 104,
+        "qjs_outgoing": 865566,
+        "weighted_mismatch": 2980.5186848836656,
+        "zjs_outgoing": 862560
+      },
+      {
+        "conditional_tv": 0.0014422944870938696,
+        "name": "push_atom_value",
+        "opcode": 4,
+        "qjs_outgoing": 2001632,
+        "weighted_mismatch": 2886.9427987906765,
+        "zjs_outgoing": 2001636
+      },
+      {
+        "conditional_tv": 0.0005917982357423206,
+        "name": "get_field2",
+        "opcode": 62,
+        "qjs_outgoing": 2465813,
+        "weighted_mismatch": 1459.2637830704787,
+        "zjs_outgoing": 2465833
+      },
+      {
+        "conditional_tv": 0.00039623379154608656,
+        "name": "get_arg0",
+        "opcode": 207,
+        "qjs_outgoing": 3333306,
+        "weighted_mismatch": 1320.2850695376333,
+        "zjs_outgoing": 3332086
+      },
+      {
+        "conditional_tv": 0.0003775782641674063,
+        "name": "get_loc0",
+        "opcode": 195,
+        "qjs_outgoing": 2703023,
+        "weighted_mismatch": 1020.2447881501445,
+        "zjs_outgoing": 2702075
+      },
+      {
+        "conditional_tv": 0.005191814493026238,
+        "name": "get_arg2",
+        "opcode": 209,
+        "qjs_outgoing": 179510,
+        "weighted_mismatch": 931.98261964314,
+        "zjs_outgoing": 179513
+      },
+      {
+        "conditional_tv": 0.0012955214092441403,
+        "name": "put_field",
+        "opcode": 63,
+        "qjs_outgoing": 703404,
+        "weighted_mismatch": 910.0364228807279,
+        "zjs_outgoing": 702448
+      },
+      {
+        "conditional_tv": 0.0009094796808261782,
+        "name": "push_0",
+        "opcode": 179,
+        "qjs_outgoing": 909057,
+        "weighted_mismatch": 826.7688702128031,
+        "zjs_outgoing": 909065
+      },
+      {
+        "conditional_tv": 0.0007954436650205937,
+        "name": "put_loc0",
+        "opcode": 199,
+        "qjs_outgoing": 1038823,
+        "weighted_mismatch": 825.6434792067655,
+        "zjs_outgoing": 1037966
+      },
+      {
+        "conditional_tv": 0.0004646279409332101,
+        "name": "get_field",
+        "opcode": 61,
+        "qjs_outgoing": 1623788,
+        "weighted_mismatch": 754.1264598581109,
+        "zjs_outgoing": 1623076
+      },
+      {
+        "conditional_tv": 0.0021185633661758817,
+        "name": "push_this",
+        "opcode": 8,
+        "qjs_outgoing": 326126,
+        "weighted_mismatch": 689.1008689892967,
+        "zjs_outgoing": 325268
+      },
+      {
+        "conditional_tv": 0.00023887255008569103,
+        "name": "get_loc3",
+        "opcode": 198,
+        "qjs_outgoing": 2804843,
+        "weighted_mismatch": 669.9999999999999,
+        "zjs_outgoing": 2804843
+      },
+      {
+        "conditional_tv": 0.002449536547986551,
+        "name": "get_arg1",
+        "opcode": 208,
+        "qjs_outgoing": 187330,
+        "weighted_mismatch": 457.7473442587948,
+        "zjs_outgoing": 186871
+      },
+      {
+        "conditional_tv": 0.0002225922441261436,
+        "name": "push_i8",
+        "opcode": 187,
+        "qjs_outgoing": 1841933,
+        "weighted_mismatch": 410.00000000000006,
+        "zjs_outgoing": 1841933
+      },
+      {
+        "conditional_tv": 0.000980845370024912,
+        "name": "put_loc2",
+        "opcode": 201,
+        "qjs_outgoing": 385373,
+        "weighted_mismatch": 377.9913227826104,
+        "zjs_outgoing": 385377
+      },
+      {
+        "conditional_tv": 0.0004294389345035308,
+        "name": "sub",
+        "opcode": 156,
+        "qjs_outgoing": 859256,
+        "weighted_mismatch": 368.83908869999954,
+        "zjs_outgoing": 858886
+      }
+    ],
+    "zjs_edges": 96563604
+  },
+  "hot_arms": {
+    "definitions": {
+      "add": [
+        "int",
+        "float_or_mixed_number",
+        "string",
+        "slow"
+      ],
+      "qjs_get_field": [
+        "inline_data",
+        "inline_absent",
+        "slow_helper"
+      ],
+      "zjs_get_field": [
+        "resolver_success",
+        "direct_absent",
+        "full_cold"
+      ]
+    },
+    "qjs_add": [
+      1261197,
+      131875,
+      1014638,
+      132
+    ],
+    "qjs_get_field": [
+      2847109,
+      8311,
+      1825816
+    ],
+    "zjs_add": [
+      1261125,
+      131951,
+      1014638,
+      132
+    ],
+    "zjs_get_field": [
+      1581234,
+      8311,
+      33531
+    ]
+  },
+  "input": "reports/perf/qjs-align/2026-08-13/PDFJS-DIAG-p2-counters-ab8-v2.json",
+  "input_warning": "Counter builds only; no counter-build timing is admissible.",
+  "lifecycle": {
+    "drop_to_zero": {
+      "qjs": 2848008,
+      "ratio_z_over_q": 0.6134852851536934,
+      "zjs": 1747211
+    },
+    "frame_entries": {
+      "qjs": 634925,
+      "ratio_z_over_q": 0.9980785132102217,
+      "zjs": 633705
+    },
+    "frame_returns": {
+      "qjs": 634925,
+      "ratio_z_over_q": 0.9980785132102217,
+      "zjs": 633705
+    },
+    "native_fences": {
+      "qjs": 5735,
+      "ratio_z_over_q": 0.925893635571055,
+      "zjs": 5310
+    },
+    "opcode_total": {
+      "qjs": 97457771,
+      "ratio_z_over_q": 0.9973274373369364,
+      "zjs": 97197309
+    },
+    "qjs_frame_alloca_bytes": 76356848,
+    "qjs_frame_alloca_count": 634925,
+    "value_dups": {
+      "qjs": 23633494,
+      "ratio_z_over_q": 0.9974594954093542,
+      "zjs": 23573453
+    },
+    "value_frees": {
+      "qjs": 26400907,
+      "ratio_z_over_q": 0.9063992763581948,
+      "zjs": 23929763
+    },
+    "zjs_cold_next": 3451835,
+    "zjs_cold_table_entries": 766815,
+    "zjs_publish": 1393741,
+    "zjs_stack_grows": 0
+  },
+  "numeric_opcode_id_alignment": {
+    "basis": "zjs opcode ID/name rows and identical QuickJS-derived opcode names",
+    "qjs_names_missing_from_zjs_map": [],
+    "zjs_bytecode_source": "src/bytecode.zig",
+    "zjs_bytecode_source_sha256": "649a456beccc25366d6df1127ac7dced27acde58fc70ff3892ae41f7d3705c77"
+  },
+  "opcode_mix": {
+    "qjs_total_mapped": 97457771,
+    "top_absolute_deltas": [
+      {
+        "delta_z_minus_q": 729488,
+        "name": "if_false8",
+        "opcode": 232,
+        "qjs": 5348912,
+        "zjs": 6078400
+      },
+      {
+        "delta_z_minus_q": -726462,
+        "name": "if_true8",
+        "opcode": 233,
+        "qjs": 1831936,
+        "zjs": 1105474
+      },
+      {
+        "delta_z_minus_q": -242416,
+        "name": "drop",
+        "opcode": 14,
+        "qjs": 1199426,
+        "zjs": 957010
+      },
+      {
+        "delta_z_minus_q": -57604,
+        "name": "define_field",
+        "opcode": 73,
+        "qjs": 112542,
+        "zjs": 54938
+      },
+      {
+        "delta_z_minus_q": 51052,
+        "name": "call_method",
+        "opcode": 36,
+        "qjs": 2355843,
+        "zjs": 2406895
+      },
+      {
+        "delta_z_minus_q": -51032,
+        "name": "tail_call_method",
+        "opcode": 37,
+        "qjs": 51032,
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": 50833,
+        "name": "return",
+        "opcode": 40,
+        "qjs": 517146,
+        "zjs": 567979
+      },
+      {
+        "delta_z_minus_q": -4270,
+        "name": "goto8",
+        "opcode": 234,
+        "qjs": 3290609,
+        "zjs": 3286339
+      },
+      {
+        "delta_z_minus_q": -3006,
+        "name": "if_false",
+        "opcode": 104,
+        "qjs": 865566,
+        "zjs": 862560
+      },
+      {
+        "delta_z_minus_q": -1220,
+        "name": "get_arg0",
+        "opcode": 207,
+        "qjs": 3333306,
+        "zjs": 3332086
+      },
+      {
+        "delta_z_minus_q": -956,
+        "name": "put_field",
+        "opcode": 63,
+        "qjs": 703404,
+        "zjs": 702448
+      },
+      {
+        "delta_z_minus_q": -948,
+        "name": "get_loc0",
+        "opcode": 195,
+        "qjs": 2703023,
+        "zjs": 2702075
+      },
+      {
+        "delta_z_minus_q": -858,
+        "name": "push_this",
+        "opcode": 8,
+        "qjs": 326126,
+        "zjs": 325268
+      },
+      {
+        "delta_z_minus_q": -857,
+        "name": "put_loc0",
+        "opcode": 199,
+        "qjs": 1038823,
+        "zjs": 1037966
+      },
+      {
+        "delta_z_minus_q": -854,
+        "name": "return_undef",
+        "opcode": 41,
+        "qjs": 66580,
+        "zjs": 65726
+      },
+      {
+        "delta_z_minus_q": -712,
+        "name": "get_field",
+        "opcode": 61,
+        "qjs": 1623788,
+        "zjs": 1623076
+      },
+      {
+        "delta_z_minus_q": -459,
+        "name": "get_arg1",
+        "opcode": 208,
+        "qjs": 187330,
+        "zjs": 186871
+      },
+      {
+        "delta_z_minus_q": -370,
+        "name": "sub",
+        "opcode": 156,
+        "qjs": 859256,
+        "zjs": 858886
+      },
+      {
+        "delta_z_minus_q": -167,
+        "name": "tail_call",
+        "opcode": 35,
+        "qjs": 167,
+        "zjs": 0
+      },
+      {
+        "delta_z_minus_q": 138,
+        "name": "call1",
+        "opcode": 237,
+        "qjs": 251027,
+        "zjs": 251165
+      },
+      {
+        "delta_z_minus_q": 32,
+        "name": "call3",
+        "opcode": 239,
+        "qjs": 1110,
+        "zjs": 1142
+      },
+      {
+        "delta_z_minus_q": 20,
+        "name": "get_var",
+        "opcode": 56,
+        "qjs": 1231268,
+        "zjs": 1231288
+      },
+      {
+        "delta_z_minus_q": 20,
+        "name": "get_field2",
+        "opcode": 62,
+        "qjs": 2465813,
+        "zjs": 2465833
+      },
+      {
+        "delta_z_minus_q": 16,
+        "name": "put_loc8",
+        "opcode": 193,
+        "qjs": 2552067,
+        "zjs": 2552083
+      },
+      {
+        "delta_z_minus_q": 8,
+        "name": "get_var_ref",
+        "opcode": 91,
+        "qjs": 27238,
+        "zjs": 27246
+      },
+      {
+        "delta_z_minus_q": 8,
+        "name": "with_get_var",
+        "opcode": 113,
+        "qjs": 10,
+        "zjs": 18
+      },
+      {
+        "delta_z_minus_q": 8,
+        "name": "eq",
+        "opcode": 167,
+        "qjs": 1110032,
+        "zjs": 1110040
+      },
+      {
+        "delta_z_minus_q": 8,
+        "name": "push_0",
+        "opcode": 179,
+        "qjs": 909057,
+        "zjs": 909065
+      },
+      {
+        "delta_z_minus_q": 8,
+        "name": "get_loc8",
+        "opcode": 192,
+        "qjs": 13533262,
+        "zjs": 13533270
+      },
+      {
+        "delta_z_minus_q": 8,
+        "name": "get_loc1",
+        "opcode": 196,
+        "qjs": 4004441,
+        "zjs": 4004449
+      }
+    ],
+    "total_variation": 0.011013789161811395,
+    "zjs_total_mapped": 97197309
+  },
+  "qjs_helpers": {
+    "add_slow": 1554,
+    "c_function": 2201049,
+    "c_function_data": 0,
+    "concat_string": 1061944,
+    "find_own_property": 6747376,
+    "get_property_internal": 2258925,
+    "relational_slow": 21010
+  },
+  "schema": "pdfjs-diag-p2-analysis-v1",
+  "value_shapes": {
+    "rows": [
+      {
+        "name": "if_true8",
+        "opcode": 233,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 122,
+          "int": 8108,
+          "object": 2945,
+          "other": 1820319,
+          "string": 442
+        },
+        "tv": 0.004170854023571316,
+        "weighted_mismatch": 4610.770680853477,
+        "zjs": {
+          "bigint": 0,
+          "float": 122,
+          "int": 8112,
+          "object": 2945,
+          "other": 1093853,
+          "string": 442
+        }
+      },
+      {
+        "name": "if_false8",
+        "opcode": 232,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 825,
+          "object": 22239,
+          "other": 5325720,
+          "string": 128
+        },
+        "tv": 0.0005203572685848636,
+        "weighted_mismatch": 2783.3452382207997,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 825,
+          "object": 22239,
+          "other": 6055208,
+          "string": 128
+        }
+      },
+      {
+        "name": "add",
+        "opcode": 155,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 32623,
+          "int": 1360495,
+          "object": 0,
+          "other": 86,
+          "string": 1014638
+        },
+        "tv": 2.9879737082096265e-05,
+        "weighted_mismatch": 71.94568589522883,
+        "zjs": {
+          "bigint": 0,
+          "float": 32695,
+          "int": 1360427,
+          "object": 0,
+          "other": 86,
+          "string": 1014638
+        }
+      },
+      {
+        "name": "get_field",
+        "opcode": 61,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 1278,
+          "int": 32132,
+          "object": 1576348,
+          "other": 0,
+          "string": 14030
+        },
+        "tv": 1.2816117794263785e-05,
+        "weighted_mismatch": 20.801533205042485,
+        "zjs": {
+          "bigint": 0,
+          "float": 1278,
+          "int": 32132,
+          "object": 1575636,
+          "other": 0,
+          "string": 14030
+        }
+      },
+      {
+        "name": "lte",
+        "opcode": 162,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 2,
+          "int": 62526,
+          "object": 0,
+          "other": 0,
+          "string": 8798
+        },
+        "tv": 0.00019628186075204275,
+        "weighted_mismatch": 14.0000000000002,
+        "zjs": {
+          "bigint": 0,
+          "float": 16,
+          "int": 62512,
+          "object": 0,
+          "other": 0,
+          "string": 8798
+        }
+      },
+      {
+        "name": "get_field2",
+        "opcode": 62,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 2,
+          "int": 32,
+          "object": 1478841,
+          "other": 0,
+          "string": 986938
+        },
+        "tv": 3.246467274910429e-06,
+        "weighted_mismatch": 8.00518121054871,
+        "zjs": {
+          "bigint": 0,
+          "float": 2,
+          "int": 32,
+          "object": 1478861,
+          "other": 0,
+          "string": 986938
+        }
+      },
+      {
+        "name": "get_length",
+        "opcode": 231,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 64344,
+          "other": 0,
+          "string": 527291
+        },
+        "tv": 1.2051101853087498e-05,
+        "weighted_mismatch": 7.129853644851422,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 64352,
+          "other": 0,
+          "string": 527291
+        }
+      },
+      {
+        "name": "add",
+        "opcode": 155,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 123356,
+          "int": 1269800,
+          "object": 0,
+          "other": 2,
+          "string": 1014684
+        },
+        "tv": 1.5761291440527196e-06,
+        "weighted_mismatch": 3.7950699504741885,
+        "zjs": {
+          "bigint": 0,
+          "float": 123360,
+          "int": 1269800,
+          "object": 0,
+          "other": 2,
+          "string": 1014684
+        }
+      },
+      {
+        "name": "eq",
+        "opcode": 167,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 884,
+          "int": 587035,
+          "object": 1235,
+          "other": 110,
+          "string": 520768
+        },
+        "tv": 3.3955885238271896e-06,
+        "weighted_mismatch": 3.769211920280943,
+        "zjs": {
+          "bigint": 0,
+          "float": 884,
+          "int": 587043,
+          "object": 1235,
+          "other": 110,
+          "string": 520768
+        }
+      },
+      {
+        "name": "eq",
+        "opcode": 167,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 1082,
+          "int": 592273,
+          "object": 5598,
+          "other": 21,
+          "string": 511058
+        },
+        "tv": 3.3615805033234288e-06,
+        "weighted_mismatch": 3.7314619292651123,
+        "zjs": {
+          "bigint": 0,
+          "float": 1082,
+          "int": 592281,
+          "object": 5598,
+          "other": 21,
+          "string": 511058
+        }
+      },
+      {
+        "name": "if_false",
+        "opcode": 104,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 303,
+          "other": 865263,
+          "string": 0
+        },
+        "tv": 1.2199501971771288e-06,
+        "weighted_mismatch": 1.0522802420771042,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 303,
+          "other": 862257,
+          "string": 0
+        }
+      },
+      {
+        "name": "neq",
+        "opcode": 168,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 86047,
+          "object": 18,
+          "other": 480,
+          "string": 3745
+        },
+        "tv": 2.08177830126962e-06,
+        "weighted_mismatch": 0.187963762821634,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 86051,
+          "object": 18,
+          "other": 480,
+          "string": 3745
+        }
+      },
+      {
+        "name": "neq",
+        "opcode": 168,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 186,
+          "int": 86103,
+          "object": 247,
+          "other": 9,
+          "string": 3745
+        },
+        "tv": 2.0543025565120614e-06,
+        "weighted_mismatch": 0.18548297782747403,
+        "zjs": {
+          "bigint": 0,
+          "float": 186,
+          "int": 86107,
+          "object": 247,
+          "other": 9,
+          "string": 3745
+        }
+      },
+      {
+        "name": "get_array_el",
+        "opcode": 67,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 3454731,
+          "object": 0,
+          "other": 0,
+          "string": 24774
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 3454731,
+          "object": 0,
+          "other": 0,
+          "string": 24774
+        }
+      },
+      {
+        "name": "get_array_el",
+        "opcode": 67,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 3313623,
+          "other": 0,
+          "string": 165882
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 3313623,
+          "other": 0,
+          "string": 165882
+        }
+      },
+      {
+        "name": "get_array_el2",
+        "opcode": 68,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 0,
+          "other": 0,
+          "string": 2
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 0,
+          "other": 0,
+          "string": 2
+        }
+      },
+      {
+        "name": "get_array_el2",
+        "opcode": 68,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 2,
+          "other": 0,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 2,
+          "other": 0,
+          "string": 0
+        }
+      },
+      {
+        "name": "get_array_el3",
+        "opcode": 69,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 126,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 126,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        }
+      },
+      {
+        "name": "get_array_el3",
+        "opcode": 69,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 126,
+          "other": 0,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 126,
+          "other": 0,
+          "string": 0
+        }
+      },
+      {
+        "name": "if_true",
+        "opcode": 105,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 0,
+          "other": 20748,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 0,
+          "object": 0,
+          "other": 20748,
+          "string": 0
+        }
+      },
+      {
+        "name": "lt",
+        "opcode": 161,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 3959635,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 3959635,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        }
+      },
+      {
+        "name": "lt",
+        "opcode": 161,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 5664,
+          "int": 3953971,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 5664,
+          "int": 3953971,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        }
+      },
+      {
+        "name": "lte",
+        "opcode": 162,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 62528,
+          "object": 0,
+          "other": 0,
+          "string": 8798
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 62528,
+          "object": 0,
+          "other": 0,
+          "string": 8798
+        }
+      },
+      {
+        "name": "gt",
+        "opcode": 163,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 98,
+          "int": 65839,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 98,
+          "int": 65839,
+          "object": 0,
+          "other": 0,
+          "string": 0
+        }
+      },
+      {
+        "name": "gt",
+        "opcode": 163,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 1382,
+          "int": 64537,
+          "object": 0,
+          "other": 18,
+          "string": 0
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 1382,
+          "int": 64537,
+          "object": 0,
+          "other": 18,
+          "string": 0
+        }
+      },
+      {
+        "name": "gte",
+        "opcode": 164,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 219312,
+          "object": 0,
+          "other": 0,
+          "string": 12194
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 219312,
+          "object": 0,
+          "other": 0,
+          "string": 12194
+        }
+      },
+      {
+        "name": "gte",
+        "opcode": 164,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 122,
+          "int": 219190,
+          "object": 0,
+          "other": 0,
+          "string": 12194
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 122,
+          "int": 219190,
+          "object": 0,
+          "other": 0,
+          "string": 12194
+        }
+      },
+      {
+        "name": "strict_eq",
+        "opcode": 169,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 116256,
+          "object": 46,
+          "other": 8556,
+          "string": 1450439
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 116256,
+          "object": 46,
+          "other": 8556,
+          "string": 1450439
+        }
+      },
+      {
+        "name": "strict_eq",
+        "opcode": 169,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 50,
+          "int": 116206,
+          "object": 54,
+          "other": 12,
+          "string": 1458975
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 50,
+          "int": 116206,
+          "object": 54,
+          "other": 12,
+          "string": 1458975
+        }
+      },
+      {
+        "name": "strict_neq",
+        "opcode": 170,
+        "operand": "top",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 6,
+          "object": 8,
+          "other": 2,
+          "string": 279
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 6,
+          "object": 8,
+          "other": 2,
+          "string": 279
+        }
+      },
+      {
+        "name": "strict_neq",
+        "opcode": 170,
+        "operand": "second",
+        "qjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 6,
+          "object": 8,
+          "other": 2,
+          "string": 279
+        },
+        "tv": 0.0,
+        "weighted_mismatch": 0.0,
+        "zjs": {
+          "bigint": 0,
+          "float": 0,
+          "int": 6,
+          "object": 8,
+          "other": 2,
+          "string": 279
+        }
+      }
+    ],
+    "shape_order": [
+      "int",
+      "float",
+      "string",
+      "object",
+      "bigint",
+      "other"
+    ],
+    "weighted_mismatch_fraction": 0.00019811479591370698
+  },
+  "zjs_cold_entries_top": [
+    {
+      "count": 263377,
+      "name": "get_field2",
+      "opcode": 62
+    },
+    {
+      "count": 182546,
+      "name": "get_array_el",
+      "opcode": 67
+    },
+    {
+      "count": 93588,
+      "name": "mul",
+      "opcode": 152
+    },
+    {
+      "count": 92074,
+      "name": "and",
+      "opcode": 171
+    },
+    {
+      "count": 39316,
+      "name": "lnot",
+      "opcode": 148
+    },
+    {
+      "count": 33531,
+      "name": "get_field",
+      "opcode": 61
+    },
+    {
+      "count": 12806,
+      "name": "eq",
+      "opcode": 167
+    },
+    {
+      "count": 12194,
+      "name": "gte",
+      "opcode": 164
+    },
+    {
+      "count": 8798,
+      "name": "lte",
+      "opcode": 162
+    },
+    {
+      "count": 8536,
+      "name": "strict_eq",
+      "opcode": 169
+    },
+    {
+      "count": 5089,
+      "name": "put_array_el",
+      "opcode": 70
+    },
+    {
+      "count": 4344,
+      "name": "div",
+      "opcode": 153
+    },
+    {
+      "count": 4008,
+      "name": "or",
+      "opcode": 173
+    },
+    {
+      "count": 3044,
+      "name": "add",
+      "opcode": 155
+    },
+    {
+      "count": 1372,
+      "name": "sar",
+      "opcode": 159
+    },
+    {
+      "count": 680,
+      "name": "if_true8",
+      "opcode": 233
+    },
+    {
+      "count": 595,
+      "name": "if_false8",
+      "opcode": 232
+    },
+    {
+      "count": 328,
+      "name": "goto8",
+      "opcode": 234
+    },
+    {
+      "count": 242,
+      "name": "neq",
+      "opcode": 168
+    },
+    {
+      "count": 126,
+      "name": "sub",
+      "opcode": 156
+    },
+    {
+      "count": 106,
+      "name": "if_false",
+      "opcode": 104
+    },
+    {
+      "count": 72,
+      "name": "shl",
+      "opcode": 158
+    },
+    {
+      "count": 18,
+      "name": "gt",
+      "opcode": 163
+    },
+    {
+      "count": 9,
+      "name": "put_field",
+      "opcode": 63
+    },
+    {
+      "count": 8,
+      "name": "drop",
+      "opcode": 14
+    },
+    {
+      "count": 4,
+      "name": "special_object",
+      "opcode": 12
+    },
+    {
+      "count": 3,
+      "name": "get_var_undef",
+      "opcode": 55
+    },
+    {
+      "count": 1,
+      "name": "put_var",
+      "opcode": 57
+    }
+  ]
+}

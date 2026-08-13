@@ -1,0 +1,2119 @@
+{
+ "tool": "zjs-zoo-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "temporary source copies set doWarmup=false and doDeterministic=true; both engines execute identical deterministicIterations/minIterations batches",
+ "iterationDivisor": 16,
+ "timestamp": "2026-08-13T04:44:56Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 20,
+  "zjs": 20
+ },
+ "firstPositionBalanced": true,
+ "cpu": 5,
+ "effectiveAffinity": [
+  5
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/d12-fpchain-base-tagged-prefix/bin/zjs",
+   "sha256": "3b89951df9c2a390ca6313f6f574c7adac5007737334f40e016814c2b34db403",
+   "repo": {
+    "path": "/home/aneryu/zjs-d12-fpchain",
+    "commit": "0bdcfbb33c3ae9d2b95e128a9cf6245c7c45686d",
+    "dirty": true
+   }
+  },
+  "qjs": {
+   "path": "/home/aneryu/quickjs/qjs",
+   "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+   "repo": {
+    "path": "/home/aneryu/quickjs",
+    "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "navier-stokes": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/navier-stokes.js",
+    "sha256": "f6788c96f00aa61f9dbdca113e1e57b08572a643b281d3a7b940f8f974179d47",
+    "fixedWorkSha256": "8f6cf45ecae6672fcee1e70a54f77b47a6a9e95532fc825909131d66e435b6fa"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 9357482016,
+       "cycles": 1647136506,
+       "branch-instructions": 1520239362,
+       "branch-misses": 177548,
+       "cache-references": 3369025674,
+       "cache-misses": 4867155
+      },
+      "wallSeconds": 0.4404152319766581,
+      "stdout": "NavierStokes: 4260",
+      "scores": {
+       "NavierStokes": 4260
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357447028,
+       "cycles": 1639188659,
+       "branch-instructions": 1520239499,
+       "branch-misses": 176694,
+       "cache-references": 3369386382,
+       "cache-misses": 4884131
+      },
+      "wallSeconds": 0.43102049827575684,
+      "stdout": "NavierStokes: 4281",
+      "scores": {
+       "NavierStokes": 4281
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357183066,
+       "cycles": 1633899381,
+       "branch-instructions": 1520202402,
+       "branch-misses": 176555,
+       "cache-references": 3369070230,
+       "cache-misses": 4853244
+      },
+      "wallSeconds": 0.42908031214028597,
+      "stdout": "NavierStokes: 4291",
+      "scores": {
+       "NavierStokes": 4291
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357095924,
+       "cycles": 1648317584,
+       "branch-instructions": 1520174816,
+       "branch-misses": 176444,
+       "cache-references": 3369237779,
+       "cache-misses": 4858328
+      },
+      "wallSeconds": 0.43301415583118796,
+      "stdout": "NavierStokes: 4260",
+      "scores": {
+       "NavierStokes": 4260
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357211379,
+       "cycles": 1634941217,
+       "branch-instructions": 1520211539,
+       "branch-misses": 174700,
+       "cache-references": 3369104442,
+       "cache-misses": 4881901
+      },
+      "wallSeconds": 0.4295726362615824,
+      "stdout": "NavierStokes: 4291",
+      "scores": {
+       "NavierStokes": 4291
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357339616,
+       "cycles": 1644983958,
+       "branch-instructions": 1520211112,
+       "branch-misses": 175447,
+       "cache-references": 3369571228,
+       "cache-misses": 4914232
+      },
+      "wallSeconds": 0.43312369426712394,
+      "stdout": "NavierStokes: 4271",
+      "scores": {
+       "NavierStokes": 4271
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357495421,
+       "cycles": 1641578918,
+       "branch-instructions": 1520252750,
+       "branch-misses": 176446,
+       "cache-references": 3369050922,
+       "cache-misses": 4890063
+      },
+      "wallSeconds": 0.4326996919699013,
+      "stdout": "NavierStokes: 4281",
+      "scores": {
+       "NavierStokes": 4281
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357555185,
+       "cycles": 1641854471,
+       "branch-instructions": 1520260055,
+       "branch-misses": 176422,
+       "cache-references": 3369801142,
+       "cache-misses": 4598402
+      },
+      "wallSeconds": 0.43141027772799134,
+      "stdout": "NavierStokes: 4260",
+      "scores": {
+       "NavierStokes": 4260
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 9025032850,
+       "cycles": 1711988580,
+       "branch-instructions": 1704476848,
+       "branch-misses": 181791,
+       "cache-references": 4058970079,
+       "cache-misses": 5106544
+      },
+      "wallSeconds": 0.44894930673763156,
+      "stdout": "NavierStokes: 4122",
+      "scores": {
+       "NavierStokes": 4122
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9024876616,
+       "cycles": 1704552631,
+       "branch-instructions": 1704451992,
+       "branch-misses": 177084,
+       "cache-references": 4058862954,
+       "cache-misses": 5192555
+      },
+      "wallSeconds": 0.44785776594653726,
+      "stdout": "NavierStokes: 4132",
+      "scores": {
+       "NavierStokes": 4132
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9024643433,
+       "cycles": 1705154900,
+       "branch-instructions": 1704429210,
+       "branch-misses": 178290,
+       "cache-references": 4058640367,
+       "cache-misses": 5184253
+      },
+      "wallSeconds": 0.4473984520882368,
+      "stdout": "NavierStokes: 4132",
+      "scores": {
+       "NavierStokes": 4132
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9024660396,
+       "cycles": 1709925856,
+       "branch-instructions": 1704427538,
+       "branch-misses": 177066,
+       "cache-references": 4058647202,
+       "cache-misses": 5165279
+      },
+      "wallSeconds": 0.4486516579054296,
+      "stdout": "NavierStokes: 4113",
+      "scores": {
+       "NavierStokes": 4113
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9024624071,
+       "cycles": 1705987758,
+       "branch-instructions": 1704419512,
+       "branch-misses": 178805,
+       "cache-references": 4058735873,
+       "cache-misses": 5065320
+      },
+      "wallSeconds": 0.4474603249691427,
+      "stdout": "NavierStokes: 4132",
+      "scores": {
+       "NavierStokes": 4132
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9024771579,
+       "cycles": 1715150088,
+       "branch-instructions": 1704444352,
+       "branch-misses": 174353,
+       "cache-references": 4058952587,
+       "cache-misses": 5165836
+      },
+      "wallSeconds": 0.4502442111261189,
+      "stdout": "NavierStokes: 4113",
+      "scores": {
+       "NavierStokes": 4113
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9024937925,
+       "cycles": 1710875596,
+       "branch-instructions": 1704460651,
+       "branch-misses": 179922,
+       "cache-references": 4058629528,
+       "cache-misses": 5167200
+      },
+      "wallSeconds": 0.44929215824231505,
+      "stdout": "NavierStokes: 4113",
+      "scores": {
+       "NavierStokes": 4113
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9024888841,
+       "cycles": 1710232847,
+       "branch-instructions": 1704452048,
+       "branch-misses": 177640,
+       "cache-references": 4058786605,
+       "cache-misses": 5178549
+      },
+      "wallSeconds": 0.4481465541757643,
+      "stdout": "NavierStokes: 4122",
+      "scores": {
+       "NavierStokes": 4122
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 9357393322.0,
+     "zjsMedian": 9024824097.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9644723692301457,
+      0.9644592792238247,
+      0.9644615659804384,
+      0.9644723607944067,
+      0.964456578511584,
+      0.9644591250667716,
+      0.9644608433092388,
+      0.9644494381894474
+     ],
+     "ratioMedian": 0.9644600612665317,
+     "ratioMAD": 2.4937344272335515e-06
+    },
+    "cycles": {
+     "qjsMedian": 1641716694.5,
+     "zjsMedian": 1710079351.5,
+     "pairedRatiosZjsOverQjs": [
+      1.039372616515853,
+      1.0398758078523285,
+      1.0436107142389572,
+      1.0373764574242388,
+      1.0434551042332674,
+      1.0426545983374265,
+      1.0422134307648314,
+      1.0416470382776086
+     ],
+     "ratioMedian": 1.04193023452122,
+     "ratioMAD": 0.0016026747148922826
+    },
+    "branch-instructions": {
+     "qjsMedian": 1520225450.5,
+     "zjsMedian": 1704448172.0,
+     "pairedRatiosZjsOverQjs": [
+      1.1211897880065547,
+      1.1211733369124888,
+      1.1211857103749006,
+      1.1212049562068263,
+      1.1211725922835531,
+      1.1211892470366314,
+      1.1211692601772962,
+      1.1211582139478105
+     ],
+     "ratioMedian": 1.1211795236436948,
+     "ratioMAD": 9.993429667565223e-06
+    },
+    "branch-misses": {
+     "qjsMedian": 176445.0,
+     "zjsMedian": 177965.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0238977628584947,
+      1.0022072056776121,
+      1.009826966101215,
+      1.003525197796468,
+      1.0234974241556956,
+      0.9937644986805132,
+      1.0197000782108974,
+      1.0069039008740406
+     ],
+     "ratioMedian": 1.0083654334876277,
+     "ratioMAD": 0.008746436266642621
+    },
+    "cache-references": {
+     "qjsMedian": 3369171110.5,
+     "zjsMedian": 4058761239.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2047904859629157,
+      1.204629714087804,
+      1.2046766882030833,
+      1.2046188094224144,
+      1.2046928027528332,
+      1.2045902319177804,
+      1.20468037496763,
+      1.2044587896931753
+     ],
+     "ratioMedian": 1.2046532011454436,
+     "ratioMAD": 3.699666520939893e-05
+    },
+    "cache-misses": {
+     "qjsMedian": 4874528.0,
+     "zjsMedian": 5166518.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0491845852453847,
+      1.063148183371822,
+      1.0682036592431783,
+      1.0631803781053892,
+      1.0375712248159068,
+      1.0511990479895943,
+      1.0566735029794094,
+      1.1261627408825936
+     ],
+     "ratioMedian": 1.0599108431756157,
+     "ratioMAD": 0.008502305626791995
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.43205498484894633,
+     "zjsMedian": 0.44839910604059696,
+     "pairedRatiosZjsOverQjs": [
+      1.0193773378878634,
+      1.0390637283798236,
+      1.042691634711876,
+      1.0361131428699482,
+      1.0416406614332572,
+      1.0395280080161953,
+      1.0383463787479836,
+      1.0387943387346126
+     ],
+     "ratioMedian": 1.038929033557218,
+     "ratioMAD": 0.0016553011675081164
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.699761325049984,
+    "zjsIPC": 5.277430014919398,
+    "ipcRatioZjsOverQjs": 0.9259036850763427
+   }
+  },
+  "box2d": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/box2d.js",
+    "sha256": "5861c95848d670f97d4c4e32e71c43f8abf8a5b9bca29f9b6854166b25fa6211",
+    "fixedWorkSha256": "2f98346e24c510ceb3269a00fec08bdf142d4c1099bcc8b6387cb505b798cfe8"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 5418263703,
+       "cycles": 1196462938,
+       "branch-instructions": 866553813,
+       "branch-misses": 1611647,
+       "cache-references": 1944810433,
+       "cache-misses": 11131943
+      },
+      "wallSeconds": 0.31752670276910067,
+      "stdout": "Box2D: 7342",
+      "scores": {
+       "Box2D": 7342
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5419033553,
+       "cycles": 1191232314,
+       "branch-instructions": 866843628,
+       "branch-misses": 1655077,
+       "cache-references": 1944849939,
+       "cache-misses": 10135548
+      },
+      "wallSeconds": 0.31605685595422983,
+      "stdout": "Box2D: 7392",
+      "scores": {
+       "Box2D": 7392
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418164500,
+       "cycles": 1191441585,
+       "branch-instructions": 866540882,
+       "branch-misses": 1620598,
+       "cache-references": 1943822460,
+       "cache-misses": 10578138
+      },
+      "wallSeconds": 0.31606584833934903,
+      "stdout": "Box2D: 7392",
+      "scores": {
+       "Box2D": 7392
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418823679,
+       "cycles": 1199084760,
+       "branch-instructions": 866733281,
+       "branch-misses": 1690576,
+       "cache-references": 1947205092,
+       "cache-misses": 12715665
+      },
+      "wallSeconds": 0.31721750227734447,
+      "stdout": "Box2D: 7342",
+      "scores": {
+       "Box2D": 7342
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418301139,
+       "cycles": 1201779550,
+       "branch-instructions": 866571865,
+       "branch-misses": 1673755,
+       "cache-references": 1946301760,
+       "cache-misses": 12669389
+      },
+      "wallSeconds": 0.32904279278591275,
+      "stdout": "Box2D: 7317",
+      "scores": {
+       "Box2D": 7317
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418772374,
+       "cycles": 1192240680,
+       "branch-instructions": 866824119,
+       "branch-misses": 1659686,
+       "cache-references": 1946372309,
+       "cache-misses": 11585288
+      },
+      "wallSeconds": 0.31609261641278863,
+      "stdout": "Box2D: 7392",
+      "scores": {
+       "Box2D": 7392
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418320394,
+       "cycles": 1193704372,
+       "branch-instructions": 866594176,
+       "branch-misses": 1609828,
+       "cache-references": 1945024688,
+       "cache-misses": 10781772
+      },
+      "wallSeconds": 0.31663853907957673,
+      "stdout": "Box2D: 7392",
+      "scores": {
+       "Box2D": 7392
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418387010,
+       "cycles": 1199019018,
+       "branch-instructions": 866585221,
+       "branch-misses": 1674182,
+       "cache-references": 1946192430,
+       "cache-misses": 11296769
+      },
+      "wallSeconds": 0.31745697604492307,
+      "stdout": "Box2D: 7366",
+      "scores": {
+       "Box2D": 7366
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 5539867709,
+       "cycles": 1296358236,
+       "branch-instructions": 1141129816,
+       "branch-misses": 2137607,
+       "cache-references": 2310059074,
+       "cache-misses": 12965075
+      },
+      "wallSeconds": 0.343304303009063,
+      "stdout": "Box2D: 6728",
+      "scores": {
+       "Box2D": 6728
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5539425079,
+       "cycles": 1297219225,
+       "branch-instructions": 1140964835,
+       "branch-misses": 2109228,
+       "cache-references": 2309487141,
+       "cache-misses": 14823459
+      },
+      "wallSeconds": 0.34384505776688457,
+      "stdout": "Box2D: 6707",
+      "scores": {
+       "Box2D": 6707
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5539756073,
+       "cycles": 1298363106,
+       "branch-instructions": 1141102266,
+       "branch-misses": 2117033,
+       "cache-references": 2309432376,
+       "cache-misses": 12892944
+      },
+      "wallSeconds": 0.3632781160995364,
+      "stdout": "Box2D: 6728",
+      "scores": {
+       "Box2D": 6728
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5539508239,
+       "cycles": 1296944631,
+       "branch-instructions": 1140992387,
+       "branch-misses": 2122263,
+       "cache-references": 2310429484,
+       "cache-misses": 14834395
+      },
+      "wallSeconds": 0.34402587497606874,
+      "stdout": "Box2D: 6707",
+      "scores": {
+       "Box2D": 6707
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5540462524,
+       "cycles": 1298842402,
+       "branch-instructions": 1141315618,
+       "branch-misses": 2104094,
+       "cache-references": 2311502303,
+       "cache-misses": 11908081
+      },
+      "wallSeconds": 0.34436098113656044,
+      "stdout": "Box2D: 6707",
+      "scores": {
+       "Box2D": 6707
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5539361769,
+       "cycles": 1296544449,
+       "branch-instructions": 1140983005,
+       "branch-misses": 2123357,
+       "cache-references": 2309775204,
+       "cache-misses": 14973440
+      },
+      "wallSeconds": 0.3431061110459268,
+      "stdout": "Box2D: 6728",
+      "scores": {
+       "Box2D": 6728
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5540188064,
+       "cycles": 1289335325,
+       "branch-instructions": 1141216412,
+       "branch-misses": 2119034,
+       "cache-references": 2310194601,
+       "cache-misses": 12652800
+      },
+      "wallSeconds": 0.34125126991420984,
+      "stdout": "Box2D: 6749",
+      "scores": {
+       "Box2D": 6749
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5539340192,
+       "cycles": 1296834553,
+       "branch-instructions": 1140953648,
+       "branch-misses": 2106454,
+       "cache-references": 2309556968,
+       "cache-misses": 13894494
+      },
+      "wallSeconds": 0.3553847800940275,
+      "stdout": "Box2D: 6707",
+      "scores": {
+       "Box2D": 6707
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 5418353702.0,
+     "zjsMedian": 5539632156.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0224433531968313,
+      1.0222164201093293,
+      1.0224414694312067,
+      1.0222713576135902,
+      1.0225460678293983,
+      1.0222540063831809,
+      1.0224917799499178,
+      1.0223227284756096
+     ],
+     "ratioMedian": 1.022382098953408,
+     "ratioMAD": 0.0001102111681637874
+    },
+    "cycles": {
+     "qjsMedian": 1195083655.0,
+     "zjsMedian": 1296889592.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0834921791785581,
+      1.088972494915043,
+      1.0897413035990346,
+      1.081612138077712,
+      1.0807659374799645,
+      1.0874854974752246,
+      1.0801127609508328,
+      1.0815796359620378
+     ],
+     "ratioMedian": 1.082552158628135,
+     "ratioMAD": 0.002112809412736394
+    },
+    "branch-instructions": {
+     "qjsMedian": 866589698.5,
+     "zjsMedian": 1141047326.5,
+     "pairedRatiosZjsOverQjs": [
+      1.3168597251328464,
+      1.3162291307746683,
+      1.3168475829626236,
+      1.3164284930694845,
+      1.317046703333716,
+      1.3162797157931874,
+      1.3168983171195463,
+      1.3166087077776278
+     ],
+     "ratioMedian": 1.3167281453701256,
+     "ratioMAD": 0.0002349120250308978
+    },
+    "branch-misses": {
+     "qjsMedian": 1657381.5,
+     "zjsMedian": 2118033.5,
+     "pairedRatiosZjsOverQjs": [
+      1.3263493804784794,
+      1.2743987137758546,
+      1.3063282812887589,
+      1.2553490644608702,
+      1.2571099115461941,
+      1.2793727247202182,
+      1.3163108108443884,
+      1.2581989293876055
+     ],
+     "ratioMedian": 1.2768857192480363,
+     "ratioMAD": 0.02065623124450411
+    },
+    "cache-references": {
+     "qjsMedian": 1945608559.0,
+     "zjsMedian": 2309917139.0,
+     "pairedRatiosZjsOverQjs": [
+      1.1878068087266376,
+      1.1874886050013136,
+      1.1880881219985493,
+      1.1865362788400104,
+      1.1876381918289998,
+      1.1867078016470074,
+      1.1877456441827952,
+      1.1867053495835456
+     ],
+     "ratioMedian": 1.1875633984151568,
+     "ratioMAD": 0.0003840669474366454
+    },
+    "cache-misses": {
+     "qjsMedian": 11214356.0,
+     "zjsMedian": 13429784.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1646731392713743,
+      1.4625217107155923,
+      1.21882924953333,
+      1.1666236095398865,
+      0.939909651523053,
+      1.292452980020868,
+      1.1735362239156977,
+      1.2299529183964018
+     ],
+     "ratioMedian": 1.1961827367245137,
+     "ratioMAD": 0.032639889562513735
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.3169280206784606,
+     "zjsMedian": 0.34393546637147665,
+     "pairedRatiosZjsOverQjs": [
+      1.0811824643885377,
+      1.087921528323622,
+      1.149374783793462,
+      1.0845110137563772,
+      1.0465537877944473,
+      1.0854606948422387,
+      1.0777313175653818,
+      1.1194738402716258
+     ],
+     "ratioMedian": 1.0849858542993078,
+     "ratioMAD": 0.0055289633223480905
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.533869808469601,
+    "zjsIPC": 4.271475528967002,
+    "ipcRatioZjsOverQjs": 0.9421257577770701
+   }
+  },
+  "crypto": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/crypto.js",
+    "sha256": "f54860a994aa6a8664b97938d5f592b048e7fbcf37f7811f734c0473bcf9b090",
+    "fixedWorkSha256": "99ee2c512b6a45eae332a2db9b9fb8ef6d6189c94a5ce713fc198646a23e1bf8"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 35921462310,
+       "cycles": 5579111393,
+       "branch-instructions": 5290013228,
+       "branch-misses": 1847192,
+       "cache-references": 12615121236,
+       "cache-misses": 820785
+      },
+      "wallSeconds": 1.4419502187520266,
+      "stdout": "Crypto: 2179",
+      "scores": {
+       "Crypto": 2179
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35922967281,
+       "cycles": 5568874986,
+       "branch-instructions": 5290328369,
+       "branch-misses": 1843556,
+       "cache-references": 12614859054,
+       "cache-misses": 837294
+      },
+      "wallSeconds": 1.438164605293423,
+      "stdout": "Crypto: 2183",
+      "scores": {
+       "Crypto": 2183
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35920419311,
+       "cycles": 5562540503,
+       "branch-instructions": 5289902572,
+       "branch-misses": 1846115,
+       "cache-references": 12613507806,
+       "cache-misses": 795784
+      },
+      "wallSeconds": 1.4365483750589192,
+      "stdout": "Crypto: 2185",
+      "scores": {
+       "Crypto": 2185
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35918771156,
+       "cycles": 5582158887,
+       "branch-instructions": 5289674569,
+       "branch-misses": 1859002,
+       "cache-references": 12614813267,
+       "cache-misses": 920963
+      },
+      "wallSeconds": 1.4417701670899987,
+      "stdout": "Crypto: 2177",
+      "scores": {
+       "Crypto": 2177
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35923059178,
+       "cycles": 5563100200,
+       "branch-instructions": 5290270626,
+       "branch-misses": 1839525,
+       "cache-references": 12615412845,
+       "cache-misses": 901182
+      },
+      "wallSeconds": 1.437145153991878,
+      "stdout": "Crypto: 2186",
+      "scores": {
+       "Crypto": 2186
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35921451466,
+       "cycles": 5588154065,
+       "branch-instructions": 5290070245,
+       "branch-misses": 1855625,
+       "cache-references": 12615824364,
+       "cache-misses": 934252
+      },
+      "wallSeconds": 1.4435037351213396,
+      "stdout": "Crypto: 2174",
+      "scores": {
+       "Crypto": 2174
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35919736142,
+       "cycles": 5562835991,
+       "branch-instructions": 5289775131,
+       "branch-misses": 1843874,
+       "cache-references": 12614793874,
+       "cache-misses": 858127
+      },
+      "wallSeconds": 1.4379185577854514,
+      "stdout": "Crypto: 2182",
+      "scores": {
+       "Crypto": 2182
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35921824105,
+       "cycles": 5600059992,
+       "branch-instructions": 5290113627,
+       "branch-misses": 1859351,
+       "cache-references": 12613649846,
+       "cache-misses": 1468448
+      },
+      "wallSeconds": 1.4489789539948106,
+      "stdout": "Crypto: 2169",
+      "scores": {
+       "Crypto": 2169
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 28963105743,
+       "cycles": 5406017310,
+       "branch-instructions": 5383888728,
+       "branch-misses": 2399988,
+       "cache-references": 12828245608,
+       "cache-misses": 999421
+      },
+      "wallSeconds": 1.396911627613008,
+      "stdout": "Crypto: 2248",
+      "scores": {
+       "Crypto": 2248
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28964114346,
+       "cycles": 5315714377,
+       "branch-instructions": 5384111683,
+       "branch-misses": 2367353,
+       "cache-references": 12828563126,
+       "cache-misses": 1115638
+      },
+      "wallSeconds": 1.3737577870488167,
+      "stdout": "Crypto: 2285",
+      "scores": {
+       "Crypto": 2285
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28962080527,
+       "cycles": 5377972599,
+       "branch-instructions": 5383761985,
+       "branch-misses": 2411446,
+       "cache-references": 12827659136,
+       "cache-misses": 971757
+      },
+      "wallSeconds": 1.389832896180451,
+      "stdout": "Crypto: 2261",
+      "scores": {
+       "Crypto": 2261
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28963291458,
+       "cycles": 5317450765,
+       "branch-instructions": 5383989731,
+       "branch-misses": 2377652,
+       "cache-references": 12827422134,
+       "cache-misses": 998871
+      },
+      "wallSeconds": 1.374937639106065,
+      "stdout": "Crypto: 2286",
+      "scores": {
+       "Crypto": 2286
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28962122203,
+       "cycles": 5341759690,
+       "branch-instructions": 5383768341,
+       "branch-misses": 2371975,
+       "cache-references": 12824259006,
+       "cache-misses": 1040657
+      },
+      "wallSeconds": 1.3823633301071823,
+      "stdout": "Crypto: 2272",
+      "scores": {
+       "Crypto": 2272
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28961854704,
+       "cycles": 5430102040,
+       "branch-instructions": 5383733729,
+       "branch-misses": 2379892,
+       "cache-references": 12829374832,
+       "cache-misses": 1067956
+      },
+      "wallSeconds": 1.4071014393121004,
+      "stdout": "Crypto: 2233",
+      "scores": {
+       "Crypto": 2233
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28962787177,
+       "cycles": 5443877567,
+       "branch-instructions": 5383876402,
+       "branch-misses": 2406196,
+       "cache-references": 12826010714,
+       "cache-misses": 1226148
+      },
+      "wallSeconds": 1.4165687398053706,
+      "stdout": "Crypto: 2217",
+      "scores": {
+       "Crypto": 2217
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28963996622,
+       "cycles": 5380849314,
+       "branch-instructions": 5384111664,
+       "branch-misses": 2384818,
+       "cache-references": 12826026971,
+       "cache-misses": 1003913
+      },
+      "wallSeconds": 1.4016661560162902,
+      "stdout": "Crypto: 2241",
+      "scores": {
+       "Crypto": 2241
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 35921456888.0,
+     "zjsMedian": 28962946460.0,
+     "pairedRatiosZjsOverQjs": [
+      0.8062897187494815,
+      0.8062840165578248,
+      0.8062845891704519,
+      0.8063552990777043,
+      0.8062264981245524,
+      0.8062551350802925,
+      0.8063195971847515,
+      0.8063063985096589
+     ],
+     "ratioMedian": 0.8062871539599668,
+     "ratioMAD": 2.5631714683227447e-05
+    },
+    "cycles": {
+     "qjsMedian": 5573993189.5,
+     "zjsMedian": 5379410956.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9689746142697244,
+      0.9545400804226277,
+      0.9668194948152812,
+      0.952579615278156,
+      0.9602127407304294,
+      0.9717165949324985,
+      0.9786155075949641,
+      0.9608556554192
+     ],
+     "ratioMedian": 0.9638375751172406,
+     "ratioMAD": 0.006508029483870914
+    },
+    "branch-instructions": {
+     "qjsMedian": 5290041736.5,
+     "zjsMedian": 5383882565.0,
+     "pairedRatiosZjsOverQjs": [
+      1.017745796835274,
+      1.0177273143477343,
+      1.0177431269711483,
+      1.017830049990737,
+      1.0176735221333457,
+      1.017705527462235,
+      1.0177892762300107,
+      1.017768623441328
+     ],
+     "ratioMedian": 1.0177444619032112,
+     "ratioMAD": 3.1547989546409916e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 1846653.5,
+     "zjsMedian": 2382355.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2992628811731537,
+      1.2841231836732923,
+      1.3062274018682476,
+      1.2789937826855484,
+      1.289449722074992,
+      1.2825285281239474,
+      1.304967693020239,
+      1.2826077486176628
+     ],
+     "ratioMedian": 1.2867864528741422,
+     "ratioMAD": 0.006025297469394286
+    },
+    "cache-references": {
+     "qjsMedian": 12614836160.5,
+     "zjsMedian": 12827540635.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0168943578117826,
+      1.0169406626808277,
+      1.01697793613749,
+      1.0168539052065224,
+      1.0165548415708625,
+      1.0169271909499136,
+      1.0167435823454343,
+      1.016837087408713
+     ],
+     "ratioMedian": 1.0168741315091525,
+     "ratioMAD": 5.979530621813556e-05
+    },
+    "cache-misses": {
+     "qjsMedian": 879654.5,
+     "zjsMedian": 1022285.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2176404295887473,
+      1.3324328133248298,
+      1.2211316136036914,
+      1.0845940607820292,
+      1.1547689589894161,
+      1.143113421218258,
+      1.4288654243486103,
+      0.6836558053128201
+     ],
+     "ratioMedian": 1.1862046942890818,
+     "ratioMAD": 0.07235095328893815
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.4399673861917108,
+     "zjsMedian": 1.3933722618967295,
+     "pairedRatiosZjsOverQjs": [
+      0.9687655020587338,
+      0.9552159620619605,
+      0.9674807478191939,
+      0.9536455050121995,
+      0.9618814955938645,
+      0.9747819871029435,
+      0.9851522759307302,
+      0.9673474912467984
+     ],
+     "ratioMedian": 0.9674141195329962,
+     "ratioMAD": 0.0064502457545395075
+    }
+   },
+   "derived": {
+    "qjsIPC": 6.444474484767398,
+    "zjsIPC": 5.384036782875597,
+    "ipcRatioZjsOverQjs": 0.8354500891580339
+   }
+  },
+  "zlib": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/zlib.js",
+    "sha256": "661926572b2fdff05c66039ab9726c22d6f67a092fa4ea68c7df5cb112d7fb2e",
+    "fixedWorkSha256": "989b505be16c5bd1afb2d316fc2d9ae0daee3a576a9abd311d489f28fae0e18c"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 89626132954,
+       "cycles": 15353577827,
+       "branch-instructions": 12962931187,
+       "branch-misses": 6873945,
+       "cache-references": 32282433194,
+       "cache-misses": 14349164
+      },
+      "wallSeconds": 3.9763068230822682,
+      "stdout": "zlib: 3874",
+      "scores": {
+       "zlib": 3874
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89621915794,
+       "cycles": 15396072693,
+       "branch-instructions": 12962282558,
+       "branch-misses": 6867501,
+       "cache-references": 32275013968,
+       "cache-misses": 14294816
+      },
+      "wallSeconds": 4.000672157853842,
+      "stdout": "zlib: 3850",
+      "scores": {
+       "zlib": 3850
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89622816338,
+       "cycles": 15474070746,
+       "branch-instructions": 12962415568,
+       "branch-misses": 6860057,
+       "cache-references": 32272798101,
+       "cache-misses": 13335255
+      },
+      "wallSeconds": 4.018916824366897,
+      "stdout": "zlib: 3834",
+      "scores": {
+       "zlib": 3834
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89622074430,
+       "cycles": 15343304000,
+       "branch-instructions": 12962295500,
+       "branch-misses": 6858825,
+       "cache-references": 32287527798,
+       "cache-misses": 14515479
+      },
+      "wallSeconds": 3.994128389749676,
+      "stdout": "zlib: 3857",
+      "scores": {
+       "zlib": 3857
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89622750585,
+       "cycles": 15357980175,
+       "branch-instructions": 12962476258,
+       "branch-misses": 6861769,
+       "cache-references": 32288726845,
+       "cache-misses": 14452720
+      },
+      "wallSeconds": 4.003075791988522,
+      "stdout": "zlib: 3849",
+      "scores": {
+       "zlib": 3849
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89623174036,
+       "cycles": 15341749310,
+       "branch-instructions": 12962575905,
+       "branch-misses": 6875040,
+       "cache-references": 32284520303,
+       "cache-misses": 14631606
+      },
+      "wallSeconds": 3.999575193040073,
+      "stdout": "zlib: 3851",
+      "scores": {
+       "zlib": 3851
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89623081792,
+       "cycles": 15427210091,
+       "branch-instructions": 12962544466,
+       "branch-misses": 6870630,
+       "cache-references": 32277810255,
+       "cache-misses": 14272884
+      },
+      "wallSeconds": 4.022117319982499,
+      "stdout": "zlib: 3830",
+      "scores": {
+       "zlib": 3830
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89623342784,
+       "cycles": 15425297723,
+       "branch-instructions": 12963867677,
+       "branch-misses": 6874907,
+       "cache-references": 32285319797,
+       "cache-misses": 13547472
+      },
+      "wallSeconds": 3.9685434252023697,
+      "stdout": "zlib: 3882",
+      "scores": {
+       "zlib": 3882
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 85992081013,
+       "cycles": 16775418809,
+       "branch-instructions": 15944475070,
+       "branch-misses": 8431495,
+       "cache-references": 36627001771,
+       "cache-misses": 13449614
+      },
+      "wallSeconds": 4.335602352861315,
+      "stdout": "zlib: 3551",
+      "scores": {
+       "zlib": 3551
+      }
+     },
+     {
+      "counters": {
+       "instructions": 85992374430,
+       "cycles": 16779074649,
+       "branch-instructions": 15944473643,
+       "branch-misses": 8407803,
+       "cache-references": 36624538334,
+       "cache-misses": 14618467
+      },
+      "wallSeconds": 4.341375070158392,
+      "stdout": "zlib: 3545",
+      "scores": {
+       "zlib": 3545
+      }
+     },
+     {
+      "counters": {
+       "instructions": 85992356196,
+       "cycles": 16810347211,
+       "branch-instructions": 15944535397,
+       "branch-misses": 8408288,
+       "cache-references": 36616414202,
+       "cache-misses": 13923871
+      },
+      "wallSeconds": 4.351585583761334,
+      "stdout": "zlib: 3536",
+      "scores": {
+       "zlib": 3536
+      }
+     },
+     {
+      "counters": {
+       "instructions": 85992421229,
+       "cycles": 16706237481,
+       "branch-instructions": 15944541778,
+       "branch-misses": 8434874,
+       "cache-references": 36620734722,
+       "cache-misses": 13585594
+      },
+      "wallSeconds": 4.335405070334673,
+      "stdout": "zlib: 3551",
+      "scores": {
+       "zlib": 3551
+      }
+     },
+     {
+      "counters": {
+       "instructions": 85992496835,
+       "cycles": 16746476703,
+       "branch-instructions": 15944524109,
+       "branch-misses": 8467227,
+       "cache-references": 36627838514,
+       "cache-misses": 14941556
+      },
+      "wallSeconds": 4.354019368067384,
+      "stdout": "zlib: 3537",
+      "scores": {
+       "zlib": 3537
+      }
+     },
+     {
+      "counters": {
+       "instructions": 85992418031,
+       "cycles": 16662631297,
+       "branch-instructions": 15944553864,
+       "branch-misses": 8437506,
+       "cache-references": 36628644874,
+       "cache-misses": 14825641
+      },
+      "wallSeconds": 4.333156287204474,
+      "stdout": "zlib: 3553",
+      "scores": {
+       "zlib": 3553
+      }
+     },
+     {
+      "counters": {
+       "instructions": 85993129508,
+       "cycles": 16878618460,
+       "branch-instructions": 15944718119,
+       "branch-misses": 8421914,
+       "cache-references": 36616473747,
+       "cache-misses": 14918408
+      },
+      "wallSeconds": 4.385230561718345,
+      "stdout": "zlib: 3511",
+      "scores": {
+       "zlib": 3511
+      }
+     },
+     {
+      "counters": {
+       "instructions": 85993373874,
+       "cycles": 16634755831,
+       "branch-instructions": 15945744835,
+       "branch-misses": 8415436,
+       "cache-references": 36625994930,
+       "cache-misses": 13429760
+      },
+      "wallSeconds": 4.2871465920470655,
+      "stdout": "zlib: 3591",
+      "scores": {
+       "zlib": 3591
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 89622949065.0,
+     "zjsMedian": 85992419630.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9594532105623128,
+      0.9595016315837003,
+      0.9594917869093934,
+      0.9595004553946699,
+      0.959494060087377,
+      0.9594886473944608,
+      0.9594975734886633,
+      0.9594975059260115
+     ],
+     "ratioMedian": 0.9594957830066942,
+     "ratioMAD": 4.334242638237562e-06
+    },
+    "cycles": {
+     "qjsMedian": 15377026434.0,
+     "zjsMedian": 16760947756.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0926064919864884,
+      1.0898282298075144,
+      1.0863558456552502,
+      1.0888292039967402,
+      1.090408798043653,
+      1.086097221399585,
+      1.0940810658854467,
+      1.0784074401492185
+     ],
+     "ratioMedian": 1.0893287169021273,
+     "ratioMAD": 0.0031021833747096883
+    },
+    "branch-instructions": {
+     "qjsMedian": 12962510362.0,
+     "zjsMedian": 15944538587.5,
+     "pairedRatiosZjsOverQjs": [
+      1.230005377640982,
+      1.2300668166780138,
+      1.230058958791746,
+      1.2300708449363773,
+      1.2300523288642153,
+      1.2300451685571054,
+      1.2300608233840253,
+      1.2300144703953075
+     ],
+     "ratioMedian": 1.2300556438279808,
+     "ratioMAD": 1.0824060454162066e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 6869065.5,
+     "zjsMedian": 8426704.5,
+     "pairedRatiosZjsOverQjs": [
+      1.2265874981542622,
+      1.2242885730923083,
+      1.2256877748974973,
+      1.2297841102521205,
+      1.2339714438069833,
+      1.227266459540599,
+      1.225784826136759,
+      1.2240799766455022
+     ],
+     "ratioMedian": 1.2261861621455106,
+     "ratioMAD": 0.0014889432241453893
+    },
+    "cache-references": {
+     "qjsMedian": 32283476748.5,
+     "zjsMedian": 36625266632.0,
+     "pairedRatiosZjsOverQjs": [
+      1.1345799602803013,
+      1.1347644456579464,
+      1.134590626056233,
+      1.1342068352556993,
+      1.1343847247316263,
+      1.1345575071343503,
+      1.1344162896343912,
+      1.134447332728708
+     ],
+     "ratioMedian": 1.134502419931529,
+     "ratioMAD": 8.71682109209182e-05
+    },
+    "cache-misses": {
+     "qjsMedian": 14321990.0,
+     "zjsMedian": 14271169.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9373099366625122,
+      1.022641144873778,
+      1.0441398383457985,
+      0.9359383868765199,
+      1.0338231142649965,
+      1.0132613603728804,
+      1.045227299542265,
+      0.9913111464633402
+     ],
+     "ratioMedian": 1.0179512526233292,
+     "ratioMAD": 0.026414345941229156
+    },
+    "wallSeconds": {
+     "qjsMedian": 4.000123675446957,
+     "zjsMedian": 4.338488711509854,
+     "pairedRatiosZjsOverQjs": [
+      1.090359106016003,
+      1.085161417597217,
+      1.08277572637917,
+      1.0854445944854532,
+      1.087668481516442,
+      1.083404131204956,
+      1.0902791273471422,
+      1.0802821420124562
+     ],
+     "ratioMedian": 1.0853030060413351,
+     "ratioMAD": 0.0024463775686359712
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.828366716391638,
+    "zjsIPC": 5.130522502775349,
+    "ipcRatioZjsOverQjs": 0.8802676208321485
+   }
+  },
+  "richards": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/richards.js",
+    "sha256": "98872e3ef6a399a7e783e90b6e8ba9ec39ee8be2af330142d2c83396881cbc80",
+    "fixedWorkSha256": "4e0e348f303d1529df42f9bddf953eb385d94ceeef40c6dade94e20db2fcc9c9"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 18450918331,
+       "cycles": 4317536975,
+       "branch-instructions": 2761675601,
+       "branch-misses": 1842311,
+       "cache-references": 7032030830,
+       "cache-misses": 794837
+      },
+      "wallSeconds": 1.1179581596516073,
+      "stdout": "Richards: 1636",
+      "scores": {
+       "Richards": 1636
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451053457,
+       "cycles": 4310485119,
+       "branch-instructions": 2761641528,
+       "branch-misses": 1877819,
+       "cache-references": 7034844640,
+       "cache-misses": 389926
+      },
+      "wallSeconds": 1.1154722142964602,
+      "stdout": "Richards: 1639",
+      "scores": {
+       "Richards": 1639
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451060402,
+       "cycles": 4319789757,
+       "branch-instructions": 2761711527,
+       "branch-misses": 1845509,
+       "cache-references": 7032228863,
+       "cache-misses": 519937
+      },
+      "wallSeconds": 1.1184980859979987,
+      "stdout": "Richards: 1634",
+      "scores": {
+       "Richards": 1634
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18450948107,
+       "cycles": 4316026023,
+       "branch-instructions": 2761687510,
+       "branch-misses": 1880277,
+       "cache-references": 7035604323,
+       "cache-misses": 534875
+      },
+      "wallSeconds": 1.1168621927499771,
+      "stdout": "Richards: 1637",
+      "scores": {
+       "Richards": 1637
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18450746183,
+       "cycles": 4307875508,
+       "branch-instructions": 2761614620,
+       "branch-misses": 1859870,
+       "cache-references": 7032584358,
+       "cache-misses": 395278
+      },
+      "wallSeconds": 1.1145626781508327,
+      "stdout": "Richards: 1640",
+      "scores": {
+       "Richards": 1640
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451107392,
+       "cycles": 4316238816,
+       "branch-instructions": 2761425864,
+       "branch-misses": 1891662,
+       "cache-references": 7033766030,
+       "cache-misses": 574535
+      },
+      "wallSeconds": 1.1177005381323397,
+      "stdout": "Richards: 1637",
+      "scores": {
+       "Richards": 1637
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18450908057,
+       "cycles": 4317956955,
+       "branch-instructions": 2761450362,
+       "branch-misses": 1879502,
+       "cache-references": 7036255338,
+       "cache-misses": 432044
+      },
+      "wallSeconds": 1.1173430811613798,
+      "stdout": "Richards: 1636",
+      "scores": {
+       "Richards": 1636
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18450779911,
+       "cycles": 4310494069,
+       "branch-instructions": 2761382256,
+       "branch-misses": 1864855,
+       "cache-references": 7035071114,
+       "cache-misses": 407262
+      },
+      "wallSeconds": 1.1156724523752928,
+      "stdout": "Richards: 1639",
+      "scores": {
+       "Richards": 1639
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 21690652205,
+       "cycles": 4753466225,
+       "branch-instructions": 4167429008,
+       "branch-misses": 3656711,
+       "cache-references": 10056851869,
+       "cache-misses": 1159405
+      },
+      "wallSeconds": 1.2291214438155293,
+      "stdout": "Richards: 1487",
+      "scores": {
+       "Richards": 1487
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21690797486,
+       "cycles": 4766371415,
+       "branch-instructions": 4167499576,
+       "branch-misses": 3745681,
+       "cache-references": 10059743205,
+       "cache-misses": 1404672
+      },
+      "wallSeconds": 1.2324239104054868,
+      "stdout": "Richards: 1482",
+      "scores": {
+       "Richards": 1482
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21690939217,
+       "cycles": 4765251066,
+       "branch-instructions": 4167536530,
+       "branch-misses": 3762450,
+       "cache-references": 10060846300,
+       "cache-misses": 1277788
+      },
+      "wallSeconds": 1.2324352418072522,
+      "stdout": "Richards: 1483",
+      "scores": {
+       "Richards": 1483
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21690813699,
+       "cycles": 4761776896,
+       "branch-instructions": 4167463319,
+       "branch-misses": 3748919,
+       "cache-references": 10060328254,
+       "cache-misses": 1464281
+      },
+      "wallSeconds": 1.2318457667715847,
+      "stdout": "Richards: 1483",
+      "scores": {
+       "Richards": 1483
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21690883653,
+       "cycles": 4763552352,
+       "branch-instructions": 4167529514,
+       "branch-misses": 3774914,
+       "cache-references": 10060142871,
+       "cache-misses": 911052
+      },
+      "wallSeconds": 1.2307885810732841,
+      "stdout": "Richards: 1483",
+      "scores": {
+       "Richards": 1483
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21690859503,
+       "cycles": 4762180717,
+       "branch-instructions": 4167408093,
+       "branch-misses": 3752386,
+       "cache-references": 10058421359,
+       "cache-misses": 1946972
+      },
+      "wallSeconds": 1.231894092168659,
+      "stdout": "Richards: 1483",
+      "scores": {
+       "Richards": 1483
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21690752737,
+       "cycles": 4773818487,
+       "branch-instructions": 4167338713,
+       "branch-misses": 3759408,
+       "cache-references": 10065309753,
+       "cache-misses": 1126858
+      },
+      "wallSeconds": 1.234609933104366,
+      "stdout": "Richards: 1480",
+      "scores": {
+       "Richards": 1480
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21690607823,
+       "cycles": 4756202697,
+       "branch-instructions": 4167262932,
+       "branch-misses": 3766770,
+       "cache-references": 10058357088,
+       "cache-misses": 1016564
+      },
+      "wallSeconds": 1.2299824226647615,
+      "stdout": "Richards: 1486",
+      "scores": {
+       "Richards": 1486
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 18450933219.0,
+     "zjsMedian": 21690805592.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1755865922704138,
+      1.1755858567398436,
+      1.17559309570353,
+      1.1755934477302468,
+      1.1756101047547536,
+      1.1755857815019106,
+      1.1755926954918,
+      1.1755930062375561
+     ],
+     "ratioMedian": 1.175592850864678,
+     "ratioMAD": 3.4277299164608976e-06
+    },
+    "cycles": {
+     "qjsMedian": 4316132419.5,
+     "zjsMedian": 4762866534.5,
+     "pairedRatiosZjsOverQjs": [
+      1.100967114473872,
+      1.1057621783660774,
+      1.103121062379981,
+      1.1032780781729776,
+      1.105777625921125,
+      1.1033172444830726,
+      1.105573431312726,
+      1.1034008215451276
+     ],
+     "ratioMedian": 1.1033590330141,
+     "ratioMAD": 0.0012261844663724597
+    },
+    "branch-instructions": {
+     "qjsMedian": 2761628074.0,
+     "zjsMedian": 4167446163.5,
+     "pairedRatiosZjsOverQjs": [
+      1.5090219164376069,
+      1.509066087595421,
+      1.5090412192786564,
+      1.5090278331309106,
+      1.5090916320540047,
+      1.5091508149211714,
+      1.5091123021243718,
+      1.5091220793301137
+     ],
+     "ratioMedian": 1.509078859824713,
+     "ratioMAD": 4.0430025728621644e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 1871337.0,
+     "zjsMedian": 3755897.0,
+     "pairedRatiosZjsOverQjs": [
+      1.9848500063235794,
+      1.9946975720237148,
+      2.0387058529652253,
+      1.9938120819432457,
+      2.0296655142563726,
+      1.9836450697851942,
+      2.0002149505560514,
+      2.019872858747731
+     ],
+     "ratioMedian": 1.9974562612898832,
+     "ratioMAD": 0.013208723235496378
+    },
+    "cache-references": {
+     "qjsMedian": 7034305335.0,
+     "zjsMedian": 10059943038.0,
+     "pairedRatiosZjsOverQjs": [
+      1.4301490013518612,
+      1.4299879698551523,
+      1.4306767450267495,
+      1.429916719607428,
+      1.4305044004990803,
+      1.4300193262186174,
+      1.4304923953855524,
+      1.4297449059162417
+     ],
+     "ratioMedian": 1.4300841637852393,
+     "ratioMAD": 0.0002533510234044023
+    },
+    "cache-misses": {
+     "qjsMedian": 475990.5,
+     "zjsMedian": 1218596.5,
+     "pairedRatiosZjsOverQjs": [
+      1.4586701424317188,
+      3.6024066104850663,
+      2.4575823609398832,
+      2.7376134610890395,
+      2.304838619908014,
+      3.3887787515120924,
+      2.6082019423947562,
+      2.49609342388929
+     ],
+     "ratioMedian": 2.552147683142023,
+     "ratioMAD": 0.21638742059051275
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.1171026369556785,
+     "zjsMedian": 1.2318699294701219,
+     "pairedRatiosZjsOverQjs": [
+      1.0994342079837445,
+      1.1048450105794785,
+      1.1018662054370805,
+      1.1029523380485207,
+      1.1042793780922948,
+      1.1021682911839112,
+      1.1049515175062414,
+      1.102458360467806
+     ],
+     "ratioMedian": 1.1027053492581633,
+     "ratioMAD": 0.001206586327607173
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.274876538921722,
+    "zjsIPC": 4.55414936265416,
+    "ipcRatioZjsOverQjs": 1.0653288629951592
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "navier-stokes",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

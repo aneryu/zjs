@@ -1,0 +1,3200 @@
+{
+  "classificationContract": {
+    "qjsJSCallInternal": "Address-resolved with full inline chains. Lines 17746-17872 and 20662-20704 are call entry/return; 20705-20710 is RC teardown; all SWITCH/CASE/BREAK/shared-tail code is one handler bucket. No seven-line CASE window is used.",
+    "regions": [
+      "frontend_compile",
+      "dispatch_hot_handlers",
+      "property_array_helpers",
+      "arithmetic_conversion",
+      "call_entry_return",
+      "rc_teardown",
+      "allocation",
+      "string_regexp",
+      "native_libc",
+      "other"
+    ],
+    "scope": "flat self samples only; each sample is assigned exactly once"
+  },
+  "fixedPrimePeriod": 65521,
+  "metrics": {
+    "allocation": {
+      "pairedDeltaMAD": 2358756.0,
+      "pairedDeltaMedian": -18771766.5,
+      "pairedDeltas": [
+        -20114947,
+        -20377031,
+        -18476922,
+        -19066611,
+        -24897980,
+        -14087015,
+        -15659519,
+        -12645553
+      ],
+      "pairedRatioMedian": 0.874502308490456,
+      "pairedRatios": [
+        0.8649362076550814,
+        0.8620842572062084,
+        0.8767482517482518,
+        0.8722563652326603,
+        0.831410825199645,
+        0.9033273381294964,
+        0.8930648769574944,
+        0.9125113327289212
+      ],
+      "positiveDeltaSamples": 0,
+      "qjsMADApproxCycles": 1408701.5,
+      "qjsMedianApproxCycles": 147717094.5,
+      "zjsMADApproxCycles": 1277659.5,
+      "zjsMedianApproxCycles": 130485071.5
+    },
+    "arithmetic_conversion": {
+      "pairedDeltaMAD": 786252.0,
+      "pairedDeltaMedian": -31679403.5,
+      "pairedDeltas": [
+        -31646643,
+        -31712164,
+        -29484450,
+        -33677794,
+        -29353408,
+        -30532786,
+        -32105290,
+        -31908727
+      ],
+      "pairedRatioMedian": 0.3197545773934194,
+      "pairedRatios": [
+        0.30503597122302156,
+        0.330567081604426,
+        0.31402439024390244,
+        0.2968536251709986,
+        0.3469387755102041,
+        0.33523537803138376,
+        0.307909604519774,
+        0.3254847645429363
+      ],
+      "positiveDeltaSamples": 0,
+      "qjsMADApproxCycles": 1179378.0,
+      "qjsMedianApproxCycles": 46159544.5,
+      "zjsMADApproxCycles": 687970.5,
+      "zjsMedianApproxCycles": 14840506.5
+    },
+    "call_entry_return": {
+      "pairedDeltaMAD": 1965630.0,
+      "pairedDeltaMedian": 61065572.0,
+      "pairedDeltas": [
+        56085976,
+        62244950,
+        62507034,
+        57461917,
+        63293286,
+        59886194,
+        56806707,
+        62769118
+      ],
+      "pairedRatioMedian": 1.91642719866446,
+      "pairedRatios": [
+        1.8214971209213051,
+        1.9161041465766635,
+        1.9380530973451326,
+        1.8400383141762453,
+        1.9907692307692308,
+        1.9167502507522567,
+        1.8218009478672985,
+        1.9696356275303644
+      ],
+      "positiveDeltaSamples": 8,
+      "qjsMADApproxCycles": 1474222.5,
+      "qjsMedianApproxCycles": 67290067.0,
+      "zjsMADApproxCycles": 1146617.5,
+      "zjsMedianApproxCycles": 126553811.5
+    },
+    "dispatch_hot_handlers": {
+      "pairedDeltaMAD": 3439852.5,
+      "pairedDeltaMedian": 152794972.0,
+      "pairedDeltas": [
+        148077460,
+        151812157,
+        156202064,
+        157709047,
+        153777787,
+        151484552,
+        162557601,
+        149322359
+      ],
+      "pairedRatioMedian": 1.387124031596275,
+      "pairedRatios": [
+        1.3738626964433416,
+        1.383927091963546,
+        1.3996647108130762,
+        1.4055602358887953,
+        1.3903209712290039,
+        1.3825914280986265,
+        1.4197259346980207,
+        1.3728730366492146
+      ],
+      "positiveDeltaSamples": 8,
+      "qjsMADApproxCycles": 2620840.0,
+      "qjsMedianApproxCycles": 394698504.0,
+      "zjsMADApproxCycles": 589689.0,
+      "zjsMedianApproxCycles": 547329673.5
+    },
+    "frontend_compile": {
+      "pairedDeltaMAD": 327605.0,
+      "pairedDeltaMedian": -17035460.0,
+      "pairedDeltas": [
+        -16773376,
+        -16707855,
+        -19983905,
+        -17232023,
+        -17952754,
+        -16838897,
+        -18083796,
+        -16707855
+      ],
+      "pairedRatioMedian": 0.8303948226171687,
+      "pairedRatios": [
+        0.8324607329842932,
+        0.8324572930354797,
+        0.8065948002536462,
+        0.8285528031290743,
+        0.8227684346701164,
+        0.8324641460234681,
+        0.819371727748691,
+        0.8322368421052632
+      ],
+      "positiveDeltaSamples": 0,
+      "qjsMADApproxCycles": 393126.0,
+      "qjsMedianApproxCycles": 100312651.0,
+      "zjsMADApproxCycles": 163802.5,
+      "zjsMedianApproxCycles": 83309951.5
+    },
+    "native_libc": {
+      "pairedDeltaMAD": 294844.5,
+      "pairedDeltaMedian": 2096672.0,
+      "pairedDeltas": [
+        2096672,
+        655210,
+        2031151,
+        2096672,
+        6158974,
+        2293235,
+        -3407092,
+        2489798
+      ],
+      "pairedRatioMedian": 1.03150045731471,
+      "pairedRatios": [
+        1.0318725099601593,
+        1.0095785440613028,
+        1.0308764940239044,
+        1.0311284046692606,
+        1.0930693069306932,
+        1.0346191889218594,
+        0.9518518518518518,
+        1.0373647984267453
+      ],
+      "positiveDeltaSamples": 7,
+      "qjsMADApproxCycles": 655210.0,
+      "qjsMedianApproxCycles": 66438294.0,
+      "zjsMADApproxCycles": 786252.0,
+      "zjsMedianApproxCycles": 68797050.0
+    },
+    "other": {
+      "pairedDeltaMAD": 458647.0,
+      "pairedDeltaMedian": 3013966.0,
+      "pairedDeltas": [
+        2031151,
+        3276050,
+        2882924,
+        2358756,
+        2751882,
+        3931260,
+        3145008,
+        3931260
+      ],
+      "pairedRatioMedian": 1.1843307593307593,
+      "pairedRatios": [
+        1.1291666666666667,
+        1.2127659574468086,
+        1.1833333333333333,
+        1.1551724137931034,
+        1.162162162162162,
+        1.234375,
+        1.1853281853281854,
+        1.2564102564102564
+      ],
+      "positiveDeltaSamples": 8,
+      "qjsMADApproxCycles": 458647.0,
+      "qjsMedianApproxCycles": 15725040.0,
+      "zjsMADApproxCycles": 950054.5,
+      "zjsMedianApproxCycles": 18968329.5
+    },
+    "property_array_helpers": {
+      "pairedDeltaMAD": 2129432.5,
+      "pairedDeltaMedian": 9860910.5,
+      "pairedDeltas": [
+        15331914,
+        4914075,
+        6486579,
+        10286797,
+        10745444,
+        5176159,
+        10221276,
+        9500545
+      ],
+      "pairedRatioMedian": 1.0880598687633278,
+      "pairedRatios": [
+        1.1389548693586697,
+        1.0420639371845204,
+        1.0572254335260116,
+        1.0918665886483323,
+        1.0973293768545993,
+        1.0450913242009132,
+        1.089500860585198,
+        1.0866188769414575
+      ],
+      "positiveDeltaSamples": 8,
+      "qjsMADApproxCycles": 2194953.5,
+      "qjsMedianApproxCycles": 112663359.5,
+      "zjsMADApproxCycles": 1539743.5,
+      "zjsMedianApproxCycles": 121443173.5
+    },
+    "rc_teardown": {
+      "pairedDeltaMAD": 1015575.5,
+      "pairedDeltaMedian": -14578422.5,
+      "pairedDeltas": [
+        -15331914,
+        -12907637,
+        -14676704,
+        -12973158,
+        -12252427,
+        -14480141,
+        -15528477,
+        -15659519
+      ],
+      "pairedRatioMedian": 0.6693388809384992,
+      "pairedRatios": [
+        0.6454545454545455,
+        0.6827697262479872,
+        0.672514619883041,
+        0.7027027027027027,
+        0.7258064516129032,
+        0.6661631419939577,
+        0.6499261447562777,
+        0.6334355828220859
+      ],
+      "positiveDeltaSamples": 0,
+      "qjsMADApproxCycles": 819012.5,
+      "qjsMedianApproxCycles": 43505944.0,
+      "zjsMADApproxCycles": 1179378.0,
+      "zjsMedianApproxCycles": 28862000.5
+    },
+    "string_regexp": {
+      "pairedDeltaMAD": 1932869.5,
+      "pairedDeltaMedian": 69288457.5,
+      "pairedDeltas": [
+        74824982,
+        69190176,
+        69386739,
+        76004360,
+        68076319,
+        67290067,
+        73383520,
+        67421109
+      ],
+      "pairedRatioMedian": 1.9734130426679046,
+      "pairedRatios": [
+        2.0362976406533577,
+        1.9626253418413857,
+        1.9842007434944238,
+        2.0922787193973633,
+        1.953211009174312,
+        1.9319419237749547,
+        2.117764471057884,
+        1.9278629395852118
+      ],
+      "positiveDeltaSamples": 8,
+      "qjsMADApproxCycles": 786252.0,
+      "qjsMedianApproxCycles": 71647213.5,
+      "zjsMADApproxCycles": 720731.0,
+      "zjsMedianApproxCycles": 139985616.5
+    }
+  },
+  "qjsJSCallInternalSourceLineSamples": {
+    "17749": 1031,
+    "17750": 44,
+    "17754": 12,
+    "17787": 89,
+    "17789": 116,
+    "17815": 18,
+    "17816": 447,
+    "17818": 197,
+    "17819": 1429,
+    "17823": 466,
+    "17826": 64,
+    "17828": 238,
+    "17829": 88,
+    "17834": 20,
+    "17835": 26,
+    "17836": 11,
+    "17837": 69,
+    "17840": 18,
+    "17841": 25,
+    "17842": 19,
+    "17843": 30,
+    "17844": 380,
+    "17846": 316,
+    "17847": 11,
+    "17849": 2,
+    "17850": 6,
+    "17851": 5,
+    "17852": 15,
+    "17853": 7,
+    "17856": 30,
+    "17857": 11,
+    "17858": 148,
+    "17860": 458,
+    "17861": 56,
+    "17863": 102,
+    "17864": 222,
+    "17865": 7,
+    "17869": 24,
+    "17870": 21,
+    "17871": 15,
+    "17878": 70,
+    "17880": 20,
+    "17882": 71,
+    "17890": 16,
+    "17901": 333,
+    "17902": 259,
+    "17904": 211,
+    "17906": 74,
+    "17908": 94,
+    "17910": 49,
+    "17912": 43,
+    "17913": 5,
+    "17915": 42,
+    "17916": 5,
+    "17918": 10,
+    "17920": 2,
+    "17921": 4,
+    "17924": 127,
+    "17926": 190,
+    "17931": 2,
+    "17932": 3,
+    "17937": 16,
+    "17939": 1,
+    "17950": 28,
+    "17952": 39,
+    "17954": 31,
+    "17956": 5,
+    "17959": 1,
+    "17960": 2,
+    "17962": 8,
+    "17963": 2,
+    "17965": 4,
+    "17998": 1,
+    "18024": 267,
+    "18026": 100,
+    "18039": 417,
+    "18040": 2,
+    "18041": 238,
+    "18083": 1,
+    "18084": 1,
+    "18086": 1,
+    "18180": 5,
+    "18189": 1,
+    "18190": 5,
+    "18191": 65,
+    "18193": 22,
+    "18195": 8,
+    "18197": 106,
+    "18198": 76,
+    "18199": 3,
+    "18200": 44,
+    "18202": 22,
+    "18215": 2,
+    "18223": 88,
+    "18225": 51,
+    "18226": 131,
+    "18227": 522,
+    "18229": 422,
+    "18231": 342,
+    "18233": 371,
+    "18234": 589,
+    "18235": 154,
+    "18236": 355,
+    "18238": 174,
+    "18242": 71,
+    "18246": 3,
+    "18247": 11,
+    "18267": 18,
+    "18270": 1,
+    "18428": 2,
+    "18467": 21,
+    "18468": 227,
+    "18469": 176,
+    "18484": 427,
+    "18486": 1,
+    "18488": 72,
+    "18562": 3,
+    "18565": 1,
+    "18585": 3612,
+    "18586": 1297,
+    "18587": 367,
+    "18589": 595,
+    "18590": 836,
+    "18591": 940,
+    "18592": 457,
+    "18593": 517,
+    "18594": 358,
+    "18595": 180,
+    "18596": 220,
+    "18597": 14,
+    "18598": 20,
+    "18599": 11,
+    "18600": 9,
+    "18601": 777,
+    "18602": 35,
+    "18603": 44,
+    "18605": 1,
+    "18606": 2,
+    "18609": 16,
+    "18613": 213,
+    "18614": 71,
+    "18615": 26,
+    "18616": 16,
+    "18617": 2,
+    "18622": 6,
+    "18633": 15,
+    "18634": 33,
+    "18637": 1,
+    "18829": 13,
+    "18830": 22,
+    "18832": 58,
+    "18834": 114,
+    "18835": 180,
+    "18837": 347,
+    "18844": 7,
+    "18845": 6,
+    "18846": 2,
+    "18855": 3,
+    "18858": 1,
+    "18864": 153,
+    "18865": 169,
+    "18867": 50,
+    "18872": 68,
+    "18873": 10,
+    "18874": 3,
+    "18876": 68,
+    "18879": 103,
+    "18886": 197,
+    "18887": 75,
+    "18888": 79,
+    "18891": 1,
+    "18893": 101,
+    "18894": 1,
+    "18895": 2,
+    "18897": 157,
+    "18900": 140,
+    "18906": 1406,
+    "18907": 427,
+    "18908": 246,
+    "18911": 3,
+    "18913": 527,
+    "18914": 30,
+    "18915": 34,
+    "18917": 329,
+    "18920": 532,
+    "18960": 1,
+    "18965": 1,
+    "19097": 21,
+    "19098": 17,
+    "19099": 11,
+    "19101": 7,
+    "19103": 9,
+    "19105": 24,
+    "19164": 3311,
+    "19165": 90,
+    "19168": 4604,
+    "19169": 102,
+    "19173": 371,
+    "19174": 77,
+    "19186": 20,
+    "19189": 14,
+    "19190": 14,
+    "19192": 861,
+    "19195": 107,
+    "19198": 125,
+    "19202": 70,
+    "19203": 3,
+    "19207": 3,
+    "19216": 50,
+    "19274": 6,
+    "19276": 23,
+    "19279": 3,
+    "19282": 15,
+    "19435": 2120,
+    "19436": 316,
+    "19552": 148,
+    "19554": 25,
+    "19555": 37,
+    "19556": 131,
+    "19558": 31,
+    "19560": 324,
+    "19565": 52,
+    "19568": 2,
+    "19569": 11,
+    "19571": 5,
+    "19572": 13,
+    "19573": 54,
+    "19575": 36,
+    "19577": 8,
+    "19578": 26,
+    "19580": 15,
+    "19582": 45,
+    "19586": 177,
+    "19587": 105,
+    "19588": 154,
+    "19589": 33,
+    "19590": 15,
+    "19594": 117,
+    "19699": 289,
+    "19700": 230,
+    "19701": 75,
+    "19703": 109,
+    "19704": 17,
+    "19705": 4,
+    "19707": 416,
+    "19709": 3,
+    "19710": 133,
+    "19714": 1,
+    "19722": 3,
+    "19723": 1,
+    "19727": 5,
+    "19729": 77,
+    "19730": 86,
+    "19731": 12,
+    "19732": 12,
+    "19742": 173,
+    "19748": 16,
+    "19751": 18,
+    "19752": 80,
+    "19753": 50,
+    "19755": 83,
+    "19756": 11,
+    "19759": 190,
+    "19761": 9,
+    "19762": 7,
+    "19763": 1,
+    "19766": 4,
+    "19769": 7,
+    "19770": 30,
+    "19771": 2,
+    "19773": 8,
+    "19774": 3,
+    "19776": 6,
+    "19788": 2,
+    "19791": 66,
+    "19795": 28,
+    "19796": 67,
+    "19797": 18,
+    "19799": 67,
+    "19800": 9,
+    "19803": 186,
+    "19805": 1,
+    "19829": 84,
+    "19834": 10,
+    "19835": 18,
+    "19836": 30,
+    "19841": 32,
+    "19842": 7,
+    "19843": 34,
+    "19847": 94,
+    "19851": 26,
+    "19853": 6,
+    "19854": 67,
+    "19859": 1,
+    "19866": 1,
+    "19872": 57,
+    "19873": 3,
+    "19878": 119,
+    "19888": 6,
+    "19894": 1,
+    "19919": 1,
+    "19922": 1,
+    "19957": 1,
+    "19978": 3,
+    "19980": 4,
+    "19982": 1,
+    "19990": 2,
+    "20014": 78,
+    "20016": 58,
+    "20018": 34,
+    "20025": 3,
+    "20027": 46,
+    "20053": 87,
+    "20055": 395,
+    "20056": 631,
+    "20057": 42,
+    "20058": 86,
+    "20060": 239,
+    "20072": 139,
+    "20116": 49,
+    "20117": 24,
+    "20118": 126,
+    "20123": 29,
+    "20124": 11,
+    "20132": 212,
+    "20157": 23,
+    "20158": 67,
+    "20159": 46,
+    "20163": 21,
+    "20165": 12,
+    "20173": 104,
+    "20177": 21,
+    "20178": 25,
+    "20179": 122,
+    "20180": 23,
+    "20183": 11,
+    "20185": 2,
+    "20186": 7,
+    "20191": 186,
+    "20195": 22,
+    "20196": 162,
+    "20197": 124,
+    "20198": 34,
+    "20201": 7,
+    "20204": 1,
+    "20209": 204,
+    "20213": 5,
+    "20214": 49,
+    "20215": 26,
+    "20216": 8,
+    "20219": 3,
+    "20227": 67,
+    "20268": 1955,
+    "20269": 41,
+    "20270": 21,
+    "20271": 102,
+    "20340": 416,
+    "20341": 50,
+    "20397": 772,
+    "20398": 1,
+    "20402": 5,
+    "20405": 1,
+    "20413": 3,
+    "20414": 19,
+    "20416": 1,
+    "20417": 4,
+    "20423": 1,
+    "20424": 5,
+    "20425": 1,
+    "20426": 6,
+    "20428": 2,
+    "20634": 10,
+    "20652": 18,
+    "20653": 5,
+    "20654": 23,
+    "20700": 100,
+    "20705": 165,
+    "20706": 216,
+    "20709": 46,
+    "20710": 5,
+    "20711": 588,
+    "None": 8
+  },
+  "runs": {
+    "qjs": [
+      {
+        "regionApproxCycles": {
+          "allocation": 148929233,
+          "arithmetic_conversion": 45537095,
+          "call_entry_return": 68272882,
+          "dispatch_hot_handlers": 396074445,
+          "frontend_compile": 100116088,
+          "native_libc": 65783084,
+          "other": 15725040,
+          "property_array_helpers": 110337364,
+          "rc_teardown": 43243860,
+          "string_regexp": 72204142
+        },
+        "regionSampleCounts": {
+          "allocation": 2273,
+          "arithmetic_conversion": 695,
+          "call_entry_return": 1042,
+          "dispatch_hot_handlers": 6045,
+          "frontend_compile": 1528,
+          "native_libc": 1004,
+          "other": 240,
+          "property_array_helpers": 1684,
+          "rc_teardown": 660,
+          "string_regexp": 1102
+        },
+        "sample": 1,
+        "sampleCount": 16273
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 147749855,
+          "arithmetic_conversion": 47371683,
+          "call_entry_return": 67945277,
+          "dispatch_hot_handlers": 395419235,
+          "frontend_compile": 99722962,
+          "native_libc": 68403924,
+          "other": 15397435,
+          "property_array_helpers": 116823943,
+          "rc_teardown": 40688541,
+          "string_regexp": 71876537
+        },
+        "regionSampleCounts": {
+          "allocation": 2255,
+          "arithmetic_conversion": 723,
+          "call_entry_return": 1037,
+          "dispatch_hot_handlers": 6035,
+          "frontend_compile": 1522,
+          "native_libc": 1044,
+          "other": 235,
+          "property_array_helpers": 1783,
+          "rc_teardown": 621,
+          "string_regexp": 1097
+        },
+        "sample": 2,
+        "sampleCount": 16352
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 149912048,
+          "arithmetic_conversion": 42981776,
+          "call_entry_return": 66634857,
+          "dispatch_hot_handlers": 390832765,
+          "frontend_compile": 103326617,
+          "native_libc": 65783084,
+          "other": 15725040,
+          "property_array_helpers": 113351330,
+          "rc_teardown": 44816364,
+          "string_regexp": 70500596
+        },
+        "regionSampleCounts": {
+          "allocation": 2288,
+          "arithmetic_conversion": 656,
+          "call_entry_return": 1017,
+          "dispatch_hot_handlers": 5965,
+          "frontend_compile": 1577,
+          "native_libc": 1004,
+          "other": 240,
+          "property_array_helpers": 1730,
+          "rc_teardown": 684,
+          "string_regexp": 1076
+        },
+        "sample": 3,
+        "sampleCount": 16237
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 149256838,
+          "arithmetic_conversion": 47895851,
+          "call_entry_return": 68403924,
+          "dispatch_hot_handlers": 388867135,
+          "frontend_compile": 100509214,
+          "native_libc": 67355588,
+          "other": 15200872,
+          "property_array_helpers": 111975389,
+          "rc_teardown": 43636986,
+          "string_regexp": 69583302
+        },
+        "regionSampleCounts": {
+          "allocation": 2278,
+          "arithmetic_conversion": 731,
+          "call_entry_return": 1044,
+          "dispatch_hot_handlers": 5935,
+          "frontend_compile": 1534,
+          "native_libc": 1028,
+          "other": 232,
+          "property_array_helpers": 1709,
+          "rc_teardown": 666,
+          "string_regexp": 1062
+        },
+        "sample": 4,
+        "sampleCount": 16219
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 147684334,
+          "arithmetic_conversion": 44947406,
+          "call_entry_return": 63882975,
+          "dispatch_hot_handlers": 393977773,
+          "frontend_compile": 101295466,
+          "native_libc": 66176210,
+          "other": 16969939,
+          "property_array_helpers": 110402885,
+          "rc_teardown": 44685322,
+          "string_regexp": 71417890
+        },
+        "regionSampleCounts": {
+          "allocation": 2254,
+          "arithmetic_conversion": 686,
+          "call_entry_return": 975,
+          "dispatch_hot_handlers": 6013,
+          "frontend_compile": 1546,
+          "native_libc": 1010,
+          "other": 259,
+          "property_array_helpers": 1685,
+          "rc_teardown": 682,
+          "string_regexp": 1090
+        },
+        "sample": 5,
+        "sampleCount": 16200
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 145718704,
+          "arithmetic_conversion": 45930221,
+          "call_entry_return": 65324437,
+          "dispatch_hot_handlers": 395943403,
+          "frontend_compile": 100509214,
+          "native_libc": 66241731,
+          "other": 16773376,
+          "property_array_helpers": 114792792,
+          "rc_teardown": 43374902,
+          "string_regexp": 72204142
+        },
+        "regionSampleCounts": {
+          "allocation": 2224,
+          "arithmetic_conversion": 701,
+          "call_entry_return": 997,
+          "dispatch_hot_handlers": 6043,
+          "frontend_compile": 1534,
+          "native_libc": 1011,
+          "other": 256,
+          "property_array_helpers": 1752,
+          "rc_teardown": 662,
+          "string_regexp": 1102
+        },
+        "sample": 6,
+        "sampleCount": 16282
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 146439435,
+          "arithmetic_conversion": 46388868,
+          "call_entry_return": 69124655,
+          "dispatch_hot_handlers": 387294631,
+          "frontend_compile": 100116088,
+          "native_libc": 70762680,
+          "other": 16969939,
+          "property_array_helpers": 114203103,
+          "rc_teardown": 44357717,
+          "string_regexp": 65652042
+        },
+        "regionSampleCounts": {
+          "allocation": 2235,
+          "arithmetic_conversion": 708,
+          "call_entry_return": 1055,
+          "dispatch_hot_handlers": 5911,
+          "frontend_compile": 1528,
+          "native_libc": 1080,
+          "other": 259,
+          "property_array_helpers": 1743,
+          "rc_teardown": 677,
+          "string_regexp": 1002
+        },
+        "sample": 7,
+        "sampleCount": 16198
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 144539326,
+          "arithmetic_conversion": 47306162,
+          "call_entry_return": 64734748,
+          "dispatch_hot_handlers": 400464352,
+          "frontend_compile": 99591920,
+          "native_libc": 66634857,
+          "other": 15331914,
+          "property_array_helpers": 109682154,
+          "rc_teardown": 42719692,
+          "string_regexp": 72662789
+        },
+        "regionSampleCounts": {
+          "allocation": 2206,
+          "arithmetic_conversion": 722,
+          "call_entry_return": 988,
+          "dispatch_hot_handlers": 6112,
+          "frontend_compile": 1520,
+          "native_libc": 1017,
+          "other": 234,
+          "property_array_helpers": 1674,
+          "rc_teardown": 652,
+          "string_regexp": 1109
+        },
+        "sample": 8,
+        "sampleCount": 16234
+      }
+    ],
+    "zjs": [
+      {
+        "regionApproxCycles": {
+          "allocation": 128814286,
+          "arithmetic_conversion": 13890452,
+          "call_entry_return": 124358858,
+          "dispatch_hot_handlers": 544151905,
+          "frontend_compile": 83342712,
+          "native_libc": 67879756,
+          "other": 17756191,
+          "property_array_helpers": 125669278,
+          "rc_teardown": 27911946,
+          "string_regexp": 147029124
+        },
+        "regionSampleCounts": {
+          "allocation": 1966,
+          "arithmetic_conversion": 212,
+          "call_entry_return": 1898,
+          "dispatch_hot_handlers": 8305,
+          "frontend_compile": 1272,
+          "native_libc": 1036,
+          "other": 271,
+          "property_array_helpers": 1918,
+          "rc_teardown": 426,
+          "string_regexp": 2244
+        },
+        "sample": 1,
+        "sampleCount": 19548
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 127372824,
+          "arithmetic_conversion": 15659519,
+          "call_entry_return": 130190227,
+          "dispatch_hot_handlers": 547231392,
+          "frontend_compile": 83015107,
+          "native_libc": 69059134,
+          "other": 18673485,
+          "property_array_helpers": 121738018,
+          "rc_teardown": 27780904,
+          "string_regexp": 141066713
+        },
+        "regionSampleCounts": {
+          "allocation": 1944,
+          "arithmetic_conversion": 239,
+          "call_entry_return": 1987,
+          "dispatch_hot_handlers": 8352,
+          "frontend_compile": 1267,
+          "native_libc": 1054,
+          "other": 285,
+          "property_array_helpers": 1858,
+          "rc_teardown": 424,
+          "string_regexp": 2153
+        },
+        "sample": 2,
+        "sampleCount": 19563
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 131435126,
+          "arithmetic_conversion": 13497326,
+          "call_entry_return": 129141891,
+          "dispatch_hot_handlers": 547034829,
+          "frontend_compile": 83342712,
+          "native_libc": 67814235,
+          "other": 18607964,
+          "property_array_helpers": 119837909,
+          "rc_teardown": 30139660,
+          "string_regexp": 139887335
+        },
+        "regionSampleCounts": {
+          "allocation": 2006,
+          "arithmetic_conversion": 206,
+          "call_entry_return": 1971,
+          "dispatch_hot_handlers": 8349,
+          "frontend_compile": 1272,
+          "native_libc": 1035,
+          "other": 284,
+          "property_array_helpers": 1829,
+          "rc_teardown": 460,
+          "string_regexp": 2135
+        },
+        "sample": 3,
+        "sampleCount": 19547
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 130190227,
+          "arithmetic_conversion": 14218057,
+          "call_entry_return": 125865841,
+          "dispatch_hot_handlers": 546576182,
+          "frontend_compile": 83277191,
+          "native_libc": 69452260,
+          "other": 17559628,
+          "property_array_helpers": 122262186,
+          "rc_teardown": 30663828,
+          "string_regexp": 145587662
+        },
+        "regionSampleCounts": {
+          "allocation": 1987,
+          "arithmetic_conversion": 217,
+          "call_entry_return": 1921,
+          "dispatch_hot_handlers": 8342,
+          "frontend_compile": 1271,
+          "native_libc": 1060,
+          "other": 268,
+          "property_array_helpers": 1866,
+          "rc_teardown": 468,
+          "string_regexp": 2222
+        },
+        "sample": 4,
+        "sampleCount": 19622
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 122786354,
+          "arithmetic_conversion": 15593998,
+          "call_entry_return": 127176261,
+          "dispatch_hot_handlers": 547755560,
+          "frontend_compile": 83342712,
+          "native_libc": 72335184,
+          "other": 19721821,
+          "property_array_helpers": 121148329,
+          "rc_teardown": 32432895,
+          "string_regexp": 139494209
+        },
+        "regionSampleCounts": {
+          "allocation": 1874,
+          "arithmetic_conversion": 238,
+          "call_entry_return": 1941,
+          "dispatch_hot_handlers": 8360,
+          "frontend_compile": 1272,
+          "native_libc": 1104,
+          "other": 301,
+          "property_array_helpers": 1849,
+          "rc_teardown": 495,
+          "string_regexp": 2129
+        },
+        "sample": 5,
+        "sampleCount": 19563
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 131631689,
+          "arithmetic_conversion": 15397435,
+          "call_entry_return": 125210631,
+          "dispatch_hot_handlers": 547427955,
+          "frontend_compile": 83670317,
+          "native_libc": 68534966,
+          "other": 20704636,
+          "property_array_helpers": 119968951,
+          "rc_teardown": 28894761,
+          "string_regexp": 139494209
+        },
+        "regionSampleCounts": {
+          "allocation": 2009,
+          "arithmetic_conversion": 235,
+          "call_entry_return": 1911,
+          "dispatch_hot_handlers": 8355,
+          "frontend_compile": 1277,
+          "native_libc": 1046,
+          "other": 316,
+          "property_array_helpers": 1831,
+          "rc_teardown": 441,
+          "string_regexp": 2129
+        },
+        "sample": 6,
+        "sampleCount": 19550
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 130779916,
+          "arithmetic_conversion": 14283578,
+          "call_entry_return": 125931362,
+          "dispatch_hot_handlers": 549852232,
+          "frontend_compile": 82032292,
+          "native_libc": 67355588,
+          "other": 20114947,
+          "property_array_helpers": 124424379,
+          "rc_teardown": 28829240,
+          "string_regexp": 139035562
+        },
+        "regionSampleCounts": {
+          "allocation": 1996,
+          "arithmetic_conversion": 218,
+          "call_entry_return": 1922,
+          "dispatch_hot_handlers": 8392,
+          "frontend_compile": 1252,
+          "native_libc": 1028,
+          "other": 307,
+          "property_array_helpers": 1899,
+          "rc_teardown": 440,
+          "string_regexp": 2122
+        },
+        "sample": 7,
+        "sampleCount": 19576
+      },
+      {
+        "regionApproxCycles": {
+          "allocation": 131893773,
+          "arithmetic_conversion": 15397435,
+          "call_entry_return": 127503866,
+          "dispatch_hot_handlers": 549786711,
+          "frontend_compile": 82884065,
+          "native_libc": 69124655,
+          "other": 19263174,
+          "property_array_helpers": 119182699,
+          "rc_teardown": 27060173,
+          "string_regexp": 140083898
+        },
+        "regionSampleCounts": {
+          "allocation": 2013,
+          "arithmetic_conversion": 235,
+          "call_entry_return": 1946,
+          "dispatch_hot_handlers": 8391,
+          "frontend_compile": 1265,
+          "native_libc": 1055,
+          "other": 294,
+          "property_array_helpers": 1819,
+          "rc_teardown": 413,
+          "string_regexp": 2138
+        },
+        "sample": 8,
+        "sampleCount": 19569
+      }
+    ]
+  },
+  "schema": "pdfjs-diag-p1-regions-v1",
+  "sourceSamples": "/home/aneryu/worktree-pdfjs-diagnosis/reports/perf/qjs-align/2026-08-13/PDFJS-DIAG-p1-samples-ab8.json",
+  "topSymbolsByRegion": {
+    "qjs": {
+      "allocation": [
+        {
+          "samples": 5391,
+          "symbol": "__js_malloc"
+        },
+        {
+          "samples": 2780,
+          "symbol": "__js_free"
+        },
+        {
+          "samples": 2340,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_malloc"
+        },
+        {
+          "samples": 855,
+          "symbol": "js_create_function"
+        },
+        {
+          "samples": 675,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:unlink_chunk.isra.0"
+        },
+        {
+          "samples": 547,
+          "symbol": "js_alloc_string"
+        },
+        {
+          "samples": 544,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:malloc"
+        },
+        {
+          "samples": 479,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__malloc_usable_size"
+        },
+        {
+          "samples": 457,
+          "symbol": "__JS_NewAtom"
+        },
+        {
+          "samples": 318,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free"
+        },
+        {
+          "samples": 315,
+          "symbol": "js_new_string_rope"
+        },
+        {
+          "samples": 307,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free_create_chunk"
+        },
+        {
+          "samples": 285,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:cfree@GLIBC_2.17"
+        },
+        {
+          "samples": 282,
+          "symbol": "JS_NewObjectProtoClass"
+        },
+        {
+          "samples": 281,
+          "symbol": "__js_realloc"
+        },
+        {
+          "samples": 273,
+          "symbol": "JS_NewAtomLen"
+        },
+        {
+          "samples": 268,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free_merge_chunk"
+        },
+        {
+          "samples": 264,
+          "symbol": "JS_NewObjectFromShape"
+        },
+        {
+          "samples": 223,
+          "symbol": "js_closure2.isra.0"
+        },
+        {
+          "samples": 179,
+          "symbol": "js_closure"
+        },
+        {
+          "samples": 166,
+          "symbol": "js_def_malloc"
+        },
+        {
+          "samples": 157,
+          "symbol": "js_create_array"
+        },
+        {
+          "samples": 130,
+          "symbol": "js_new_string8_len"
+        },
+        {
+          "samples": 100,
+          "symbol": "__js_malloc_usable_size"
+        },
+        {
+          "samples": 100,
+          "symbol": "js_def_free"
+        },
+        {
+          "samples": 99,
+          "symbol": "js_malloc_large"
+        },
+        {
+          "samples": 98,
+          "symbol": "js_new_shape2.constprop.0"
+        },
+        {
+          "samples": 41,
+          "symbol": "JS_NewAtomStr.isra.0"
+        },
+        {
+          "samples": 20,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free_maybe_consolidate.part.0"
+        },
+        {
+          "samples": 17,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:realloc"
+        }
+      ],
+      "arithmetic_conversion": [
+        {
+          "samples": 1473,
+          "symbol": "js_atof"
+        },
+        {
+          "samples": 1189,
+          "symbol": "js_atod"
+        },
+        {
+          "samples": 706,
+          "symbol": "round_to_d.constprop.0"
+        },
+        {
+          "samples": 565,
+          "symbol": "mpb_shr_round.part.0"
+        },
+        {
+          "samples": 439,
+          "symbol": "JS_ToInt32Free"
+        },
+        {
+          "samples": 298,
+          "symbol": "mul_pow"
+        },
+        {
+          "samples": 178,
+          "symbol": "JS_ToInt32Sat"
+        },
+        {
+          "samples": 163,
+          "symbol": "js_dtoa"
+        },
+        {
+          "samples": 142,
+          "symbol": "JS_ToNumberHintFree"
+        },
+        {
+          "samples": 104,
+          "symbol": "js_binary_logic_slow"
+        },
+        {
+          "samples": 69,
+          "symbol": "JS_ToBoolFree"
+        },
+        {
+          "samples": 56,
+          "symbol": "JS_ToInt64Clamp"
+        },
+        {
+          "samples": 49,
+          "symbol": "js_strict_eq2.isra.0"
+        },
+        {
+          "samples": 47,
+          "symbol": "js_operator_typeof"
+        },
+        {
+          "samples": 44,
+          "symbol": "JS_ToPrimitiveFree"
+        },
+        {
+          "samples": 41,
+          "symbol": "mpb_mul1_base"
+        },
+        {
+          "samples": 28,
+          "symbol": "js_relational_slow"
+        },
+        {
+          "samples": 19,
+          "symbol": "js_eq_slow"
+        },
+        {
+          "samples": 9,
+          "symbol": "js_dtoa2"
+        },
+        {
+          "samples": 3,
+          "symbol": "JS_ToInt32"
+        }
+      ],
+      "call_entry_return": [
+        {
+          "samples": 6393,
+          "symbol": "JS_CallInternal"
+        },
+        {
+          "samples": 1703,
+          "symbol": "js_call_c_function"
+        },
+        {
+          "samples": 55,
+          "symbol": "JS_CallFree"
+        },
+        {
+          "samples": 4,
+          "symbol": "JS_CallConstructorInternal"
+        }
+      ],
+      "dispatch_hot_handlers": [
+        {
+          "samples": 48059,
+          "symbol": "JS_CallInternal"
+        }
+      ],
+      "frontend_compile": [
+        {
+          "samples": 2924,
+          "symbol": "next_token"
+        },
+        {
+          "samples": 2342,
+          "symbol": "get_line_col_cached"
+        },
+        {
+          "samples": 1993,
+          "symbol": "parse_ident"
+        },
+        {
+          "samples": 805,
+          "symbol": "js_parse_expr_binary"
+        },
+        {
+          "samples": 509,
+          "symbol": "resolve_labels"
+        },
+        {
+          "samples": 507,
+          "symbol": "free_token"
+        },
+        {
+          "samples": 431,
+          "symbol": "code_match"
+        },
+        {
+          "samples": 392,
+          "symbol": "free_bytecode_atoms"
+        },
+        {
+          "samples": 366,
+          "symbol": "js_parse_string"
+        },
+        {
+          "samples": 331,
+          "symbol": "js_parse_skip_parens_token"
+        },
+        {
+          "samples": 321,
+          "symbol": "js_parse_postfix_expr"
+        },
+        {
+          "samples": 173,
+          "symbol": "ss_check"
+        },
+        {
+          "samples": 157,
+          "symbol": "dbuf_put"
+        },
+        {
+          "samples": 109,
+          "symbol": "resolve_scope_var"
+        },
+        {
+          "samples": 102,
+          "symbol": "find_var.isra.0"
+        },
+        {
+          "samples": 100,
+          "symbol": "js_parse_assign_expr2"
+        },
+        {
+          "samples": 81,
+          "symbol": "js_bytecode_function_finalizer"
+        },
+        {
+          "samples": 78,
+          "symbol": "js_parse_unary"
+        },
+        {
+          "samples": 76,
+          "symbol": "js_parse_logical_and_or"
+        },
+        {
+          "samples": 66,
+          "symbol": "dbuf_claim"
+        },
+        {
+          "samples": 49,
+          "symbol": "emit_atom"
+        },
+        {
+          "samples": 42,
+          "symbol": "skip_spaces"
+        },
+        {
+          "samples": 42,
+          "symbol": "js_parse_object_literal"
+        },
+        {
+          "samples": 35,
+          "symbol": "emit_source_pos"
+        },
+        {
+          "samples": 32,
+          "symbol": "update_token_ident.constprop.0"
+        },
+        {
+          "samples": 29,
+          "symbol": "__dbuf_putc"
+        },
+        {
+          "samples": 26,
+          "symbol": "js_parse_statement_or_decl"
+        },
+        {
+          "samples": 23,
+          "symbol": "simple_next_token"
+        },
+        {
+          "samples": 17,
+          "symbol": "js_bytecode_function_mark"
+        },
+        {
+          "samples": 16,
+          "symbol": "js_parse_property_name"
+        }
+      ],
+      "native_libc": [
+        {
+          "samples": 7396,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__memcpy_sve"
+        },
+        {
+          "samples": 202,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:memcmp"
+        },
+        {
+          "samples": 159,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__memmove_sve"
+        },
+        {
+          "samples": 126,
+          "symbol": "memcpy@plt"
+        },
+        {
+          "samples": 103,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__memcpy_generic"
+        },
+        {
+          "samples": 83,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__memset_zva64"
+        },
+        {
+          "samples": 35,
+          "symbol": "memcmp@plt"
+        },
+        {
+          "samples": 29,
+          "symbol": "memset@plt"
+        },
+        {
+          "samples": 24,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:alloc_perturb"
+        },
+        {
+          "samples": 7,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:do_lookup_x"
+        },
+        {
+          "samples": 6,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:_dl_check_map_versions"
+        },
+        {
+          "samples": 5,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__strlen_asimd"
+        },
+        {
+          "samples": 4,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:_dl_relocate_object"
+        },
+        {
+          "samples": 4,
+          "symbol": "memmove@plt"
+        },
+        {
+          "samples": 3,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:strcmp"
+        },
+        {
+          "samples": 3,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:check_match"
+        },
+        {
+          "samples": 2,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__aarch64_swp8_acq"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:__tunable_get_val"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_IO_flush_all"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__GI___mremap"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__sbrk"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__unregister_atfork"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_IO_file_overflow@@GLIBC_2.17"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_IO_fwrite"
+        }
+      ],
+      "other": [
+        {
+          "samples": 596,
+          "symbol": "JS_CallInternal"
+        },
+        {
+          "samples": 333,
+          "symbol": "[unknown]:[unknown]"
+        },
+        {
+          "samples": 92,
+          "symbol": "JS_FreeContext"
+        },
+        {
+          "samples": 78,
+          "symbol": "pow_ui.part.0"
+        },
+        {
+          "samples": 68,
+          "symbol": "js_malloc_new_arena"
+        },
+        {
+          "samples": 37,
+          "symbol": "malloc_usable_size@plt"
+        },
+        {
+          "samples": 36,
+          "symbol": "js_function_set_properties"
+        },
+        {
+          "samples": 33,
+          "symbol": "set_object_name"
+        },
+        {
+          "samples": 33,
+          "symbol": "js_get_length64"
+        },
+        {
+          "samples": 32,
+          "symbol": "push_short_int"
+        },
+        {
+          "samples": 32,
+          "symbol": "js_realloc"
+        },
+        {
+          "samples": 32,
+          "symbol": "strstart"
+        },
+        {
+          "samples": 31,
+          "symbol": "skip_dead_code"
+        },
+        {
+          "samples": 31,
+          "symbol": "JS_OrdinaryIsInstanceOf"
+        },
+        {
+          "samples": 31,
+          "symbol": "js_parseInt"
+        },
+        {
+          "samples": 31,
+          "symbol": "output_digits"
+        },
+        {
+          "samples": 30,
+          "symbol": "resize_properties"
+        },
+        {
+          "samples": 28,
+          "symbol": "JS_ToObject"
+        },
+        {
+          "samples": 24,
+          "symbol": "put_short_code"
+        },
+        {
+          "samples": 23,
+          "symbol": "js_mallocz"
+        },
+        {
+          "samples": 23,
+          "symbol": "js_realloc2"
+        },
+        {
+          "samples": 19,
+          "symbol": "free@plt"
+        },
+        {
+          "samples": 17,
+          "symbol": "pop_scope"
+        },
+        {
+          "samples": 16,
+          "symbol": "find_jump_target"
+        },
+        {
+          "samples": 15,
+          "symbol": "JS_IsInstanceOf"
+        },
+        {
+          "samples": 14,
+          "symbol": "get_closure_var"
+        },
+        {
+          "samples": 13,
+          "symbol": "gc_scan"
+        },
+        {
+          "samples": 13,
+          "symbol": "update_label"
+        },
+        {
+          "samples": 13,
+          "symbol": "gc_free_cycles"
+        },
+        {
+          "samples": 12,
+          "symbol": "mp_div1norm.constprop.0"
+        }
+      ],
+      "property_array_helpers": [
+        {
+          "samples": 4451,
+          "symbol": "JS_GetPropertyInternal"
+        },
+        {
+          "samples": 1618,
+          "symbol": "__JS_AtomToValue"
+        },
+        {
+          "samples": 1216,
+          "symbol": "JS_SetPropertyValue"
+        },
+        {
+          "samples": 1133,
+          "symbol": "__JS_FindAtom.constprop.0"
+        },
+        {
+          "samples": 1128,
+          "symbol": "add_property"
+        },
+        {
+          "samples": 996,
+          "symbol": "JS_GetPropertyValue"
+        },
+        {
+          "samples": 619,
+          "symbol": "get_var_ref"
+        },
+        {
+          "samples": 504,
+          "symbol": "JS_DefineProperty"
+        },
+        {
+          "samples": 444,
+          "symbol": "JS_CreateProperty"
+        },
+        {
+          "samples": 244,
+          "symbol": "js_array_push"
+        },
+        {
+          "samples": 212,
+          "symbol": "add_shape_property"
+        },
+        {
+          "samples": 170,
+          "symbol": "JS_SetPropertyInternal"
+        },
+        {
+          "samples": 168,
+          "symbol": "JS_GetPrototypePrimitive.isra.0"
+        },
+        {
+          "samples": 149,
+          "symbol": "js_array_splice"
+        },
+        {
+          "samples": 99,
+          "symbol": "JS_DefinePropertyValue"
+        },
+        {
+          "samples": 68,
+          "symbol": "JS_FreeAtomStruct"
+        },
+        {
+          "samples": 65,
+          "symbol": "JS_DefineAutoInitProperty"
+        },
+        {
+          "samples": 58,
+          "symbol": "set_array_length"
+        },
+        {
+          "samples": 55,
+          "symbol": "js_get_atom_index"
+        },
+        {
+          "samples": 55,
+          "symbol": "expand_fast_array"
+        },
+        {
+          "samples": 51,
+          "symbol": "JS_ValueToAtom"
+        },
+        {
+          "samples": 45,
+          "symbol": "JS_ArraySpeciesGetCtor"
+        },
+        {
+          "samples": 41,
+          "symbol": "JS_ResizeAtomHash"
+        },
+        {
+          "samples": 29,
+          "symbol": "JS_GetOwnPropertyInternal"
+        },
+        {
+          "samples": 24,
+          "symbol": "js_clone_shape"
+        },
+        {
+          "samples": 22,
+          "symbol": "js_array_join"
+        },
+        {
+          "samples": 18,
+          "symbol": "js_realloc_array"
+        },
+        {
+          "samples": 13,
+          "symbol": "JS_IsArray"
+        },
+        {
+          "samples": 13,
+          "symbol": "JS_ToArrayLengthFree"
+        },
+        {
+          "samples": 9,
+          "symbol": "js_array_slice"
+        }
+      ],
+      "rc_teardown": [
+        {
+          "samples": 1403,
+          "symbol": "__JS_FreeValueRT"
+        },
+        {
+          "samples": 954,
+          "symbol": "JS_FreeValue"
+        },
+        {
+          "samples": 880,
+          "symbol": "free_gc_object"
+        },
+        {
+          "samples": 432,
+          "symbol": "JS_CallInternal"
+        },
+        {
+          "samples": 290,
+          "symbol": "js_array_mark"
+        },
+        {
+          "samples": 288,
+          "symbol": "mark_children"
+        },
+        {
+          "samples": 277,
+          "symbol": "js_array_finalizer"
+        },
+        {
+          "samples": 196,
+          "symbol": "js_free_shape"
+        },
+        {
+          "samples": 196,
+          "symbol": "free_property"
+        },
+        {
+          "samples": 156,
+          "symbol": "free_var_ref"
+        },
+        {
+          "samples": 103,
+          "symbol": "gc_decref_child"
+        },
+        {
+          "samples": 54,
+          "symbol": "gc_scan_incref_child"
+        },
+        {
+          "samples": 43,
+          "symbol": "gc_decref"
+        },
+        {
+          "samples": 27,
+          "symbol": "gc_scan_incref_child2"
+        },
+        {
+          "samples": 2,
+          "symbol": "js_array_buffer_finalizer"
+        },
+        {
+          "samples": 1,
+          "symbol": "js_typed_array_mark"
+        },
+        {
+          "samples": 1,
+          "symbol": "js_regexp_finalizer"
+        },
+        {
+          "samples": 1,
+          "symbol": "js_object_data_mark"
+        }
+      ],
+      "string_regexp": [
+        {
+          "samples": 1375,
+          "symbol": "js_string_indexOf"
+        },
+        {
+          "samples": 1183,
+          "symbol": "JS_ConcatString2"
+        },
+        {
+          "samples": 904,
+          "symbol": "JS_ConcatString"
+        },
+        {
+          "samples": 706,
+          "symbol": "js_string_fromCharCode"
+        },
+        {
+          "samples": 703,
+          "symbol": "js_string_charCodeAt"
+        },
+        {
+          "samples": 694,
+          "symbol": "string_buffer_end"
+        },
+        {
+          "samples": 633,
+          "symbol": "JS_ToStringInternal"
+        },
+        {
+          "samples": 619,
+          "symbol": "js_string_eq.isra.0"
+        },
+        {
+          "samples": 491,
+          "symbol": "JS_ConcatStringInPlace"
+        },
+        {
+          "samples": 418,
+          "symbol": "string_buffer_init2"
+        },
+        {
+          "samples": 183,
+          "symbol": "js_string_charAt"
+        },
+        {
+          "samples": 142,
+          "symbol": "hash_string"
+        },
+        {
+          "samples": 106,
+          "symbol": "JS_NewStringLen"
+        },
+        {
+          "samples": 88,
+          "symbol": "string_rope_get"
+        },
+        {
+          "samples": 80,
+          "symbol": "string_buffer_write8"
+        },
+        {
+          "samples": 72,
+          "symbol": "js_string_memcmp"
+        },
+        {
+          "samples": 68,
+          "symbol": "JS_ToCStringLen2"
+        },
+        {
+          "samples": 53,
+          "symbol": "string_buffer_concat_value_free"
+        },
+        {
+          "samples": 27,
+          "symbol": "unicode_from_utf8"
+        },
+        {
+          "samples": 22,
+          "symbol": "string_buffer_putc8"
+        },
+        {
+          "samples": 14,
+          "symbol": "string_buffer_concat"
+        },
+        {
+          "samples": 8,
+          "symbol": "js_array_indexOf"
+        },
+        {
+          "samples": 7,
+          "symbol": "js_object_toString"
+        },
+        {
+          "samples": 6,
+          "symbol": "JS_ToStringFree"
+        },
+        {
+          "samples": 6,
+          "symbol": "js_regexp_Symbol_replace"
+        },
+        {
+          "samples": 4,
+          "symbol": "js_string_get_own_property"
+        },
+        {
+          "samples": 4,
+          "symbol": "string_buffer_widen"
+        },
+        {
+          "samples": 4,
+          "symbol": "JS_ConcatString3"
+        },
+        {
+          "samples": 2,
+          "symbol": "js_sub_string"
+        },
+        {
+          "samples": 2,
+          "symbol": "string_buffer_realloc"
+        }
+      ]
+    },
+    "zjs": {
+      "allocation": [
+        {
+          "samples": 3442,
+          "symbol": "core.memory.MemoryAccount.allocAlignedBytesNoTrigger"
+        },
+        {
+          "samples": 3020,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_malloc"
+        },
+        {
+          "samples": 1553,
+          "symbol": "core.memory.MemoryAccount.freeAlignedBytes"
+        },
+        {
+          "samples": 751,
+          "symbol": "core.string.String.createUtf8"
+        },
+        {
+          "samples": 729,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:unlink_chunk.isra.0"
+        },
+        {
+          "samples": 672,
+          "symbol": "core.string.String.createRopeOwned"
+        },
+        {
+          "samples": 569,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:malloc"
+        },
+        {
+          "samples": 496,
+          "symbol": "exec.object_ops.createBytecodeFunctionObjectInternal"
+        },
+        {
+          "samples": 438,
+          "symbol": "core.shape.Registry.createObjectRoot"
+        },
+        {
+          "samples": 409,
+          "symbol": "core.string.String.createBalancedRopeOwned"
+        },
+        {
+          "samples": 383,
+          "symbol": "core.object.Object.createInternal"
+        },
+        {
+          "samples": 371,
+          "symbol": "core.memory.MemoryAccount.allocInternal__anon_53438"
+        },
+        {
+          "samples": 351,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free"
+        },
+        {
+          "samples": 331,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:cfree@GLIBC_2.17"
+        },
+        {
+          "samples": 308,
+          "symbol": "core.memory.MemoryAccount.free__anon_180226"
+        },
+        {
+          "samples": 274,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free_merge_chunk"
+        },
+        {
+          "samples": 262,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free_create_chunk"
+        },
+        {
+          "samples": 207,
+          "symbol": "core.memory.MemoryAccount.createWithFamInternal__anon_54288"
+        },
+        {
+          "samples": 207,
+          "symbol": "core.string.String.createUtf16"
+        },
+        {
+          "samples": 188,
+          "symbol": "core.memory.MemoryAccount.createInternal__anon_54596"
+        },
+        {
+          "samples": 172,
+          "symbol": "core.memory.MemoryAccount.allocInternal__anon_117780"
+        },
+        {
+          "samples": 124,
+          "symbol": "core.runtime.JSRuntime.collectBeforeObjectAllocation"
+        },
+        {
+          "samples": 117,
+          "symbol": "core.memory.MemoryAccount.allocInternal__anon_121650"
+        },
+        {
+          "samples": 68,
+          "symbol": "core.memory.SmallObjectSlab.addArena"
+        },
+        {
+          "samples": 51,
+          "symbol": "core.memory.MemoryAccount.free__anon_121699"
+        },
+        {
+          "samples": 43,
+          "symbol": "core.memory.MemoryAccount.createInternal__anon_113118"
+        },
+        {
+          "samples": 37,
+          "symbol": "core.memory.SmallObjectSlab.releaseEmptyArena"
+        },
+        {
+          "samples": 21,
+          "symbol": "core.memory.MemoryAccount.allocInternal__anon_59248"
+        },
+        {
+          "samples": 19,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:_int_free_maybe_consolidate.part.0"
+        },
+        {
+          "samples": 18,
+          "symbol": "core.memory.MemoryAccount.allocInternalSlow__anon_117787"
+        }
+      ],
+      "arithmetic_conversion": [
+        {
+          "samples": 478,
+          "symbol": "exec.vm_arith.binaryVm"
+        },
+        {
+          "samples": 282,
+          "symbol": "fmt.parse_float.parseFloat__anon_74519"
+        },
+        {
+          "samples": 167,
+          "symbol": "libs.number_format.jsDtoaImpl"
+        },
+        {
+          "samples": 151,
+          "symbol": "libs.number_format.mulPow"
+        },
+        {
+          "samples": 139,
+          "symbol": "exec.value_ops.toNumberValue"
+        },
+        {
+          "samples": 123,
+          "symbol": "core.number.parseIntValue"
+        },
+        {
+          "samples": 103,
+          "symbol": "libs.number_format.mpbShrRound"
+        },
+        {
+          "samples": 64,
+          "symbol": "exec.coercion_ops.toPrimitiveForNumber"
+        },
+        {
+          "samples": 58,
+          "symbol": "core.number.parseIntLatin1Bytes"
+        },
+        {
+          "samples": 56,
+          "symbol": "exec.builtin_glue.qjsGlobalParseInt"
+        },
+        {
+          "samples": 53,
+          "symbol": "exec.value_ops.binary"
+        },
+        {
+          "samples": 33,
+          "symbol": "exec.vm_arith.looseEqualOp"
+        },
+        {
+          "samples": 30,
+          "symbol": "libs.number_format.outputDigits"
+        },
+        {
+          "samples": 13,
+          "symbol": "exec.builtin_glue.qjsGlobalParseFloat"
+        },
+        {
+          "samples": 12,
+          "symbol": "core.number.toNumber"
+        },
+        {
+          "samples": 9,
+          "symbol": "core.number.parseSimpleDecimalFloat"
+        },
+        {
+          "samples": 8,
+          "symbol": "exec.coercion_ops.toPrimitiveForAdditionObject"
+        },
+        {
+          "samples": 8,
+          "symbol": "core.number.parseFloatLatin1Bytes"
+        },
+        {
+          "samples": 6,
+          "symbol": "core.number.jsWhitespacePrefixLen"
+        },
+        {
+          "samples": 3,
+          "symbol": "exec.vm_arith.looseEqualSameNumberTypes"
+        },
+        {
+          "samples": 1,
+          "symbol": "libs.number_format.u64toaImpl"
+        },
+        {
+          "samples": 1,
+          "symbol": "exec.coercion_ops.toLengthIndexInto"
+        },
+        {
+          "samples": 1,
+          "symbol": "exec.value_ops.toIntegerOrInfinity"
+        },
+        {
+          "samples": 1,
+          "symbol": "core.number.parseFloatValue"
+        }
+      ],
+      "call_entry_return": [
+        {
+          "samples": 9416,
+          "symbol": "exec.vm_call.nativeMethodFastDispatch"
+        },
+        {
+          "samples": 1904,
+          "symbol": "exec.builtin_dispatch.callTypedInternalRecordDirect"
+        },
+        {
+          "samples": 1542,
+          "symbol": "exec.builtin_dispatch.callInternalRecord"
+        },
+        {
+          "samples": 761,
+          "symbol": "exec.frame.Frame.captureLocal__anon_107647"
+        },
+        {
+          "samples": 451,
+          "symbol": "exec.inline_calls.Machine.setupSimpleInlineEntry__anon_112729"
+        },
+        {
+          "samples": 348,
+          "symbol": "exec.inline_calls.Machine.pushFrame__anon_113698"
+        },
+        {
+          "samples": 181,
+          "symbol": "exec.call_runtime.callNativeCallableObject"
+        },
+        {
+          "samples": 179,
+          "symbol": "exec.inline_calls.Machine.setupFallbackInlineEntry"
+        },
+        {
+          "samples": 166,
+          "symbol": "exec.call_runtime.functionNameValueFromAtom"
+        },
+        {
+          "samples": 80,
+          "symbol": "exec.call_runtime.callValueOrBytecodeDispatchAfterInterruptPoll"
+        },
+        {
+          "samples": 65,
+          "symbol": "exec.call_runtime.execCall"
+        },
+        {
+          "samples": 56,
+          "symbol": "exec.call_runtime.ordinaryHasInstance"
+        },
+        {
+          "samples": 51,
+          "symbol": "exec.inline_calls.Machine.setupSimpleInlineEntry__anon_112730"
+        },
+        {
+          "samples": 40,
+          "symbol": "exec.inline_calls.Machine.pushExactSimpleFrame__anon_113690"
+        },
+        {
+          "samples": 23,
+          "symbol": "exec.call_runtime.callValueOrBytecodeSyncInternalOutlined"
+        },
+        {
+          "samples": 23,
+          "symbol": "exec.inline_calls.Machine.pushExactArgsLeafFrame__anon_117979"
+        },
+        {
+          "samples": 20,
+          "symbol": "exec.call_runtime.qjsFunctionApplyArrayLike"
+        },
+        {
+          "samples": 20,
+          "symbol": "exec.inline_calls.Machine.setupNativeBoundarySimpleEntry__anon_153342"
+        },
+        {
+          "samples": 19,
+          "symbol": "exec.inline_calls.Machine.pushExactSimpleFrame__anon_113696"
+        },
+        {
+          "samples": 19,
+          "symbol": "exec.call_runtime.callNativeCallableByName"
+        },
+        {
+          "samples": 17,
+          "symbol": "exec.call_runtime.runSyncInlineRouteMovedArgs"
+        },
+        {
+          "samples": 14,
+          "symbol": "exec.call_runtime.SyncInternalCallSite.call"
+        },
+        {
+          "samples": 10,
+          "symbol": "exec.inline_calls.Machine.popConstructorReturn"
+        },
+        {
+          "samples": 10,
+          "symbol": "exec.call_runtime.qjsFunctionApplyCall"
+        },
+        {
+          "samples": 9,
+          "symbol": "exec.call_runtime.constructValueOrBytecodeWithNewTargetAfterInterruptPoll"
+        },
+        {
+          "samples": 9,
+          "symbol": "exec.call_runtime.prototypeChainBlocksSimpleFieldStore"
+        },
+        {
+          "samples": 8,
+          "symbol": "exec.call_runtime.prepareSameMachineConstructorAfterFirstPoll"
+        },
+        {
+          "samples": 7,
+          "symbol": "exec.frame.ensureVarRefsCapacity"
+        },
+        {
+          "samples": 6,
+          "symbol": "exec.frame.Frame.freeCold__anon_113296"
+        },
+        {
+          "samples": 5,
+          "symbol": "exec.call_runtime.callValueOrBytecodeRoot"
+        }
+      ],
+      "dispatch_hot_handlers": [
+        {
+          "samples": 4991,
+          "symbol": "exec.tailcall_dispatch.op_get_field2"
+        },
+        {
+          "samples": 4100,
+          "symbol": "exec.tailcall_dispatch.op_call_method"
+        },
+        {
+          "samples": 4026,
+          "symbol": "exec.tailcall_dispatch.op_get_array_el"
+        },
+        {
+          "samples": 3752,
+          "symbol": "exec.tailcall_dispatch.op_if_false8"
+        },
+        {
+          "samples": 3405,
+          "symbol": "exec.tailcall_dispatch.op_get_field2_primitive"
+        },
+        {
+          "samples": 3387,
+          "symbol": "exec.tailcall_dispatch.op_get_field"
+        },
+        {
+          "samples": 3152,
+          "symbol": "exec.tailcall_dispatch.opCompare__struct_117073.h"
+        },
+        {
+          "samples": 3101,
+          "symbol": "exec.tailcall_dispatch.opLoc__struct_116663.h"
+        },
+        {
+          "samples": 2178,
+          "symbol": "exec.tailcall_dispatch.op_push_atom_value"
+        },
+        {
+          "samples": 2014,
+          "symbol": "exec.tailcall_dispatch.op_get_var"
+        },
+        {
+          "samples": 1879,
+          "symbol": "exec.tailcall_dispatch.op_add_strings"
+        },
+        {
+          "samples": 1861,
+          "symbol": "exec.tailcall_dispatch.op_return"
+        },
+        {
+          "samples": 1614,
+          "symbol": "exec.tailcall_dispatch.opCompare__struct_117037.h"
+        },
+        {
+          "samples": 1532,
+          "symbol": "exec.tailcall_dispatch.op_put_array_el_cold"
+        },
+        {
+          "samples": 1433,
+          "symbol": "exec.tailcall_dispatch.op_put_field"
+        },
+        {
+          "samples": 1333,
+          "symbol": "exec.tailcall_dispatch.opCompare__struct_117061.h"
+        },
+        {
+          "samples": 1236,
+          "symbol": "exec.tailcall_dispatch.op_get_arg0_fast"
+        },
+        {
+          "samples": 1191,
+          "symbol": "exec.tailcall_dispatch.opLoc__struct_116679.h"
+        },
+        {
+          "samples": 1145,
+          "symbol": "exec.tailcall_dispatch.opLoc__struct_116707.h"
+        },
+        {
+          "samples": 1080,
+          "symbol": "exec.tailcall_dispatch.opBinary__struct_116935.hnd"
+        },
+        {
+          "samples": 815,
+          "symbol": "exec.tailcall_dispatch.opLoc__struct_116647.h"
+        },
+        {
+          "samples": 789,
+          "symbol": "exec.tailcall_dispatch.coldStd__struct_115068.h"
+        },
+        {
+          "samples": 745,
+          "symbol": "exec.tailcall_dispatch.opLoc__struct_116639.h"
+        },
+        {
+          "samples": 741,
+          "symbol": "exec.tailcall_dispatch.opCall__struct_113969.h"
+        },
+        {
+          "samples": 728,
+          "symbol": "exec.tailcall_dispatch.op_goto8"
+        },
+        {
+          "samples": 682,
+          "symbol": "exec.tailcall_dispatch.op_update_loc"
+        },
+        {
+          "samples": 673,
+          "symbol": "exec.tailcall_dispatch.warmExactArgsLeafOutline__anon_136529"
+        },
+        {
+          "samples": 634,
+          "symbol": "exec.tailcall_dispatch.op_dup"
+        },
+        {
+          "samples": 573,
+          "symbol": "exec.tailcall_dispatch.op_if_false"
+        },
+        {
+          "samples": 573,
+          "symbol": "exec.tailcall_dispatch.op_push_small"
+        }
+      ],
+      "frontend_compile": [
+        {
+          "samples": 2209,
+          "symbol": "simple_token.balancedAfterOpen"
+        },
+        {
+          "samples": 987,
+          "symbol": "parser.lexer.LexerImpl.nextInto"
+        },
+        {
+          "samples": 878,
+          "symbol": "parser.parser_core.parseExprBinary"
+        },
+        {
+          "samples": 482,
+          "symbol": "compiler_v2.resolve_variables.Resolver.run"
+        },
+        {
+          "samples": 465,
+          "symbol": "bytecode.pipeline_finalize.computeStackSizeForCurrentBytecode__anon_156097"
+        },
+        {
+          "samples": 418,
+          "symbol": "parser.lexer.LexerImpl.finishNumber"
+        },
+        {
+          "samples": 397,
+          "symbol": "compiler_v2.resolve_labels.Resolver.matchSeq"
+        },
+        {
+          "samples": 371,
+          "symbol": "compiler_v2.resolve_labels.Resolver.walk__anon_157869"
+        },
+        {
+          "samples": 364,
+          "symbol": "parser.parser_core.parsePrimary"
+        },
+        {
+          "samples": 251,
+          "symbol": "bytecode.function_bytecode.FunctionBytecodeImpl.deinitWithLayout__anon_109533"
+        },
+        {
+          "samples": 234,
+          "symbol": "compiler_v2.resolve_variables.Resolver.lowerScopeVar"
+        },
+        {
+          "samples": 190,
+          "symbol": "parser.lexer.LexerImpl.lexPunctuator"
+        },
+        {
+          "samples": 174,
+          "symbol": "compiler_v2.resolve_variables.Resolver.copyInputInstruction"
+        },
+        {
+          "samples": 160,
+          "symbol": "parser.parser_core.parseAssignExpr2"
+        },
+        {
+          "samples": 141,
+          "symbol": "parser.lexer.LexerImpl.nextIntoReplacing"
+        },
+        {
+          "samples": 139,
+          "symbol": "parser.lexer.LexerImpl.emitIdentifierOrKeyword"
+        },
+        {
+          "samples": 138,
+          "symbol": "bytecode.function_def.FunctionDefImpl.validateFinalScopeLinks"
+        },
+        {
+          "samples": 125,
+          "symbol": "parser.parser_core.parseLogicalAndOr"
+        },
+        {
+          "samples": 108,
+          "symbol": "parser.lexer.LexerImpl.lexNumber"
+        },
+        {
+          "samples": 103,
+          "symbol": "parser.parser_core.parseLhsExpr"
+        },
+        {
+          "samples": 92,
+          "symbol": "compiler_v2.resolve_labels.Resolver.copyDefault__anon_158323"
+        },
+        {
+          "samples": 88,
+          "symbol": "parser.parser_core.parseUnary"
+        },
+        {
+          "samples": 73,
+          "symbol": "parser.parser_core.parseStatementOrDeclSlow"
+        },
+        {
+          "samples": 69,
+          "symbol": "parser.parser_core.setObjectName"
+        },
+        {
+          "samples": 63,
+          "symbol": "bytecode.pipeline_pc2line.encodeInto"
+        },
+        {
+          "samples": 58,
+          "symbol": "bytecode.pipeline_finalize.createFunctionBytecodeAfterChildren"
+        },
+        {
+          "samples": 56,
+          "symbol": "parser.parser_core.v2FEmitOpI32"
+        },
+        {
+          "samples": 49,
+          "symbol": "bytecode.binding_rules.resolveBindingTopologyAfterCurrentMiss__anon_165242"
+        },
+        {
+          "samples": 42,
+          "symbol": "compiler_v2.root.compileFunctionV2ForPackedFinalize"
+        },
+        {
+          "samples": 42,
+          "symbol": "parser.parser_core.parseVar"
+        }
+      ],
+      "native_libc": [
+        {
+          "samples": 7448,
+          "symbol": "compiler_rt.memcpy.memcpyFast"
+        },
+        {
+          "samples": 618,
+          "symbol": "mem.eqlBytes"
+        },
+        {
+          "samples": 192,
+          "symbol": "compiler_rt.memset"
+        },
+        {
+          "samples": 51,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__memcpy_generic"
+        },
+        {
+          "samples": 25,
+          "symbol": "compiler_rt.floatuntidf.__floatuntidf"
+        },
+        {
+          "samples": 25,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:alloc_perturb"
+        },
+        {
+          "samples": 19,
+          "symbol": "hash.wyhash.Wyhash.hash"
+        },
+        {
+          "samples": 15,
+          "symbol": "mem.findScalarPos__anon_87457"
+        },
+        {
+          "samples": 5,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:check_match"
+        },
+        {
+          "samples": 4,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:do_lookup_x"
+        },
+        {
+          "samples": 3,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:strcmp"
+        },
+        {
+          "samples": 2,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:_dl_lookup_symbol_x"
+        },
+        {
+          "samples": 2,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:clock_gettime@@GLIBC_2.17"
+        },
+        {
+          "samples": 2,
+          "symbol": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1:_dl_relocate_object"
+        },
+        {
+          "samples": 1,
+          "symbol": "compiler_rt.rem_pio2.rem_pio2"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__GI___writev"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__sbrk"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__aarch64_swp8_acq"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:pthread_mutex_lock@@GLIBC_2.17"
+        },
+        {
+          "samples": 1,
+          "symbol": "/usr/lib/aarch64-linux-gnu/libc.so.6:__default_morecore@GLIBC_2.17"
+        },
+        {
+          "samples": 1,
+          "symbol": "compiler_rt.log.log"
+        }
+      ],
+      "other": [
+        {
+          "samples": 584,
+          "symbol": "array_list.Aligned(u16,null).ensureTotalCapacity"
+        },
+        {
+          "samples": 351,
+          "symbol": "[unknown]:[unknown]"
+        },
+        {
+          "samples": 189,
+          "symbol": "exec.construct.constructTypedArrayValue"
+        },
+        {
+          "samples": 166,
+          "symbol": "exec.value_ops.startAccumulatorRope"
+        },
+        {
+          "samples": 125,
+          "symbol": "exec.stack.Stack.reserveAdditional"
+        },
+        {
+          "samples": 101,
+          "symbol": "array_list.Aligned(u8,null).append"
+        },
+        {
+          "samples": 95,
+          "symbol": "heap.c_allocator_impl.alloc"
+        },
+        {
+          "samples": 57,
+          "symbol": "exec.vm_value.typeOfIsUndefined"
+        },
+        {
+          "samples": 53,
+          "symbol": "heap.c_allocator_impl.free"
+        },
+        {
+          "samples": 50,
+          "symbol": "array_list.Aligned(u8,null).ensureUnusedCapacity"
+        },
+        {
+          "samples": 50,
+          "symbol": "core.value_semantics.toBoolean"
+        },
+        {
+          "samples": 50,
+          "symbol": "exec.vm_value.logicalNot"
+        },
+        {
+          "samples": 36,
+          "symbol": "exec.vm_value.typeOf"
+        },
+        {
+          "samples": 36,
+          "symbol": "exec.number_ops.numberCall"
+        },
+        {
+          "samples": 30,
+          "symbol": "heap.ArenaAllocator.alloc"
+        },
+        {
+          "samples": 29,
+          "symbol": "exec.value_ops.valuesStrictEqual"
+        },
+        {
+          "samples": 27,
+          "symbol": "exec.value_ops.compare"
+        },
+        {
+          "samples": 23,
+          "symbol": "core.value_format.trimJsWhitespace"
+        },
+        {
+          "samples": 22,
+          "symbol": "sort.block.swap__anon_158959"
+        },
+        {
+          "samples": 19,
+          "symbol": "exec.zjs_vm.runTC"
+        },
+        {
+          "samples": 18,
+          "symbol": "exec.function_ops.functionHasInstanceDirect"
+        },
+        {
+          "samples": 17,
+          "symbol": "core.value_format.formatFiniteNumber"
+        },
+        {
+          "samples": 17,
+          "symbol": "malloc@plt"
+        },
+        {
+          "samples": 16,
+          "symbol": "core.value_format.parseJsNumber"
+        },
+        {
+          "samples": 14,
+          "symbol": "heap.ArenaAllocator.free"
+        },
+        {
+          "samples": 13,
+          "symbol": "free@plt"
+        },
+        {
+          "samples": 13,
+          "symbol": "exec.call.nativeFunctionNameForVmBorrowed"
+        },
+        {
+          "samples": 8,
+          "symbol": "exec.builtin_glue.qjsGlobalIsNaNOrFinite"
+        },
+        {
+          "samples": 8,
+          "symbol": "core.bulk_memory.fillByte"
+        },
+        {
+          "samples": 7,
+          "symbol": "sort.block.block__anon_158952"
+        }
+      ],
+      "property_array_helpers": [
+        {
+          "samples": 1572,
+          "symbol": "exec.vm_property_field.putTypedArrayElementFast"
+        },
+        {
+          "samples": 1423,
+          "symbol": "exec.vm_property_field.field"
+        },
+        {
+          "samples": 1181,
+          "symbol": "core.object.Object.appendPreparedPropertyEntry"
+        },
+        {
+          "samples": 1056,
+          "symbol": "core.typed_array.readNumericElement"
+        },
+        {
+          "samples": 795,
+          "symbol": "exec.array_ops.qjsArraySpliceCall"
+        },
+        {
+          "samples": 645,
+          "symbol": "exec.property_ic.fastImmediatePrototypeDataPropertyLookupForObject"
+        },
+        {
+          "samples": 617,
+          "symbol": "exec.object_ops.attachFunctionCaptures"
+        },
+        {
+          "samples": 604,
+          "symbol": "exec.vm_property_field.getArrayElement"
+        },
+        {
+          "samples": 448,
+          "symbol": "core.object.Object.getOwnProperty"
+        },
+        {
+          "samples": 359,
+          "symbol": "core.object.Object.adoptShapeForNewProperty"
+        },
+        {
+          "samples": 348,
+          "symbol": "core.typed_array.writeTruncatingIntegerElement"
+        },
+        {
+          "samples": 348,
+          "symbol": "exec.array_ops.putDenseArrayElementOverwriteOwnedFast"
+        },
+        {
+          "samples": 328,
+          "symbol": "core.object.Object.defineOrdinaryOwnProperty"
+        },
+        {
+          "samples": 298,
+          "symbol": "core.object.Object.appendDenseArrayValues"
+        },
+        {
+          "samples": 283,
+          "symbol": "exec.array_builtin_ops.arrayPushCall"
+        },
+        {
+          "samples": 262,
+          "symbol": "core.atom.AtomTable.kind"
+        },
+        {
+          "samples": 217,
+          "symbol": "exec.array_ops.qjsArrayPushCallImpl"
+        },
+        {
+          "samples": 211,
+          "symbol": "exec.array_ops.arrayHasDefaultSpecies"
+        },
+        {
+          "samples": 206,
+          "symbol": "core.object.Object.getProperty"
+        },
+        {
+          "samples": 185,
+          "symbol": "exec.object_ops.bytecodeFunctionPrototypeForRealm"
+        },
+        {
+          "samples": 176,
+          "symbol": "core.object.Object.definePlainDataPropertyKnownFast"
+        },
+        {
+          "samples": 158,
+          "symbol": "exec.object_ops.getValueProperty"
+        },
+        {
+          "samples": 137,
+          "symbol": "core.object.Object.createArrayFromInitialShape"
+        },
+        {
+          "samples": 137,
+          "symbol": "exec.object_ops.getPrimitiveProperty"
+        },
+        {
+          "samples": 134,
+          "symbol": "core.object.Object.defineOwnProperty"
+        },
+        {
+          "samples": 132,
+          "symbol": "core.object.Object.ensureArrayBufferCapacity"
+        },
+        {
+          "samples": 132,
+          "symbol": "core.array.arrayIndexFromAtom__anon_74258"
+        },
+        {
+          "samples": 114,
+          "symbol": "core.object.Object.create"
+        },
+        {
+          "samples": 114,
+          "symbol": "exec.array_builtin_ops.arrayCall"
+        },
+        {
+          "samples": 103,
+          "symbol": "exec.array_ops.arrayConstructorFromGlobal"
+        }
+      ],
+      "rc_teardown": [
+        {
+          "samples": 910,
+          "symbol": "core.object.Object.destroyFromHeader"
+        },
+        {
+          "samples": 570,
+          "symbol": "core.value.JSValue.destroyZeroRef__anon_58617"
+        },
+        {
+          "samples": 505,
+          "symbol": "core.string.String.destroyFromHeader"
+        },
+        {
+          "samples": 386,
+          "symbol": "core.object.destroyOptionalVarRefCellSlice"
+        },
+        {
+          "samples": 213,
+          "symbol": "core.object.Object.traceChildren__anon_108687"
+        },
+        {
+          "samples": 203,
+          "symbol": "core.object.Object.traceChildren__anon_108675"
+        },
+        {
+          "samples": 183,
+          "symbol": "core.gc.destroyZeroRef__anon_79673"
+        },
+        {
+          "samples": 173,
+          "symbol": "core.shape.Registry.destroyShape"
+        },
+        {
+          "samples": 130,
+          "symbol": "core.descriptor.Descriptor.destroy__anon_74356"
+        },
+        {
+          "samples": 121,
+          "symbol": "core.property.Slot.destroy__anon_178523"
+        },
+        {
+          "samples": 79,
+          "symbol": "core.memory.MemoryAccount.destroyWithFam__anon_54511"
+        },
+        {
+          "samples": 36,
+          "symbol": "core.object.Object.destroyRuntimeCyclesWithValueRoots"
+        },
+        {
+          "samples": 31,
+          "symbol": "core.gc.destroyZeroRefNow__anon_110346"
+        },
+        {
+          "samples": 10,
+          "symbol": "exec.inline_calls.Entry.deinitGeneralResources"
+        },
+        {
+          "samples": 7,
+          "symbol": "exec.array_ops.OwnedArrayLikeArgs.deinit"
+        },
+        {
+          "samples": 4,
+          "symbol": "core.object.destroyAtomSlice"
+        },
+        {
+          "samples": 2,
+          "symbol": "core.var_ref.VarRef.destroyFromHeader__anon_108718"
+        },
+        {
+          "samples": 1,
+          "symbol": "exec.inline_calls.Entry.deinitGeneral"
+        },
+        {
+          "samples": 1,
+          "symbol": "core.gc.destroyFunctionBytecodeZeroRef__anon_110359"
+        },
+        {
+          "samples": 1,
+          "symbol": "exec.string_ops.StringBuffer.deinit"
+        },
+        {
+          "samples": 1,
+          "symbol": "exec.object_ops.OwnedPrototype.deinit"
+        }
+      ],
+      "string_regexp": [
+        {
+          "samples": 2400,
+          "symbol": "exec.string_builtin_ops.stringCall"
+        },
+        {
+          "samples": 2240,
+          "symbol": "exec.value_ops.stringAddStringsOwned"
+        },
+        {
+          "samples": 1492,
+          "symbol": "exec.value_ops.concatFlatStringBodiesOwned"
+        },
+        {
+          "samples": 1128,
+          "symbol": "core.string.compareStringValues"
+        },
+        {
+          "samples": 901,
+          "symbol": "core.string.decodeUtf8"
+        },
+        {
+          "samples": 851,
+          "symbol": "exec.string_ops.qjsStringFromCharCode"
+        },
+        {
+          "samples": 763,
+          "symbol": "exec.string_ops.appendStringValueUnits"
+        },
+        {
+          "samples": 722,
+          "symbol": "exec.string_builtin_ops.stringIndexOfUnits"
+        },
+        {
+          "samples": 681,
+          "symbol": "core.atom.AtomTable.internString"
+        },
+        {
+          "samples": 662,
+          "symbol": "exec.string_ops.qjsStringNumericArgsMethod"
+        },
+        {
+          "samples": 645,
+          "symbol": "exec.string_builtin_ops.stringCharCodeAtCall"
+        },
+        {
+          "samples": 614,
+          "symbol": "exec.string_ops.qjsStringPrototypeMethod"
+        },
+        {
+          "samples": 463,
+          "symbol": "core.string.flatStringsEq"
+        },
+        {
+          "samples": 394,
+          "symbol": "exec.vm_arith.addLocalStringAt"
+        },
+        {
+          "samples": 379,
+          "symbol": "exec.string_ops.qjsStringSearchPositionMethod"
+        },
+        {
+          "samples": 367,
+          "symbol": "exec.vm_property_field.fastStringIndexValue"
+        },
+        {
+          "samples": 334,
+          "symbol": "exec.string_ops.callStringBody"
+        },
+        {
+          "samples": 291,
+          "symbol": "exec.string_builtin_ops.methodCall"
+        },
+        {
+          "samples": 188,
+          "symbol": "core.string.compareResolved"
+        },
+        {
+          "samples": 166,
+          "symbol": "core.value.JSValue.asStringBody"
+        },
+        {
+          "samples": 164,
+          "symbol": "exec.string_ops.toStringForAnnexB"
+        },
+        {
+          "samples": 154,
+          "symbol": "exec.string_builtin_ops.charAtValue"
+        },
+        {
+          "samples": 148,
+          "symbol": "core.string.appendRopeTail"
+        },
+        {
+          "samples": 144,
+          "symbol": "core.string.StringValueIterator.next"
+        },
+        {
+          "samples": 136,
+          "symbol": "core.string.decodeOne"
+        },
+        {
+          "samples": 129,
+          "symbol": "exec.value_ops.appendValueString"
+        },
+        {
+          "samples": 127,
+          "symbol": "core.string.StringRope.flatten"
+        },
+        {
+          "samples": 113,
+          "symbol": "core.string.freeRopeTail"
+        },
+        {
+          "samples": 79,
+          "symbol": "exec.string_builtin_ops.stringValueFromSearchArgument"
+        },
+        {
+          "samples": 46,
+          "symbol": "core.host_function.builtin_method_id_lookup.string.decodePrototypeMethodId"
+        }
+      ]
+    }
+  },
+  "total": {
+    "namedNetFractionOfGap": 0.9786305492851768,
+    "namedRegionDeltaSum": 213041531.5,
+    "otherDeltaMedian": 3013966.0,
+    "pairedGapMAD": 3341571.0,
+    "pairedGapMedian": 217693522.5,
+    "pairedGaps": [
+      214581275,
+      210387931,
+      216874510,
+      222967963,
+      220347123,
+      214122628,
+      221329938,
+      218512535
+    ],
+    "qjsMADApproxCycles": 2391516.5,
+    "qjsMedianApproxCycles": 1063766195.5,
+    "zjsMADApproxCycles": 851773.0,
+    "zjsMedianApproxCycles": 1281787323.0
+  }
+}

@@ -54,12 +54,15 @@ zig build final-switch-selftest       # or: tools/final-switch/selftest.sh
 
 ### A · The zoo runner attests affinity; it does not set it
 
-`tools/perf/zoo/run_zoo_compare.py` verifies `os.sched_getaffinity(0) == {--cpu}`
-and refuses otherwise — the caller must supply `taskset -c 19`. The first Gate A
-performance attempt omitted it and the runner refused all three invocations
-(`rc=2`). That was fail-closed behaviour working correctly, but only because
-the runner happened to check; the orchestrator should never have been able to
-request an unpinned measurement at all. So:
+In the serial mode used by this orchestration,
+`tools/perf/zoo/run_zoo_compare.py` verifies
+`os.sched_getaffinity(0) == {--cpu}` and refuses otherwise — the caller must
+supply `taskset -c 19`. The runner also has an independently invoked parallel
+mode, but `performance.sh` deliberately retains the serial contract described
+here. The first Gate A performance attempt omitted the pin and the runner
+refused all three invocations (`rc=2`). That was fail-closed behaviour working
+correctly, but only because the runner happened to check; the orchestrator
+should never have been able to request an unpinned measurement at all. So:
 
 * `fs_pinned()` in `preflight.sh` is the only sanctioned way to invoke an
   affinity-attesting runner, and it always supplies `taskset -c $FS_CPU`.

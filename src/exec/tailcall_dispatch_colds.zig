@@ -863,8 +863,18 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }) |e| t[e.o] = e.h;
     t[op.set_loc_uninitialized] = td.op_set_loc_uninitialized;
     t[op.put_loc_check_init] = td.op_put_loc_check_init;
+    // qjs OP_fclosure/OP_fclosure8 keep the operand decode and `*sp++ =
+    // js_closure(...)` in JS_CallInternal (qjs:17914-17915,18165-18170).
+    // The resident zjs twins preserve the allocating constructor/rooting path
+    // while continuing with their register pc/sp; the all-cold table above
+    // remains the stop-boundary implementation.
+    t[op.fclosure] = td.opFclosure(true);
+    t[op.fclosure8] = td.opFclosure(false);
     t[op.get_arg] = td.op_get_arg;
-    inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
+    t[op.get_arg0] = td.op_get_arg0_fast;
+    t[op.get_arg1] = td.op_get_arg1_fast;
+    t[op.get_arg2] = td.op_get_arg2_fast;
+    t[op.get_arg3] = td.op_get_arg3_fast;
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.put_arg, .h = td.opArgStore(.put) },
         .{ .o = op.set_arg, .h = td.opArgStore(.set) },
@@ -894,6 +904,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // independent CASE per opcode, quickjs.c:20268-20271/20340-20341/20397-20398 —
     // no runtime predicate select on the int fast path).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompare(o);
+    // qjs OP_neg keeps int/bool/null/float in its CASE and calls
+    // js_unary_arith_slow only for ToNumeric operands (quickjs.c:19940-19970).
+    t[op.neg] = td.op_neg;
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
     // qjs OP_post_inc/OP_post_dec int fast leg (quickjs.c:20009-20045). Every
     // `let` loop update emits post_inc+put_loc_check+drop (checked lvalues are
@@ -920,6 +933,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // logicalNot assigned above (qjs reaches those via an out-of-line JS_ToBoolFree
     // bl too — pinned binary, JS_CallInternal+0x6abc).
     t[op.lnot] = td.op_lnot;
+    // qjs CASE(OP_is_null):20625-20630 compares the top-slot tag in place;
+    // set_true (20648-20650) overwrites null without a free, while
+    // free_and_set_false (20651-20654) releases only refcounted non-null values
+    // through JS_FreeValue's inline tag guard before overwriting with false.
+    t[op.is_null] = td.op_is_null;
     t[op.inc_loc] = td.op_update_loc;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
@@ -941,6 +959,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_var] = td.op_get_var;
     t[op.get_var_undef] = td.op_get_var;
     t[op.put_var] = td.op_put_var; // resident cell write-through; every other arm → cold h_put_var
+    t[op.instanceof] = td.op_instanceof;
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.get_var_ref0, .h = td.opGetVarRef(.c0) },
         .{ .o = op.get_var_ref1, .h = td.opGetVarRef(.c1) },
