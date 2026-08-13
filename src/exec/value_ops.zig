@@ -424,7 +424,9 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
         switch (str.resolveData()) {
             .latin1 => |bytes| {
                 if (fastStringToInt32(bytes)) |val| return core.JSValue.int32(val);
-                return numberToValue(parseJsNumber(bytes));
+                // Latin1 0x80-0xFF are single code points, not UTF-8 lead bytes
+                // (qjs skip_spaces qjs:11230 classifies by code point after ToCString).
+                return numberToValue(core.value_format.parseJsNumberLatin1(bytes));
             },
             .utf16 => {},
         }

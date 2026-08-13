@@ -6319,6 +6319,117 @@ test "local add_loc retains string snapshots while using a rope tail" {
     try std.testing.expect(chain_depth <= 4);
 }
 
+test "add_loc string+object goes through slow add after toPrimitive (qjs OP_add_loc)" {
+    // X-03: qjs:19766-19767 requires both operands already JS_TAG_STRING
+    // before in-place concat. An object RHS must take js_add_slow so a
+    // toString that reassigns the accumulator cannot mutate a stale rope.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(f());
+        \\function plusEq(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s += o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(plusEq());
+        \\function viaValueOf(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { valueOf: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(viaValueOf());
+        \\function viaToPrim(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { [Symbol.toPrimitive]: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(viaToPrim());
+        \\function viaClosure(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  function cap(){ return s; }
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash + " cap=" + cap();
+        \\}
+        \\print(viaClosure());
+        \\function longRope(){
+        \\  var s = "";
+        \\  for (var i = 0; i < 9000; i++) s += "a";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s_len=" + s.length + " s_is_ZZZ=" + (s === "ZZZ") + " stash_len=" + stash.length;
+        \\}
+        \\print(longRope());
+        \\function noTailSidecar(){
+        \\  var base = "abc";
+        \\  var t = base + "y";
+        \\  var stash = null;
+        \\  var o = { toString: function(){ stash = t; t = "ZZZ"; return "Q"; } };
+        \\  t = t + o;
+        \\  return "t=" + t + " stash=" + stash;
+        \\}
+        \\print(noTailSidecar());
+        \\function toStringNumber(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return 1; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(toStringNumber());
+        \\function notAddLoc(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  var r = s + o;
+        \\  return "s=" + s + " r=" + r + " stash=" + stash;
+        \\}
+        \\print(notAddLoc());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd cap=abcdQ\n" ++
+            "s_len=9002 s_is_ZZZ=false stash_len=9001\n" ++
+            "t=abcyQ stash=abcy\n" ++
+            "s=abcd1 stash=abcd\n" ++
+            "s=ZZZ r=abcdQ stash=abcd\n",
+        stream.buffered(),
+    );
+}
+
 test "checked lexical string accumulation keeps rope depth bounded" {
     engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
@@ -7684,6 +7795,84 @@ test "number native builtin records cover static and prototype dispatch" {
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
+}
+
+test "class extends Number ToPrimitive matches JS_ToNumeric" {
+    // X-37: qjs js_number_constructor (qjs:44822) uses JS_ToNumeric
+    // (qjs:13030) so object arguments run valueOf/toString. The subclass
+    // super path must not skip that via toNumberValue's missing object arm.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class MyNum extends Number {}
+        \\function t(n,f){ try{ print(n+" => "+f()); }catch(e){ print(n+" => THROW "+e.name+": "+e.message); } }
+        \\t("new MyNum({valueOf:42})", ()=> new MyNum({valueOf(){return 42}}).valueOf());
+        \\t("new MyNum([5])", ()=> new MyNum([5]).valueOf());
+        \\t("new MyNum({toString:'7'})", ()=> new MyNum({toString(){return "7"}}).valueOf());
+        \\t("Reflect.construct", ()=> Reflect.construct(Number,[{valueOf(){return 42}}],MyNum).valueOf());
+        \\t("new Number(obj) plain", ()=> new Number({valueOf(){return 42}}).valueOf());
+        \\t("new MyNum(new Date(1000))", ()=> new MyNum(new Date(1000)).valueOf());
+        \\t("new MyNum(SymToPrim)", ()=> new MyNum({[Symbol.toPrimitive](){return 9}}).valueOf());
+        \\t("throwing valueOf", ()=> new MyNum({valueOf(){throw new Error("boom")}}).valueOf());
+        \\var log=[]; try{ new MyNum({valueOf(){log.push("v");return 1}}); }catch(e){}
+        \\print("sideeffect log=["+log+"]");
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "new MyNum({valueOf:42}) => 42\n" ++
+            "new MyNum([5]) => 5\n" ++
+            "new MyNum({toString:'7'}) => 7\n" ++
+            "Reflect.construct => 42\n" ++
+            "new Number(obj) plain => 42\n" ++
+            "new MyNum(new Date(1000)) => 1000\n" ++
+            "new MyNum(SymToPrim) => 9\n" ++
+            "throwing valueOf => THROW Error: boom\n" ++
+            "sideeffect log=[v]\n",
+        stream.buffered(),
+    );
+}
+
+test "Number.prototype.toString saturates out-of-i32 radix before intFromFloat" {
+    // X-12: qjs js_get_radix (qjs:44953) uses JS_ToInt32Sat (qjs:13125)
+    // before the 2..36 check. `@intFromFloat(Infinity)` panics in Debug.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\try { print((5).toString(Infinity)); } catch(e){ print("Inf:", e.name, e.message); }
+        \\try { print((5).toString(-Infinity)); } catch(e){ print("-Inf:", e.name, e.message); }
+        \\try { print((5).toString(1e30)); } catch(e){ print("1e30:", e.name, e.message); }
+        \\try { print((5).toString(-1e30)); } catch(e){ print("-1e30:", e.name, e.message); }
+        \\try { print((5).toString({valueOf:()=>Infinity})); } catch(e){ print("objInf:", e.name, e.message); }
+        \\try { print((5).toString(2**31)); } catch(e){ print("2**31:", e.name, e.message); }
+        \\try { print((5).toString(NaN)); } catch(e){ print("NaN:", e.name, e.message); }
+        \\try { print((5).toString({valueOf:()=>NaN})); } catch(e){ print("objNaN:", e.name, e.message); }
+        \\try { print((5).toString(-0)); } catch(e){ print("-0:", e.name, e.message); }
+        \\try { print((5).toString(16)); } catch(e){ print("16:", e); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "Inf: RangeError radix must be between 2 and 36\n" ++
+            "-Inf: RangeError radix must be between 2 and 36\n" ++
+            "1e30: RangeError radix must be between 2 and 36\n" ++
+            "-1e30: RangeError radix must be between 2 and 36\n" ++
+            "objInf: RangeError radix must be between 2 and 36\n" ++
+            "2**31: RangeError radix must be between 2 and 36\n" ++
+            "NaN: RangeError radix must be between 2 and 36\n" ++
+            "objNaN: RangeError radix must be between 2 and 36\n" ++
+            "-0: RangeError radix must be between 2 and 36\n" ++
+            "5\n",
+        stream.buffered(),
+    );
 }
 
 test "string static native builtin records ignore dispatch names" {
@@ -20620,6 +20809,83 @@ test "latin1 high bytes survive raw-string byte bridges (qjs JS_ToCStringLen2 mi
     try helpers.expectStringValueBytes(
         result,
         "true,true,true,true,true,true,true,true,true,true,true",
+    );
+}
+
+test "ToNumber latin1 high bytes are code points not UTF-8 whitespace" {
+    // X-38: latin1 0x80-0xFF are single code points. Feeding the raw bytes to
+    // a UTF-8 whitespace decoder made Number("\xe2\x80\x801") == 1 while
+    // qjs skip_spaces (qjs:11230) / lre_is_space classify by code point.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [2048]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var s = String.fromCharCode(0xE2,0x80,0x80) + "1";
+        \\print("len="+s.length+" cc="+s.charCodeAt(0)+","+s.charCodeAt(1)+","+s.charCodeAt(2)+","+s.charCodeAt(3));
+        \\print("Number(s)="+Number(s));  print("+s="+(+s));  print("-s="+(-s));
+        \\print("parseFloat="+parseFloat(s));  print("parseInt="+parseInt(s));  print("Math.abs="+Math.abs(s));
+        \\print("eqloose="+(s==1));  print("at="+[7,8].at(s));
+        \\print("Math.max="+Math.max(s,0));  print("slice="+[1,2,3].slice(s).length);
+        \\print("s*2="+(s*2));  print("s|0="+(s|0));
+        \\var seqs = [
+        \\  [0xC2,0xA0],
+        \\  [0xE1,0x9A,0x80],
+        \\  [0xE2,0x81,0x9F],
+        \\  [0xE3,0x80,0x80],
+        \\  [0xEF,0xBB,0xBF],
+        \\  [0xE2,0x80,0x8A],
+        \\  [0xE2,0x80,0xA8]
+        \\];
+        \\seqs.forEach(function(seq, i){
+        \\  var prefix = String.fromCharCode.apply(null, seq) + "1";
+        \\  var suffix = "1" + String.fromCharCode.apply(null, seq);
+        \\  print("p"+i+" Number="+Number(prefix)+" parseFloat="+parseFloat(prefix)+" parseInt="+parseInt(prefix));
+        \\  print("s"+i+" Number="+Number(suffix)+" parseFloat="+parseFloat(suffix)+" parseInt="+parseInt(suffix));
+        \\});
+        \\var a0 = String.fromCharCode(0xA0) + "1";
+        \\print("bareA0 Number="+Number(a0)+" parseFloat="+parseFloat(a0));
+        \\print("U00A0 Number="+Number("\u00A0"+"1")+" parseFloat="+parseFloat("\u00A0"+"1"));
+        \\print("U2000 Number="+Number("\u2000"+"1")+" parseFloat="+parseFloat("\u2000"+"1"));
+        \\print("UFEFF Number="+Number("\uFEFF"+"1")+" parseFloat="+parseFloat("\uFEFF"+"1"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "len=4 cc=226,128,128,49\n" ++
+            "Number(s)=NaN\n" ++
+            "+s=NaN\n" ++
+            "-s=NaN\n" ++
+            "parseFloat=NaN\n" ++
+            "parseInt=NaN\n" ++
+            "Math.abs=NaN\n" ++
+            "eqloose=false\n" ++
+            "at=7\n" ++
+            "Math.max=NaN\n" ++
+            "slice=3\n" ++
+            "s*2=NaN\n" ++
+            "s|0=0\n" ++
+            "p0 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s0 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p1 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s1 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p2 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s2 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p3 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s3 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p4 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s4 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p5 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s5 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p6 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s6 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "bareA0 Number=1 parseFloat=1\n" ++
+            "U00A0 Number=1 parseFloat=1\n" ++
+            "U2000 Number=1 parseFloat=1\n" ++
+            "UFEFF Number=1 parseFloat=1\n",
+        stream.buffered(),
     );
 }
 

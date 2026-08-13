@@ -659,8 +659,7 @@ pub fn addLocal(
 
 /// String-accumulator branch of `addLocal`, outlined so its JSValue temporaries
 /// live in their own frame and never inflate the hot number path's spill set.
-/// `rhs` is CONSUMED here (toPrimitiveForAdditionFree); the caller transfers
-/// ownership and does not free it.
+/// `rhs` is CONSUMED here; the caller transfers ownership and does not free it.
 noinline fn addLocalString(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -672,24 +671,30 @@ noinline fn addLocalString(
     const lhs = value_slot.loadOwned(&frame.locals[idx]);
     defer lhs.free(ctx.runtime);
 
-    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
-    defer rhs_primitive.free(ctx.runtime);
-
-    // QuickJS OP_add_loc appends into the binding's string storage when the
-    // accumulator is unshared. Whether the binding is a raw local or a VarRef
-    // cell, it owns one string reference and `lhs` owns the second. Captured
-    // closures share the cell rather than duplicating its string; an actual
-    // independent string snapshot raises rc above 2 and makes the append bail.
-    if (rhs_primitive.isString()) {
-        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
+    // qjs:19766-19767 OP_add_loc string arm requires BOTH `*pv` and `op2`
+    // already JS_TAG_STRING; object operands go to js_add_slow (qjs:19778).
+    // Structurally impossible to in-place-append after user toString.
+    if (rhs.isString()) {
+        defer rhs.free(ctx.runtime);
+        // QuickJS OP_add_loc appends into the binding's string storage when the
+        // accumulator is unshared. Whether the binding is a raw local or a VarRef
+        // cell, it owns one string reference and `lhs` owns the second. Captured
+        // closures share the cell rather than duplicating its string; an actual
+        // independent string snapshot raises rc above 2 and makes the append bail.
+        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, 2)) {
             return;
         }
-        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
+        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs)) |rope_val| {
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], rope_val);
             return;
         }
+        const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
+        value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+        return;
     }
 
+    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    defer rhs_primitive.free(ctx.runtime);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
     value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
 }
@@ -789,19 +794,24 @@ noinline fn addLocalStringAt(
     const lhs = value_slot.loadOwned(slot);
     defer lhs.free(ctx.runtime);
 
-    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
-    defer rhs_primitive.free(ctx.runtime);
-
-    if (rhs_primitive.isString()) {
-        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
+    // qjs:19766-19767 OP_add_loc string arm requires BOTH `*pv` and `op2`
+    // already JS_TAG_STRING; object operands go to js_add_slow (qjs:19778).
+    if (rhs.isString()) {
+        defer rhs.free(ctx.runtime);
+        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, 2)) {
             return;
         }
-        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
+        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs)) |rope_val| {
             value_slot.replaceOwned(ctx.runtime, slot, rope_val);
             return;
         }
+        const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
+        value_slot.replaceOwned(ctx.runtime, slot, updated);
+        return;
     }
 
+    const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
+    defer rhs_primitive.free(ctx.runtime);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
     value_slot.replaceOwned(ctx.runtime, slot, updated);
 }
