@@ -11335,6 +11335,52 @@ test "RegExp exec result template preserves metadata groups and indices" {
     try std.testing.expectEqualStrings("1|a|1|ba|true\n2|a|a|1|ba|a|1|2|1|2\n", stream.buffered());
 }
 
+test "RegExp compiler stack overflow is a catchable SyntaxError" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\try { new RegExp("(?:".repeat(40000)); print("no throw"); } catch(e) { print(e.name + ":" + e.message); }
+        \\try { new RegExp("[".repeat(1000)+"a"+"]".repeat(1000),"v"); print("v-no throw"); } catch(e) { print("v:" + e.name + ":" + e.message); }
+        \\try { new RegExp("(?:".repeat(1000)+")".repeat(1000)); print("shallow-ok"); } catch(e) { print("shallow:" + e.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "SyntaxError:stack overflow\n" ++
+            "v:SyntaxError:stack overflow\n" ++
+            "shallow-ok\n",
+        stream.buffered(),
+    );
+}
+
+test "RegExp accepts literal astral group names in non-unicode mode" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var nm = String.fromCharCode(0xD801,0xDC00);
+        \\["", "u", "v"].forEach(function(fl){
+        \\  try { var r = new RegExp("(?<"+nm+">x)", fl); print("flags["+fl+"] accepted; groups:", JSON.stringify(Object.keys(r.exec("x").groups))); }
+        \\  catch(e){ print("flags["+fl+"]:", e.message); }
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "flags[] accepted; groups: [\"𐐀\"]\n" ++
+            "flags[u] accepted; groups: [\"𐐀\"]\n" ++
+            "flags[v] accepted; groups: [\"𐐀\"]\n",
+        stream.buffered(),
+    );
+}
+
 test "RegExp literals reuse parse-time bytecode and the intrinsic realm shape" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

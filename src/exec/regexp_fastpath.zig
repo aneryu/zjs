@@ -454,8 +454,12 @@ pub fn qjsRegExpCompile(
     var flag_bytes = std.ArrayList(u8).empty;
     defer flag_bytes.deinit(ctx.runtime.memory.allocator);
     try value_ops.appendValueString(ctx.runtime, &flag_bytes, flags_value);
-    var compiled = regexp_adapter.compile(ctx.runtime.memory.allocator, source_bytes.items, flag_bytes.items) catch |err| switch (err) {
+    var compiled = regexp_adapter.compileWithRuntime(ctx.runtime, source_bytes.items, flag_bytes.items) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        error.StackOverflow => {
+            _ = exception_ops.throwSyntaxErrorMessage(ctx, global, "stack overflow") catch |throw_err| return throw_err;
+            return error.SyntaxError;
+        },
         else => |other| return other,
     };
     defer compiled.deinit(ctx.runtime.memory.allocator);
