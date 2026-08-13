@@ -187,3 +187,38 @@ bash tools/perf/codex_run.sh reap        # 回收残留进程组
 4. **计数器构建不是 cost-neutral** —— 会触发 `get_arg0..3` size ASSERT；**只供频率**。
 5. **单 pad 显著性判定不可信**（见 §2）。
 6. **19 个候选只有 2 个落地** —— 命中率约 10%，属正常，不要因为连续否定就放宽判据。
+
+---
+
+## 9. 实现差异审计（2026-08-13/14）—— ⚠️ 未经核查
+
+分支 `audit/impl-divergence-20260813`（worktree `/home/aneryu/worktree-impl-audit`），
+commit `c4fd68fc`，产物 `docs/qjs-align/IMPL-DIVERGENCE-2026-08-13/`（4.2 MB / 55,623 行）。
+
+**1,017 条语句级差异**（臂序 / 谓词强度 / 退出点 / 操作次序 / 每次执行次数 / 常量阈值 /
+结构体布局 / 定义但不发射 / 完全缺失 / zjs 独有），16 份子系统报告 + README。
+
+### ⚠️ 可信度
+
+**只有 6 条经手工差分复现：4 确认 / 1 核不实 / 1 前提缺失。** 其余 1,011 条未核。
+全量核查 workflow（33 agent）因额度耗尽**零条完成**。
+**读之前先读 `VERIFICATION-STATUS.md`；不得当作可执行清单。**
+
+恢复核查：`Workflow({scriptPath: ".../zjs-qjs-divergence-full-verification-wf_f18cb246-df9.js",
+resumeFromRunId: "wf_f18cb246-df9"})`。关键产出是「一审被推翻比例」。
+
+### 已确认可直接行动的 4 条（附复现，见 VERIFICATION-STATUS.md）
+
+| # | 缺陷 | zjs | qjs | 支付频率 |
+|---|---|---|---|---|
+| 1 | 正则递归无栈溢出检查 | **exit=139 SIGSEGV** | SyntaxError | 每次正则编译 |
+| 2 | 属性读兜底到 `globalThis.<Ctor>.prototype` | `f.zzz===1` 而 `'zzz' in f===false` | 均 undefined/false | **每次属性读 miss** |
+| 3 | switch 落穿丢失（case 尾为回边 goto 时） | `"a,d"` | `"a,b"` | 每 switch（窄条件） |
+| 4 | generator 内 `for (var yield of …)` | 接受 | SyntaxError | 每次解析 |
+
+⚠️ 第 2 条同时是正确性 bug 与纯税（qjs 在该位置成本为 0）；第 3 条触发条件很窄，
+普通 case 尾**不复现**——写复现时必须用 `while(true){…break;}` 形态。
+
+### 差分跑机
+`/home/aneryu/worktree-impl-audit/difftest.sh <js>` —— 并排两侧 stdout+stderr+exit，
+自动判 IDENTICAL / DIFFER / DIFFER—崩溃。**任何行为类断言都应先过它再相信。**
