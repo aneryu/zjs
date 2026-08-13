@@ -238,10 +238,11 @@ pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const co
 
 pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = core.number.numberValue(receiver) orelse return error.TypeError;
-    const radix = if (args.len >= 1 and !args[0].isUndefined())
-        @as(i32, @intFromFloat(try core.number.toNumber(rt, args[0])))
-    else
-        10;
+    // qjs js_number_toString (quickjs.c:44975) uses js_get_radix → JS_ToInt32Sat
+    // (qjs:44953 / JS_ToInt32SatFree qjs:13125) BEFORE the 2..36 range check.
+    // Saturate out-of-i32 values (Infinity, 1e30, 2**31) instead of
+    // `@intFromFloat` which panics in Debug/ReleaseSafe.
+    const radix = try integerDigitsArgument(rt, args, 10);
     if (radix < 2 or radix > 36) return error.InvalidRadix;
 
     if (radix == 10 or !std.math.isFinite(number) or std.math.isNan(number)) {

@@ -40,7 +40,11 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
     try appendValueString(rt, &bytes, input);
 
     const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
-    return parseIntLatin1Bytes(bytes.items, radix);
+    // appendValueString emits UTF-8 (qjs JS_ToCStringLen2, quickjs.c:4458);
+    // trim UTF-8 whitespace first, then scan the remainder as already-decoded
+    // code units. parseIntLatin1Bytes itself treats each byte as a latin1
+    // code point and must not re-decode UTF-8 whitespace sequences.
+    return parseIntLatin1Bytes(core.value_format.trimJsWhitespace(bytes.items), radix);
 }
 
 /// QuickJS source map: global parseFloat / Number.parseFloat. This is still the
@@ -58,7 +62,7 @@ pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, input);
-    return parseFloatLatin1Bytes(bytes.items);
+    return parseFloatLatin1Bytes(core.value_format.trimJsWhitespace(bytes.items));
 }
 
 pub fn parseIntLatin1Bytes(source: []const u8, initial_radix: i32) f64 {
@@ -299,26 +303,17 @@ fn parseJsNumber(bytes: []const u8) f64 {
     return core.value_format.parseJsNumber(bytes);
 }
 
+/// Latin1 code-point whitespace. ASCII 0x09-0x0d/0x20 stay the first arm so
+/// the ASCII hot path is a single switch match; 0xA0 is NBSP (U+00A0).
+/// Multi-byte UTF-8 sequences are NOT whitespace here — those bytes are
+/// independent latin1 code points. qjs skip_spaces (qjs:11230) + lre_is_space
+/// (libunicode.h:162) classify by CODE POINT.
 fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {
     if (bytes.len == 0) return null;
     switch (bytes[0]) {
-        0x09...0x0d, 0x20 => return 1,
-        0xa0 => return 1,
-        0xc2 => if (startsWith(bytes, &.{ 0xc2, 0xa0 })) return 2,
-        0xe1 => if (startsWith(bytes, &.{ 0xe1, 0x9a, 0x80 })) return 3,
-        0xe2 => {
-            if (bytes.len >= 3 and bytes[1] == 0x80 and ((bytes[2] >= 0x80 and bytes[2] <= 0x8a) or bytes[2] == 0xa8 or bytes[2] == 0xa9 or bytes[2] == 0xaf)) return 3;
-            if (startsWith(bytes, &.{ 0xe2, 0x81, 0x9f })) return 3;
-        },
-        0xe3 => if (startsWith(bytes, &.{ 0xe3, 0x80, 0x80 })) return 3,
-        0xef => if (startsWith(bytes, &.{ 0xef, 0xbb, 0xbf })) return 3,
-        else => {},
+        0x09...0x0d, 0x20, 0xa0 => return 1,
+        else => return null,
     }
-    return null;
-}
-
-fn startsWith(bytes: []const u8, prefix: []const u8) bool {
-    return bytes.len >= prefix.len and std.mem.eql(u8, bytes[0..prefix.len], prefix);
 }
 
 fn toInt32(number: f64) i32 {
