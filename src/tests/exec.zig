@@ -21049,3 +21049,122 @@ test "sloppy CallExpression assignment targets throw after evaluating only the c
     defer result.free(js.runtime);
     try helpers.expectStringValueBytes(result, "true,true,true,true,true,true|6,0,0");
 }
+
+test "async context-keyword arrow binding identifier is a function" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [32]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var f = async yield => yield+1;
+        \\f(41).then(v=>print(v));
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("42\n", output.buffered());
+}
+
+test "get/set object shorthand serializes like a named property" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var get=1; print(JSON.stringify({get}));
+        \\var set=1; print(JSON.stringify({set}));
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("{\"get\":1}\n{\"set\":1}\n", output.buffered());
+}
+
+test "top-level direct eval does not break private-name eval resolution" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class C {
+        \\  #f = 1;
+        \\  get #g(){ return 2; }
+        \\  #p(){ return 3; }
+        \\  read(){ return eval("this.#f"); }
+        \\  getg(){ return eval("this.#g"); }
+        \\  callp(){ return eval("this.#p()"); }
+        \\  brand(){ return eval("#f in this"); }
+        \\  write(){ return eval("this.#f = 50, this.#f"); }
+        \\  noneval(){ return this.#f + this.#g + this.#p(); }
+        \\}
+        \\var o = new C();
+        \\function show(label, fn){
+        \\  try { print(label + ": " + fn()); }
+        \\  catch(e){ print(label + " threw: " + e.name + " | " + e.message); }
+        \\}
+        \\show("field", function(){ return o.read(); });
+        \\show("getter", function(){ return o.getg(); });
+        \\show("method", function(){ return o.callp(); });
+        \\show("brand", function(){ return o.brand(); });
+        \\show("write", function(){ return o.write(); });
+        \\show("noneval", function(){ return o.noneval(); });
+        \\eval("1");
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings(
+        "field: 1\ngetter: 2\nmethod: 3\nbrand: true\nwrite: 50\nnoneval: 55\n",
+        output.buffered(),
+    );
+}
+
+test "switch fallthrough after while-family tails reaches the next case" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function run(body){
+        \\  var r=[];
+        \\  switch(0){
+        \\    case 0: body();
+        \\    case 1: r.push("b"); break;
+        \\    default: r.push("d");
+        \\  }
+        \\  return r.join(",");
+        \\}
+        \\print(run(function(){ while(true){break;} }));
+        \\print(run(function(){ while(1)break; }));
+        \\print(run(function(){ lbl:while(true){break lbl;} }));
+        \\print(run(function(){ for(;;){break;} }));
+        \\print(run(function(){ for(;;)break; }));
+        \\print(run(function(){ do{break;}while(0); }));
+        \\print(run(function(){ { } }));
+        \\print(run(function(){ if(1){}else{} }));
+        \\print(run(function(){ for(var i of []){} }));
+        \\print(run(function(){ for(var k in {}){} }));
+        \\print(run(function(){ try{}catch(e){} }));
+        \\print(run(function(){ for(var q=0;q<1;q++){continue;} }));
+        \\function t(x){ var r=[]; switch(x){ case 0: while(true){ r.push("a"); break; } case 1: r.push("b"); break; default: r.push("d"); } return r.join(","); }
+        \\print(t(0));
+        \\switch(0){ case 0: if(false) break; print("y"); case 1: print("z"); }
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings(
+        "b\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\na,b\ny\nz\n",
+        output.buffered(),
+    );
+}
+
+test "long numeric literals parse without a 128-byte cap" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111);
+        \\print(0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111);
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("1.1111111111111112e+128\n2.288265886710203e+155\n", output.buffered());
+}

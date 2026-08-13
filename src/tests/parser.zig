@@ -239,6 +239,66 @@ test "F1.2: numeric literals (decimal, hex, octal, binary, exponent, separators)
     }
 }
 
+test "direct eval this is a scope_get_var against the caller seed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const this_atom = try rt.internAtom("this");
+    defer rt.atoms.free(this_atom);
+    const seeds = [_]parser.EvalClosureSeed{.{
+        .var_name = this_atom,
+        .closure_type = .local,
+        .var_idx = 0,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+    }};
+    var parsed = try compileForTest(
+        rt,
+        "this",
+        .{ .mode = .eval_direct, .filename = "<eval>", .eval_closure_seed = &seeds },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.byteCode(), op.push_this));
+    try std.testing.expect(countOpcode(parsed.byteCode(), op.get_var_ref) +
+        countOpcode(parsed.byteCode(), op.get_var_ref0) > 0);
+}
+
+test "F1.2: numeric literals have no 128-byte length cap" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    const ones_128 = "1" ** 128;
+    const ones_129 = "1" ** 129;
+    const one_e200 = "1" ++ ("0" ** 200);
+    const tiny = "0." ++ ("0" ** 140) ++ "1";
+    const nines_400 = "9" ** 400;
+    const hex_130 = "0x" ++ ("1" ** 130);
+
+    const Case = struct { src: []const u8, expected: f64 };
+    const cases = [_]Case{
+        .{ .src = ones_128, .expected = 1.1111111111111112e+127 },
+        .{ .src = ones_129, .expected = 1.1111111111111112e+128 },
+        .{ .src = one_e200, .expected = 1e+200 },
+        .{ .src = tiny, .expected = 1e-141 },
+        .{ .src = nines_400, .expected = std.math.inf(f64) },
+        .{ .src = hex_130, .expected = 2.288265886710203e+155 },
+    };
+    for (cases) |c| {
+        var lx = env.lexer(c.src);
+        var tok = try lx.next();
+        defer freeAndDrain(&lx, &tok);
+        try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+        try std.testing.expect(!tok.payload.num.is_bigint);
+        if (std.math.isInf(c.expected)) {
+            try std.testing.expect(std.math.isPositiveInf(tok.payload.num.value));
+        } else {
+            try std.testing.expectEqual(c.expected, tok.payload.num.value);
+        }
+    }
+}
+
 test "F1.2: bigint suffix records is_bigint and source text" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
@@ -6244,6 +6304,93 @@ test "Object literal: spread" {
 
     try std.testing.expectEqual(op.object, fn_bc.code[0]);
     try expectOpcode(fn_bc.code, op.copy_data_properties);
+}
+
+test "Object literal: get/set shorthand is accepted" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const accepted = [_][]const u8{
+        "{get}",
+        "{get,}",
+        "{a:1,get}",
+        "{set}",
+        "{set,}",
+        "{a:1,set}",
+    };
+    for (accepted) |src| {
+        var fn_bc = try parseExpr(&env, src);
+        defer fn_bc.deinit(env.rt);
+        try std.testing.expectEqual(op.object, fn_bc.code[0]);
+        try expectOpcode(fn_bc.code, op.define_field);
+    }
+}
+
+test "async arrow accepts sloppy context-keyword binding identifiers" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const accepted = [_][]const u8{
+        "var f = async yield => 1;",
+        "var f = async let => 1;",
+        "var f = async static => 1;",
+        "var f = async implements => 1;",
+        "var f = async interface => 1;",
+        "var f = async package => 1;",
+        "var f = async private => 1;",
+        "var f = async protected => 1;",
+        "var f = async public => 1;",
+        "var f = async x => 1;",
+        "var f = async of => 1;",
+        "var f = async async => 1;",
+        "var f = yield => 1;",
+        "var f = static => 1;",
+        "var f = let => 1;",
+        "var f = async (yield) => 1;",
+    };
+    for (accepted) |src| {
+        var fn_bc = try parseStatement(&env, src);
+        defer fn_bc.deinit(env.rt);
+    }
+
+    // +Await makes `await` illegal as AsyncArrowBindingIdentifier.
+    try expectParseStatementError(&env, "var f = async await => 1;");
+}
+
+test "for-in/of var binding rejects yield in generators and await in async" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    try expectParseStatementError(&env, "function* g(){ for (var yield of [1]) ; }");
+    try expectParseStatementError(&env, "function* g(){ for (var yield in {a:1}) ; }");
+    try expectParseStatementError(&env, "async function f(){ for (var await of [1]) ; }");
+    try expectParseStatementError(&env, "async function* f(){ for (var await of [1]) ; }");
+    try expectParseStatementError(&env, "function* g(){ for (var yield = 1 in {a:1}) ; }");
+    try expectParseStatementError(&env, "function* g(){ var yield; }");
+    try expectParseStatementError(&env, "async function f(){ var await; }");
+
+    var sloppy_of = try parseStatement(&env, "for (var yield of [1]) ;");
+    defer sloppy_of.deinit(env.rt);
+    var sloppy_in = try parseStatement(&env, "for (var yield in {a:1}) ;");
+    defer sloppy_in.deinit(env.rt);
+}
+
+test "switch case after while-family still emits a fallthrough skip-goto" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const accepted = [_][]const u8{
+        "switch(0){ case 0: while(true){break;} case 1: ; }",
+        "switch(0){ case 0: while(1)break; case 1: ; }",
+        "switch(0){ case 0: lbl:while(true){break lbl;} case 1: ; }",
+        "switch(0){ case 0: for(;;){break;} case 1: ; }",
+        "switch(0){ case 0: do{break;}while(0); case 1: ; }",
+        "switch(0){ case 0: if(false) break; y(); case 1: z(); }",
+    };
+    for (accepted) |src| {
+        var fn_bc = try parseStatement(&env, src);
+        defer fn_bc.deinit(env.rt);
+    }
 }
 
 // =====================================================================
