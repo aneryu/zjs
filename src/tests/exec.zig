@@ -5568,6 +5568,91 @@ test "resident set_var_ref preserves assignment results and refcounted self-assi
     try std.testing.expect(generic_set_idx.? >= 4);
 }
 
+test "resident stack permutations preserve assignment values and ownership" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\globalThis.__residentInsert2 = function (object, value) {
+        \\  return object.field = value;
+        \\};
+        \\globalThis.__residentInsert3 = function (object, key, value) {
+        \\  return object[key] = value;
+        \\};
+        \\globalThis.__residentPerm3 = function (object) {
+        \\  return object.count++;
+        \\};
+        \\const marker = { alive: true };
+        \\const target = { count: 4 };
+        \\assert.sameValue(__residentInsert2(target, marker), marker);
+        \\assert.sameValue(target.field, marker);
+        \\assert.sameValue(__residentInsert3(target, "indexed", marker), marker);
+        \\assert.sameValue(target.indexed, marker);
+        \\target.count = 12345678901234567890n;
+        \\assert.sameValue(__residentPerm3(target), 12345678901234567890n);
+        \\assert.sameValue(target.count, 12345678901234567891n);
+        \\assert.sameValue(marker.alive, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const insert2 = try globalFunctionBytecode(&js, "__residentInsert2");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(insert2.byteCode(), op.insert2));
+    const insert3 = try globalFunctionBytecode(&js, "__residentInsert3");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(insert3.byteCode(), op.insert3));
+    const perm3 = try globalFunctionBytecode(&js, "__residentPerm3");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(perm3.byteCode(), op.perm3));
+}
+
+test "typed array int32 store fast arm preserves conversion and assignment semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\globalThis.__typedIntStore = function (array, index, value) {
+        \\  return array[index] = value;
+        \\};
+        \\const i8 = new Int8Array(1);
+        \\assert.sameValue(__typedIntStore(i8, 0, 255), 255);
+        \\assert.sameValue(i8[0], -1);
+        \\const u8 = new Uint8Array(1);
+        \\assert.sameValue(__typedIntStore(u8, 0, -1), -1);
+        \\assert.sameValue(u8[0], 255);
+        \\const u8c = new Uint8ClampedArray(2);
+        \\__typedIntStore(u8c, 0, -1);
+        \\__typedIntStore(u8c, 1, 300);
+        \\assert.sameValue(u8c[0], 0);
+        \\assert.sameValue(u8c[1], 255);
+        \\const i16 = new Int16Array(1);
+        \\__typedIntStore(i16, 0, 65535);
+        \\assert.sameValue(i16[0], -1);
+        \\const u16 = new Uint16Array(1);
+        \\__typedIntStore(u16, 0, -1);
+        \\assert.sameValue(u16[0], 65535);
+        \\const i32 = new Int32Array(1);
+        \\__typedIntStore(i32, 0, -2147483648);
+        \\assert.sameValue(i32[0], -2147483648);
+        \\const u32 = new Uint32Array(1);
+        \\__typedIntStore(u32, 0, -1);
+        \\assert.sameValue(u32[0], 4294967295);
+        \\const empty = new Uint8Array(0);
+        \\assert.sameValue(__typedIntStore(empty, 0, 7), 7);
+        \\assert.sameValue(empty[0], undefined);
+        \\const f64 = new Float64Array(1);
+        \\__typedIntStore(f64, 0, 42);
+        \\assert.sameValue(f64[0], 42);
+        \\let coercions = 0;
+        \\__typedIntStore(u8, 0, { valueOf() { coercions++; return 258; } });
+        \\assert.sameValue(u8[0], 2);
+        \\assert.sameValue(coercions, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const store = try globalFunctionBytecode(&js, "__typedIntStore");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(store.byteCode(), op.put_array_el));
+}
+
 test "checked local replacement preserves int fast moves and refcounted fallbacks" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -4564,6 +4564,47 @@ pub fn op_dup(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) cal
     sp[0] = v.dup();
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
+
+/// qjs OP_insert2: `obj value -> value obj value` (quickjs.c:18058-18063).
+/// The original top slot moves to the new top and exactly one duplicate owns
+/// the new bottom copy; no value is released and the memory operand stack stays
+/// authoritative throughout the resident continuation.
+pub fn op_insert2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    sp[0] = value;
+    (sp - 1)[0] = (sp - 2)[0];
+    (sp - 2)[0] = value.dup();
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+/// qjs OP_insert3: `obj key value -> value obj key value`
+/// (quickjs.c:18064-18070). As with OP_insert2, only the copied value gains an
+/// owner; the other slots are raw moves.
+pub fn op_insert3(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    sp[0] = value;
+    (sp - 1)[0] = (sp - 2)[0];
+    (sp - 2)[0] = (sp - 3)[0];
+    (sp - 3)[0] = value.dup();
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+/// qjs OP_perm3: `obj old value -> old obj value` (quickjs.c:18079-18086).
+/// This is a pure two-slot move: ownership counts and stack depth do not
+/// change.
+pub fn op_perm3(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // Keep both 16-byte values in integer pairs. Whole-JSValue assignment makes
+    // LLVM use q registers and spill one temporary to the native stack for this
+    // swap on AArch64; expressing each slot through the established integer-pair
+    // helpers preserves the exact bits and independent SSA values. The backend
+    // may coalesce the final moves, but no native-stack temporary remains.
+    const old = loadValueAsIntPair(&(sp - 2)[0]);
+    const object = loadValueAsIntPair(&(sp - 3)[0]);
+    storeValueAsIntPair(&(sp - 2)[0], object);
+    storeValueAsIntPair(&(sp - 3)[0], old);
+    return cont(pc + 1, sp, var_buf, vm);
+}
+
 pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const tmp = (sp - 2)[0];
     (sp - 2)[0] = (sp - 1)[0];
