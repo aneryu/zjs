@@ -9184,6 +9184,171 @@ test "qjs alignment C3 in operator respects null prototype" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "qjs alignment X-02 Array length Set redirects when Receiver differs" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var arr=[1,2,3], recv={};
+        \\print(Reflect.set(arr,"length",2,recv));
+        \\print("arr.length="+arr.length+" recv.length="+recv.length+
+        \\      " hasOwn="+Object.prototype.hasOwnProperty.call(recv,"length"));
+        \\var arr2=[1,2,3], recv2={};
+        \\print(Reflect.set(arr2,"0",9,recv2));
+        \\print("arr2[0]="+arr2[0]+" recv2[0]="+recv2[0]+
+        \\      " hasOwn0="+Object.prototype.hasOwnProperty.call(recv2,"0"));
+        \\var arr3=[1,2,3];
+        \\print(Reflect.set(arr3,"length",1));
+        \\print("arr3.length="+arr3.length);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\true
+        \\arr.length=3 recv.length=2 hasOwn=true
+        \\true
+        \\arr2[0]=1 recv2[0]=9 hasOwn0=true
+        \\true
+        \\arr3.length=1
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-08 eval var writable false syncs VARREF is_const" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\(0,eval)("var ev = 1;");
+        \\Object.defineProperty(globalThis, "ev", {writable:false});
+        \\print("desc.writable = " + Object.getOwnPropertyDescriptor(globalThis,"ev").writable);
+        \\try { ev = 7; } catch(e){ print("assign threw " + e.name); }
+        \\print("ev = " + ev);
+        \\globalThis.gp = 5; Object.defineProperty(globalThis, "gp", {writable:false});
+        \\print("gp desc.writable = " + Object.getOwnPropertyDescriptor(globalThis,"gp").writable);
+        \\gp = 9; print("gp = " + gp);
+        \\(0,eval)("var ev2 = 1;"); Object.defineProperty(globalThis, "ev2", {enumerable:false});
+        \\print("ev2 desc.enumerable = " + Object.getOwnPropertyDescriptor(globalThis,"ev2").enumerable);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\desc.writable = false
+        \\ev = 1
+        \\gp desc.writable = false
+        \\gp = 5
+        \\ev2 desc.enumerable = false
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-09 VARREF to GETSET detaches the stale cell" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\(0,eval)("var ev = 1;");
+        \\ev = 7;
+        \\Object.defineProperty(globalThis, "ev", {get:function(){return 42;}, configurable:true});
+        \\print("bare ev = " + ev);
+        \\print("globalThis.ev = " + globalThis.ev);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\bare ev = 42
+        \\globalThis.ev = 42
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-07 integer-key Set breaks on first proto hit" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\"use strict";
+        \\function t(mk){
+        \\  var B = {}; mk(B);
+        \\  var A = Object.create(B); Object.defineProperty(A, "0", {value:2, writable:true, configurable:true});
+        \\  var o = Object.create(A);
+        \\  try { o[0] = 9; } catch(e) { return "THREW " + e.name; }
+        \\  return "OK " + JSON.stringify(Object.getOwnPropertyDescriptor(o, "0"));
+        \\}
+        \\print("far readonly data : " + t(function(B){ Object.defineProperty(B,"0",{value:1,writable:false,configurable:true}); }));
+        \\print("far no-setter acc : " + t(function(B){ Object.defineProperty(B,"0",{get:function(){return 1;},configurable:true}); }));
+        \\function tn(mk){
+        \\  var B = {}; mk(B);
+        \\  var A = Object.create(B); Object.defineProperty(A, "zk", {value:2, writable:true, configurable:true});
+        \\  var o = Object.create(A);
+        \\  try { o.zk = 9; } catch(e) { return "THREW " + e.name; }
+        \\  return "OK " + JSON.stringify(Object.getOwnPropertyDescriptor(o, "zk"));
+        \\}
+        \\print("named ctrl readonly: " + tn(function(B){ Object.defineProperty(B,"zk",{value:1,writable:false,configurable:true}); }));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\far readonly data : OK {"value":9,"writable":true,"enumerable":true,"configurable":true}
+        \\far no-setter acc : OK {"value":9,"writable":true,"enumerable":true,"configurable":true}
+        \\named ctrl readonly: OK {"value":9,"writable":true,"enumerable":true,"configurable":true}
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-10 Get miss does not fall back to globalThis constructor prototype" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f(){}
+        \\Object.setPrototypeOf(f, null);
+        \\print("f.call:", typeof f.call, "| f.bind:", typeof f.bind, "| f.toString:", typeof f.toString);
+        \\print("'bind' in f:", ('bind' in f));
+        \\print("desc:", String(Object.getOwnPropertyDescriptor(f,'call')));
+        \\print("f.call===Function.prototype.call:", f.call === Function.prototype.call);
+        \\var a=[1,2,3];
+        \\Object.setPrototypeOf(a, null);
+        \\print("a.join:", typeof a.join, "| hasJoin:", ('join' in a));
+        \\var dv = new DataView(new ArrayBuffer(8));
+        \\Object.setPrototypeOf(dv, null);
+        \\print("dv.byteLength:", dv.byteLength);
+        \\print("s0:", new String("hi")[0]);
+        \\function g(){}
+        \\globalThis.Function = { prototype: { zzz: "F-hijack" } };
+        \\globalThis.Object   = { prototype: { qqq: "O-hijack" } };
+        \\print("g.zzz:", g.zzz, "| g.qqq:", g.qqq);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\f.call: undefined | f.bind: undefined | f.toString: undefined
+        \\'bind' in f: false
+        \\desc: undefined
+        \\f.call===Function.prototype.call: false
+        \\a.join: undefined | hasJoin: false
+        \\dv.byteLength: undefined
+        \\s0: h
+        \\g.zzz: undefined | g.qqq: undefined
+        \\
+    , stream.buffered());
+}
+
 test "qjs alignment C4 Array instanceof follows prototype chain" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

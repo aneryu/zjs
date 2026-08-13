@@ -7124,6 +7124,17 @@ pub fn qjsReflectSetCall(
         const ok = try ordinarySetWithReceiver(ctx, output, global, args[0], object, receiver_value, atom_id, set_value, caller_function, caller_frame);
         return core.JSValue.boolean(ok);
     }
+    // qjs JS_SetPropertyInternal: when obj != this_obj (Reflect.set receiver),
+    // `if (unlikely(p != p1)) goto retry2` (quickjs.c:9701-9702) skips the
+    // own JS_PROP_LENGTH / set_array_length arm (9714-9717) and later takes
+    // the generic receiver path (9892-9929): gopd on Receiver, then
+    // DefineProperty/CreateProperty on Receiver. OrdinarySetWithOwnDescriptor,
+    // not ArraySetLength.
+    const receiver_value = if (args.len >= 4) args[3] else args[0];
+    if (!object_ops.sameObjectIdentity(receiver_value, args[0])) {
+        const ok = try ordinarySetWithReceiver(ctx, output, global, args[0], object, receiver_value, atom_id, set_value, caller_function, caller_frame);
+        return core.JSValue.boolean(ok);
+    }
     const value_to_set = try array_ops.arrayLengthAssignmentValue(ctx, output, global, object, atom_id, set_value, caller_function, caller_frame);
     defer if (!value_to_set.same(set_value)) value_to_set.free(ctx.runtime);
     object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
@@ -7463,7 +7474,7 @@ pub fn qjsReflectOwnKeysCall(
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
     const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
-    const out = try core.Object.createArray(ctx.runtime, null);
+    const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
     for (keys) |key| {
         const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
