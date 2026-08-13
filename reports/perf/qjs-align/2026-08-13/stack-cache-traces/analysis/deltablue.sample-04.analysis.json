@@ -1,0 +1,530 @@
+{
+  "benchmark": "deltablue",
+  "cache": {
+    "0": {
+      "baseline": {
+        "loads": 310459152,
+        "stores": 311665582,
+        "total": 622124734
+      },
+      "capacity": 0,
+      "control_flow_joins": {
+        "cost_shapes": {},
+        "dynamic_edges_canonicalized": 0,
+        "materialized_slots": 0,
+        "observed_join_points": 42,
+        "requiring_canonicalization": 0
+      },
+      "dataflow_iterations": 1,
+      "eliminable": {
+        "fraction_of_baseline": 0.0,
+        "loads": 0,
+        "stores": 0,
+        "total": 0
+      },
+      "entry_cache_depth_distribution": {
+        "0": 379035827
+      },
+      "exit_cache_depth_distribution": {
+        "0": 379035827
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 32374437,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "canonical_publication": {
+          "boundary_hits": 1177229,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "cold_helper": {
+          "boundary_hits": 1179797,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "return": {
+          "boundary_hits": 31163587,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        }
+      },
+      "modeled": {
+        "loads": 310459152,
+        "stores": 311665582,
+        "total": 622124734
+      }
+    },
+    "1": {
+      "baseline": {
+        "loads": 310459152,
+        "stores": 311665582,
+        "total": 622124734
+      },
+      "capacity": 1,
+      "control_flow_joins": {
+        "cost_shapes": {
+          "1->0": 138877
+        },
+        "dynamic_edges_canonicalized": 138877,
+        "materialized_slots": 138877,
+        "observed_join_points": 42,
+        "requiring_canonicalization": 3
+      },
+      "dataflow_iterations": 3,
+      "eliminable": {
+        "fraction_of_baseline": 0.5049459550984514,
+        "loads": 157069684,
+        "stores": 157069684,
+        "total": 314139368
+      },
+      "entry_cache_depth_distribution": {
+        "0": 134303030,
+        "1": 244732797
+      },
+      "exit_cache_depth_distribution": {
+        "0": 134303030,
+        "1": 244732797
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 32374437,
+          "materialized_slots": 31982007,
+          "materializing_events": 31982007
+        },
+        "canonical_publication": {
+          "boundary_hits": 1177229,
+          "materialized_slots": 779715,
+          "materializing_events": 779715
+        },
+        "capacity_evict": {
+          "boundary_hits": 67850691,
+          "materialized_slots": 67850691,
+          "materializing_events": 67850691
+        },
+        "cold_helper": {
+          "boundary_hits": 1179797,
+          "materialized_slots": 1179162,
+          "materializing_events": 1179162
+        },
+        "control_flow_join": {
+          "boundary_hits": 138877,
+          "materialized_slots": 138877,
+          "materializing_events": 138877
+        },
+        "return": {
+          "boundary_hits": 31163587,
+          "materialized_slots": 17712206,
+          "materializing_events": 17712206
+        }
+      },
+      "modeled": {
+        "loads": 153389468,
+        "stores": 154595898,
+        "total": 307985366
+      }
+    },
+    "2": {
+      "baseline": {
+        "loads": 310459152,
+        "stores": 311665582,
+        "total": 622124734
+      },
+      "capacity": 2,
+      "control_flow_joins": {
+        "cost_shapes": {
+          "1->0": 304952
+        },
+        "dynamic_edges_canonicalized": 304952,
+        "materialized_slots": 304952,
+        "observed_join_points": 42,
+        "requiring_canonicalization": 3
+      },
+      "dataflow_iterations": 8,
+      "eliminable": {
+        "fraction_of_baseline": 0.5587946837683518,
+        "loads": 173819997,
+        "stores": 173819997,
+        "total": 347639994
+      },
+      "entry_cache_depth_distribution": {
+        "0": 134302463,
+        "1": 161634168,
+        "2": 83099196
+      },
+      "exit_cache_depth_distribution": {
+        "0": 134302463,
+        "1": 161634168,
+        "2": 83099196
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 32374437,
+          "materialized_slots": 62985541,
+          "materializing_events": 31982007
+        },
+        "canonical_publication": {
+          "boundary_hits": 1177229,
+          "materialized_slots": 1559368,
+          "materializing_events": 779717
+        },
+        "capacity_evict": {
+          "boundary_hits": 18565881,
+          "materialized_slots": 18565881,
+          "materializing_events": 18565881
+        },
+        "cold_helper": {
+          "boundary_hits": 1179797,
+          "materialized_slots": 1375305,
+          "materializing_events": 1179162
+        },
+        "control_flow_join": {
+          "boundary_hits": 304952,
+          "materialized_slots": 304952,
+          "materializing_events": 304952
+        },
+        "return": {
+          "boundary_hits": 31163587,
+          "materialized_slots": 17712207,
+          "materializing_events": 17712207
+        }
+      },
+      "modeled": {
+        "loads": 136639155,
+        "stores": 137845585,
+        "total": 274484740
+      }
+    }
+  },
+  "local_round_trips": {
+    "access_executions": {
+      "get": 70312899,
+      "put": 31939194,
+      "set": 5108409
+    },
+    "eliminable_by_pure_tos_cache": false,
+    "get_after_last_put_by_opcode_distance": {
+      "all": 67157540,
+      "distance_le_1": 30374030,
+      "distance_le_32": 47384482,
+      "distance_le_8": 39334652
+    },
+    "get_after_last_set_by_opcode_distance": {
+      "all": 3155359,
+      "distance_le_32": 1623884,
+      "distance_le_8": 504632
+    },
+    "immediate_put_to_any_get": 30650963,
+    "immediate_put_to_same_local_get": 30374030,
+    "immediate_set_to_same_local_get": 0,
+    "local_load_store_operations_for_same_local_put_get": 60748060,
+    "top_same_local_pairs": [
+      {
+        "count": 4957425,
+        "function": "0x257e267c",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 4100800,
+        "function": "0x25817008",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3772175,
+        "function": "0x257c8294",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3627800,
+        "function": "0x257c8294",
+        "get_pc": 19,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3382500,
+        "function": "0x2580ea94",
+        "get_pc": 5,
+        "local_index": 2,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3382500,
+        "function": "0x25837e3c",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3382500,
+        "function": "0x2580ea94",
+        "get_pc": 4,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 3
+      },
+      {
+        "count": 3344000,
+        "function": "0x2580ea94",
+        "get_pc": 17,
+        "local_index": 2,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3344000,
+        "function": "0x257c8698",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3344000,
+        "function": "0x2580ea94",
+        "get_pc": 23,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 3
+      },
+      {
+        "count": 3219425,
+        "function": "0x257c8194",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 3134175,
+        "function": "0x257c8194",
+        "get_pc": 19,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 2805000,
+        "function": "0x257c838c",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 2805000,
+        "function": "0x257c838c",
+        "get_pc": 11,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 754600,
+        "function": "0x25835f88",
+        "get_pc": 16,
+        "local_index": 2,
+        "write_access": "put",
+        "write_pc": 15
+      },
+      {
+        "count": 754600,
+        "function": "0x25835f88",
+        "get_pc": 17,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 13
+      },
+      {
+        "count": 644325,
+        "function": "0x257c7b98",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 638550,
+        "function": "0x257c4454",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 629475,
+        "function": "0x257c4454",
+        "get_pc": 25,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 629475,
+        "function": "0x257c4454",
+        "get_pc": 36,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      }
+    ]
+  },
+  "method": {
+    "boundary_policy": "materialize before boundary opcode and leave depth zero",
+    "cache_shape": "contiguous logical TOS",
+    "join_policy": "minimum observed incoming cache depth",
+    "local_slot_traffic_in_tos_coverage": false,
+    "local_write_distance_bucket_upper_bounds": [
+      1,
+      8,
+      32,
+      4294967295
+    ],
+    "traffic_unit": "one JSValue slot load or store"
+  },
+  "one_slot_failure": {
+    "definition": "two-pop non-boundary execution where cache=1 loads more stack slots than cache=2",
+    "dynamic_executions": 16749753,
+    "eligible_two_pop_executions": 26180064,
+    "extra_loads_vs_two_slot": 16749753,
+    "fraction_of_eligible_two_pop_executions": 0.6397903763718836,
+    "top_sites": [
+      {
+        "count": 7630150,
+        "opcode": "eq",
+        "site": "pc=16"
+      },
+      {
+        "count": 4100800,
+        "opcode": "get_array_el",
+        "site": "pc=9"
+      },
+      {
+        "count": 629475,
+        "opcode": "mul",
+        "site": "pc=47"
+      },
+      {
+        "count": 629475,
+        "opcode": "add",
+        "site": "pc=59"
+      },
+      {
+        "count": 475475,
+        "opcode": "neq",
+        "site": "pc=41"
+      },
+      {
+        "count": 470525,
+        "opcode": "neq",
+        "site": "pc=16"
+      },
+      {
+        "count": 331375,
+        "opcode": "gt",
+        "site": "pc=12"
+      },
+      {
+        "count": 194700,
+        "opcode": "eq",
+        "site": "pc=57"
+      },
+      {
+        "count": 194700,
+        "opcode": "lt",
+        "site": "pc=12"
+      },
+      {
+        "count": 139975,
+        "opcode": "neq",
+        "site": "pc=25"
+      },
+      {
+        "count": 139425,
+        "opcode": "put_field",
+        "site": "pc=97"
+      },
+      {
+        "count": 139425,
+        "opcode": "put_field",
+        "site": "pc=130"
+      },
+      {
+        "count": 139425,
+        "opcode": "neq",
+        "site": "pc=82"
+      },
+      {
+        "count": 112200,
+        "opcode": "neq",
+        "site": "pc=191"
+      },
+      {
+        "count": 110275,
+        "opcode": "eq",
+        "site": "pc=14"
+      },
+      {
+        "count": 110275,
+        "opcode": "eq",
+        "site": "pc=98"
+      },
+      {
+        "count": 84425,
+        "opcode": "neq",
+        "site": "pc=61"
+      },
+      {
+        "count": 83050,
+        "opcode": "eq",
+        "site": "pc=18"
+      },
+      {
+        "count": 82500,
+        "opcode": "put_field",
+        "site": "pc=57"
+      },
+      {
+        "count": 58025,
+        "opcode": "lt",
+        "site": "pc=18"
+      }
+    ]
+  },
+  "schema": 1,
+  "significance": {
+    "absolute_traffic_threshold": 1000000,
+    "fraction_threshold": 0.05,
+    "two_slot_passes": true
+  },
+  "source_trace": "raw trace not retained; sha256=59d13a0ac7e4d17a6609361ddf53d48aad3938f975aedc02e70dd90126c8eeee",
+  "trace": {
+    "local_history_overflowed": false,
+    "opcodes_executed": 379035827,
+    "overflowed": false,
+    "raw_boundary_hits": {
+      "canonical_publication": 34149006,
+      "cold_helper": 1179797
+    },
+    "total_edges": 379035827,
+    "unique_edges": 4528
+  },
+  "validation": {
+    "boundary_stack_effect_mismatches": 1102,
+    "edge_opcode_count_conserved": true,
+    "nonboundary_stack_effect_mismatches": 0
+  }
+}

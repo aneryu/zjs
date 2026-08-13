@@ -1,0 +1,547 @@
+{
+  "benchmark": "mandreel",
+  "cache": {
+    "0": {
+      "baseline": {
+        "loads": 1050247656,
+        "stores": 1050736005,
+        "total": 2100983661
+      },
+      "capacity": 0,
+      "control_flow_joins": {
+        "cost_shapes": {},
+        "dynamic_edges_canonicalized": 0,
+        "materialized_slots": 0,
+        "observed_join_points": 209,
+        "requiring_canonicalization": 0
+      },
+      "dataflow_iterations": 1,
+      "eliminable": {
+        "fraction_of_baseline": 0.0,
+        "loads": 0,
+        "stores": 0,
+        "total": 0
+      },
+      "entry_cache_depth_distribution": {
+        "0": 1283999441
+      },
+      "exit_cache_depth_distribution": {
+        "0": 1283999441
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 13548576,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "canonical_publication": {
+          "boundary_hits": 1498,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "cold_helper": {
+          "boundary_hits": 6852786,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "exception": {
+          "boundary_hits": 1,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "return": {
+          "boundary_hits": 13193984,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        }
+      },
+      "modeled": {
+        "loads": 1050247656,
+        "stores": 1050736005,
+        "total": 2100983661
+      }
+    },
+    "1": {
+      "baseline": {
+        "loads": 1050247656,
+        "stores": 1050736005,
+        "total": 2100983661
+      },
+      "capacity": 1,
+      "control_flow_joins": {
+        "cost_shapes": {
+          "1->0": 114667
+        },
+        "dynamic_edges_canonicalized": 114667,
+        "materialized_slots": 114667,
+        "observed_join_points": 209,
+        "requiring_canonicalization": 7
+      },
+      "dataflow_iterations": 3,
+      "eliminable": {
+        "fraction_of_baseline": 0.5362473973090074,
+        "loads": 563323510,
+        "stores": 563323510,
+        "total": 1126647020
+      },
+      "entry_cache_depth_distribution": {
+        "0": 248283847,
+        "1": 1035715594
+      },
+      "exit_cache_depth_distribution": {
+        "0": 248283847,
+        "1": 1035715594
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 13548576,
+          "materialized_slots": 13546624,
+          "materializing_events": 13546624
+        },
+        "canonical_publication": {
+          "boundary_hits": 1498,
+          "materialized_slots": 65,
+          "materializing_events": 65
+        },
+        "capacity_evict": {
+          "boundary_hits": 446933339,
+          "materialized_slots": 446933339,
+          "materializing_events": 446933339
+        },
+        "cold_helper": {
+          "boundary_hits": 6852786,
+          "materialized_slots": 290529,
+          "materializing_events": 290529
+        },
+        "control_flow_join": {
+          "boundary_hits": 114667,
+          "materialized_slots": 114667,
+          "materializing_events": 114667
+        },
+        "exception": {
+          "boundary_hits": 1,
+          "materialized_slots": 1,
+          "materializing_events": 1
+        },
+        "return": {
+          "boundary_hits": 13193984,
+          "materialized_slots": 12347614,
+          "materializing_events": 12347614
+        }
+      },
+      "modeled": {
+        "loads": 486924146,
+        "stores": 487412495,
+        "total": 974336641
+      }
+    },
+    "2": {
+      "baseline": {
+        "loads": 1050247656,
+        "stores": 1050736005,
+        "total": 2100983661
+      },
+      "capacity": 2,
+      "control_flow_joins": {
+        "cost_shapes": {
+          "1->0": 114665
+        },
+        "dynamic_edges_canonicalized": 114665,
+        "materialized_slots": 114665,
+        "observed_join_points": 209,
+        "requiring_canonicalization": 6
+      },
+      "dataflow_iterations": 21,
+      "eliminable": {
+        "fraction_of_baseline": 0.8297308200722843,
+        "loads": 871625448,
+        "stores": 871625448,
+        "total": 1743250896
+      },
+      "entry_cache_depth_distribution": {
+        "0": 247811664,
+        "1": 589468364,
+        "2": 446719413
+      },
+      "exit_cache_depth_distribution": {
+        "0": 247811664,
+        "1": 589468364,
+        "2": 446719413
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 13548576,
+          "materialized_slots": 26754302,
+          "materializing_events": 13546624
+        },
+        "canonical_publication": {
+          "boundary_hits": 1498,
+          "materialized_slots": 95,
+          "materializing_events": 65
+        },
+        "capacity_evict": {
+          "boundary_hits": 124655529,
+          "materialized_slots": 124655529,
+          "materializing_events": 124655529
+        },
+        "cold_helper": {
+          "boundary_hits": 6852786,
+          "materialized_slots": 361389,
+          "materializing_events": 290529
+        },
+        "control_flow_join": {
+          "boundary_hits": 114665,
+          "materialized_slots": 114665,
+          "materializing_events": 114665
+        },
+        "exception": {
+          "boundary_hits": 1,
+          "materialized_slots": 2,
+          "materializing_events": 1
+        },
+        "return": {
+          "boundary_hits": 13193984,
+          "materialized_slots": 12791173,
+          "materializing_events": 12791173
+        }
+      },
+      "modeled": {
+        "loads": 178622208,
+        "stores": 179110557,
+        "total": 357732765
+      }
+    }
+  },
+  "local_round_trips": {
+    "access_executions": {
+      "get": 246965799,
+      "put": 97469279,
+      "set": 25955118
+    },
+    "eliminable_by_pure_tos_cache": false,
+    "get_after_last_put_by_opcode_distance": {
+      "all": 242402525,
+      "distance_le_1": 573700,
+      "distance_le_32": 98392000,
+      "distance_le_8": 49879603
+    },
+    "get_after_last_set_by_opcode_distance": {
+      "all": 4563274,
+      "distance_le_1": 19200,
+      "distance_le_32": 1200122,
+      "distance_le_8": 697879
+    },
+    "immediate_put_to_any_get": 32706302,
+    "immediate_put_to_same_local_get": 573700,
+    "immediate_set_to_same_local_get": 19200,
+    "local_load_store_operations_for_same_local_put_get": 1147400,
+    "top_same_local_pairs": [
+      {
+        "count": 3977217,
+        "function": "0x21e59dfc",
+        "get_pc": 137,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 136
+      },
+      {
+        "count": 3977217,
+        "function": "0x21f25898",
+        "get_pc": 55,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 54
+      },
+      {
+        "count": 3977217,
+        "function": "0x21dfb288",
+        "get_pc": 20,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 19
+      },
+      {
+        "count": 3977216,
+        "function": "0x21f25898",
+        "get_pc": 67,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 54
+      },
+      {
+        "count": 3977216,
+        "function": "0x21f25898",
+        "get_pc": 71,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 54
+      },
+      {
+        "count": 3977216,
+        "function": "0x21dfb288",
+        "get_pc": 36,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 19
+      },
+      {
+        "count": 3977216,
+        "function": "0x21e59dfc",
+        "get_pc": 149,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 136
+      },
+      {
+        "count": 3977216,
+        "function": "0x21dfb288",
+        "get_pc": 32,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 19
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 805,
+        "local_index": 12,
+        "write_access": "put",
+        "write_pc": 243
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 948,
+        "local_index": 15,
+        "write_access": "put",
+        "write_pc": 937
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 897,
+        "local_index": 16,
+        "write_access": "put",
+        "write_pc": 862
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 825,
+        "local_index": 5,
+        "write_access": "put",
+        "write_pc": 816
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 821,
+        "local_index": 12,
+        "write_access": "put",
+        "write_pc": 243
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 923,
+        "local_index": 15,
+        "write_access": "put",
+        "write_pc": 849
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 313,
+        "local_index": 15,
+        "write_access": "put",
+        "write_pc": 298
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 887,
+        "local_index": 17,
+        "write_access": "put",
+        "write_pc": 875
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 910,
+        "local_index": 5,
+        "write_access": "put",
+        "write_pc": 839
+      },
+      {
+        "count": 2268416,
+        "function": "0x2175104c",
+        "get_pc": 942,
+        "local_index": 5,
+        "write_access": "put",
+        "write_pc": 839
+      },
+      {
+        "count": 2262638,
+        "function": "0x2175104c",
+        "get_pc": 957,
+        "local_index": 3,
+        "write_access": "put",
+        "write_pc": 132
+      },
+      {
+        "count": 2262638,
+        "function": "0x2175104c",
+        "get_pc": 844,
+        "local_index": 6,
+        "write_access": "put",
+        "write_pc": 971
+      }
+    ]
+  },
+  "method": {
+    "boundary_policy": "materialize before boundary opcode and leave depth zero",
+    "cache_shape": "contiguous logical TOS",
+    "join_policy": "minimum observed incoming cache depth",
+    "local_slot_traffic_in_tos_coverage": false,
+    "local_write_distance_bucket_upper_bounds": [
+      1,
+      8,
+      32,
+      4294967295
+    ],
+    "traffic_unit": "one JSValue slot load or store"
+  },
+  "one_slot_failure": {
+    "definition": "two-pop non-boundary execution where cache=1 loads more stack slots than cache=2",
+    "dynamic_executions": 308273320,
+    "eligible_two_pop_executions": 394129551,
+    "extra_loads_vs_two_slot": 308273320,
+    "fraction_of_eligible_two_pop_executions": 0.7821624113640746,
+    "top_sites": [
+      {
+        "count": 12345394,
+        "opcode": "gte",
+        "site": "pc=2"
+      },
+      {
+        "count": 3977234,
+        "opcode": "put_array_el",
+        "site": "pc=151"
+      },
+      {
+        "count": 3977217,
+        "opcode": "div",
+        "site": "pc=142"
+      },
+      {
+        "count": 3977217,
+        "opcode": "div",
+        "site": "pc=60"
+      },
+      {
+        "count": 3977217,
+        "opcode": "div",
+        "site": "pc=25"
+      },
+      {
+        "count": 3977216,
+        "opcode": "get_array_el",
+        "site": "pc=37"
+      },
+      {
+        "count": 3977216,
+        "opcode": "get_array_el",
+        "site": "pc=72"
+      },
+      {
+        "count": 2309058,
+        "opcode": "add",
+        "site": "pc=296"
+      },
+      {
+        "count": 2306816,
+        "opcode": "sar",
+        "site": "pc=808"
+      },
+      {
+        "count": 2297056,
+        "opcode": "sar",
+        "site": "pc=847"
+      },
+      {
+        "count": 2291714,
+        "opcode": "add",
+        "site": "pc=835"
+      },
+      {
+        "count": 2287922,
+        "opcode": "add",
+        "site": "pc=858"
+      },
+      {
+        "count": 2287636,
+        "opcode": "sar",
+        "site": "pc=922"
+      },
+      {
+        "count": 2279814,
+        "opcode": "add",
+        "site": "pc=307"
+      },
+      {
+        "count": 2278037,
+        "opcode": "add",
+        "site": "pc=813"
+      },
+      {
+        "count": 2276457,
+        "opcode": "add",
+        "site": "pc=884"
+      },
+      {
+        "count": 2276457,
+        "opcode": "put_array_el",
+        "site": "pc=899"
+      },
+      {
+        "count": 2272239,
+        "opcode": "add",
+        "site": "pc=968"
+      },
+      {
+        "count": 2270356,
+        "opcode": "add",
+        "site": "pc=871"
+      },
+      {
+        "count": 2268672,
+        "opcode": "sar",
+        "site": "pc=837"
+      }
+    ]
+  },
+  "schema": 1,
+  "significance": {
+    "absolute_traffic_threshold": 1000000,
+    "fraction_threshold": 0.05,
+    "two_slot_passes": true
+  },
+  "source_trace": "raw trace not retained; sha256=cc32a0e820820b6e55b842c37094dcdceecd6b337347dd90b046cc9340f16f36",
+  "trace": {
+    "local_history_overflowed": false,
+    "opcodes_executed": 1283999441,
+    "overflowed": false,
+    "raw_boundary_hits": {
+      "canonical_publication": 20048305,
+      "cold_helper": 6852787,
+      "exception": 1
+    },
+    "total_edges": 1283999441,
+    "unique_edges": 883360
+  },
+  "validation": {
+    "boundary_stack_effect_mismatches": 5,
+    "edge_opcode_count_conserved": true,
+    "nonboundary_stack_effect_mismatches": 0
+  }
+}

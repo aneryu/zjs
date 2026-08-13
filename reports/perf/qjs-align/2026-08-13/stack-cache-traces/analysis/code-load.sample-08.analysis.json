@@ -1,0 +1,531 @@
+{
+  "benchmark": "code-load",
+  "cache": {
+    "0": {
+      "baseline": {
+        "loads": 168080,
+        "stores": 168647,
+        "total": 336727
+      },
+      "capacity": 0,
+      "control_flow_joins": {
+        "cost_shapes": {},
+        "dynamic_edges_canonicalized": 0,
+        "materialized_slots": 0,
+        "observed_join_points": 186,
+        "requiring_canonicalization": 0
+      },
+      "dataflow_iterations": 1,
+      "eliminable": {
+        "fraction_of_baseline": 0.0,
+        "loads": 0,
+        "stores": 0,
+        "total": 0
+      },
+      "entry_cache_depth_distribution": {
+        "0": 192893
+      },
+      "exit_cache_depth_distribution": {
+        "0": 192893
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 6039,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "canonical_publication": {
+          "boundary_hits": 17275,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "cold_helper": {
+          "boundary_hits": 20319,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        },
+        "return": {
+          "boundary_hits": 3619,
+          "materialized_slots": 0,
+          "materializing_events": 0
+        }
+      },
+      "modeled": {
+        "loads": 168080,
+        "stores": 168647,
+        "total": 336727
+      }
+    },
+    "1": {
+      "baseline": {
+        "loads": 168080,
+        "stores": 168647,
+        "total": 336727
+      },
+      "capacity": 1,
+      "control_flow_joins": {
+        "cost_shapes": {
+          "1->0": 268
+        },
+        "dynamic_edges_canonicalized": 268,
+        "materialized_slots": 268,
+        "observed_join_points": 186,
+        "requiring_canonicalization": 43
+      },
+      "dataflow_iterations": 3,
+      "eliminable": {
+        "fraction_of_baseline": 0.2976060725751128,
+        "loads": 50106,
+        "stores": 50106,
+        "total": 100212
+      },
+      "entry_cache_depth_distribution": {
+        "0": 87538,
+        "1": 105355
+      },
+      "exit_cache_depth_distribution": {
+        "0": 87538,
+        "1": 105355
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 6039,
+          "materialized_slots": 4858,
+          "materializing_events": 4858
+        },
+        "canonical_publication": {
+          "boundary_hits": 17275,
+          "materialized_slots": 9015,
+          "materializing_events": 9015
+        },
+        "capacity_evict": {
+          "boundary_hits": 41909,
+          "materialized_slots": 41909,
+          "materializing_events": 41909
+        },
+        "cold_helper": {
+          "boundary_hits": 20319,
+          "materialized_slots": 8290,
+          "materializing_events": 8290
+        },
+        "control_flow_join": {
+          "boundary_hits": 268,
+          "materialized_slots": 268,
+          "materializing_events": 268
+        },
+        "return": {
+          "boundary_hits": 3619,
+          "materialized_slots": 1408,
+          "materializing_events": 1408
+        }
+      },
+      "modeled": {
+        "loads": 117974,
+        "stores": 118541,
+        "total": 236515
+      }
+    },
+    "2": {
+      "baseline": {
+        "loads": 168080,
+        "stores": 168647,
+        "total": 336727
+      },
+      "capacity": 2,
+      "control_flow_joins": {
+        "cost_shapes": {
+          "1->0": 294
+        },
+        "dynamic_edges_canonicalized": 294,
+        "materialized_slots": 294,
+        "observed_join_points": 186,
+        "requiring_canonicalization": 28
+      },
+      "dataflow_iterations": 19,
+      "eliminable": {
+        "fraction_of_baseline": 0.40507592203773385,
+        "loads": 68200,
+        "stores": 68200,
+        "total": 136400
+      },
+      "entry_cache_depth_distribution": {
+        "0": 82429,
+        "1": 66724,
+        "2": 43740
+      },
+      "exit_cache_depth_distribution": {
+        "0": 82429,
+        "1": 66724,
+        "2": 43740
+      },
+      "flush_reasons": {
+        "call": {
+          "boundary_hits": 6039,
+          "materialized_slots": 7993,
+          "materializing_events": 4858
+        },
+        "canonical_publication": {
+          "boundary_hits": 17275,
+          "materialized_slots": 10320,
+          "materializing_events": 9029
+        },
+        "capacity_evict": {
+          "boundary_hits": 13381,
+          "materialized_slots": 13381,
+          "materializing_events": 13381
+        },
+        "cold_helper": {
+          "boundary_hits": 20319,
+          "materialized_slots": 13690,
+          "materializing_events": 8390
+        },
+        "control_flow_join": {
+          "boundary_hits": 294,
+          "materialized_slots": 294,
+          "materializing_events": 294
+        },
+        "return": {
+          "boundary_hits": 3619,
+          "materialized_slots": 1634,
+          "materializing_events": 1527
+        }
+      },
+      "modeled": {
+        "loads": 99880,
+        "stores": 100447,
+        "total": 200327
+      }
+    }
+  },
+  "local_round_trips": {
+    "access_executions": {
+      "get": 29982,
+      "put": 15398,
+      "set": 1924
+    },
+    "eliminable_by_pure_tos_cache": false,
+    "get_after_last_put_by_opcode_distance": {
+      "all": 25659,
+      "distance_le_1": 569,
+      "distance_le_32": 16493,
+      "distance_le_8": 8198
+    },
+    "get_after_last_set_by_opcode_distance": {
+      "all": 4274,
+      "distance_le_1": 608,
+      "distance_le_32": 1999,
+      "distance_le_8": 1512
+    },
+    "immediate_put_to_any_get": 3961,
+    "immediate_put_to_same_local_get": 569,
+    "immediate_set_to_same_local_get": 608,
+    "local_load_store_operations_for_same_local_put_get": 1138,
+    "top_same_local_pairs": [
+      {
+        "count": 304,
+        "function": "0xf614120",
+        "get_pc": 4,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 3
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 65,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 73,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 2,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 18,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 35,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 49,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 34,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 10,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 41,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 57,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 203,
+        "function": "0xf615704",
+        "get_pc": 26,
+        "local_index": 0,
+        "write_access": "put",
+        "write_pc": 1
+      },
+      {
+        "count": 197,
+        "function": "0xf614120",
+        "get_pc": 15,
+        "local_index": 0,
+        "write_access": "set",
+        "write_pc": 14
+      },
+      {
+        "count": 197,
+        "function": "0xf614120",
+        "get_pc": 11,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 3
+      },
+      {
+        "count": 197,
+        "function": "0xf614120",
+        "get_pc": 21,
+        "local_index": 0,
+        "write_access": "set",
+        "write_pc": 20
+      },
+      {
+        "count": 175,
+        "function": "0xf76e9c8",
+        "get_pc": 149,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 139
+      },
+      {
+        "count": 175,
+        "function": "0xf809fc8",
+        "get_pc": 149,
+        "local_index": 1,
+        "write_access": "put",
+        "write_pc": 139
+      },
+      {
+        "count": 175,
+        "function": "0xf76e9c8",
+        "get_pc": 158,
+        "local_index": 3,
+        "write_access": "put",
+        "write_pc": 155
+      },
+      {
+        "count": 175,
+        "function": "0xfc73e08",
+        "get_pc": 152,
+        "local_index": 0,
+        "write_access": "set",
+        "write_pc": 129
+      },
+      {
+        "count": 175,
+        "function": "0xfb9bd88",
+        "get_pc": 152,
+        "local_index": 0,
+        "write_access": "set",
+        "write_pc": 129
+      }
+    ]
+  },
+  "method": {
+    "boundary_policy": "materialize before boundary opcode and leave depth zero",
+    "cache_shape": "contiguous logical TOS",
+    "join_policy": "minimum observed incoming cache depth",
+    "local_slot_traffic_in_tos_coverage": false,
+    "local_write_distance_bucket_upper_bounds": [
+      1,
+      8,
+      32,
+      4294967295
+    ],
+    "traffic_unit": "one JSValue slot load or store"
+  },
+  "one_slot_failure": {
+    "definition": "two-pop non-boundary execution where cache=1 loads more stack slots than cache=2",
+    "dynamic_executions": 13873,
+    "eligible_two_pop_executions": 20448,
+    "extra_loads_vs_two_slot": 13873,
+    "fraction_of_eligible_two_pop_executions": 0.6784526604068858,
+    "top_sites": [
+      {
+        "count": 1778,
+        "opcode": "get_array_el",
+        "site": "pc=154"
+      },
+      {
+        "count": 1225,
+        "opcode": "strict_eq",
+        "site": "pc=159"
+      },
+      {
+        "count": 1204,
+        "opcode": "strict_neq",
+        "site": "pc=278"
+      },
+      {
+        "count": 644,
+        "opcode": "lt",
+        "site": "pc=137"
+      },
+      {
+        "count": 595,
+        "opcode": "get_array_el",
+        "site": "pc=150"
+      },
+      {
+        "count": 553,
+        "opcode": "get_array_el",
+        "site": "pc=148"
+      },
+      {
+        "count": 504,
+        "opcode": "lt",
+        "site": "pc=118"
+      },
+      {
+        "count": 304,
+        "opcode": "lt",
+        "site": "pc=6"
+      },
+      {
+        "count": 252,
+        "opcode": "strict_eq",
+        "site": "pc=99"
+      },
+      {
+        "count": 252,
+        "opcode": "neq",
+        "site": "pc=131"
+      },
+      {
+        "count": 238,
+        "opcode": "get_array_el",
+        "site": "pc=112"
+      },
+      {
+        "count": 238,
+        "opcode": "get_array_el",
+        "site": "pc=116"
+      },
+      {
+        "count": 224,
+        "opcode": "eq",
+        "site": "pc=2"
+      },
+      {
+        "count": 197,
+        "opcode": "sar",
+        "site": "pc=23"
+      },
+      {
+        "count": 197,
+        "opcode": "get_array_el",
+        "site": "pc=12"
+      },
+      {
+        "count": 197,
+        "opcode": "shl",
+        "site": "pc=18"
+      },
+      {
+        "count": 147,
+        "opcode": "strict_eq",
+        "site": "pc=6"
+      },
+      {
+        "count": 114,
+        "opcode": "add",
+        "site": "pc=44"
+      },
+      {
+        "count": 114,
+        "opcode": "and",
+        "site": "pc=63"
+      },
+      {
+        "count": 114,
+        "opcode": "and",
+        "site": "pc=26"
+      }
+    ]
+  },
+  "schema": 1,
+  "significance": {
+    "absolute_traffic_threshold": 1000000,
+    "fraction_threshold": 0.05,
+    "two_slot_passes": false
+  },
+  "source_trace": "raw trace not retained; sha256=762c7d7a1f47cd08e5ccc0778cad79099d200f297f47dffc513fb395bf87f598",
+  "trace": {
+    "local_history_overflowed": false,
+    "opcodes_executed": 192893,
+    "overflowed": false,
+    "raw_boundary_hits": {
+      "canonical_publication": 41684,
+      "cold_helper": 20319
+    },
+    "total_edges": 192893,
+    "unique_edges": 41304
+  },
+  "validation": {
+    "boundary_stack_effect_mismatches": 59,
+    "edge_opcode_count_conserved": true,
+    "nonboundary_stack_effect_mismatches": 0
+  }
+}
