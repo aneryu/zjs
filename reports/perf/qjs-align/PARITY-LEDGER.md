@@ -79,9 +79,11 @@ geomean 0.9137     总 log deficit 1.3539     追平需相对提升 9.45%
   tag-before-payload 无收益、16B 宽度不是病因、C ABI 边界已被编译器消除。
 - **布局彩票**：7-pad zoo 极差仅 0.380pp，最好 pad +0.268%，且源码一改排名重排——**不是杠杆**。
 
-## 当前唯二存活的广域假设
+## 存活假设（2026-08-13 更新：只剩一个）
 
-1. **跨 benchmark 的 call/frame 固定税**（`call-boundary` 线在跑）
+1. ~~跨 benchmark 的 call/frame 固定税~~ —— **CLOSED**。三个继续条件全不满足：
+   PdfJS backtrace 税 14.074M < 20M；跨 Zoo 暴露 132.237M raw → 校准后仅 **0.1355 pp** < 0.20 pp；
+   return 区域虽 13/15 基准 8/8 同向但仍是未具名区域、且与已封板的弥散调用税重叠。
 2. **2-slot read-forwarding**（`A1/A2 codegen harness`，机器码可行性完全未知）
 
 **目前没有已验证的追平方向。** 若这两条都死亡，需要做一次架构边界决策

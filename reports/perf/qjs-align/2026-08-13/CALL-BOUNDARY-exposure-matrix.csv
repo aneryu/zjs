@@ -1,0 +1,196 @@
+benchmark,call_kind,q_event_count,z_event_count,q_instructions_per_event,z_instructions_per_event,instruction_deficit_per_event,q_cycles_per_event,z_cycles_per_event,cycle_deficit_per_event,q_backend_stall_per_event,z_backend_stall_per_event,backend_stall_deficit_per_event,absolute_cycle_deficit,predicted_zoo_contribution_pp,basis,note
+box2d,whole_workload_per_semantic_call,2261622.0,2173441.0,2391.046713597586,2536.086345108977,145.03963151139124,521.3507115689536,585.5350968809367,64.18438531198319,173.9323290983197,166.99907911003794,-6.933249988281773,93195495.0,0.2480944108538431,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+box2d,sampled_call_entry,2261622.0,2173441.0,,,,33.301935292458246,40.03416149782764,6.732226205369393,,,,11793780.0,0.030372860697797713,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+box2d,sampled_call_return,2261622.0,2173441.0,,,,1.6658210346379723,18.509770451555852,16.84394941691788,,,,36527957.5,0.09500500300606626,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+box2d,native_backtrace_publish_restore,705278.0,704366.0,,,,,5.732364761578525,5.732364761578525,,,,4037682.8376540192,0.010366557460841627,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 704366.0/704366.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+box2d,js_to_js,1556344.0,1469083.0,,,,,,,,,,,,counter-only ABBA8,
+box2d,js_to_native_c_function,705278.0,704358.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+box2d,bytecode_builtin_bytecode_reentry,160329.0,247589.0,,,,,,,,,,,,counter-only ABBA8,
+box2d,bytecode_frame_push_pop,1716674.0,1716673.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 1716674.0/1716674.0; z push/pop 1716673.0/1716673.0
+box2d,entry_or_current_frame_republication,1716674.0,1469083.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+box2d,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+box2d,reload_after_pop,0,1143584.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+box2d,interrupt_poll,8114622.0,8115087.0,,,,,,,,,,,,counter-only ABBA8,
+box2d,native_fence,160329.0,247589.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 247589.0/247589.0
+code-load,whole_workload_per_semantic_call,9606.0,8743.0,122212.58406204455,109207.8275763468,-13004.756485697755,30688.056162814908,28583.10774333753,-2104.9484194773795,5358.755517384968,4177.822429372069,-1180.9330880128991,-45010284.5,0.0,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+code-load,sampled_call_entry,9606.0,8743.0,,,,34.10420570476786,108.66458881390827,74.56038310914042,,,,655210.0,0.00856433864581752,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+code-load,sampled_call_return,9606.0,8743.0,,,,6.82084114095357,44.96465744023791,38.14381629928434,,,,327605.0,0.004279358818529959,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 7/8"
+code-load,native_backtrace_publish_restore,7012.0,5828.0,,,,,5.732364761578525,5.732364761578525,,,,33408.22183047965,0.00043613983215193817,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 5828.0/5828.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+code-load,js_to_js,2594.0,3383.0,,,,,,,,,,,,counter-only ABBA8,
+code-load,js_to_native_c_function,7012.0,5360.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+code-load,bytecode_builtin_bytecode_reentry,912.0,21.0,,,,,,,,,,,,counter-only ABBA8,
+code-load,bytecode_frame_push_pop,3507.0,3512.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 3507.0/3507.0; z push/pop 3512.0/3512.0
+code-load,entry_or_current_frame_republication,3507.0,3383.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+code-load,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+code-load,reload_after_pop,0,2693.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+code-load,interrupt_poll,27023.0,27321.0,,,,,,,,,,,,counter-only ABBA8,
+code-load,native_fence,912.0,21.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 21.0/21.0
+crypto,whole_workload_per_semantic_call,2504468.5,2504534.5,14336.827433844746,11559.543633557454,-2777.2838002872923,2223.919042104143,2138.0884405864645,-85.83060151767859,473.2367867673321,306.37529069773245,-166.86149606959964,-212928036.5,0.0,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+crypto,sampled_call_entry,2504468.5,2504534.5,,,,30.229773502841024,25.454603639917917,-4.775169862923107,,,,-12514511.0,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+crypto,sampled_call_return,2504468.5,2504534.5,,,,2.5115173139530405,31.57626576914792,29.06474845519488,,,,72761070.5,0.04463001757143509,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+crypto,native_backtrace_publish_restore,498180.0,561143.5,,,,,5.732364761578525,5.732364761578525,,,,3216679.225588839,0.0019601929713814513,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 561143.5/561143.5; unit MAD 0.894 cyc; semantic qualification remains blocked
+crypto,js_to_js,2006288.5,2006341.0,,,,,,,,,,,,counter-only ABBA8,
+crypto,js_to_native_c_function,498180.0,498193.5,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+crypto,bytecode_builtin_bytecode_reentry,0.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+crypto,bytecode_frame_push_pop,2006289.5,2006342.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 2006289.5/2006289.5; z push/pop 2006342.0/2006342.0
+crypto,entry_or_current_frame_republication,2006289.5,2006341.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+crypto,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+crypto,reload_after_pop,0,1936110.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+crypto,interrupt_poll,52334334.5,52341655.0,,,,,,,,,,,,counter-only ABBA8,
+crypto,native_fence,0.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+deltablue,whole_workload_per_semantic_call,32375537.0,32375529.0,598.1631866214296,792.1390485851211,193.9758619636915,153.31066641458332,175.6982672468456,22.38760083226228,82.55393272704634,80.37867602101575,-2.175256706030595,725387957.5,0.4450260063732269,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+deltablue,sampled_call_entry,32375537.0,32375529.0,,,,36.208479615334255,18.08451241059258,-18.123967204741675,,,,-592408121.5,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+deltablue,sampled_call_return,32375537.0,32375529.0,,,,1.5137882655042911,18.058203249744583,16.54441498424029,,,,535077246.5,0.32227047907425777,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+deltablue,native_backtrace_publish_restore,1435518.0,1212493.0,,,,,5.732364761578525,5.732364761578525,,,,6950452.14686063,0.0039884803260265035,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 1212493.0/1212493.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+deltablue,js_to_js,30940019.0,31163586.0,,,,,,,,,,,,counter-only ABBA8,
+deltablue,js_to_native_c_function,1435518.0,1211943.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+deltablue,bytecode_builtin_bytecode_reentry,223575.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+deltablue,bytecode_frame_push_pop,31163595.0,31163587.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 31163595.0/31163595.0; z push/pop 31163587.0/31163587.0
+deltablue,entry_or_current_frame_republication,31163595.0,31163586.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+deltablue,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+deltablue,reload_after_pop,0,30511555.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+deltablue,interrupt_poll,54265079.0,54270259.0,,,,,,,,,,,,counter-only ABBA8,
+deltablue,native_fence,223575.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+earley-boyer,whole_workload_per_semantic_call,22957506.0,18253336.0,1119.8825172037416,1625.4792355490524,505.5967183453108,226.67562519639546,350.8642591962368,124.18863399984133,74.94685430987147,102.34763571437024,27.400781404498773,1197694013.5,0.675398001607525,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+earley-boyer,sampled_call_entry,22957506.0,18253336.0,,,,26.635067959908188,23.32300777786592,-3.3120601820422664,,,,-184081249.5,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+earley-boyer,sampled_call_return,22957506.0,18253336.0,,,,1.043141423985689,16.26777549046377,15.22463406647808,,,,273976061.5,0.1426276869627679,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+earley-boyer,native_backtrace_publish_restore,7947915.0,7948281.0,,,,,5.732364761578525,5.732364761578525,,,,45562445.91952412,0.023291012175045943,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 7948281.0/7948281.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+earley-boyer,js_to_js,15009591.0,10305421.0,,,,,,,,,,,,counter-only ABBA8,
+earley-boyer,js_to_native_c_function,7947915.0,7947915.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+earley-boyer,bytecode_builtin_bytecode_reentry,0.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+earley-boyer,bytecode_frame_push_pop,15009592.0,10305422.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 15009592.0/15009592.0; z push/pop 10305422.0/10305422.0
+earley-boyer,entry_or_current_frame_republication,15009592.0,10305421.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+earley-boyer,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+earley-boyer,reload_after_pop,0,8571881.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+earley-boyer,interrupt_poll,64803363.0,64808060.0,,,,,,,,,,,,counter-only ABBA8,
+earley-boyer,native_fence,0.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+gbemu,whole_workload_per_semantic_call,4775911.0,2965543.0,1960.285898124986,3360.884904720653,1400.599006595667,367.00606282236,662.7528938207944,295.7468309984344,114.75223554207773,167.9263374363481,53.174101894270365,212408481.0,0.37310225572257855,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+gbemu,sampled_call_entry,4775911.0,2965543.0,,,,26.059350666291728,13.742529445703536,-12.316821220588192,,,,-82621981.0,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+gbemu,sampled_call_return,4775911.0,2965543.0,,,,0.6790933708773049,15.079222422335471,14.400129051458165,,,,41638595.5,0.06985460168456571,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+gbemu,native_backtrace_publish_restore,2187880.0,552285.0,,,,,5.732364761578525,5.732364761578525,,,,3165899.072348396,0.005259016190784958,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 552285.0/552285.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+gbemu,js_to_js,2588031.0,2588030.0,,,,,,,,,,,,counter-only ABBA8,
+gbemu,js_to_native_c_function,2187880.0,377513.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+gbemu,bytecode_builtin_bytecode_reentry,1.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+gbemu,bytecode_frame_push_pop,2588033.0,2588032.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 2588033.0/2588033.0; z push/pop 2588032.0/2588032.0
+gbemu,entry_or_current_frame_republication,2588033.0,2588030.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+gbemu,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+gbemu,reload_after_pop,0,815096.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+gbemu,interrupt_poll,29138412.0,27319742.0,,,,,,,,,,,,counter-only ABBA8,
+gbemu,native_fence,1.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+mandreel,whole_workload_per_semantic_call,13588367.0,13548569.0,2754.8270281852115,2813.546429921861,58.719401736649615,462.97783773429137,500.011768955083,37.03393122079166,96.295831721354,100.73932092016507,4.443489198811065,489097469.0,0.24445878651354655,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+mandreel,sampled_call_entry,13588367.0,13548569.0,,,,30.290830531733505,1.3468284731767612,-28.944002058556745,,,,-394370899.0,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+mandreel,sampled_call_return,13588367.0,13548569.0,,,,0.9571362401383477,16.693902654959356,15.736766414821007,,,,213238094.5,0.1043352135375728,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+mandreel,native_backtrace_publish_restore,394382.0,354589.0,,,,,5.732364761578525,5.732364761578525,,,,2032633.4884433676,0.0009789575711789049,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 354589.0/354589.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+mandreel,js_to_js,13193985.0,13193984.0,,,,,,,,,,,,counter-only ABBA8,
+mandreel,js_to_native_c_function,394382.0,354585.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+mandreel,bytecode_builtin_bytecode_reentry,0.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+mandreel,bytecode_frame_push_pop,13193986.0,13193985.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 13193986.0/13193986.0; z push/pop 13193985.0/13193985.0
+mandreel,entry_or_current_frame_republication,13193986.0,13193984.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+mandreel,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+mandreel,reload_after_pop,0,847816.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+mandreel,interrupt_poll,76989946.0,77259798.0,,,,,,,,,,,,counter-only ABBA8,
+mandreel,native_fence,0.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+navier-stokes,whole_workload_per_semantic_call,1846.0,1845.0,5062254.356988083,4884271.103794038,-177983.25319404434,881234.0782773565,930102.145799458,48868.06752210157,196577.20747562297,308022.14525745256,111444.93778182959,89787904.0,0.17531602703202268,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+navier-stokes,sampled_call_entry,1846.0,1845.0,,,,35.49349945828819,35.512737127371274,0.019237669083082665,,,,0.0,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 3/8"
+navier-stokes,sampled_call_return,1846.0,1845.0,,,,0.0,35.512737127371274,35.512737127371274,,,,32760.5,6.227890030183198e-05,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 4/8"
+navier-stokes,native_backtrace_publish_restore,118.0,142.0,,,,,5.732364761578525,5.732364761578525,,,,813.9957961441505,1.5474211674074246e-06,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 142.0/142.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+navier-stokes,js_to_js,1728.0,1727.0,,,,,,,,,,,,counter-only ABBA8,
+navier-stokes,js_to_native_c_function,118.0,118.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+navier-stokes,bytecode_builtin_bytecode_reentry,0.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+navier-stokes,bytecode_frame_push_pop,1729.0,1728.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 1729.0/1729.0; z push/pop 1728.0/1728.0
+navier-stokes,entry_or_current_frame_republication,1729.0,1727.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+navier-stokes,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+navier-stokes,reload_after_pop,0,928.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+navier-stokes,interrupt_poll,23889692.0,23892017.0,,,,,,,,,,,,counter-only ABBA8,
+navier-stokes,native_fence,0.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+pdfjs,whole_workload_per_semantic_call,2830238.0,2787103.0,2067.9636166640403,2226.4059220272807,158.4423053632404,380.50211748976585,464.65042716397636,84.14830967421051,83.64206384763402,111.37377413034251,27.73171028270849,221836428.5,0.6129556485998471,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+pdfjs,sampled_call_entry,2830238.0,2787103.0,,,,21.958106880057436,45.08957078371341,23.131463903655977,,,,63850214.5,0.16494122508186088,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+pdfjs,sampled_call_return,2830238.0,2787103.0,,,,0.5787587474975603,6.312069736927556,5.733310989429995,,,,16019884.5,0.040606301080050373,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+pdfjs,native_backtrace_publish_restore,2201049.0,2455127.0,,,,,5.732364761578525,5.732364761578525,,,,14073683.5,0.03564612309510744,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 2455127.0/2455127.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+pdfjs,js_to_js,629189.0,628376.0,,,,,,,,,,,,counter-only ABBA8,
+pdfjs,js_to_native_c_function,2201049.0,2158727.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+pdfjs,bytecode_builtin_bytecode_reentry,5735.0,5310.0,,,,,,,,,,,,counter-only ABBA8,
+pdfjs,bytecode_frame_push_pop,634925.0,633693.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 634925.0/634925.0; z push/pop 633693.0/633693.0
+pdfjs,entry_or_current_frame_republication,634925.0,628376.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+pdfjs,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+pdfjs,reload_after_pop,0,337606.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+pdfjs,interrupt_poll,14596414.0,14551632.0,,,,,,,,,,,,counter-only ABBA8,
+pdfjs,native_fence,5735.0,5310.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 5310.0/5310.0
+raytrace,whole_workload_per_semantic_call,8571759.0,8571758.0,1812.9789336704403,2484.1202734024923,671.1413397320521,376.066310193742,534.7079481245271,158.64163793078507,127.2457202774833,110.15861600385826,-17.087104273625044,1362085245.5,1.1504307388540234,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+raytrace,sampled_call_entry,8571759.0,8571758.0,,,,40.62309200480321,69.3065421352306,28.68345013042739,,,,244786456.0,0.1790515345862246,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+raytrace,sampled_call_return,8571759.0,8571758.0,,,,1.7427914153909367,32.35248037800414,30.609688962613202,,,,262182281.5,0.19215785461693635,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+raytrace,native_backtrace_publish_restore,2935062.0,2935176.0,,,,,5.732364761578525,5.732364761578525,,,,16825499.47143101,0.011997563946829258,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 2935176.0/2935176.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+raytrace,js_to_js,5636697.0,5636696.0,,,,,,,,,,,,counter-only ABBA8,
+raytrace,js_to_native_c_function,2935062.0,2935062.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+raytrace,bytecode_builtin_bytecode_reentry,2530574.0,2530574.0,,,,,,,,,,,,counter-only ABBA8,
+raytrace,bytecode_frame_push_pop,8167272.0,8167271.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 8167272.0/8167272.0; z push/pop 8167271.0/8167271.0
+raytrace,entry_or_current_frame_republication,8167272.0,5636696.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+raytrace,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+raytrace,reload_after_pop,0,4884594.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+raytrace,interrupt_poll,26693442.0,26695420.0,,,,,,,,,,,,counter-only ABBA8,
+raytrace,native_fence,2530574.0,2530574.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 2530574.0/2530574.0
+regexp,whole_workload_per_semantic_call,3558383.0,3551957.0,3638.4676878514765,2819.945335486888,-818.5223523645886,627.6316312774651,575.43887707537,-52.1927542020951,69.57452120808806,103.92840299023891,34.35388178215085,-197104153.0,0.0,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+regexp,sampled_call_entry,3558383.0,3551957.0,,,,16.94929424404287,41.292380087934625,24.343085843891753,,,,85832510.0,0.1399525218543493,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+regexp,sampled_call_return,3558383.0,3551957.0,,,,0.3774693449243659,3.8184153130232152,3.4409459680988492,,,,12350708.5,0.01977214152756519,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+regexp,native_backtrace_publish_restore,3100610.0,3094533.0,,,,,5.732364761578525,5.732364761578525,,,,17738991.92274188,0.028435885719410473,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 3094533.0/3094533.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+regexp,js_to_js,457773.0,457772.0,,,,,,,,,,,,counter-only ABBA8,
+regexp,js_to_native_c_function,3100610.0,3094185.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+regexp,bytecode_builtin_bytecode_reentry,0.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+regexp,bytecode_frame_push_pop,457774.0,457773.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 457774.0/457774.0; z push/pop 457773.0/457773.0
+regexp,entry_or_current_frame_republication,457774.0,457772.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+regexp,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+regexp,reload_after_pop,0,424810.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+regexp,interrupt_poll,7729499.0,7729968.0,,,,,,,,,,,,counter-only ABBA8,
+regexp,native_fence,0.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+richards,whole_workload_per_semantic_call,20777054.0,20776027.0,887.500541992142,1045.178437990093,157.67789599795105,207.4152800729112,229.1428886283215,21.727608555410285,103.48099432190917,99.91083896839372,-3.570155353515446,451851876.0,0.3253235179055862,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+richards,sampled_call_entry,20777054.0,20776027.0,,,,36.19775924440491,17.143419961862776,-19.05433928254213,,,,-395451995.5,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+richards,sampled_call_return,20777054.0,20776027.0,,,,1.0863900387417773,21.703645360106627,20.61725532136485,,,,428900466.0,0.3079930812913239,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+richards,native_backtrace_publish_restore,7198.0,8224.0,,,,,5.732364761578525,5.732364761578525,,,,47142.96779922179,3.230453321820842e-05,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 8224.0/8224.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+richards,js_to_js,20769856.0,20768829.0,,,,,,,,,,,,counter-only ABBA8,
+richards,js_to_native_c_function,7198.0,7198.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+richards,bytecode_builtin_bytecode_reentry,0.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+richards,bytecode_frame_push_pop,20769857.0,20768830.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 20769857.0/20769857.0; z push/pop 20768830.0/20768830.0
+richards,entry_or_current_frame_republication,20769857.0,20768829.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+richards,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+richards,reload_after_pop,0,20768823.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+richards,interrupt_poll,64647354.0,64653813.0,,,,,,,,,,,,counter-only ABBA8,
+richards,native_fence,0.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+splay,whole_workload_per_semantic_call,1300322.0,1234087.0,2848.8815516464383,3216.9901822156785,368.1086305692402,901.3613320392949,1097.990131165793,196.62879912649805,477.60197858684234,597.853037103543,120.25105851670065,182429544.5,0.4717215652482586,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+splay,sampled_call_entry,1300322.0,1234087.0,,,,33.83573568700675,9.477045378486281,-24.358690308520472,,,,-32793260.5,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+splay,sampled_call_return,1300322.0,1234087.0,,,,1.5116486531797508,22.644032795094674,21.132384141914923,,,,25848034.5,0.0628307384517946,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+splay,native_backtrace_publish_restore,23993.0,24169.0,,,,,5.732364761578525,5.732364761578525,,,,138545.52392259138,0.00033356753366563637,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 24169.0/24169.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+splay,js_to_js,1276329.0,1210094.0,,,,,,,,,,,,counter-only ABBA8,
+splay,js_to_native_c_function,23993.0,23993.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+splay,bytecode_builtin_bytecode_reentry,0.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+splay,bytecode_frame_push_pop,1276330.0,1210095.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 1276330.0/1276330.0; z push/pop 1210095.0/1210095.0
+splay,entry_or_current_frame_republication,1276330.0,1210094.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+splay,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+splay,reload_after_pop,0,232488.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+splay,interrupt_poll,4293179.0,4293559.0,,,,,,,,,,,,counter-only ABBA8,
+splay,native_fence,0.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
+typescript,whole_workload_per_semantic_call,13792375.0,13785013.0,1160.7459047118425,1301.4752982822722,140.7293935704297,317.87195087865575,334.4571344618971,16.58518358324136,152.66173440034802,126.16832595660229,-26.493408443745736,227873659.0,0.16535604468221554,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+typescript,sampled_call_entry,13792375.0,13785013.0,,,,33.57669929943175,25.782976374414737,-7.793722925017015,,,,-110108040.5,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+typescript,sampled_call_return,13792375.0,13785013.0,,,,1.2422618657047826,20.72334353257411,19.481081666869326,,,,268799902.5,0.19596276864668646,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+typescript,native_backtrace_publish_restore,3491391.0,3105018.0,,,,,5.732364761578525,5.732364761578525,,,,17799095.76726703,0.012618369539483972,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 3105018.0/3105018.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+typescript,js_to_js,10300984.0,10772834.0,,,,,,,,,,,,counter-only ABBA8,
+typescript,js_to_native_c_function,3491391.0,3012179.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+typescript,bytecode_builtin_bytecode_reentry,475431.0,6.0,,,,,,,,,,,,counter-only ABBA8,
+typescript,bytecode_frame_push_pop,10776416.0,10772841.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 10776416.0/10776416.0; z push/pop 10772841.0/10772841.0
+typescript,entry_or_current_frame_republication,10776416.0,10772834.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+typescript,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+typescript,reload_after_pop,0,9381383.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+typescript,interrupt_poll,43568204.0,43669640.0,,,,,,,,,,,,counter-only ABBA8,
+typescript,native_fence,475431.0,6.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 6.0/6.0
+zlib,whole_workload_per_semantic_call,551475.0,551449.0,162065.76024661137,155590.52367308672,-6475.236573524657,27505.70140804207,30350.405637692696,2844.704229650626,2205.3678172174623,1653.831822163065,-551.5359950543973,1573171901.5,0.3220164745361904,production perf stat ABBA8; whole workload normalized by each engine's calls,normalization only; not an isolated call-boundary unit cost
+zlib,sampled_call_entry,551475.0,551449.0,,,,53.88054490230745,13.069767104482917,-40.81077779782453,,,,-22571984.5,0.0,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 0/8"
+zlib,sampled_call_return,551475.0,551449.0,,,,2.3762092569926105,47.76405796365575,45.38784870666314,,,,24865219.5,0.004850187614223225,"flat cycles samples, period 65521, ABBA8","region upper bound, not a named mechanism; positive pairs 8/8"
+zlib,native_backtrace_publish_restore,107067.0,107058.0,,,,,5.732364761578525,5.732364761578525,,,,613695.5066450738,0.00011962014862317621,"PdfJS causal ablation cost / PdfJS NativeBacktraceScope count, transferred by exposure",z publish/restore 107058.0/107058.0; unit MAD 0.894 cyc; semantic qualification remains blocked
+zlib,js_to_js,444408.0,444407.0,,,,,,,,,,,,counter-only ABBA8,
+zlib,js_to_native_c_function,107067.0,107042.0,,,,,,,,,,,,counter-only ABBA8; comparable observable C_FUNCTION seam,
+zlib,bytecode_builtin_bytecode_reentry,1.0,0.0,,,,,,,,,,,,counter-only ABBA8,
+zlib,bytecode_frame_push_pop,444410.0,444409.0,,,,,,,,,,,,counter-only ABBA8,q push/pop 444410.0/444410.0; z push/pop 444409.0/444409.0
+zlib,entry_or_current_frame_republication,444410.0,444407.0,,,,,,,,,,,,counter-only ABBA8; implementation-specific publication seams,
+zlib,reload_top,0,0.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+zlib,reload_after_pop,0,443974.0,,,,,,,,,,,,counter-only ABBA8; zjs-specific seam,
+zlib,interrupt_poll,146140019.0,146174163.0,,,,,,,,,,,,counter-only ABBA8,
+zlib,native_fence,1.0,0.0,,,,,,,,,,,,counter-only ABBA8; native-to-bytecode boundary,z fence push/restore 0.0/0.0
