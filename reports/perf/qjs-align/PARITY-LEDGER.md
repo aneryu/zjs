@@ -68,6 +68,7 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 | native-backtrace-publication | ~+0.04 pp | CANDIDATE BLOCKED（语义资格） |
 | rope-strict-equality | ~+0.03 pp | CANDIDATE BLOCKED（上游未命名） |
 | tail_call/tail_call_method 发射 | 未定价，DeltaBlue −0.484% 方向有利 | INCONCLUSIVE（新判据下未达精度） |
+| audit-exec 17 条正确性批次（`192a097d`，含 X-10 Get-miss 兜底删除） | 3-pad 中位 **+0.17 pp**（1.0018 / 0.9998 / 1.0019） | **NEUTRAL** — 正确性通道落地；低于 MDE 0.278 pp，**不登记为性能候选**。产物 `2026-08-14/zoo-ab-audit-exec-pack.json` |
 
 ⚠️ 前两项合计 **+0.06 pp**，远低于 0.3 pp 的登记线以上门槛，**不得单独打包**。
 

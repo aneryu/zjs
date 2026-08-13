@@ -1,0 +1,1391 @@
+{
+ "tool": "zjs-zoo-compare",
+ "schemaVersion": 2,
+ "medianMethod": "statistics.median; even sample counts average the middle pair",
+ "scoreDirection": "higher-is-better; ratio = zjs/qjs, so below 1.0 means zjs is slower",
+ "timestamp": "2026-08-13T20:40:55Z",
+ "measurementWallSeconds": 1322.2475791899487,
+ "samplesPerEnginePerBench": 8,
+ "executionMode": "serial-alternating",
+ "samplingOrder": "alternating by sample parity; each engine leads exactly half the samples",
+ "firstPositionBalanced": true,
+ "clusterAssignmentBalanced": false,
+ "cpu": 19,
+ "cpuClusters": null,
+ "parallelLanes": 1,
+ "effectiveAffinity": [
+  19
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/lineage-prefix-after-pad7/bin/zjs",
+   "sha256": "40d0e877aa21a1a01846a809755b0d9d4be8a5df471e0eb2119bd2fd7d067a39",
+   "repo": {
+    "path": "/home/aneryu/zjs",
+    "commit": "192a097dc1f81781b285444f75c77a2d3351e164",
+    "dirty": true
+   }
+  },
+  "qjs": {
+   "path": "/tmp/lineage-prefix-base-pad7/bin/zjs",
+   "sha256": "fa8c6f3a4ec309f73dd947a918511cf43b0eb4989f36c27473132a295380877d",
+   "repo": {
+    "path": "/tmp/lineage-prefix-base-pad7/bin",
+    "commit": null,
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "box2d": {
+   "scores": {
+    "Box2D": {
+     "zjs": {
+      "median": 6814.0,
+      "min": 6784,
+      "max": 6830,
+      "samples": [
+       6824,
+       6811,
+       6817,
+       6830,
+       6811,
+       6817,
+       6784,
+       6784
+      ]
+     },
+     "qjs": {
+      "median": 6761.5,
+      "min": 6758,
+      "max": 6778,
+      "samples": [
+       6758,
+       6758,
+       6765,
+       6771,
+       6758,
+       6778,
+       6771,
+       6758
+      ]
+     },
+     "ratioZjsOverQjs": 1.007764549286401,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.0495600730646402,
+    "qjs": 1.0568389110267162
+   }
+  },
+  "code-load": {
+   "scores": {
+    "CodeLoad": {
+     "zjs": {
+      "median": 35985.0,
+      "min": 35886,
+      "max": 36048,
+      "samples": [
+       36048,
+       35989,
+       36016,
+       35948,
+       35979,
+       35986,
+       35984,
+       35886
+      ]
+     },
+     "qjs": {
+      "median": 36075.0,
+      "min": 35949,
+      "max": 36175,
+      "samples": [
+       35949,
+       36093,
+       36084,
+       36120,
+       35995,
+       36030,
+       36066,
+       36175
+      ]
+     },
+     "ratioZjsOverQjs": 0.9975051975051975,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.034062555525452,
+    "qjs": 2.035384977934882
+   }
+  },
+  "crypto": {
+   "scores": {
+    "Crypto": {
+     "zjs": {
+      "median": 2312.0,
+      "min": 2305,
+      "max": 2316,
+      "samples": [
+       2313,
+       2316,
+       2309,
+       2315,
+       2315,
+       2309,
+       2305,
+       2311
+      ]
+     },
+     "qjs": {
+      "median": 2306.5,
+      "min": 2279,
+      "max": 2321,
+      "samples": [
+       2279,
+       2318,
+       2310,
+       2321,
+       2297,
+       2301,
+       2306,
+       2307
+      ]
+     },
+     "ratioZjsOverQjs": 1.0023845653587686,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 5.092653240310028,
+    "qjs": 5.095558987697586
+   }
+  },
+  "deltablue": {
+   "scores": {
+    "DeltaBlue": {
+     "zjs": {
+      "median": 1245.0,
+      "min": 1235,
+      "max": 1248,
+      "samples": [
+       1235,
+       1248,
+       1245,
+       1246,
+       1245,
+       1248,
+       1243,
+       1242
+      ]
+     },
+     "qjs": {
+      "median": 1244.0,
+      "min": 1241,
+      "max": 1247,
+      "samples": [
+       1246,
+       1245,
+       1241,
+       1247,
+       1246,
+       1243,
+       1242,
+       1243
+      ]
+     },
+     "ratioZjsOverQjs": 1.0008038585209003,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.007167570060119,
+    "qjs": 2.0068570964504033
+   }
+  },
+  "earley-boyer": {
+   "scores": {
+    "EarleyBoyer": {
+     "zjs": {
+      "median": 3587.5,
+      "min": 3569,
+      "max": 3604,
+      "samples": [
+       3604,
+       3602,
+       3570,
+       3578,
+       3582,
+       3598,
+       3569,
+       3593
+      ]
+     },
+     "qjs": {
+      "median": 3562.0,
+      "min": 3514,
+      "max": 3576,
+      "samples": [
+       3564,
+       3576,
+       3576,
+       3555,
+       3575,
+       3555,
+       3514,
+       3560
+      ]
+     },
+     "ratioZjsOverQjs": 1.0071588994946659,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 5.616376678459346,
+    "qjs": 6.1440365025773644
+   }
+  },
+  "gbemu": {
+   "scores": {
+    "Gameboy": {
+     "zjs": {
+      "median": 12453.0,
+      "min": 12389,
+      "max": 12506,
+      "samples": [
+       12494,
+       12424,
+       12389,
+       12459,
+       12459,
+       12506,
+       12447,
+       12435
+      ]
+     },
+     "qjs": {
+      "median": 12494.0,
+      "min": 12483,
+      "max": 12530,
+      "samples": [
+       12530,
+       12494,
+       12494,
+       12506,
+       12483,
+       12506,
+       12483,
+       12494
+      ]
+     },
+     "ratioZjsOverQjs": 0.996718424843925,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.0952033086214215,
+    "qjs": 1.0913694265764207
+   }
+  },
+  "mandreel": {
+   "scores": {
+    "Mandreel": {
+     "zjs": {
+      "median": 1866.0,
+      "min": 1855,
+      "max": 1872,
+      "samples": [
+       1865,
+       1872,
+       1855,
+       1862,
+       1857,
+       1867,
+       1867,
+       1872
+      ]
+     },
+     "qjs": {
+      "median": 1878.0,
+      "min": 1870,
+      "max": 1885,
+      "samples": [
+       1871,
+       1872,
+       1882,
+       1885,
+       1874,
+       1870,
+       1882,
+       1883
+      ]
+     },
+     "ratioZjsOverQjs": 0.9936102236421726,
+     "isLatency": false
+    },
+    "MandreelLatency": {
+     "zjs": {
+      "median": 13584.0,
+      "min": 13510,
+      "max": 13621,
+      "samples": [
+       13621,
+       13584,
+       13510,
+       13621,
+       13584,
+       13547,
+       13584,
+       13621
+      ]
+     },
+     "qjs": {
+      "median": 13639.5,
+      "min": 13621,
+      "max": 13696,
+      "samples": [
+       13621,
+       13621,
+       13696,
+       13658,
+       13621,
+       13696,
+       13621,
+       13658
+      ]
+     },
+     "ratioZjsOverQjs": 0.9959309358847465,
+     "isLatency": true
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 4.452594724018127,
+    "qjs": 4.4290499642957
+   }
+  },
+  "navier-stokes": {
+   "scores": {
+    "NavierStokes": {
+     "zjs": {
+      "median": 4548.0,
+      "min": 4524,
+      "max": 4555,
+      "samples": [
+       4541,
+       4524,
+       4546,
+       4555,
+       4550,
+       4550,
+       4546,
+       4550
+      ]
+     },
+     "qjs": {
+      "median": 4550.5,
+      "min": 4532,
+      "max": 4568,
+      "samples": [
+       4564,
+       4532,
+       4541,
+       4568,
+       4555,
+       4546,
+       4537,
+       4564
+      ]
+     },
+     "ratioZjsOverQjs": 0.9994506098230964,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0375901670195162,
+    "qjs": 2.0357551912311465
+   }
+  },
+  "pdfjs": {
+   "scores": {
+    "PdfJS": {
+     "zjs": {
+      "median": 7784.5,
+      "min": 7620,
+      "max": 7803,
+      "samples": [
+       7781,
+       7796,
+       7620,
+       7773,
+       7788,
+       7781,
+       7788,
+       7803
+      ]
+     },
+     "qjs": {
+      "median": 7788.0,
+      "min": 7773,
+      "max": 7803,
+      "samples": [
+       7773,
+       7796,
+       7773,
+       7803,
+       7788,
+       7788,
+       7803,
+       7781
+      ]
+     },
+     "ratioZjsOverQjs": 0.9995505906522856,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 1.1501269601285458,
+    "qjs": 1.148627539165318
+   }
+  },
+  "raytrace": {
+   "scores": {
+    "RayTrace": {
+     "zjs": {
+      "median": 2648.0,
+      "min": 2554,
+      "max": 2653,
+      "samples": [
+       2651,
+       2554,
+       2651,
+       2648,
+       2635,
+       2648,
+       2653,
+       2619
+      ]
+     },
+     "qjs": {
+      "median": 2644.0,
+      "min": 2617,
+      "max": 2653,
+      "samples": [
+       2643,
+       2645,
+       2617,
+       2645,
+       2651,
+       2640,
+       2653,
+       2632
+      ]
+     },
+     "ratioZjsOverQjs": 1.0015128593040847,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.0165630804840475,
+    "qjs": 2.016455126926303
+   }
+  },
+  "regexp": {
+   "scores": {
+    "RegExp": {
+     "zjs": {
+      "median": 896.0,
+      "min": 882,
+      "max": 903,
+      "samples": [
+       903,
+       896,
+       882,
+       893,
+       898,
+       896,
+       899,
+       894
+      ]
+     },
+     "qjs": {
+      "median": 890.0,
+      "min": 873,
+      "max": 899,
+      "samples": [
+       896,
+       891,
+       887,
+       873,
+       893,
+       887,
+       899,
+       889
+      ]
+     },
+     "ratioZjsOverQjs": 1.006741573033708,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 3.1632697561290115,
+    "qjs": 3.1892850985750556
+   }
+  },
+  "richards": {
+   "scores": {
+    "Richards": {
+     "zjs": {
+      "median": 1479.5,
+      "min": 1476,
+      "max": 1481,
+      "samples": [
+       1481,
+       1476,
+       1479,
+       1481,
+       1480,
+       1478,
+       1480,
+       1478
+      ]
+     },
+     "qjs": {
+      "median": 1481.0,
+      "min": 1469,
+      "max": 1485,
+      "samples": [
+       1478,
+       1469,
+       1485,
+       1481,
+       1481,
+       1483,
+       1483,
+       1478
+      ]
+     },
+     "ratioZjsOverQjs": 0.9989871708305199,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.005100962938741,
+    "qjs": 2.004723049933091
+   }
+  },
+  "splay": {
+   "scores": {
+    "Splay": {
+     "zjs": {
+      "median": 6857.5,
+      "min": 6837,
+      "max": 6878,
+      "samples": [
+       6845,
+       6845,
+       6870,
+       6862,
+       6878,
+       6837,
+       6862,
+       6853
+      ]
+     },
+     "qjs": {
+      "median": 6845.0,
+      "min": 6829,
+      "max": 6862,
+      "samples": [
+       6845,
+       6845,
+       6845,
+       6837,
+       6829,
+       6853,
+       6862,
+       6837
+      ]
+     },
+     "ratioZjsOverQjs": 1.0018261504747992,
+     "isLatency": false
+    },
+    "SplayLatency": {
+     "zjs": {
+      "median": 17266.0,
+      "min": 17224,
+      "max": 17315,
+      "samples": [
+       17224,
+       17262,
+       17299,
+       17267,
+       17315,
+       17244,
+       17273,
+       17265
+      ]
+     },
+     "qjs": {
+      "median": 17277.5,
+      "min": 17223,
+      "max": 17312,
+      "samples": [
+       17223,
+       17263,
+       17299,
+       17283,
+       17280,
+       17240,
+       17312,
+       17275
+      ]
+     },
+     "ratioZjsOverQjs": 0.9993343944436406,
+     "isLatency": true
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 2.3587593296542764,
+    "qjs": 2.358812970109284
+   }
+  },
+  "typescript": {
+   "scores": {
+    "Typescript": {
+     "zjs": {
+      "median": 20049.5,
+      "min": 20001,
+      "max": 20108,
+      "samples": [
+       20001,
+       20067,
+       20076,
+       20045,
+       20108,
+       20054,
+       20032,
+       20039
+      ]
+     },
+     "qjs": {
+      "median": 19806.5,
+      "min": 19768,
+      "max": 19855,
+      "samples": [
+       19808,
+       19855,
+       19805,
+       19845,
+       19768,
+       19821,
+       19802,
+       19778
+      ]
+     },
+     "ratioZjsOverQjs": 1.0122686996693004,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 6.423522281227633,
+    "qjs": 6.500313235446811
+   }
+  },
+  "zlib": {
+   "scores": {
+    "zlib": {
+     "zjs": {
+      "median": 3657.5,
+      "min": 3635,
+      "max": 3700,
+      "samples": [
+       3694,
+       3700,
+       3639,
+       3693,
+       3662,
+       3635,
+       3653,
+       3653
+      ]
+     },
+     "qjs": {
+      "median": 3649.5,
+      "min": 3627,
+      "max": 3676,
+      "samples": [
+       3652,
+       3637,
+       3659,
+       3647,
+       3676,
+       3632,
+       3653,
+       3627
+      ]
+     },
+     "ratioZjsOverQjs": 1.0021920811070009,
+     "isLatency": false
+    }
+   },
+   "wallSecondsMedian": {
+    "zjs": 41.804569848580286,
+    "qjs": 41.896935359574854
+   }
+  }
+ },
+ "summary": {
+  "throughputGeomean": 1.0018874148056507,
+  "throughputRatios": {
+   "box2d": 1.007764549286401,
+   "code-load": 0.9975051975051975,
+   "crypto": 1.0023845653587686,
+   "deltablue": 1.0008038585209003,
+   "earley-boyer": 1.0071588994946659,
+   "gbemu": 0.996718424843925,
+   "mandreel": 0.9936102236421726,
+   "navier-stokes": 0.9994506098230964,
+   "pdfjs": 0.9995505906522856,
+   "raytrace": 1.0015128593040847,
+   "regexp": 1.006741573033708,
+   "richards": 0.9989871708305199,
+   "splay": 1.0018261504747992,
+   "typescript": 1.0122686996693004,
+   "zlib": 1.0021920811070009
+  },
+  "latencyRatios": {
+   "mandreel:MandreelLatency": 0.9959309358847465,
+   "splay:SplayLatency": 0.9993343944436406
+  },
+  "zjsFaster": [
+   "box2d",
+   "crypto",
+   "deltablue",
+   "earley-boyer",
+   "raytrace",
+   "regexp",
+   "splay",
+   "typescript",
+   "zlib"
+  ],
+  "zjsSlower": [
+   "code-load",
+   "gbemu",
+   "mandreel",
+   "navier-stokes",
+   "pdfjs",
+   "richards"
+  ]
+ },
+ "orderLog": [
+  {
+   "bench": "box2d",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

@@ -1,7 +1,10 @@
 # AUDIT-EXEC 计划 — 基于已核查差异台账的修复批次（交 grok 执行）
 
 日期：2026-08-14。制定者：driver。执行者：**grok**（`~/.local/bin/grok`，headless 单轮模式已冒烟验证）。
-状态：**计划已定稿，未派发**。派发命令见 §7，用户放行后一键启动。
+状态：**已合入 main 并完成 §6 验收**。
+merge `65a60344`（G1→G4→G3→G2）+ follow-up `192a097d`（tagged-template 补 `Array.prototype`，X-10 删除兜底后的依赖方）。
+canonical `zig build test262-gate`：0/49775 errors，passed 44581（与基线持平）。
+zoo A/B（pads 0/3/7 × 8 samples，CPU 19，ABBA）：after/before geomean 1.0018 / 0.9998 / 1.0019，中位 **+0.18%**（相对 0.9278 基线约 **+0.17 pp**）< MDE 0.278 pp → **性能中性，正确性通道落地**。
 
 ## 0. 输入与目标
 
@@ -160,8 +163,49 @@ grok --prompt-file "$d/prompt.md" --cwd "$wt" \
   （DeltaBlue 7.06M 次缺失，与 codex 的 dispatch 线协调后排期）。
 - **等用户裁决**：X-23/X-24（`BigInt.asUintN`——zjs 忠实对齐 qjs 则违规范、修对规范则偏离 qjs，二选一）。
 
-## 9. 落地表（执行后由 driver 填写）
+## 9. 落地表（2026-08-14 grok 执行）
+
+基线 = `6d8295ce`（计划写的 `10221e76` 已过期）。Claude Code 咨询了 X-02 / X-04 / X-05 三处归因（`/tmp/grok-1000/audit-exec/claude-x0{2,4,5}.md`）。
+合入 main：`65a60344` + `192a097d`。test262-gate 与 zoo A/B 见本节末。
 
 | 条目 | lane | 状态 | 备注 |
 |---|---|---|---|
-| （待执行） | | | |
+| X-01 | G1 | **FIXED** IDENTICAL | `SyntaxError: stack overflow`（不再 SIGSEGV）。qjs:`libregexp.c:1390/2410`、`quickjs.c:48000`。v-mode `[`×1000 zjs 现亦干净 SyntaxError（qjs 仍 accept；合同要求不崩）。`/home/aneryu/worktree-grok-g1-regexp` |
+| X-13 | G1 | **FIXED** IDENTICAL | 字面量 astral 群名重组。qjs:`libregexp.c:1648-1656`。U+10400，非 emoji |
+| X-10 | G2 | **FIXED** IDENTICAL | 删除 20 条 `[[Get]]` miss 类名兜底。qjs:`quickjs.c:8355-8363`。依赖方改为走真实 `Array.prototype`（rest / iterator pair / Object.keys / **tagged-template cooked+raw**，`192a097d`） |
+| X-07 | G2 | **FIXED** IDENTICAL | 整数键冷路径命中即 break。qjs:`9839-9853`。命名键对照仍 IDENTICAL |
+| X-08 | G2 | **FIXED** IDENTICAL | VARREF 重定义同步 `is_const`。qjs:`10508-10520`。gp/ev2 对照 IDENTICAL |
+| X-09 | G2 | **FIXED** IDENTICAL | VARREF→GETSET 摘 cell。qjs:`10410-10426` |
+| X-02 | G2 | **FIXED** IDENTICAL | `qjsReflectSetCall`：receiver≠target 走 OrdinarySet。qjs:`9701-9702` skip `set_array_length`。异 receiver 不做 ToUint32（`length=-1` 两侧 `recv.length=-1`） |
+| X-04 | G3 | **FIXED** IDENTICAL | 归因订正：不是私有名解析，是 direct eval 的 `this` 编译。`emitThisValue` 对 `is_direct_eval` 发 `scope_get_var this`（qjs:`26934-26939` / `37239`）。6 形态矩阵 IDENTICAL |
+| X-05 | G3 | **FIXED** IDENTICAL | 已收档为 `isLiveCode` 入边检查（qjs `js_is_live_code`）。并删掉 `v2SwitchBreakRefCount` 守卫：`if(false) break; print("y"); case 1: print("z")` 现为 `y\\nz` |
+| X-26 | G3 | **FIXED** IDENTICAL | `async yield => 1` 接受。`async await => 1` **保持拒绝**（spec 正确，对 qjs DIFFER 是合同要求） |
+| X-27 | G3 | **FIXED** IDENTICAL | `({get})`/`({set})` 简写。qjs:`24643-24646` |
+| X-28 | G3 | **FIXED** IDENTICAL | 去掉 128 字节数字缓冲上限。qjs:`js_atof` 12876+ |
+| X-29 | G3 | **FIXED** 接受集合 IDENTICAL | `for (var yield of/in)` 现拒绝。消息仍 `UnexpectedToken` vs qjs `variable name expected`（与 `var yield` 对照同族，归 X-40） |
+| X-03 | G4 | **FIXED** IDENTICAL | `add_loc` 仅当 RHS 已是 string 才 in-place。qjs:`19766-19767`。3 组负对照仍 IDENTICAL |
+| X-38 | G4 | **FIXED** IDENTICAL | latin1 ToNumber 按码点判空白。qjs:`skip_spaces` 11230。7 组序列 × 前后缀 |
+| X-37 | G4 | **FIXED** IDENTICAL | 仅改 `class_init_ops.zig` / `construct.zig` 两处走 `toPrimitiveForNumber`。qjs:`44822 JS_ToNumeric` |
+| X-12 | G4 | **FIXED** IDENTICAL | radix 先饱和再范围检查。Debug 不再 panic。qjs:`JS_ToInt32Sat` |
+
+### worktree / 总结文件
+
+| lane | worktree | branch | 总结 |
+|---|---|---|---|
+| G1 | `/home/aneryu/worktree-grok-g1-regexp` | `grok/audit-fix-g1-regexp` | `/tmp/grok-1000/audit-exec/g1-summary.md` |
+| G2 | `/home/aneryu/worktree-grok-g2-object` | `grok/audit-fix-g2-object` | `/tmp/grok-1000/audit-exec/g2-summary.md` |
+| G3 | `/home/aneryu/worktree-grok-g3-parser` | `grok/audit-fix-g3-parser` | `/tmp/grok-1000/audit-exec/g3-summary.md` |
+| G4 | `/home/aneryu/worktree-grok-g4-value` | `grok/audit-fix-g4-value` | `/tmp/grok-1000/audit-exec/g4-summary.md` |
+| ALL | `/home/aneryu/worktree-grok-audit-all` | `grok/audit-exec-20260814` | G1→G4→G3→G2 已合入 main `65a60344`；17/17 difftest IDENTICAL；test-parser 493 / test-exec 435 / test-core 329 |
+
+### §6 验收
+
+| 项 | 结果 |
+|---|---|
+| 合并顺序 | G1 `ab2cd515` → G4 `32100b5d` → G3 `cb4d3d16` → G2 `a56baaaf` → 集成 `65a60344` → X-10 依赖方 `192a097d` |
+| `zig build test262-gate --seed 0` | **0/49775 errors，passed 44581**（与基线相同）。合入后第一次 gate 暴露 5 个 `harness/deepEqual-*.js` TypeError：tagged-template 数组无 `Array.prototype`，`strings.map` 不是函数。`192a097d` 后复跑归零。 |
+| zoo A/B | 产物 `zoo-ab-pad{0,3,7}.json` + `zoo-ab-audit-exec-pack.json`。`--zjs`=after / `--qjs`=before，CPU 19，8 samples，ABBA。 |
+| geomean after/before | pad0 **1.0018** / pad3 **0.9998** / pad7 **1.0019**；中位 **1.0018**（+0.18%，约 +0.17 pp） |
+| 三大反超资产（中位） | crypto **1.009** / code-load **0.998** / regexp **1.007**。无超噪声回退（regexp pad3 0.993 被 pad0/pad7 的 1.007 对冲，符号翻转 = 布局噪声）。 |
+| 其它同号移动 | typescript 三 pad 均约 +1.2%；mandreel 三 pad 均约 −1.2%。geomean 仍在 MDE 内，不触发回滚。 |
+| 判读 | **性能中性，正确性通道落地**。X-10 未给出可测正效应（+0.17 pp < 0.278 pp），不进 PARITY-LEDGER 机制候选。 |

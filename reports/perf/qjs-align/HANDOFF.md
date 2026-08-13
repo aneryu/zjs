@@ -240,3 +240,22 @@ commit `113b6614`。产物 `docs/qjs-align/IMPL-DIVERGENCE-2026-08-13/`：
 `README §3.5 G9` bind 的 `[[Prototype]]`；`08·#48/#50` 与 `13·K8`（node 佐证）；
 `13·F1 BigInt.asUintN` 两侧各错各的，**忠实对齐与合规范互斥，需裁决**。
 
+### 2026-08-14 grok 批次已落地（AUDIT-EXEC-PLAN-GROK）
+
+17 条 CONFIRMED-EXEC 已合入 main：`65a60344` + follow-up `192a097d`。
+计划与落地表：`2026-08-14/AUDIT-EXEC-PLAN-GROK.md`。
+
+| 项 | 结果 |
+|---|---|
+| 范围 | X-01/13 regexp；X-10/07/08/09/02 object；X-04/05/26/27/28/29 parser；X-03/38/37/12 value |
+| X-04 归因 | **不是私有名**。direct eval 的 `this` 必须发 `scope_get_var this`（qjs `26934` / `37239`）。 |
+| X-05 归因 | `v2CaseTailCanFallthrough` 改为 `isLiveCode` 入边检查；删掉 `v2SwitchBreakRefCount` 守卫。 |
+| X-10 依赖方 | 删 20 条 Get-miss 类名兜底后，rest / iterator pair / Object.keys / **tagged-template cooked+raw** 改为真实 `Array.prototype`。 |
+| test262-gate | **0/49775 errors，passed 44581**（与 `6d8295ce` 基线持平）。 |
+| zoo A/B | pads 0/3/7 × 8 samples，CPU 19，after/before。geomean 1.0018 / 0.9998 / 1.0019，中位 **+0.18%**（约 +0.17 pp）< MDE 0.278 pp。 |
+| 三大反超资产 | crypto 1.009 / code-load 0.998 / regexp 1.007（中位）。无超噪声回退。 |
+| 判读 | **性能中性，正确性通道落地**。X-10 未给出可测正效应，不登记为性能候选。 |
+
+抽查时标「不复现」的 `01·V-26` / `04b·A-02`，用台账原文脚本在本批复现并修成 IDENTICAL（X-38 / X-03）。
+X-29 接受集合已对齐；消息仍 `UnexpectedToken`（归 X-40）。`async await` 保持拒绝。
+
