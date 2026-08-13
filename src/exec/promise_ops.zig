@@ -2614,10 +2614,9 @@ pub fn qjsPromiseResolveIdentity(
 }
 
 /// QuickJS's `JS_GetProperty(..., JS_ATOM_constructor)` reaches the Promise's
-/// ordinary shape/prototype chain directly. zjs's general resolver must also
-/// support legacy class-name fallback for prototype-less internal promises,
-/// so keep that authority for missing/accessor/exotic shapes while letting the
-/// normal Promise.prototype data hit take the same direct walk as qjs.
+/// ordinary shape/prototype chain directly. Keep that authority for
+/// missing/accessor/exotic shapes while letting the normal Promise.prototype
+/// data hit take the same direct walk as qjs.
 fn promiseConstructorDataValueForFastPath(promise: *core.Object) ?core.JSValue {
     var cursor = promise;
     while (true) {

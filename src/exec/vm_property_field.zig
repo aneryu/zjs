@@ -434,18 +434,13 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
     // ask for the tri-state). qjs ends its inline window at the chain root with
     // `p = p->shape->proto; if (!p) { val = JS_UNDEFINED; break; }`
     // (quickjs.c:19141-19143), because there a shape miss on a non-exotic link
-    // is the whole answer. zjs cannot say that for every class:
-    // `object_ops.getValuePropertyObjectMiss` still resolves built-in prototype
-    // members by CLASS NAME off the global (Array/Function/String/Date/...
-    // prototypes) after the real chain missed, and some objects (rest-parameter
-    // arrays, regexp-split results) legitimately have a null self.prototype
-    // while still resolving members through that fallback. So `undefined` may
-    // only be synthesized when EVERY link walked was one of the two classes with
-    // no such fallback and no exotic miss behaviour — plain `object` and the
-    // global object. That is exactly the per-cursor admission set of the
-    // out-of-line `property_ic.ordinaryDataPropertyLookup`, whose `.undefined`
-    // arm is what the cold tail reaches today: this leg is a pure fusion of that
-    // walk into the handler, not a new semantic.
+    // is the whole answer. After deleting the zjs-only class-name miss
+    // fallback, a complete ordinary miss is also JS_UNDEFINED
+    // (quickjs.c:8355-8363). `undefined` is still synthesized only when EVERY
+    // link walked was one of the two classes with no exotic miss behaviour —
+    // plain `object` and the global object — matching the per-cursor admission
+    // set of the out-of-line `property_ic.ordinaryDataPropertyLookup`. This
+    // leg is a fusion of that walk into the handler, not a new semantic.
     //
     // Structured as a separate loop rather than a running "still ordinary" latch
     // so the own-hit path stays byte-identical to the two-state walk: a latch is
@@ -494,7 +489,7 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
     // Phase 2 — the pre-existing two-state walk, verbatim. Reached directly by
     // the two-state callers and by phase 1 once a non-authoritative link has
     // been crossed. Running off the end here returns null (= "defer to the
-    // resolver"), preserving the by-class-name fallback described above.
+    // resolver"), which now returns JS_UNDEFINED after the real proto walk.
     while (true) {
         if (probe_mapped_arguments and object.class_id == core.class.ids.mapped_arguments) return null;
         var slow_property = false;
