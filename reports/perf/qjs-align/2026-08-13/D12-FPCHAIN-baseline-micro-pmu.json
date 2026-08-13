@@ -1,0 +1,1504 @@
+{
+ "task": "D12-FPCHAIN",
+ "cpu": 5,
+ "parallelism": 1,
+ "lock": null,
+ "pmu": "armv8_pmuv3_1",
+ "samplesPerEnginePerCase": 8,
+ "samplingOrder": "ABBA by first position over each block of four samples",
+ "binaries": {
+  "qjs": {
+   "path": "/home/aneryu/quickjs/qjs",
+   "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+   "configSignature": null
+  },
+  "zjs_tagged": {
+   "path": "/tmp/d12-fpchain-base-tagged-prefix/bin/zjs",
+   "sha256": "3b89951df9c2a390ca6313f6f574c7adac5007737334f40e016814c2b34db403",
+   "configSignature": "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
+  }
+ },
+ "cases": {
+  "loop.js": {
+   "path": "/tmp/fp/loop.js",
+   "sha256": "060fcf3556c7a690efcf884467ee4e3bb3f09f926d69be429eb2f60548354a98",
+   "stdout": "1",
+   "metrics": {
+    "instructions": {
+     "qjs": {
+      "samples": [
+       2043444000,
+       2043576109,
+       2043586886,
+       2043547727,
+       2043598910,
+       2043634170,
+       2043558293,
+       2043582789
+      ],
+      "median": 2043579449.0
+     },
+     "zjs_tagged": {
+      "samples": [
+       1644027394,
+       1643844650,
+       1643726127,
+       1643751948,
+       1643810176,
+       1643933888,
+       1643740060,
+       1643859639
+      ],
+      "median": 1643827413.0
+     },
+     "ratiozjs_taggedOverqjs": 0.8043863495517076
+    },
+    "cycles": {
+     "qjs": {
+      "samples": [
+       372168963,
+       373275742,
+       372682828,
+       372820599,
+       373301129,
+       373409129,
+       375349552,
+       373160569
+      ],
+      "median": 373218155.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       294745016,
+       287133141,
+       288169759,
+       287204214,
+       286972742,
+       287037678,
+       287340705,
+       288330005
+      ],
+      "median": 287272459.5
+     },
+     "ratiozjs_taggedOverqjs": 0.7697172692875601
+    },
+    "stall_backend": {
+     "qjs": {
+      "samples": [
+       154747664,
+       156119861,
+       155175741,
+       155831847,
+       156282255,
+       156414035,
+       158752624,
+       155867782
+      ],
+      "median": 155993821.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       120152018,
+       112596472,
+       113879086,
+       112384337,
+       112290087,
+       112350504,
+       112711624,
+       114067210
+      ],
+      "median": 112654048.0
+     },
+     "ratiozjs_taggedOverqjs": 0.7221699354291413
+    },
+    "stall_backend_mem": {
+     "qjs": {
+      "samples": [
+       599047,
+       475452,
+       544054,
+       603411,
+       564182,
+       795455,
+       572729,
+       595886
+      ],
+      "median": 584307.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       634267,
+       602445,
+       548571,
+       559300,
+       573639,
+       594963,
+       565452,
+       548486
+      ],
+      "median": 569545.5
+     },
+     "ratiozjs_taggedOverqjs": 0.9747359053238235
+    },
+    "stall_frontend": {
+     "qjs": {
+      "samples": [
+       812722,
+       1026298,
+       778870,
+       779578,
+       818924,
+       855434,
+       860146,
+       840577
+      ],
+      "median": 829750.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       1163379,
+       1218625,
+       1029010,
+       1144269,
+       1194349,
+       1026501,
+       1257869,
+       977912
+      ],
+      "median": 1153824.0
+     },
+     "ratiozjs_taggedOverqjs": 1.3905674055032204
+    },
+    "branch-instructions": {
+     "qjs": {
+      "samples": [
+       300608314,
+       300631631,
+       300630631,
+       300625463,
+       300633640,
+       300639100,
+       300626356,
+       300631823
+      ],
+      "median": 300631131.0
+     },
+     "zjs_tagged": {
+      "samples": [
+       360687298,
+       360644588,
+       360624516,
+       360627556,
+       360637145,
+       360656707,
+       360628191,
+       360643540
+      ],
+      "median": 360640342.5
+     },
+     "ratiozjs_taggedOverqjs": 1.1996107698507112
+    },
+    "branch-misses": {
+     "qjs": {
+      "samples": [
+       25510,
+       25493,
+       24984,
+       25309,
+       25160,
+       25779,
+       25116,
+       24891
+      ],
+      "median": 25234.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       23009,
+       21153,
+       22071,
+       24922,
+       33479,
+       25438,
+       21486,
+       21803
+      ],
+      "median": 22540.0
+     },
+     "ratiozjs_taggedOverqjs": 0.893221581564921
+    },
+    "wallSeconds": {
+     "qjs": {
+      "samples": [
+       0.12354529090225697,
+       0.10404376219958067,
+       0.10399832110852003,
+       0.1036958391778171,
+       0.10373019194230437,
+       0.10514052212238312,
+       0.10440173326060176,
+       0.10381419211626053
+      ],
+      "median": 0.10402104165405035
+     },
+     "zjs_tagged": {
+      "samples": [
+       0.08423986285924911,
+       0.08231930295005441,
+       0.08260623319074512,
+       0.08207646897062659,
+       0.08198813162744045,
+       0.08217005431652069,
+       0.08355675311759114,
+       0.0819989638403058
+      ],
+      "median": 0.08224467863328755
+     },
+     "ratiozjs_taggedOverqjs": 0.7906542496162854
+    }
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 2043444000,
+       "cycles": 372168963,
+       "stall_backend": 154747664,
+       "stall_backend_mem": 599047,
+       "stall_frontend": 812722,
+       "branch-instructions": 300608314,
+       "branch-misses": 25510
+      },
+      "stdout": "1",
+      "wallSeconds": 0.12354529090225697
+     },
+     {
+      "counters": {
+       "instructions": 2043576109,
+       "cycles": 373275742,
+       "stall_backend": 156119861,
+       "stall_backend_mem": 475452,
+       "stall_frontend": 1026298,
+       "branch-instructions": 300631631,
+       "branch-misses": 25493
+      },
+      "stdout": "1",
+      "wallSeconds": 0.10404376219958067
+     },
+     {
+      "counters": {
+       "instructions": 2043586886,
+       "cycles": 372682828,
+       "stall_backend": 155175741,
+       "stall_backend_mem": 544054,
+       "stall_frontend": 778870,
+       "branch-instructions": 300630631,
+       "branch-misses": 24984
+      },
+      "stdout": "1",
+      "wallSeconds": 0.10399832110852003
+     },
+     {
+      "counters": {
+       "instructions": 2043547727,
+       "cycles": 372820599,
+       "stall_backend": 155831847,
+       "stall_backend_mem": 603411,
+       "stall_frontend": 779578,
+       "branch-instructions": 300625463,
+       "branch-misses": 25309
+      },
+      "stdout": "1",
+      "wallSeconds": 0.1036958391778171
+     },
+     {
+      "counters": {
+       "instructions": 2043598910,
+       "cycles": 373301129,
+       "stall_backend": 156282255,
+       "stall_backend_mem": 564182,
+       "stall_frontend": 818924,
+       "branch-instructions": 300633640,
+       "branch-misses": 25160
+      },
+      "stdout": "1",
+      "wallSeconds": 0.10373019194230437
+     },
+     {
+      "counters": {
+       "instructions": 2043634170,
+       "cycles": 373409129,
+       "stall_backend": 156414035,
+       "stall_backend_mem": 795455,
+       "stall_frontend": 855434,
+       "branch-instructions": 300639100,
+       "branch-misses": 25779
+      },
+      "stdout": "1",
+      "wallSeconds": 0.10514052212238312
+     },
+     {
+      "counters": {
+       "instructions": 2043558293,
+       "cycles": 375349552,
+       "stall_backend": 158752624,
+       "stall_backend_mem": 572729,
+       "stall_frontend": 860146,
+       "branch-instructions": 300626356,
+       "branch-misses": 25116
+      },
+      "stdout": "1",
+      "wallSeconds": 0.10440173326060176
+     },
+     {
+      "counters": {
+       "instructions": 2043582789,
+       "cycles": 373160569,
+       "stall_backend": 155867782,
+       "stall_backend_mem": 595886,
+       "stall_frontend": 840577,
+       "branch-instructions": 300631823,
+       "branch-misses": 24891
+      },
+      "stdout": "1",
+      "wallSeconds": 0.10381419211626053
+     }
+    ],
+    "zjs_tagged": [
+     {
+      "counters": {
+       "instructions": 1644027394,
+       "cycles": 294745016,
+       "stall_backend": 120152018,
+       "stall_backend_mem": 634267,
+       "stall_frontend": 1163379,
+       "branch-instructions": 360687298,
+       "branch-misses": 23009
+      },
+      "stdout": "1",
+      "wallSeconds": 0.08423986285924911
+     },
+     {
+      "counters": {
+       "instructions": 1643844650,
+       "cycles": 287133141,
+       "stall_backend": 112596472,
+       "stall_backend_mem": 602445,
+       "stall_frontend": 1218625,
+       "branch-instructions": 360644588,
+       "branch-misses": 21153
+      },
+      "stdout": "1",
+      "wallSeconds": 0.08231930295005441
+     },
+     {
+      "counters": {
+       "instructions": 1643726127,
+       "cycles": 288169759,
+       "stall_backend": 113879086,
+       "stall_backend_mem": 548571,
+       "stall_frontend": 1029010,
+       "branch-instructions": 360624516,
+       "branch-misses": 22071
+      },
+      "stdout": "1",
+      "wallSeconds": 0.08260623319074512
+     },
+     {
+      "counters": {
+       "instructions": 1643751948,
+       "cycles": 287204214,
+       "stall_backend": 112384337,
+       "stall_backend_mem": 559300,
+       "stall_frontend": 1144269,
+       "branch-instructions": 360627556,
+       "branch-misses": 24922
+      },
+      "stdout": "1",
+      "wallSeconds": 0.08207646897062659
+     },
+     {
+      "counters": {
+       "instructions": 1643810176,
+       "cycles": 286972742,
+       "stall_backend": 112290087,
+       "stall_backend_mem": 573639,
+       "stall_frontend": 1194349,
+       "branch-instructions": 360637145,
+       "branch-misses": 33479
+      },
+      "stdout": "1",
+      "wallSeconds": 0.08198813162744045
+     },
+     {
+      "counters": {
+       "instructions": 1643933888,
+       "cycles": 287037678,
+       "stall_backend": 112350504,
+       "stall_backend_mem": 594963,
+       "stall_frontend": 1026501,
+       "branch-instructions": 360656707,
+       "branch-misses": 25438
+      },
+      "stdout": "1",
+      "wallSeconds": 0.08217005431652069
+     },
+     {
+      "counters": {
+       "instructions": 1643740060,
+       "cycles": 287340705,
+       "stall_backend": 112711624,
+       "stall_backend_mem": 565452,
+       "stall_frontend": 1257869,
+       "branch-instructions": 360628191,
+       "branch-misses": 21486
+      },
+      "stdout": "1",
+      "wallSeconds": 0.08355675311759114
+     },
+     {
+      "counters": {
+       "instructions": 1643859639,
+       "cycles": 288330005,
+       "stall_backend": 114067210,
+       "stall_backend_mem": 548486,
+       "stall_frontend": 977912,
+       "branch-instructions": 360643540,
+       "branch-misses": 21803
+      },
+      "stdout": "1",
+      "wallSeconds": 0.0819989638403058
+     }
+    ]
+   }
+  },
+  "dep.js": {
+   "path": "/tmp/fp/dep.js",
+   "sha256": "78e8da729b712e76493e1cb7f2421ed7040aa798b69d3cfb2d7d3447ceed1b49",
+   "stdout": "1",
+   "metrics": {
+    "instructions": {
+     "qjs": {
+      "samples": [
+       10187226772,
+       10187163818,
+       10187056807,
+       10187143773,
+       10187261324,
+       10187190813,
+       10187124154,
+       10187146789
+      ],
+      "median": 10187155303.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       8467487181,
+       8467462350,
+       8467482145,
+       8467685821,
+       8467554599,
+       8467590379,
+       8467693274,
+       8467595909
+      ],
+      "median": 8467572489.0
+     },
+     "ratiozjs_taggedOverqjs": 0.8312008835372124
+    },
+    "cycles": {
+     "qjs": {
+      "samples": [
+       1995020835,
+       1992125133,
+       1997591758,
+       1991917090,
+       1992860774,
+       1994000068,
+       1991713225,
+       1991904098
+      ],
+      "median": 1992492953.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       1969512121,
+       1969871570,
+       1970519408,
+       1969798579,
+       1969731317,
+       1970334189,
+       1970083622,
+       1968290220
+      ],
+      "median": 1969835074.5
+     },
+     "ratiozjs_taggedOverqjs": 0.9886283768481091
+    },
+    "stall_backend": {
+     "qjs": {
+      "samples": [
+       494221158,
+       499530377,
+       495393135,
+       499144484,
+       491292061,
+       497151711,
+       499239968,
+       491759695
+      ],
+      "median": 496272423.0
+     },
+     "zjs_tagged": {
+      "samples": [
+       674405932,
+       674411358,
+       674628683,
+       674789098,
+       674311830,
+       675027031,
+       674715993,
+       673272843
+      ],
+      "median": 674520020.5
+     },
+     "ratiozjs_taggedOverqjs": 1.3591728841640673
+    },
+    "stall_backend_mem": {
+     "qjs": {
+      "samples": [
+       1926031,
+       1826215,
+       1813246,
+       1968656,
+       2015785,
+       1922732,
+       1823674,
+       1870011
+      ],
+      "median": 1896371.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       1876089,
+       1943411,
+       1794719,
+       2056030,
+       1887819,
+       1888884,
+       2041997,
+       1850204
+      ],
+      "median": 1888351.5
+     },
+     "ratiozjs_taggedOverqjs": 0.9957708708446631
+    },
+    "stall_frontend": {
+     "qjs": {
+      "samples": [
+       41979846,
+       32517037,
+       40534492,
+       31993391,
+       41440223,
+       37325745,
+       31151784,
+       42259256
+      ],
+      "median": 38930118.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       1333451,
+       1713795,
+       2612883,
+       1408870,
+       1792408,
+       2380924,
+       1901937,
+       1393808
+      ],
+      "median": 1753101.5
+     },
+     "ratiozjs_taggedOverqjs": 0.04503201037006861
+    },
+    "branch-instructions": {
+     "qjs": {
+      "samples": [
+       1681195454,
+       1681184844,
+       1681160026,
+       1681179125,
+       1681202194,
+       1681191077,
+       1681179741,
+       1681178517
+      ],
+      "median": 1681182292.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       1661198886,
+       1661214358,
+       1661212692,
+       1661236655,
+       1661215620,
+       1661223589,
+       1661234227,
+       1661219600
+      ],
+      "median": 1661217610.0
+     },
+     "ratiozjs_taggedOverqjs": 0.9881246176639705
+    },
+    "branch-misses": {
+     "qjs": {
+      "samples": [
+       32877,
+       28885,
+       182424,
+       29528,
+       179936,
+       40471,
+       28971,
+       32916
+      ],
+      "median": 32896.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       32961,
+       25036,
+       47460,
+       27101,
+       26851,
+       26528,
+       31144,
+       27042
+      ],
+      "median": 27071.5
+     },
+     "ratiozjs_taggedOverqjs": 0.8229294909792835
+    },
+    "wallSeconds": {
+     "qjs": {
+      "samples": [
+       0.5201721680350602,
+       0.5199556527659297,
+       0.5296189277432859,
+       0.5207700747996569,
+       0.5206238487735391,
+       0.5205191909335554,
+       0.5209846016950905,
+       0.5200525941327214
+      ],
+      "median": 0.5205715198535472
+     },
+     "zjs_tagged": {
+      "samples": [
+       0.5140087278559804,
+       0.5140456398949027,
+       0.5136956511996686,
+       0.5141097661107779,
+       0.5141217806376517,
+       0.514410519041121,
+       0.5142330126836896,
+       0.5137804322876036
+      ],
+      "median": 0.5140777030028403
+     },
+     "ratiozjs_taggedOverqjs": 0.9875256009922828
+    }
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 10187226772,
+       "cycles": 1995020835,
+       "stall_backend": 494221158,
+       "stall_backend_mem": 1926031,
+       "stall_frontend": 41979846,
+       "branch-instructions": 1681195454,
+       "branch-misses": 32877
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5201721680350602
+     },
+     {
+      "counters": {
+       "instructions": 10187163818,
+       "cycles": 1992125133,
+       "stall_backend": 499530377,
+       "stall_backend_mem": 1826215,
+       "stall_frontend": 32517037,
+       "branch-instructions": 1681184844,
+       "branch-misses": 28885
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5199556527659297
+     },
+     {
+      "counters": {
+       "instructions": 10187056807,
+       "cycles": 1997591758,
+       "stall_backend": 495393135,
+       "stall_backend_mem": 1813246,
+       "stall_frontend": 40534492,
+       "branch-instructions": 1681160026,
+       "branch-misses": 182424
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5296189277432859
+     },
+     {
+      "counters": {
+       "instructions": 10187143773,
+       "cycles": 1991917090,
+       "stall_backend": 499144484,
+       "stall_backend_mem": 1968656,
+       "stall_frontend": 31993391,
+       "branch-instructions": 1681179125,
+       "branch-misses": 29528
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5207700747996569
+     },
+     {
+      "counters": {
+       "instructions": 10187261324,
+       "cycles": 1992860774,
+       "stall_backend": 491292061,
+       "stall_backend_mem": 2015785,
+       "stall_frontend": 41440223,
+       "branch-instructions": 1681202194,
+       "branch-misses": 179936
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5206238487735391
+     },
+     {
+      "counters": {
+       "instructions": 10187190813,
+       "cycles": 1994000068,
+       "stall_backend": 497151711,
+       "stall_backend_mem": 1922732,
+       "stall_frontend": 37325745,
+       "branch-instructions": 1681191077,
+       "branch-misses": 40471
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5205191909335554
+     },
+     {
+      "counters": {
+       "instructions": 10187124154,
+       "cycles": 1991713225,
+       "stall_backend": 499239968,
+       "stall_backend_mem": 1823674,
+       "stall_frontend": 31151784,
+       "branch-instructions": 1681179741,
+       "branch-misses": 28971
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5209846016950905
+     },
+     {
+      "counters": {
+       "instructions": 10187146789,
+       "cycles": 1991904098,
+       "stall_backend": 491759695,
+       "stall_backend_mem": 1870011,
+       "stall_frontend": 42259256,
+       "branch-instructions": 1681178517,
+       "branch-misses": 32916
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5200525941327214
+     }
+    ],
+    "zjs_tagged": [
+     {
+      "counters": {
+       "instructions": 8467487181,
+       "cycles": 1969512121,
+       "stall_backend": 674405932,
+       "stall_backend_mem": 1876089,
+       "stall_frontend": 1333451,
+       "branch-instructions": 1661198886,
+       "branch-misses": 32961
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5140087278559804
+     },
+     {
+      "counters": {
+       "instructions": 8467462350,
+       "cycles": 1969871570,
+       "stall_backend": 674411358,
+       "stall_backend_mem": 1943411,
+       "stall_frontend": 1713795,
+       "branch-instructions": 1661214358,
+       "branch-misses": 25036
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5140456398949027
+     },
+     {
+      "counters": {
+       "instructions": 8467482145,
+       "cycles": 1970519408,
+       "stall_backend": 674628683,
+       "stall_backend_mem": 1794719,
+       "stall_frontend": 2612883,
+       "branch-instructions": 1661212692,
+       "branch-misses": 47460
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5136956511996686
+     },
+     {
+      "counters": {
+       "instructions": 8467685821,
+       "cycles": 1969798579,
+       "stall_backend": 674789098,
+       "stall_backend_mem": 2056030,
+       "stall_frontend": 1408870,
+       "branch-instructions": 1661236655,
+       "branch-misses": 27101
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5141097661107779
+     },
+     {
+      "counters": {
+       "instructions": 8467554599,
+       "cycles": 1969731317,
+       "stall_backend": 674311830,
+       "stall_backend_mem": 1887819,
+       "stall_frontend": 1792408,
+       "branch-instructions": 1661215620,
+       "branch-misses": 26851
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5141217806376517
+     },
+     {
+      "counters": {
+       "instructions": 8467590379,
+       "cycles": 1970334189,
+       "stall_backend": 675027031,
+       "stall_backend_mem": 1888884,
+       "stall_frontend": 2380924,
+       "branch-instructions": 1661223589,
+       "branch-misses": 26528
+      },
+      "stdout": "1",
+      "wallSeconds": 0.514410519041121
+     },
+     {
+      "counters": {
+       "instructions": 8467693274,
+       "cycles": 1970083622,
+       "stall_backend": 674715993,
+       "stall_backend_mem": 2041997,
+       "stall_frontend": 1901937,
+       "branch-instructions": 1661234227,
+       "branch-misses": 31144
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5142330126836896
+     },
+     {
+      "counters": {
+       "instructions": 8467595909,
+       "cycles": 1968290220,
+       "stall_backend": 673272843,
+       "stall_backend_mem": 1850204,
+       "stall_frontend": 1393808,
+       "branch-instructions": 1661219600,
+       "branch-misses": 27042
+      },
+      "stdout": "1",
+      "wallSeconds": 0.5137804322876036
+     }
+    ]
+   }
+  },
+  "indep.js": {
+   "path": "/tmp/fp/indep.js",
+   "sha256": "922ab74f307c60bf218bd90df08d3826f59e32316f9d4aa28debd5ff76c89872",
+   "stdout": "1",
+   "metrics": {
+    "instructions": {
+     "qjs": {
+      "samples": [
+       11386793132,
+       11386697756,
+       11386830143,
+       11386604012,
+       11386875939,
+       11386689256,
+       11386670840,
+       11386727904
+      ],
+      "median": 11386712830.0
+     },
+     "zjs_tagged": {
+      "samples": [
+       9366317319,
+       9366357697,
+       9366308284,
+       9366237088,
+       9366255113,
+       9366324618,
+       9366425784,
+       9366238051
+      ],
+      "median": 9366312801.5
+     },
+     "ratiozjs_taggedOverqjs": 0.822565119656223
+    },
+    "cycles": {
+     "qjs": {
+      "samples": [
+       1797197988,
+       1749372956,
+       1773727922,
+       1707538950,
+       1814002832,
+       1776211494,
+       1724360401,
+       1744510942
+      ],
+      "median": 1761550439.0
+     },
+     "zjs_tagged": {
+      "samples": [
+       1363474701,
+       1364199425,
+       1364226846,
+       1365662616,
+       1372393982,
+       1367472253,
+       1367190252,
+       1365886953
+      ],
+      "median": 1365774784.5
+     },
+     "ratiozjs_taggedOverqjs": 0.7753253919174323
+    },
+    "stall_backend": {
+     "qjs": {
+      "samples": [
+       73498806,
+       195137827,
+       118764700,
+       122296628,
+       52512165,
+       99120826,
+       154479114,
+       189645979
+      ],
+      "median": 120530664.0
+     },
+     "zjs_tagged": {
+      "samples": [
+       166463264,
+       158408434,
+       163260377,
+       161440986,
+       130596185,
+       144155236,
+       158040982,
+       161646499
+      ],
+      "median": 159924710.0
+     },
+     "ratiozjs_taggedOverqjs": 1.326838372017929
+    },
+    "stall_backend_mem": {
+     "qjs": {
+      "samples": [
+       1747226,
+       1648373,
+       1719291,
+       1558266,
+       1786383,
+       1635109,
+       1684380,
+       1768987
+      ],
+      "median": 1701835.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       1530068,
+       1501487,
+       1471034,
+       1524551,
+       1420368,
+       1436128,
+       1412130,
+       1355160
+      ],
+      "median": 1453581.0
+     },
+     "ratiozjs_taggedOverqjs": 0.8541254427939716
+    },
+    "stall_frontend": {
+     "qjs": {
+      "samples": [
+       75506898,
+       48052314,
+       61832107,
+       53029420,
+       84242468,
+       67266675,
+       50866738,
+       48625186
+      ],
+      "median": 57430763.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       44194006,
+       44989932,
+       46059794,
+       46793342,
+       47899335,
+       52699177,
+       47601876,
+       48925869
+      ],
+      "median": 47197609.0
+     },
+     "ratiozjs_taggedOverqjs": 0.8218175438325838
+    },
+    "branch-instructions": {
+     "qjs": {
+      "samples": [
+       1741135840,
+       1741122496,
+       1741139220,
+       1741105509,
+       1741145521,
+       1741121543,
+       1741111786,
+       1741121408
+      ],
+      "median": 1741122019.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       1721026566,
+       1721037762,
+       1721027945,
+       1721013169,
+       1721013801,
+       1721029279,
+       1721047903,
+       1721015900
+      ],
+      "median": 1721027255.5
+     },
+     "ratiozjs_taggedOverqjs": 0.9884587273178185
+    },
+    "branch-misses": {
+     "qjs": {
+      "samples": [
+       29725,
+       29797,
+       30172,
+       29723,
+       29525,
+       30050,
+       30076,
+       30542
+      ],
+      "median": 29923.5
+     },
+     "zjs_tagged": {
+      "samples": [
+       25253,
+       27705,
+       25225,
+       26124,
+       25134,
+       24679,
+       34904,
+       36528
+      ],
+      "median": 25688.5
+     },
+     "ratiozjs_taggedOverqjs": 0.8584724380503618
+    },
+    "wallSeconds": {
+     "qjs": {
+      "samples": [
+       0.47099619219079614,
+       0.4587417431175709,
+       0.4637780380435288,
+       0.44651364674791694,
+       0.4741035420447588,
+       0.46437037689611316,
+       0.45076684607192874,
+       0.4563907948322594
+      ],
+      "median": 0.46125989058054984
+     },
+     "zjs_tagged": {
+      "samples": [
+       0.3587795193307102,
+       0.36038788408041,
+       0.3588299509137869,
+       0.3591864500194788,
+       0.3605848611332476,
+       0.3595372992567718,
+       0.3607082050293684,
+       0.3595197629183531
+      ],
+      "median": 0.35952853108756244
+     },
+     "ratiozjs_taggedOverqjs": 0.7794489363362019
+    }
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 11386793132,
+       "cycles": 1797197988,
+       "stall_backend": 73498806,
+       "stall_backend_mem": 1747226,
+       "stall_frontend": 75506898,
+       "branch-instructions": 1741135840,
+       "branch-misses": 29725
+      },
+      "stdout": "1",
+      "wallSeconds": 0.47099619219079614
+     },
+     {
+      "counters": {
+       "instructions": 11386697756,
+       "cycles": 1749372956,
+       "stall_backend": 195137827,
+       "stall_backend_mem": 1648373,
+       "stall_frontend": 48052314,
+       "branch-instructions": 1741122496,
+       "branch-misses": 29797
+      },
+      "stdout": "1",
+      "wallSeconds": 0.4587417431175709
+     },
+     {
+      "counters": {
+       "instructions": 11386830143,
+       "cycles": 1773727922,
+       "stall_backend": 118764700,
+       "stall_backend_mem": 1719291,
+       "stall_frontend": 61832107,
+       "branch-instructions": 1741139220,
+       "branch-misses": 30172
+      },
+      "stdout": "1",
+      "wallSeconds": 0.4637780380435288
+     },
+     {
+      "counters": {
+       "instructions": 11386604012,
+       "cycles": 1707538950,
+       "stall_backend": 122296628,
+       "stall_backend_mem": 1558266,
+       "stall_frontend": 53029420,
+       "branch-instructions": 1741105509,
+       "branch-misses": 29723
+      },
+      "stdout": "1",
+      "wallSeconds": 0.44651364674791694
+     },
+     {
+      "counters": {
+       "instructions": 11386875939,
+       "cycles": 1814002832,
+       "stall_backend": 52512165,
+       "stall_backend_mem": 1786383,
+       "stall_frontend": 84242468,
+       "branch-instructions": 1741145521,
+       "branch-misses": 29525
+      },
+      "stdout": "1",
+      "wallSeconds": 0.4741035420447588
+     },
+     {
+      "counters": {
+       "instructions": 11386689256,
+       "cycles": 1776211494,
+       "stall_backend": 99120826,
+       "stall_backend_mem": 1635109,
+       "stall_frontend": 67266675,
+       "branch-instructions": 1741121543,
+       "branch-misses": 30050
+      },
+      "stdout": "1",
+      "wallSeconds": 0.46437037689611316
+     },
+     {
+      "counters": {
+       "instructions": 11386670840,
+       "cycles": 1724360401,
+       "stall_backend": 154479114,
+       "stall_backend_mem": 1684380,
+       "stall_frontend": 50866738,
+       "branch-instructions": 1741111786,
+       "branch-misses": 30076
+      },
+      "stdout": "1",
+      "wallSeconds": 0.45076684607192874
+     },
+     {
+      "counters": {
+       "instructions": 11386727904,
+       "cycles": 1744510942,
+       "stall_backend": 189645979,
+       "stall_backend_mem": 1768987,
+       "stall_frontend": 48625186,
+       "branch-instructions": 1741121408,
+       "branch-misses": 30542
+      },
+      "stdout": "1",
+      "wallSeconds": 0.4563907948322594
+     }
+    ],
+    "zjs_tagged": [
+     {
+      "counters": {
+       "instructions": 9366317319,
+       "cycles": 1363474701,
+       "stall_backend": 166463264,
+       "stall_backend_mem": 1530068,
+       "stall_frontend": 44194006,
+       "branch-instructions": 1721026566,
+       "branch-misses": 25253
+      },
+      "stdout": "1",
+      "wallSeconds": 0.3587795193307102
+     },
+     {
+      "counters": {
+       "instructions": 9366357697,
+       "cycles": 1364199425,
+       "stall_backend": 158408434,
+       "stall_backend_mem": 1501487,
+       "stall_frontend": 44989932,
+       "branch-instructions": 1721037762,
+       "branch-misses": 27705
+      },
+      "stdout": "1",
+      "wallSeconds": 0.36038788408041
+     },
+     {
+      "counters": {
+       "instructions": 9366308284,
+       "cycles": 1364226846,
+       "stall_backend": 163260377,
+       "stall_backend_mem": 1471034,
+       "stall_frontend": 46059794,
+       "branch-instructions": 1721027945,
+       "branch-misses": 25225
+      },
+      "stdout": "1",
+      "wallSeconds": 0.3588299509137869
+     },
+     {
+      "counters": {
+       "instructions": 9366237088,
+       "cycles": 1365662616,
+       "stall_backend": 161440986,
+       "stall_backend_mem": 1524551,
+       "stall_frontend": 46793342,
+       "branch-instructions": 1721013169,
+       "branch-misses": 26124
+      },
+      "stdout": "1",
+      "wallSeconds": 0.3591864500194788
+     },
+     {
+      "counters": {
+       "instructions": 9366255113,
+       "cycles": 1372393982,
+       "stall_backend": 130596185,
+       "stall_backend_mem": 1420368,
+       "stall_frontend": 47899335,
+       "branch-instructions": 1721013801,
+       "branch-misses": 25134
+      },
+      "stdout": "1",
+      "wallSeconds": 0.3605848611332476
+     },
+     {
+      "counters": {
+       "instructions": 9366324618,
+       "cycles": 1367472253,
+       "stall_backend": 144155236,
+       "stall_backend_mem": 1436128,
+       "stall_frontend": 52699177,
+       "branch-instructions": 1721029279,
+       "branch-misses": 24679
+      },
+      "stdout": "1",
+      "wallSeconds": 0.3595372992567718
+     },
+     {
+      "counters": {
+       "instructions": 9366425784,
+       "cycles": 1367190252,
+       "stall_backend": 158040982,
+       "stall_backend_mem": 1412130,
+       "stall_frontend": 47601876,
+       "branch-instructions": 1721047903,
+       "branch-misses": 34904
+      },
+      "stdout": "1",
+      "wallSeconds": 0.3607082050293684
+     },
+     {
+      "counters": {
+       "instructions": 9366238051,
+       "cycles": 1365886953,
+       "stall_backend": 161646499,
+       "stall_backend_mem": 1355160,
+       "stall_frontend": 48925869,
+       "branch-instructions": 1721015900,
+       "branch-misses": 36528
+      },
+      "stdout": "1",
+      "wallSeconds": 0.3595197629183531
+     }
+    ]
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 0,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 1,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 2,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 3,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 4,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 5,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 6,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/loop.js",
+   "sample": 7,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 0,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 1,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 2,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 3,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 4,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 5,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 6,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/dep.js",
+   "sample": 7,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 0,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 1,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 2,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 3,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 4,
+   "order": "qjs->zjs_tagged"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 5,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 6,
+   "order": "zjs_tagged->qjs"
+  },
+  {
+   "case": "/tmp/fp/indep.js",
+   "sample": 7,
+   "order": "qjs->zjs_tagged"
+  }
+ ]
+}
