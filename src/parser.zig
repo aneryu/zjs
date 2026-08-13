@@ -10351,6 +10351,16 @@ pub const parser_core = struct {
         try Emitter.opAtom(s, opcode.op.define_field, raw_name);
     }
 
+    fn realmArrayPrototype(rt: *core.JSRuntime) ?*core.Object {
+        if (rt.context_head) |ctx| {
+            if (ctx.array_shape) |initial| return initial.proto;
+        }
+        if (rt.constructing_context_head) |ctx| {
+            if (ctx.array_shape) |initial| return initial.proto;
+        }
+        return null;
+    }
+
     const TaggedTemplateObjectBuilder = struct {
         rt: *core.JSRuntime,
         template_value: JSValue,
@@ -10360,9 +10370,14 @@ pub const parser_core = struct {
         depth: u32 = 0,
 
         fn init(rt: *core.JSRuntime) Error!TaggedTemplateObjectBuilder {
-            const template_object = core.Object.createArray(rt, null) catch return Error.OutOfMemory;
+            // qjs js_parse_template builds the cooked/raw arrays with
+            // JS_NewArray (quickjs.c:26820-26840) — realm Array.prototype.
+            // After deleting the Get miss fallback, a null proto makes
+            // `strings.map` in assert.deepEqual.format a TypeError.
+            const prototype = realmArrayPrototype(rt);
+            const template_object = core.Object.createArray(rt, prototype) catch return Error.OutOfMemory;
             errdefer core.Object.destroyFromHeader(rt, &template_object.header);
-            const raw_array = core.Object.createArray(rt, null) catch return Error.OutOfMemory;
+            const raw_array = core.Object.createArray(rt, prototype) catch return Error.OutOfMemory;
             errdefer core.Object.destroyFromHeader(rt, &raw_array.header);
 
             const raw_value = raw_array.value();

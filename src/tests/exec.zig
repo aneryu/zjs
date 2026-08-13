@@ -9538,7 +9538,22 @@ test "qjs alignment X-10 Get miss does not fall back to globalThis constructor p
     , stream.buffered());
 }
 
-test "qjs alignment C4 Array instanceof follows prototype chain" {
+test "qjs alignment X-10 tagged template objects keep Array.prototype" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function tag(strings) {
+        \\  print(typeof strings.map);
+        \\  print(Object.getPrototypeOf(strings) === Array.prototype);
+        \\}
+        \\tag`[${1}]`;
+    , &stream);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("function\ntrue\n", stream.buffered());
+}
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
