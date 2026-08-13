@@ -3629,6 +3629,12 @@ pub const parser_core = struct {
     const core_bigint = @import("core/bigint.zig");
     const core = @import("core/root.zig");
     const regexp_lib = @import("libs/regexp.zig");
+
+    fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
+        // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
+        const rt: *core.JSRuntime = @ptrCast(@alignCast(opaque_ptr orelse return false));
+        return rt.checkNativeStackOverflow(alloca_size);
+    }
     const libs_bignum = @import("libs/bigint.zig");
     const simple_token = @import("simple_token.zig");
     const unicode = @import("libs/unicode.zig");
@@ -9990,8 +9996,13 @@ pub const parser_core = struct {
         };
         try Emitter.pushConstOwned(s, pattern_string.value());
 
-        var compiled = regexp_lib.compilePatternAndFlags(s.function.memory.allocator, pattern, flags) catch |err| switch (err) {
+        var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.function.memory.allocator, pattern, flags, .{
+            .@"opaque" = s.runtime.?,
+            .check_stack_overflow = lreCheckStackOverflow,
+        }) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
+            // qjs:libregexp.c:2411 re_parse_error "stack overflow" -> JS_ThrowSyntaxError
+            error.StackOverflow => return Error.StackOverflow,
             else => return Error.InvalidRegExp,
         };
         defer compiled.deinit(s.function.memory.allocator);
@@ -20351,6 +20362,20 @@ pub const compile_entry = struct {
 
         const canonical_root = compileQjsProgram(rt, filename_atom, source, options, compile_context, &function, &features) catch |err| switch (err) {
             error.OutOfMemory => return err,
+            // qjs:libregexp.c:1391/2411 and quickjs.c:22836 js_parse_error "stack overflow"
+            error.StackOverflow => {
+                var result = ResultImpl{
+                    .runtime = rt,
+                    .mode = options.mode,
+                    .direct_eval = options.mode == .eval_direct,
+                };
+                try setFallbackSyntaxError(&result, rt, filename_atom, source, "stack overflow");
+                function.deinit(rt);
+                function_owned = false;
+                arena.deinit();
+                arena_owned = false;
+                return result;
+            },
             else => {
                 var result = ResultImpl{
                     .runtime = rt,

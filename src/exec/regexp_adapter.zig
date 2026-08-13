@@ -19,6 +19,19 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: []const
     return regexp_lib.compilePatternAndFlags(allocator, pattern, flags);
 }
 
+pub fn compileWithRuntime(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !Compiled {
+    return regexp_lib.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, .{
+        .@"opaque" = rt,
+        .check_stack_overflow = lreCheckStackOverflow,
+    });
+}
+
+fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
+    // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
+    const runtime: *core.JSRuntime = @ptrCast(@alignCast(opaque_ptr orelse return false));
+    return runtime.checkNativeStackOverflow(alloca_size);
+}
+
 pub fn execOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
     var match: Match = undefined;
     return switch (try execIntoMatchOnStringFromIndex(rt, compiled, string_value, start_index, &match)) {

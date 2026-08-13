@@ -478,7 +478,7 @@ pub fn construct(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue
 }
 
 pub fn constructLiteral(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8, prototype: ?*core.Object) !core.JSValue {
-    var compiled = compilePatternAndFlagsSyntax(rt, pattern, flags) catch |err| switch (err) {
+    var compiled = compilePatternAndFlagsSyntax(rt, null, pattern, flags) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         else => |other| return other,
     };
@@ -511,7 +511,7 @@ pub fn constructLiteralWithValues(
     prototype: ?*core.Object,
 ) !core.JSValue {
     _ = stored_flags;
-    var compiled = compilePatternAndFlagsSyntax(rt, pattern, flags) catch |err| switch (err) {
+    var compiled = compilePatternAndFlagsSyntax(rt, null, pattern, flags) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         else => |other| return other,
     };
@@ -565,7 +565,7 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
     else
         try regExpStringValue(rt, flags);
 
-    var compiled = try compileSourceAndFlags(rt, source_val, flags_val);
+    var compiled = try compileSourceAndFlags(rt, realm_global, source_val, flags_val);
     defer compiled.deinit(rt.memory.allocator);
 
     return constructCompiled(rt, realm_global, source_val, compiled.bytecode, prototype);
@@ -579,11 +579,47 @@ fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     return try createStringValue(rt, bytes.items);
 }
 
-fn compilePatternAndFlagsSyntax(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !regexp_lib.Compiled {
-    return regexp_lib.compilePatternAndFlags(rt.memory.allocator, pattern, flags);
+fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
+    // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
+    const rt: *core.JSRuntime = @ptrCast(@alignCast(opaque_ptr orelse return false));
+    return rt.checkNativeStackOverflow(alloca_size);
 }
 
-fn compileSourceAndFlags(rt: *core.JSRuntime, source: core.JSValue, flags: core.JSValue) !regexp_lib.Compiled {
+fn regexpCompileOptions(rt: *core.JSRuntime) regexp_lib.CompileOptions {
+    return .{
+        .@"opaque" = rt,
+        .check_stack_overflow = lreCheckStackOverflow,
+    };
+}
+
+fn throwRegExpStackOverflow(rt: *core.JSRuntime, global: ?*core.Object) !void {
+    // qjs:quickjs.c:47633-47635 JS_ThrowSyntaxError(ctx, "%s", error_msg) with
+    // re_parse_error(s, "stack overflow"). Must not reuse error.StackOverflow,
+    // which materializes InternalError.
+    if (global) |g| {
+        if (rt.contextForGlobal(g) orelse rt.contextForGlobalIncludingConstructing(g)) |ctx| {
+            _ = try exception_ops.throwSyntaxErrorMessage(ctx, g, "stack overflow");
+        }
+    } else if (rt.context_head) |ctx| {
+        if (ctx.global) |g| {
+            _ = try exception_ops.throwSyntaxErrorMessage(ctx, g, "stack overflow");
+        }
+    }
+    return error.SyntaxError;
+}
+
+fn compilePatternAndFlagsSyntax(rt: *core.JSRuntime, global: ?*core.Object, pattern: []const u8, flags: []const u8) !regexp_lib.Compiled {
+    return regexp_lib.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, regexpCompileOptions(rt)) catch |err| switch (err) {
+        error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        error.StackOverflow => {
+            try throwRegExpStackOverflow(rt, global);
+            return error.SyntaxError;
+        },
+        else => |other| return other,
+    };
+}
+
+fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: core.JSValue, flags: core.JSValue) !regexp_lib.Compiled {
     // QuickJS's js_compile_regexp passes both strings through
     // JS_ToCStringLen2. ASCII strings keep a live reference and expose their
     // inline bytes directly; only strings that need UTF-8 transcoding allocate
@@ -598,14 +634,22 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, source: core.JSValue, flags: core.
     // in UTF-16 code units rather than merging surrogate pairs prematurely.
     const flag_bits = regexp_lib.parseFlagBits(flag_bytes.slice()) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        error.StackOverflow => {
+            try throwRegExpStackOverflow(rt, global);
+            return error.SyntaxError;
+        },
         else => |other| return other,
     };
     const cesu8 = (flag_bits & (regexp_lib.flags.unicode | regexp_lib.flags.unicode_sets)) == 0;
     var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.memory.allocator, source, cesu8);
     defer source_bytes.deinit();
 
-    return regexp_lib.compilePatternWithFlagBits(rt.memory.allocator, source_bytes.slice(), flag_bits) catch |err| switch (err) {
+    return regexp_lib.compilePatternWithFlagBitsAndOptions(rt.memory.allocator, source_bytes.slice(), flag_bits, regexpCompileOptions(rt)) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        error.StackOverflow => {
+            try throwRegExpStackOverflow(rt, global);
+            return error.SyntaxError;
+        },
         else => |other| return other,
     };
 }
