@@ -194,35 +194,48 @@ bash tools/perf/codex_run.sh reap        # 回收残留进程组
 
 ---
 
-## 9. 实现差异审计（2026-08-13/14）—— ⚠️ 未经核查
+## 9. 实现差异审计（2026-08-13/14）—— 已全量核查
 
 分支 `audit/impl-divergence-20260813`（worktree `/home/aneryu/worktree-impl-audit`），
-commit `c4fd68fc`，产物 `docs/qjs-align/IMPL-DIVERGENCE-2026-08-13/`（4.2 MB / 55,623 行）。
+commit `113b6614`。产物 `docs/qjs-align/IMPL-DIVERGENCE-2026-08-13/`：
+16 份子系统报告 + README（55,623 行）+ 16 份 verify 产物（1.2 MB）+ **`VERIFIED-LEDGER.md`（2,054 行）**。
 
-**1,017 条语句级差异**（臂序 / 谓词强度 / 退出点 / 操作次序 / 每次执行次数 / 常量阈值 /
-结构体布局 / 定义但不发射 / 完全缺失 / zjs 独有），16 份子系统报告 + README。
+**1,017 条语句级差异**，经「逐条核查 + 二审」两轮（33 agent / 820 万 token）。
 
-### ⚠️ 可信度
+### 可信度
 
-**只有 6 条经手工差分复现：4 确认 / 1 核不实 / 1 前提缺失。** 其余 1,011 条未核。
-全量核查 workflow（33 agent）因额度耗尽**零条完成**。
-**读之前先读 `VERIFICATION-STATUS.md`；不得当作可执行清单。**
+| 指标 | 值 |
+|---|---|
+| CONFIRMED-EXEC 且二审 UPHELD | **≈278 条** ← **唯一可直接开工的** |
+| REFUTED + NARROWED | 199 条（69 + 130） |
+| **原审计被推翻/收窄** | **8.9%**（README §3 部分 **14.4%**） |
+| 一审被二审硬推翻 | 2.8% |
 
-恢复核查：`Workflow({scriptPath: ".../zjs-qjs-divergence-full-verification-wf_f18cb246-df9.js",
-resumeFromRunId: "wf_f18cb246-df9"})`。关键产出是「一审被推翻比例」。
+⚠️ 6 条 OVERTURNED 改变了可执行性结论，其中 **3 条是一审把 README 原本正确的条目误判为 REFUTED**
+（探针顺序错 / 只跑 ReleaseFast / 用了非 ID_Start emoji）——**核查本身也会出错**。
+⇒ **每条落地前仍须自己复现。** 工具 `worktree-impl-audit/difftest.sh`。
 
-### 已确认可直接行动的 4 条（附复现，见 VERIFICATION-STATUS.md）
+### 已由 driver 亲手复现的缺陷（7 条成功 / 9 条抽查）
 
-| # | 缺陷 | zjs | qjs | 支付频率 |
-|---|---|---|---|---|
-| 1 | 正则递归无栈溢出检查 | **exit=139 SIGSEGV** | SyntaxError | 每次正则编译 |
-| 2 | 属性读兜底到 `globalThis.<Ctor>.prototype` | `f.zzz===1` 而 `'zzz' in f===false` | 均 undefined/false | **每次属性读 miss** |
-| 3 | switch 落穿丢失（case 尾为回边 goto 时） | `"a,d"` | `"a,b"` | 每 switch（窄条件） |
-| 4 | generator 内 `for (var yield of …)` | 接受 | SyntaxError | 每次解析 |
+| # | 缺陷 | zjs | qjs |
+|---|---|---|---|
+| 1 | 正则编译器无栈溢出检查 | **exit=139 SIGSEGV，输出全空** | `SyntaxError: stack overflow` |
+| 2 | `Reflect.set(arr,"length",2,recv)` 不做 Receiver 重定向 | `arr.length=2` / `recv.length=undefined` | `arr.length=3` / `recv.length=2` |
+| 3 | 顶层 direct eval 破坏全脚本私有名解析 | `TypeError: invalid brand on object` | `9` |
+| 4 | `[[Get]]` miss 回落 `globalThis.<Ctor>.prototype` | `f.zzz===1` 而 `'zzz' in f===false` | 均 undefined/false |
+| 5 | switch 落穿在 `while` 家族尾部丢失 | `a,d` | `a,b` |
+| 6 | generator 内 `for (var yield of [1])` | 接受 | `SyntaxError` |
 
-⚠️ 第 2 条同时是正确性 bug 与纯税（qjs 在该位置成本为 0）；第 3 条触发条件很窄，
-普通 case 尾**不复现**——写复现时必须用 `while(true){…break;}` 形态。
+⚠️ 第 4 条同时是正确性 bug 与纯税（qjs 该处成本为 0，zjs 每次属性读 miss 都付）。
+⚠️ 第 5 条触发条件很窄，普通 case 尾**不复现**。
 
-### 差分跑机
-`/home/aneryu/worktree-impl-audit/difftest.sh <js>` —— 并排两侧 stdout+stderr+exit，
-自动判 IDENTICAL / DIFFER / DIFFER—崩溃。**任何行为类断言都应先过它再相信。**
+### ❌ 两条不复现（均在字符串/值子系统）
+
+`01·V-26`（ToNumber latin1）与 `04b·A-02`（accumulator rope 别名，试了四种写法含 64 字符 rope 与 `+=`）。
+**该子系统的行为类断言应额外存疑。**
+
+### ⛔ 三条禁止向 qjs 对齐（zjs 才是规范正确方）
+
+`README §3.5 G9` bind 的 `[[Prototype]]`；`08·#48/#50` 与 `13·K8`（node 佐证）；
+`13·F1 BigInt.asUintN` 两侧各错各的，**忠实对齐与合规范互斥，需裁决**。
+
