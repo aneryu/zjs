@@ -799,7 +799,12 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
         const value = switch (kind) {
             1 => entry.key.dup(),
             2 => if (is_set) entry.key.dup() else entry.value.dup(),
-            3 => try buildCollectionEntryPair(ctx.runtime, is_set, entry),
+            3 => try buildCollectionEntryPair(
+                ctx.runtime,
+                is_set,
+                entry,
+                if (ctx.global) |global| array_ops.arrayPrototypeFromGlobal(ctx.runtime, global) else null,
+            ),
             else => unreachable,
         };
         errdefer value.free(ctx.runtime);
@@ -854,17 +859,16 @@ fn fastGeneratorForOfNext(
 }
 
 /// Build the `[key, value]` pair for a Map/Set entries iterator step. Mirrors
-/// collection.iteratorValue's key_value arm exactly (a null-proto fast array;
-/// Set yields [key, key]); the borrowed components are rooted across the array
-/// allocation.
-fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.object.CollectionEntry) !core.JSValue {
+/// collection.iteratorValue's key_value arm and qjs js_create_array
+/// (quickjs.c:9601 → JS_NewArray), whose proto is the realm Array.prototype.
+fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.object.CollectionEntry, prototype: ?*core.Object) !core.JSValue {
     // qjs js_create_array (quickjs.c:9601): a pre-sized dense fast array filled by
     // direct slot writes, NOT two per-element defineOwnProperty (each an
     // atomFromUInt32 + Descriptor build + the indexed-property machinery). Every
     // allocation (createArray, the elements slice) happens BEFORE the dups, so no
     // GC sits between a dup and the adopt; the borrowed key/value meanwhile stay
     // alive via the collection (same liveness the key/value kinds rely on).
-    const pair = try core.Object.createArray(rt, null);
+    const pair = try core.Object.createArray(rt, prototype);
     errdefer core.Object.destroyFromHeader(rt, &pair.header);
     const elements = try rt.memory.alloc(core.JSValue, 2);
     elements[0] = entry.key.dup();
@@ -1262,7 +1266,7 @@ pub fn arrayIteratorValue(
             defer ctx.runtime.active_value_roots = root_frame.previous;
             defer value.free(ctx.runtime);
 
-            const pair = try core.Object.createArray(ctx.runtime, null);
+            const pair = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
             errdefer core.Object.destroyFromHeader(ctx.runtime, &pair.header);
             pair_value = pair.value();
             value = if (core.object.isTypedArrayObject(target))

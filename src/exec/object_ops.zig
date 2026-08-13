@@ -17,9 +17,6 @@ const vm_property_globals = @import("vm_property_globals.zig");
 const stack_mod = @import("stack.zig");
 const HostError = exceptions.HostError;
 const op = bytecode.opcode.op;
-const atom_buffer = (core.atom.predefinedId("buffer", .string)).?;
-const atom_byte_length = (core.atom.predefinedId("byteLength", .string)).?;
-const atom_byte_offset = (core.atom.predefinedId("byteOffset", .string)).?;
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -2864,7 +2861,10 @@ pub fn getValueProperty(
         if (try getPropertyValueFromObjectChain(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |property_value| {
             return property_value;
         }
-        return getValuePropertyObjectMiss(ctx, global, value, object, atom_id);
+        // qjs JS_GetPropertyInternal (quickjs.c:8355-8363): after the proto
+        // walk, return JS_UNDEFINED. No class-name fallback, no DataView
+        // own-leg, no String-index miss synthesis.
+        return core.JSValue.undefinedValue();
     }
     return getValuePropertyNonObject(ctx, output, global, value, atom_id, caller_function, caller_frame);
 }
@@ -2909,62 +2909,6 @@ pub inline fn probePublicNamedDataPropertyFromObject(
         if (slow_property or object.needsSlowPropertyAccess()) return .{ .needs_slow = true };
         object = object.getPrototype() orelse return .{};
     }
-}
-
-/// Object-property fallback after the real shape/prototype chain missed. QJS
-/// reaches the equivalent cases only from the cold exotic/missing-property
-/// arms of JS_GetPropertyInternal; keeping them out of the common frame avoids
-/// making every successful RegExp/result lookup carry their error paths.
-noinline fn getValuePropertyObjectMiss(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    value: core.JSValue,
-    object: *core.Object,
-    atom_id: core.Atom,
-) !core.JSValue {
-    const rt = ctx.runtime;
-    if (object.class_id == core.class.ids.dataview and
-        (atom_id == atom_buffer or
-            atom_id == atom_byte_length or
-            atom_id == atom_byte_offset))
-    {
-        if (atom_id == atom_buffer) return (object.typedArrayBuffer() orelse return error.TypeError).dup();
-        if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteLength(rt, object)));
-        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteOffset(rt, object)));
-    }
-    const direct = try object.getProperty(atom_id);
-    if (!direct.isUndefined()) return direct;
-    direct.free(rt);
-    if (object.isArray() and atom_id == core.atom.ids.length) return value_ops.length(rt, value);
-    if (object.class_id == core.class.ids.string) {
-        if (object.objectData()) |string_data| {
-            if (try getStringIndexValue(rt, string_data, atom_id)) |indexed| return indexed;
-        }
-    }
-    if (object.isArray()) return getPrototypeMethodWithFallback(rt, global, "Array", atom_id, "Object");
-    if (object.class_id == core.class.ids.object) {
-        if (object.hasNullPrototype()) return core.JSValue.undefinedValue();
-        return getPrototypeMethod(rt, global, "Object", atom_id);
-    }
-    if (object.class_id == core.class.ids.string) return getPrototypeMethod(rt, global, "String", atom_id);
-    if (object.class_id == core.class.ids.number) return getPrototypeMethod(rt, global, "Number", atom_id);
-    if (object.class_id == core.class.ids.boolean) return getPrototypeMethod(rt, global, "Boolean", atom_id);
-    if (object.class_id == core.class.ids.big_int) return getPrototypeMethod(rt, global, "BigInt", atom_id);
-    if (object.class_id == core.class.ids.symbol) return getPrototypeMethod(rt, global, "Symbol", atom_id);
-    if (isFunctionLikeClass(object.class_id)) {
-        return getPrototypeMethodWithFallback(rt, global, "Function", atom_id, "Object");
-    }
-    if (object.class_id == core.class.ids.date) return getPrototypeMethod(rt, global, "Date", atom_id);
-    if (object.class_id == core.class.ids.regexp) return getPrototypeMethodWithFallback(rt, global, "RegExp", atom_id, "Object");
-    if (object.class_id == core.class.ids.promise) return getPrototypeMethod(rt, global, "Promise", atom_id);
-    if (object.class_id == core.class.ids.array_buffer) return getPrototypeMethod(rt, global, "ArrayBuffer", atom_id);
-    if (object.class_id == core.class.ids.shared_array_buffer) return getPrototypeMethod(rt, global, "SharedArrayBuffer", atom_id);
-    if (object.class_id == core.class.ids.weak_ref) return getPrototypeMethod(rt, global, "WeakRef", atom_id);
-    if (object.class_id == core.class.ids.finalization_registry) return getPrototypeMethod(rt, global, "FinalizationRegistry", atom_id);
-    if (object.class_id == core.class.ids.disposable_stack) return getPrototypeMethod(rt, global, "DisposableStack", atom_id);
-    if (object.class_id == core.class.ids.async_disposable_stack) return getPrototypeMethod(rt, global, "AsyncDisposableStack", atom_id);
-    if (object.class_id == core.class.ids.dataview) return getPrototypeMethod(rt, global, "DataView", atom_id);
-    return core.JSValue.undefinedValue();
 }
 
 noinline fn getValuePropertyNonObject(
@@ -4136,25 +4080,6 @@ pub fn sameObjectIdentity(a: core.JSValue, b: core.JSValue) bool {
     const a_header = a.refHeader() orelse return false;
     const b_header = b.refHeader() orelse return false;
     return a_header == b_header;
-}
-
-pub fn getPrototypeMethodWithFallback(rt: *core.JSRuntime, global: *core.Object, constructor_name: []const u8, atom_id: core.Atom, fallback_constructor_name: []const u8) !core.JSValue {
-    const value = try getPrototypeMethod(rt, global, constructor_name, atom_id);
-    if (!value.isUndefined()) return value;
-    value.free(rt);
-    return getPrototypeMethod(rt, global, fallback_constructor_name, atom_id);
-}
-
-pub fn getPrototypeMethod(rt: *core.JSRuntime, global: *core.Object, constructor_name: []const u8, atom_id: core.Atom) !core.JSValue {
-    const ctor_key = try rt.internAtom(constructor_name);
-    defer rt.atoms.free(ctor_key);
-    const ctor_value = try global.getProperty(ctor_key);
-    defer ctor_value.free(rt);
-    const ctor = try property_ops.expectObject(ctor_value);
-    const proto_value = try ctor.getProperty(core.atom.ids.prototype);
-    defer proto_value.free(rt);
-    const proto = try property_ops.expectObject(proto_value);
-    return try proto.getProperty(atom_id);
 }
 
 pub fn hasPropertyForWith(

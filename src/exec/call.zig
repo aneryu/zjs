@@ -1635,19 +1635,19 @@ pub fn callObjectStatic(
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
-        return core.object.ownEntriesArray(rt, object_value, .keys);
+        return core.object.ownEntriesArray(rt, object_value, .keys, if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null);
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.values)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
-        return core.object.ownEntriesArray(rt, object_value, .values);
+        return core.object.ownEntriesArray(rt, object_value, .values, if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null);
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.entries)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(ctx, global, args[0]);
         defer object_value.free(rt);
-        return core.object.ownEntriesArray(rt, object_value, .entries);
+        return core.object.ownEntriesArray(rt, object_value, .entries, if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null);
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_descriptor)) {
         if (args.len < 1) return error.TypeError;
@@ -1688,7 +1688,7 @@ pub fn callObjectStatic(
         const object = try expectObjectArg(object_value);
         const keys = try object.ownKeys(rt);
         defer core.Object.freeKeys(rt, keys);
-        const out = try core.Object.createArray(rt, null);
+        const out = try core.Object.createArray(rt, if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null);
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         var out_index: u32 = 0;
         for (keys) |key| {
@@ -1706,7 +1706,7 @@ pub fn callObjectStatic(
         const object = try expectObjectArg(object_value);
         const keys = try object.ownKeys(rt);
         defer core.Object.freeKeys(rt, keys);
-        const out = try core.Object.createArray(rt, null);
+        const out = try core.Object.createArray(rt, if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null);
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         for (keys) |key| {
             if (!rt.atoms.isPublicSymbol(key)) continue;

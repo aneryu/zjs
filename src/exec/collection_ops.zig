@@ -479,7 +479,7 @@ fn methodCallResolved(
             return mapGetOrInsertComputed(rt, object, args[0], args[1], host);
         },
         13 => {
-            return collectionIteratorNext(rt, object);
+            return collectionIteratorNext(rt, global, object);
         },
         14 => {
             return collectionSize(object);
@@ -774,7 +774,7 @@ fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []cons
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), false, false, true));
 }
 
-fn collectionIteratorNext(rt: *core.JSRuntime, iterator: *core.Object) !core.JSValue {
+fn collectionIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, iterator: *core.Object) !core.JSValue {
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return error.TypeError;
     const target_value = (iterator.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const target = try expectObject(target_value);
@@ -786,14 +786,14 @@ fn collectionIteratorNext(rt: *core.JSRuntime, iterator: *core.Object) !core.JSV
         iterator.iteratorIndexSlot().* += 1;
         const entry = target.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
-        return iteratorResult(rt, try iteratorValue(rt, target.class_id, entry, @enumFromInt((iterator.iteratorKindSlot().*))), false);
+        return iteratorResult(rt, try iteratorValue(rt, global, target.class_id, entry, @enumFromInt((iterator.iteratorKindSlot().*))), false);
     }
     const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
     iterator.detachCollectionIteratorTarget(rt);
     return done_result;
 }
 
-fn iteratorValue(rt: *core.JSRuntime, class_id: core.ClassId, entry: core.object.CollectionEntry, kind: CollectionIteratorKind) !core.JSValue {
+fn iteratorValue(rt: *core.JSRuntime, global: ?*core.Object, class_id: core.ClassId, entry: core.object.CollectionEntry, kind: CollectionIteratorKind) !core.JSValue {
     switch (kind) {
         .key => return entry.key.dup(),
         .value => return if (class_id == core.class.ids.set) entry.key.dup() else entry.value.dup(),
@@ -811,7 +811,10 @@ fn iteratorValue(rt: *core.JSRuntime, class_id: core.ClassId, entry: core.object
             rt.active_value_roots = &root_frame;
             defer rt.active_value_roots = root_frame.previous;
 
-            const pair = try core.Object.createArray(rt, null);
+            // qjs js_create_array → JS_NewArray (quickjs.c:9601, 5841): pair proto
+            // is the realm Array.prototype, not a null-proto class-name fallback.
+            const prototype = if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null;
+            const pair = try core.Object.createArray(rt, prototype);
             errdefer core.Object.destroyFromHeader(rt, &pair.header);
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value_value, true, true, true));

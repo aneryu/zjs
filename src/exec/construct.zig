@@ -3,6 +3,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const closure_mod = @import("closure.zig");
 const globals_mod = core.global_slots;
 const value_ops = @import("value_ops.zig");
+const coercion_ops = @import("coercion_ops.zig");
 const typed_array_construct = @import("typed_array_construct.zig");
 const std = @import("std");
 
@@ -180,15 +181,19 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         }
         if (std.mem.eql(u8, name, "Number")) {
             if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
-            // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric, then a
-            // bigint result converts to float64 rather than throwing.
-            const primitive = if (rooted_args.len >= 1)
-                (if (rooted_args[0].isBigInt())
-                    value_ops.numberToValue(try value_ops.bigIntToNumber(rt, rooted_args[0]))
-                else
-                    try value_ops.toNumberValue(rt, rooted_args[0]))
-            else
-                core.JSValue.int32(0);
+            // qjs js_number_constructor (quickjs.c:44822) uses JS_ToNumeric
+            // (qjs:13030 → JS_ToNumberHintFree TON_FLAG_NUMERIC, qjs:12946),
+            // which ToPrimitive's objects (qjs:12975-12979) before ToNumber.
+            const primitive = if (rooted_args.len >= 1) blk: {
+                if (rooted_args[0].isBigInt())
+                    break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(rt, rooted_args[0]));
+                const global = ctx.global orelse return error.InvalidBuiltinRegistry;
+                const coerced = try coercion_ops.toPrimitiveForNumber(ctx, null, global, rooted_args[0]);
+                defer coerced.free(rt);
+                if (coerced.isBigInt())
+                    break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(rt, coerced));
+                break :blk try value_ops.toNumberValue(rt, coerced);
+            } else core.JSValue.int32(0);
             return constructPrimitiveWrapper(rt, core.class.ids.number, prototype, primitive);
         }
         if (std.mem.eql(u8, name, "Boolean")) return constructPrimitiveWrapper(rt, core.class.ids.boolean, prototype, core.JSValue.boolean(rooted_args.len >= 1 and value_ops.isTruthy(rooted_args[0])));

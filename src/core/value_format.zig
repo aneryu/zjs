@@ -23,7 +23,18 @@ pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u
 }
 
 pub fn parseJsNumber(bytes: []const u8) f64 {
-    const trimmed = trimJsWhitespace(bytes);
+    return parseJsNumberTrimmed(trimJsWhitespace(bytes));
+}
+
+/// ToNumber of a latin1-backed JS string. Each byte is one code point
+/// (0x00-0xFF); do not feed the raw sequence to a UTF-8 whitespace decoder.
+/// qjs classifies whitespace by CODE POINT after JS_ToCString (skip_spaces
+/// qjs:11230, js_atof via JS_ToNumberHintFree qjs:12987-12992).
+pub fn parseJsNumberLatin1(bytes: []const u8) f64 {
+    return parseJsNumberTrimmed(trimJsWhitespaceLatin1(bytes));
+}
+
+fn parseJsNumberTrimmed(trimmed: []const u8) f64 {
     if (trimmed.len == 0) return 0;
     if (std.mem.indexOfScalar(u8, trimmed, '_') != null) return std.math.nan(f64);
     if (hasSignedRadixPrefix(trimmed)) return std.math.nan(f64);
@@ -96,7 +107,7 @@ fn formatSimpleFiniteDecimal(buffer: []u8, value: f64) ?[]const u8 {
 /// and StringToBigInt, mirroring qjs `skip_spaces` (quickjs.c:11230) which is
 /// shared by `js_atof` and `JS_StringToBigInt` (quickjs.c:14609): ASCII
 /// 0x09-0x0d + 0x20 plus the Unicode space set (NBSP, U+1680, U+2000-200A,
-/// U+2028/2029, U+202F, U+205F, U+3000, BOM U+FEFF).
+/// U+2028/2029, U+202F, U+205F, U+3000, BOM U+FEFF). `bytes` is UTF-8.
 pub fn trimJsWhitespace(bytes: []const u8) []const u8 {
     var start: usize = 0;
     var end: usize = bytes.len;
@@ -109,6 +120,31 @@ pub fn trimJsWhitespace(bytes: []const u8) []const u8 {
         end -= width;
     }
     return bytes[start..end];
+}
+
+/// Latin1 backing stores one code point per byte. Only ASCII whitespace and
+/// U+00A0 (NBSP, latin1 0xA0) are StrWhiteSpaceChar below U+0100; qjs
+/// `lre_is_space` (libunicode.h:162) classifies by code point, never by
+/// treating 0x80-0xFF as a UTF-8 lead byte.
+pub fn trimJsWhitespaceLatin1(bytes: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = bytes.len;
+    while (start < end) {
+        if (!isJsWhitespaceLatin1Byte(bytes[start])) break;
+        start += 1;
+    }
+    while (end > start) {
+        if (!isJsWhitespaceLatin1Byte(bytes[end - 1])) break;
+        end -= 1;
+    }
+    return bytes[start..end];
+}
+
+inline fn isJsWhitespaceLatin1Byte(byte: u8) bool {
+    return switch (byte) {
+        0x09...0x0d, 0x20, 0xa0 => true,
+        else => false,
+    };
 }
 
 fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {

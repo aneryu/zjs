@@ -608,7 +608,11 @@ pub noinline fn rest(
 ) !void {
     const first_arg_idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
-    const object_value = try core.Object.createArray(ctx.runtime, null);
+    // qjs OP_rest uses js_create_array → JS_NewArray (quickjs.c:18017, 9601-9607,
+    // 5841-5844), whose shape proto is the realm Array.prototype. Rest arrays
+    // must walk that real chain; the deleted class-name Get fallback is gone.
+    const prototype = if (ctx.global) |global| array_ops.arrayPrototypeFromGlobal(ctx.runtime, global) else null;
+    const object_value = try core.Object.createArray(ctx.runtime, prototype);
     var array_value = object_value.value();
     var element_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{

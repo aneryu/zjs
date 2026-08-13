@@ -421,11 +421,29 @@ pub const Compiled = struct {
 };
 
 pub fn compilePatternAndFlags(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []const u8) !Compiled {
-    return .{ .bytecode = try compile(allocator, pattern, flags_str) };
+    return compilePatternAndFlagsWithOptions(allocator, pattern, flags_str, .{});
+}
+
+pub fn compilePatternAndFlagsWithOptions(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    flags_str: []const u8,
+    options: CompileOptions,
+) !Compiled {
+    return .{ .bytecode = try compileWithOptions(allocator, pattern, flags_str, options) };
 }
 
 pub fn compilePatternWithFlagBits(allocator: std.mem.Allocator, pattern: []const u8, re_flags: u16) !Compiled {
-    return .{ .bytecode = try compileWithFlagBits(allocator, pattern, re_flags) };
+    return compilePatternWithFlagBitsAndOptions(allocator, pattern, re_flags, .{});
+}
+
+pub fn compilePatternWithFlagBitsAndOptions(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    re_flags: u16,
+    options: CompileOptions,
+) !Compiled {
+    return .{ .bytecode = try compileWithFlagBitsAndOptions(allocator, pattern, re_flags, options) };
 }
 
 pub fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
@@ -1703,6 +1721,24 @@ inline fn fromSurrogate(high: u16, low: u16) u21 {
     return 0x10000 + 0x400 * (@as(u21, high) - 0xd800) + (@as(u21, low) - 0xdc00);
 }
 
+const DecodedWtf8 = struct {
+    code_point: u21,
+    len: usize,
+};
+
+fn decodeWtf8Surrogate(bytes: []const u8, index: usize) ?DecodedWtf8 {
+    if (index + 3 > bytes.len or bytes[index] != 0xed) return null;
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    if (second < 0xa0 or second > 0xbf) return null;
+    if (third < 0x80 or third > 0xbf) return null;
+    const code_point: u21 =
+        (@as(u21, bytes[index] & 0x0f) << 12) |
+        (@as(u21, second & 0x3f) << 6) |
+        @as(u21, third & 0x3f);
+    return .{ .code_point = code_point, .len = 3 };
+}
+
 fn writeHeader(buf: []u8, flag_bits: u16, captures: u8, stack_size: u8, code_len: u32) void {
     std.mem.writeInt(u16, buf[0..2], flag_bits, .little);
     buf[re_header_capture_count] = captures;
@@ -1715,6 +1751,18 @@ fn writeHeader(buf: []u8, flag_bits: u16, captures: u8, stack_size: u8, code_len
 pub const CompileError = std.mem.Allocator.Error || error{
     InvalidPattern,
     Unsupported,
+    // qjs:libregexp.c:1391/2411 re_parse_error(s, "stack overflow") — SyntaxError at JS wrappers
+    StackOverflow,
+};
+
+/// Host-provided native-stack guard. Mirrors qjs `lre_check_stack_overflow`
+/// (libregexp.h:60, implemented in quickjs.c:48000). A null check is a no-op,
+/// matching the fuzz harness that always returns 0.
+pub const StackOverflowCheck = *const fn (opaque_ptr: ?*anyopaque, alloca_size: usize) bool;
+
+pub const CompileOptions = struct {
+    @"opaque": ?*anyopaque = null,
+    check_stack_overflow: ?StackOverflowCheck = null,
 };
 
 const max_code_point: u21 = 0x10ffff;
@@ -1875,10 +1923,28 @@ const REStringListBuildContext = struct {
 };
 
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []const u8) CompileError![]u8 {
-    return compileWithFlagBits(allocator, pattern, try parseFlagBits(flags_str));
+    return compileWithOptions(allocator, pattern, flags_str, .{});
+}
+
+pub fn compileWithOptions(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    flags_str: []const u8,
+    options: CompileOptions,
+) CompileError![]u8 {
+    return compileWithFlagBitsAndOptions(allocator, pattern, try parseFlagBits(flags_str), options);
 }
 
 pub fn compileWithFlagBits(allocator: std.mem.Allocator, pattern: []const u8, re_flags: u16) CompileError![]u8 {
+    return compileWithFlagBitsAndOptions(allocator, pattern, re_flags, .{});
+}
+
+pub fn compileWithFlagBitsAndOptions(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    re_flags: u16,
+    options: CompileOptions,
+) CompileError![]u8 {
     var s = REParseState{
         .allocator = allocator,
         .byte_code = .empty,
@@ -1890,6 +1956,8 @@ pub fn compileWithFlagBits(allocator: std.mem.Allocator, pattern: []const u8, re
         .ignore_case = (re_flags & flags.ignore_case) != 0,
         .multi_line = (re_flags & flags.multiline) != 0,
         .dotall = (re_flags & flags.dot_all) != 0,
+        .@"opaque" = options.@"opaque",
+        .check_stack_overflow = options.check_stack_overflow,
     };
     errdefer s.byte_code.deinit(allocator);
     defer s.group_names.deinit(allocator);
@@ -1992,6 +2060,27 @@ fn readGroupNameCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
         if (first > max_code_point) return error.InvalidPattern;
         return first;
     }
+    // qjs:libregexp.c:1648-1656 — unicode_from_utf8 then unconditionally recombine
+    // a following low surrogate. CESU-8 / WTF-8 hi/lo halves must decode first
+    // (std.unicode.utf8Decode rejects them) so non-u `new RegExp` sources work.
+    const first = try readGroupNameLiteralCodePoint(pattern, index);
+    if (isHiSurrogate(first)) {
+        const saved = index.*;
+        if (readGroupNameLiteralCodePoint(pattern, index)) |second| {
+            if (isLoSurrogate(second)) return fromSurrogate(@intCast(first), @intCast(second));
+        } else |_| {}
+        index.* = saved;
+    }
+    if (first > max_code_point) return error.InvalidPattern;
+    return first;
+}
+
+fn readGroupNameLiteralCodePoint(pattern: []const u8, index: *usize) CompileError!u21 {
+    if (index.* >= pattern.len) return error.InvalidPattern;
+    if (decodeWtf8Surrogate(pattern, index.*)) |decoded| {
+        index.* += decoded.len;
+        return decoded.code_point;
+    }
     const byte = pattern[index.*];
     const width = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidPattern;
     if (index.* + width > pattern.len) return error.InvalidPattern;
@@ -2080,7 +2169,13 @@ const REParseState = struct {
     total_capture_count: i32 = -1,
     has_named_captures: i32 = -1,
     @"opaque": ?*anyopaque = null,
+    check_stack_overflow: ?StackOverflowCheck = null,
     group_names: std.ArrayList(u8) = .empty,
+
+    fn lreCheckStackOverflow(self: *const REParseState, alloca_size: usize) bool {
+        const check = self.check_stack_overflow orelse return false;
+        return check(self.@"opaque", alloca_size);
+    }
 
     fn atomResult(self: *const REParseState, start: usize, quantifiable: bool) Atom {
         return .{ .start = start, .quantifiable = quantifiable, .capture_count_before = self.capture_count };
@@ -2239,6 +2334,8 @@ const REParseState = struct {
     //--- top-level parse dispatch ---
 
     fn reParseDisjunction(self: *REParseState, terminator: ?u8, is_backward_dir: bool) CompileError!void {
+        // qjs:libregexp.c:2410 — one native-stack check per recursive disjunction entry
+        if (self.lreCheckStackOverflow(0)) return error.StackOverflow;
         const start = self.byte_code.items.len;
         try self.reParseAlternative(terminator, is_backward_dir);
         while (self.buf_ptr < self.buf_start.len and self.buf_start[self.buf_ptr] == '|') {
@@ -2636,6 +2733,8 @@ const REParseState = struct {
     /// ignoring case and complemented when the class is negated (negation
     /// of a set that may contain strings is a SyntaxError).
     fn reParseNestedClass(self: *REParseState) CompileError!REStringList {
+        // qjs:libregexp.c:1390 — one native-stack check per recursive v-mode class entry
+        if (self.lreCheckStackOverflow(0)) return error.StackOverflow;
         const invert = if (self.buf_ptr < self.buf_start.len and self.buf_start[self.buf_ptr] == '^') blk: {
             self.buf_ptr += 1;
             break :blk true;
@@ -3437,23 +3536,6 @@ const REParseState = struct {
         return fromSurrogate(@intCast(first), @intCast(second));
     }
 
-    const DecodedWtf8 = struct {
-        code_point: u21,
-        len: usize,
-    };
-
-    fn decodeWtf8Surrogate(bytes: []const u8, index: usize) ?DecodedWtf8 {
-        if (index + 3 > bytes.len or bytes[index] != 0xed) return null;
-        const second = bytes[index + 1];
-        const third = bytes[index + 2];
-        if (second < 0xa0 or second > 0xbf) return null;
-        if (third < 0x80 or third > 0xbf) return null;
-        const code_point: u21 =
-            (@as(u21, bytes[index] & 0x0f) << 12) |
-            (@as(u21, second & 0x3f) << 6) |
-            @as(u21, third & 0x3f);
-        return .{ .code_point = code_point, .len = 3 };
-    }
     fn readUtf8CodePoint(self: *REParseState) CompileError!u21 {
         if (self.buf_ptr >= self.buf_start.len) return error.InvalidPattern;
         const byte = self.buf_start[self.buf_ptr];

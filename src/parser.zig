@@ -1083,7 +1083,7 @@ pub const lexer = struct {
                     return;
                 }
             }
-            const value = parseNumber(lexeme, base) catch return error.InvalidNumber;
+            const value = parseNumber(self.allocator, lexeme, base) catch return error.InvalidNumber;
             self.emitInto(out, t.TOK_NUMBER, .{ .num = .{ .value = value } });
         }
 
@@ -1921,20 +1921,51 @@ pub const lexer = struct {
         return @floatFromInt(value);
     }
 
-    fn parseNumber(lexeme: []const u8, base: u8) !f64 {
-        var stripped: [128]u8 = undefined;
-        var len: usize = 0;
+    fn parseNumber(allocator: std.mem.Allocator, lexeme: []const u8, base: u8) !f64 {
+        // qjs js_atof has no length cap: it strips `_` into a stack scratch
+        // and grows a heap buffer when that scratch is too small
+        // (quickjs.c:12876-12883). Parse the source slice directly when there
+        // are no separators; otherwise use an unbounded strip buffer.
+        var has_separator = false;
         for (lexeme) |c| {
-            if (c == '_') continue;
-            if (len >= stripped.len) return error.InvalidNumber;
-            stripped[len] = c;
-            len += 1;
+            if (c == '_') {
+                has_separator = true;
+                break;
+            }
         }
-        const s = stripped[0..len];
+        if (!has_separator) return parseNumberDigits(lexeme, base);
+
+        var stripped: std.ArrayList(u8) = .empty;
+        defer stripped.deinit(allocator);
+        try stripped.ensureTotalCapacity(allocator, lexeme.len);
+        for (lexeme) |c| {
+            if (c != '_') stripped.appendAssumeCapacity(c);
+        }
+        return parseNumberDigits(stripped.items, base);
+    }
+
+    fn parseNumberDigits(s: []const u8, base: u8) !f64 {
         if (base == 10) return std.fmt.parseFloat(f64, s) catch error.InvalidNumber;
         if (s.len < 3) return error.InvalidNumber;
-        const value = std.fmt.parseUnsigned(u128, s[2..], base) catch return error.InvalidNumber;
-        return @floatFromInt(value);
+        const digits = s[2..];
+        if (std.fmt.parseUnsigned(u128, digits, base)) |value| {
+            return @floatFromInt(value);
+        } else |_| {
+            // Same parser as the u128 path; overflow accumulates in f64 the
+            // way qjs js_atod / value_format.parseRadixPrefixedDigits do.
+            var value: f64 = 0;
+            for (digits) |c| {
+                const digit: u8 = switch (c) {
+                    '0'...'9' => c - '0',
+                    'a'...'f' => c - 'a' + 10,
+                    'A'...'F' => c - 'A' + 10,
+                    else => return error.InvalidNumber,
+                };
+                if (digit >= base) return error.InvalidNumber;
+                value = value * @as(f64, @floatFromInt(base)) + @as(f64, @floatFromInt(digit));
+            }
+            return value;
+        }
     }
 
     fn keywordLookup(lexeme: []const u8) ?t.TokenKind {
@@ -3629,6 +3660,12 @@ pub const parser_core = struct {
     const core_bigint = @import("core/bigint.zig");
     const core = @import("core/root.zig");
     const regexp_lib = @import("libs/regexp.zig");
+
+    fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
+        // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
+        const rt: *core.JSRuntime = @ptrCast(@alignCast(opaque_ptr orelse return false));
+        return rt.checkNativeStackOverflow(alloca_size);
+    }
     const libs_bignum = @import("libs/bigint.zig");
     const simple_token = @import("simple_token.zig");
     const unicode = @import("libs/unicode.zig");
@@ -6564,11 +6601,14 @@ pub const parser_core = struct {
                 // the synthetic derived-return fallback in emitReturnValue.
                 try self.emitScopeGetVar(atom_this);
             } else if (self.emit_to_function_def and
-                (self.cur_func().func_type == .arrow or self.cur_func().func_type == .class_static_init))
+                (self.cur_func().func_type == .arrow or
+                    self.cur_func().func_type == .class_static_init or
+                    self.cur_func().is_direct_eval))
             {
-                // Arrows and class static blocks have no own ThisBinding.
-                // Resolve the nearest lexical owner's hidden `this` local
-                // through the ordinary closure chain.
+                // qjs TOK_THIS always emits OP_scope_get_var this
+                // (quickjs.c:26934-26939). Direct eval has no own ThisBinding
+                // (quickjs.c:37239); resolve against the caller seed so a
+                // root-eval-captured `this` cannot shadow the method's this.
                 try self.emitScopeGetVar(atom_this);
             } else {
                 try Emitter.op(self, opcode.op.push_this);
@@ -7505,7 +7545,10 @@ pub const parser_core = struct {
 
         const param_kind = nextRegexpAwareLookaheadKind(s, s.peekKind()) catch |err| return lookaheadErrorAsNoMatch(err);
         if (s.lex.gotLineTerminator()) return false;
-        if (param_kind == tok.TOK_IDENT) {
+        // qjs `update_token_ident` (quickjs.c:22738-22764) keeps sloppy
+        // context keywords as TOK_IDENT. zjs lexes them as dedicated kinds,
+        // so AsyncArrowBindingIdentifier must accept those kinds here.
+        if (isAsyncArrowBindingIdentifierKind(s, param_kind)) {
             const arrow_kind = nextRegexpAwareLookaheadKind(s, param_kind) catch |err| return lookaheadErrorAsNoMatch(err);
             if (s.lex.gotLineTerminator()) return false;
             return arrow_kind == tok.TOK_ARROW;
@@ -7513,6 +7556,19 @@ pub const parser_core = struct {
         if (param_kind != '(') return false;
         const balanced = scanBalancedAfterOpening(s, param_kind, true) catch |err| return lookaheadErrorAsNoMatch(err);
         return balanced.closed and balanced.following == tok.TOK_ARROW;
+    }
+
+    /// AsyncArrowBindingIdentifier in sloppy non-generator. Keep `await`
+    /// rejected: +Await makes it illegal even though qjs accepts
+    /// `async await => 1` at sloppy top-level (quickjs.c:22749-22756).
+    fn isAsyncArrowBindingIdentifierKind(s: *State, kind: tok.TokenKind) bool {
+        if (kind == tok.TOK_IDENT) return true;
+        if (s.is_strict or s.cur_func().is_strict_mode) return false;
+        return switch (kind) {
+            tok.TOK_YIELD => !s.in_generator,
+            tok.TOK_STATIC, tok.TOK_LET => true,
+            else => isSloppyFutureReservedToken(kind),
+        };
     }
 
     /// Check if we're at an arrow function head
@@ -9990,8 +10046,13 @@ pub const parser_core = struct {
         };
         try Emitter.pushConstOwned(s, pattern_string.value());
 
-        var compiled = regexp_lib.compilePatternAndFlags(s.function.memory.allocator, pattern, flags) catch |err| switch (err) {
+        var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.function.memory.allocator, pattern, flags, .{
+            .@"opaque" = s.runtime.?,
+            .check_stack_overflow = lreCheckStackOverflow,
+        }) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
+            // qjs:libregexp.c:2411 re_parse_error "stack overflow" -> JS_ThrowSyntaxError
+            error.StackOverflow => return Error.StackOverflow,
             else => return Error.InvalidRegExp,
         };
         defer compiled.deinit(s.function.memory.allocator);
@@ -10557,9 +10618,13 @@ pub const parser_core = struct {
             defer if (name_info.retained) s.function.atoms.free(name);
             const is_getter = !name_info.has_escape and atomNameEquals(s, name, "get");
             const is_setter = !name_info.has_escape and atomNameEquals(s, name, "set");
+            // qjs js_parse_property_name retreats to a shorthand ident when
+            // the next token is `:`, `,`, `}`, `(`, or `=` (quickjs.c:24643-24646).
             if ((is_getter or is_setter) and
                 s.peekKind() != @as(tok.TokenKind, @intCast(':')) and
-                s.peekKind() != @as(tok.TokenKind, @intCast('(')))
+                s.peekKind() != @as(tok.TokenKind, @intCast('(')) and
+                s.peekKind() != @as(tok.TokenKind, @intCast(',')) and
+                s.peekKind() != @as(tok.TokenKind, @intCast('}')))
             {
                 try parseObjectAccessorProperty(s, computed_flags, if (is_getter) .get else .set, if (is_getter) 1 else 2, property_source_start);
             } else if (s.peekKind() == @as(tok.TokenKind, @intCast(':'))) {
@@ -11798,11 +11863,6 @@ pub const parser_core = struct {
     /// unlabelled break against the switch's own break frame bumps the frame
     /// label's ref_count (labelled breaks ride the label frame's label, exactly
     /// like legacy labelled fixups bypass `break_fixups`).
-    fn v2SwitchBreakRefCount(s: *State) u32 {
-        const label = s.v2_break_frame_labels.getLast();
-        return s.v2Builder().label_slots[label.index()].ref_count;
-    }
-
     /// QCP-1 S2-G2: v2 twin of `caseCanFallthrough` — the v2 temp stream carries
     /// no line_num pseudo-ops, so the last opcode of the case body (bounded
     /// forward scan from the body start) is the flowSummary answer. Terminator
@@ -11817,6 +11877,13 @@ pub const parser_core = struct {
     /// the tail jump.
     /// `scan_start` is the switch's own first emission position; scanning from
     /// there reproduces the whole-stream answer without an O(code_len) walk.
+    ///
+    /// When the last opcode is a terminator, the tail is still live if a
+    /// referenced label is bound at `code_len` — the same incoming-edge rule
+    /// as `isLiveCode` / qjs `js_is_live_code` (quickjs.c:23816). v2 label
+    /// binds emit zero bytes, so a while-family back-edge `goto` would otherwise
+    /// look like "cannot continue" even though `break` lands at the case end.
+    /// Keep this 5-opcode terminator set; do not reuse `isLiveCode`'s wider set.
     fn v2CaseTailCanFallthrough(s: *State, scan_start: u32, body_start: u32) bool {
         const v2b = s.v2Builder();
         var pc: usize = if (v2b.code_len > body_start) body_start else scan_start;
@@ -11831,15 +11898,21 @@ pub const parser_core = struct {
         }
         std.debug.assert(pc == v2b.code_len);
         const op_id = last orelse return true;
-        return switch (op_id) {
+        switch (op_id) {
             opcode.op.goto,
             opcode.op.@"return",
             opcode.op.return_undef,
             opcode.op.return_async,
             opcode.op.throw,
-            => false,
-            else => true,
-        };
+            => {},
+            else => return true,
+        }
+        var label_index: u32 = 0;
+        while (label_index < v2b.label_len) : (label_index += 1) {
+            const slot = v2b.label_slots[label_index];
+            if (slot.flags.bound and slot.bound_offset == v2b.code_len and slot.ref_count > 0) return true;
+        }
+        return false;
     }
 
     /// QCP-1 S2-G3: v2 twin of `isLiveCode` — qjs js_is_live_code
@@ -13518,8 +13591,6 @@ pub const parser_core = struct {
                             v2_default_label = default_label;
                             default_waiting_for_body = false;
                         }
-                        var v2_break_refs_before_body: u32 = undefined;
-                        v2_break_refs_before_body = v2SwitchBreakRefCount(s);
                         while (s.peekKind() != tok.TOK_CASE and
                             s.peekKind() != tok.TOK_DEFAULT and
                             s.peekKind() != '}' and
@@ -13527,7 +13598,11 @@ pub const parser_core = struct {
                         {
                             try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
                         }
-                        const case_tail_can_fallthrough = v2SwitchBreakRefCount(s) == v2_break_refs_before_body and
+                        // qjs TOK_SWITCH (quickjs.c:29313-29318) always emits
+                        // the fallthrough goto; js_is_live_code strips dead
+                        // tails. Do not also require "no switch-break in the
+                        // body" — that drops `case 0: if(false) break; y(); case 1:`.
+                        const case_tail_can_fallthrough =
                             v2CaseTailCanFallthrough(s, v2_clause_scan_start, v2_body_start);
                         if ((s.peekKind() == tok.TOK_CASE or s.peekKind() == tok.TOK_DEFAULT) and
                             case_tail_can_fallthrough)
@@ -13561,8 +13636,6 @@ pub const parser_core = struct {
                         v2_default_candidate = try v2FNewLabel(s);
                         try v2FBindLabel(s, v2_default_candidate);
                         has_default = true;
-                        var v2_break_refs_before_body: u32 = undefined;
-                        v2_break_refs_before_body = v2SwitchBreakRefCount(s);
                         while (s.peekKind() != tok.TOK_CASE and
                             s.peekKind() != tok.TOK_DEFAULT and
                             s.peekKind() != '}' and
@@ -13576,7 +13649,7 @@ pub const parser_core = struct {
                             v2_default_label = v2_default_candidate;
                             default_waiting_for_body = false;
                         }
-                        const case_tail_can_fallthrough = v2SwitchBreakRefCount(s) == v2_break_refs_before_body and
+                        const case_tail_can_fallthrough =
                             v2CaseTailCanFallthrough(s, v2_clause_scan_start, v2_body_start);
                         if (s.peekKind() == tok.TOK_CASE and case_tail_can_fallthrough) {
                             const fallthrough_label = try v2FNewLabel(s);
@@ -14796,11 +14869,16 @@ pub const parser_core = struct {
                     ParseFlags.default,
                 );
             } else {
+                // Must match parseVar's full sloppy_keyword_var predicate
+                // (quickjs.c:22738 update_token_ident is the one qjs gate, so
+                // js_parse_var and js_parse_for_in_of cannot diverge).
                 const sloppy_keyword_var = var_tok == tok.TOK_VAR and
                     (s.peekKind() == tok.TOK_YIELD or s.peekKind() == tok.TOK_STATIC or
                         s.peekKind() == tok.TOK_LET or s.peekKind() == tok.TOK_AWAIT or
                         isSloppyFutureReservedBindingToken(s)) and
-                    !(s.is_strict or s.cur_func().is_strict_mode);
+                    !(s.is_strict or s.cur_func().is_strict_mode) and
+                    !(s.peekKind() == tok.TOK_YIELD and s.in_generator) and
+                    !(s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s));
                 if (!isIdentifierLikeToken(s) and !sloppy_keyword_var) return Error.UnexpectedToken;
                 if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                 const atom_id = identifierLikeAtom(s);
@@ -20351,6 +20429,20 @@ pub const compile_entry = struct {
 
         const canonical_root = compileQjsProgram(rt, filename_atom, source, options, compile_context, &function, &features) catch |err| switch (err) {
             error.OutOfMemory => return err,
+            // qjs:libregexp.c:1391/2411 and quickjs.c:22836 js_parse_error "stack overflow"
+            error.StackOverflow => {
+                var result = ResultImpl{
+                    .runtime = rt,
+                    .mode = options.mode,
+                    .direct_eval = options.mode == .eval_direct,
+                };
+                try setFallbackSyntaxError(&result, rt, filename_atom, source, "stack overflow");
+                function.deinit(rt);
+                function_owned = false;
+                arena.deinit();
+                arena_owned = false;
+                return result;
+            },
             else => {
                 var result = ResultImpl{
                     .runtime = rt,
