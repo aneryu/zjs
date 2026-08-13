@@ -1,28 +1,29 @@
 # 性能追平战役 — 交接
 
-最后更新 2026-08-13。**接手先读这一份，再按需展开。**
+最后更新 2026-08-14。**接手先读这一份，再按需展开。**
 
 ---
 
 ## 1. 现在在哪
 
 ```
-zoo throughput geomean   0.9137   (15 基准 × 每侧 24 samples，3 车道并行)
-总 log deficit           1.3539
-追平需相对提升            9.45%
-基线 zjs fb680e41  vs  qjs 04be2460
+zoo throughput geomean   0.9278   (15 基准 × 每侧 24 samples，3 车道并行)
+总 log deficit           1.1233
+追平需相对提升            7.78%
+基线 zjs 42b6160f / 18d66826  vs  qjs 04be2460
+产物 2026-08-13/zoo-absolute-42b6160f.json
 ```
 
-**今天净落地两刀，geomean 0.9111 → 0.9137（+0.29%）。** 其后 `42b6160f`
-（resident `insert2`/`insert3`/`perm3` + int32 TypedArray store）已通过正式
-7-lineage Zoo 门：中位 **+1.384 log-pp**，最坏 pad **+1.070**，`S/MDE = 4.98×`。
-见 `2026-08-13/STACK3-TYPED-INT-FORMAL-LINEAGE.md`。这是因果 zjs/zjs，还不是
-新的 zjs/qjs 绝对基线。
+上一份绝对基线是 `0.9137`（`fb680e41` 时代，`zoo-absolute-fb680e41.json`）。
+`42b6160f` 落地后同协议重跑为 **0.9278**（相对旧基线 **+1.537 log-pp**）。
+正式 7-lineage 因果门是 +1.384 log-pp；绝对 zjs/qjs 与之同向、略高。
+NavierStokes 已翻到 **1.061**。
 
 | commit | 内容 | 实测效果 |
 |---|---|---|
 | `485a7c5a` | `fclosure` 常驻 handler + 压平 capture source 分派（qjs:17914） | **zoo 效应为零**；保留理由是忠实性（qjs 有常驻 CASE 而 zjs 两表都挂 coldStd）+ 指令 −0.371% 稳定 |
 | `fb680e41` | `build_arg_list` 的 length 快前缀（qjs:41171 / qjs:8268） | **RayTrace +2.25/+2.54/+2.04%（三 pad），geomean +0.24%**；RayTrace 0.754 → 0.783 |
+| `42b6160f` | resident `insert2`/`insert3`/`perm3` + int32 TypedArray store | 正式 7-lineage **PASS +1.384**；绝对 zoo 0.9137 → **0.9278** |
 
 ⚠️ **目前没有已验证的追平方向。** 见 §5。
 
@@ -105,8 +106,8 @@ return 区域虽在 13/15 基准上 8/8 同向，但仍是**未具名区域**且
 | DeltaBlue | 已归因 | 调用/帧/构造同边界 595.6M = 其赤字 **80.4%**；qjs 有 7.06M 次 `tail_call_method` 而 zjs **为 0** |
 | stack-cache 模拟 | **9/15 归档，机会门 PASS** | A1 消除 operand-stack loads 的 0.298–0.661，A2 0.406–0.847；**local slot traffic 不在覆盖内**；1-slot 失效率 0.502–0.782 |
 
-⚠️ **六个基准从未被归因过**：zlib / richards / mandreel / box2d / gbemu / splay，
-合计占总赤字 **39.1%**。
+⚠️ **五个仍落后且从未归因的基准**：zlib / richards / mandreel / box2d / splay，
+合计占净赤字 **34.3%**。gbemu 已被 stack3 包拉到 0.968，不再算未归因主项。
 
 ---
 
