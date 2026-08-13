@@ -1,0 +1,372 @@
+{
+  "schema": "pdfjs-diag-branch-pmu-v1",
+  "warning": "BR_RETURN_RETIRED is an architectural return-frequency proxy, not a semantic helper counter and not a unit-cost measurement.",
+  "timestampUtc": "2026-08-13T03:45:06Z",
+  "cpu": 19,
+  "effectiveAffinity": [
+    19
+  ],
+  "parallelism": 1,
+  "samplesPerEngine": 8,
+  "samplingOrder": "qjs->zjs, zjs->qjs repeated (ABBA)",
+  "orderLog": [
+    {
+      "sample": 1,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 2,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 3,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 4,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 5,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 6,
+      "order": "zjs->qjs"
+    },
+    {
+      "sample": 7,
+      "order": "qjs->zjs"
+    },
+    {
+      "sample": 8,
+      "order": "zjs->qjs"
+    }
+  ],
+  "pmu": "armv8_pmuv3_1",
+  "rawEvents": {
+    "branch_immediate_retired": "event=0x0d",
+    "branch_return_retired": "event=0x0e",
+    "branch_retired": "event=0x21",
+    "branch_mispredicted_retired": "event=0x22"
+  },
+  "kernel": "6.17.0-1014-nvidia",
+  "binaries": {
+    "qjs": {
+      "path": "/tmp/pdfjs-diagnosis-20260813/pristine/qjs-b76d",
+      "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d"
+    },
+    "zjs": {
+      "path": "/tmp/pdfjs-diagnosis-20260813/pristine/zjs-c0ad",
+      "sha256": "c0ad7c3e1650bbab33cc8e4022dddf1813630e9b55ad40528cde580aeac65f96"
+    }
+  },
+  "source": {
+    "path": "/home/aneryu/worktree-pdfjs-diagnosis/reports/perf/qjs-align/2026-08-13/PDFJS-DIAG-return-control-inline.js",
+    "sha256": "4edcea150076166b44d0ed5c6d09fdb665b5ddbe9e8a943c18bba21715ec9f89"
+  },
+  "records": {
+    "qjs": [
+      {
+        "counters": {
+          "branch_immediate_retired": 33244453,
+          "branch_return_retired": 21688,
+          "branch_retired": 54272941,
+          "branch_mispredicted_retired": 13125
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 33244452,
+          "branch_return_retired": 21688,
+          "branch_retired": 54272940,
+          "branch_mispredicted_retired": 13293
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 33244511,
+          "branch_return_retired": 21688,
+          "branch_retired": 54272999,
+          "branch_mispredicted_retired": 13166
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 33244457,
+          "branch_return_retired": 21688,
+          "branch_retired": 54272945,
+          "branch_mispredicted_retired": 12887
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 33244514,
+          "branch_return_retired": 21687,
+          "branch_retired": 54273001,
+          "branch_mispredicted_retired": 12953
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 33244508,
+          "branch_return_retired": 21688,
+          "branch_retired": 54272996,
+          "branch_mispredicted_retired": 13272
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 33244452,
+          "branch_return_retired": 21688,
+          "branch_retired": 54272940,
+          "branch_mispredicted_retired": 13394
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 33244515,
+          "branch_return_retired": 21688,
+          "branch_retired": 54273003,
+          "branch_mispredicted_retired": 13514
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      }
+    ],
+    "zjs": [
+      {
+        "counters": {
+          "branch_immediate_retired": 40197569,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214334,
+          "branch_mispredicted_retired": 10765
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 40197976,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214741,
+          "branch_mispredicted_retired": 11856
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 40197772,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214537,
+          "branch_mispredicted_retired": 10369
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 40198060,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214825,
+          "branch_mispredicted_retired": 9402
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 40197899,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214664,
+          "branch_mispredicted_retired": 10085
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 40197768,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214533,
+          "branch_mispredicted_retired": 10108
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 40197538,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214303,
+          "branch_mispredicted_retired": 10138
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      },
+      {
+        "counters": {
+          "branch_immediate_retired": 40197707,
+          "branch_return_retired": 15159,
+          "branch_retired": 61214472,
+          "branch_mispredicted_retired": 10756
+        },
+        "stdout": "PdfJS: 1784293664",
+        "stdoutSha256": "51bd5e6ef71dbb4269225ce84677b638361a50c12446903f3cdd7b03a1b7cb6d",
+        "exitCode": 0
+      }
+    ]
+  },
+  "metrics": {
+    "branch_immediate_retired": {
+      "qjsMedian": 33244482.5,
+      "qjsMAD": 30.0,
+      "zjsMedian": 40197770.0,
+      "zjsMAD": 165.0,
+      "ratioMedian": 1.20915515387586,
+      "ratioMAD": 3.853895699457155e-06,
+      "deltaMedian": 6953260.5,
+      "deltaMAD": 134.5,
+      "pairedRatiosZjsOverQjs": [
+        1.2091511627518732,
+        1.2091634417676669,
+        1.2091551594788084,
+        1.2091657866452745,
+        1.209158870543272,
+        1.2091551482729117,
+        1.2091502666369716,
+        1.2091530587827797
+      ],
+      "pairedDeltasZjsMinusQjs": [
+        6953116,
+        6953524,
+        6953261,
+        6953603,
+        6953385,
+        6953260,
+        6953086,
+        6953192
+      ]
+    },
+    "branch_return_retired": {
+      "qjsMedian": 21688.0,
+      "qjsMAD": 0.0,
+      "zjsMedian": 15159.0,
+      "zjsMAD": 0.0,
+      "ratioMedian": 0.6989579490962744,
+      "ratioMAD": 0.0,
+      "deltaMedian": -6529.0,
+      "deltaMAD": 0.0,
+      "pairedRatiosZjsOverQjs": [
+        0.6989579490962744,
+        0.6989579490962744,
+        0.6989579490962744,
+        0.6989579490962744,
+        0.6989901784479181,
+        0.6989579490962744,
+        0.6989579490962744,
+        0.6989579490962744
+      ],
+      "pairedDeltasZjsMinusQjs": [
+        -6529,
+        -6529,
+        -6529,
+        -6529,
+        -6528,
+        -6529,
+        -6529,
+        -6529
+      ]
+    },
+    "branch_retired": {
+      "qjsMedian": 54272970.5,
+      "qjsMAD": 30.0,
+      "zjsMedian": 61214535.0,
+      "zjsMAD": 165.0,
+      "ratioMedian": 1.1279003891391846,
+      "ratioMAD": 2.416727687526432e-06,
+      "deltaMedian": 6941537.5,
+      "deltaMAD": 135.0,
+      "pairedRatiosZjsOverQjs": [
+        1.127897859819316,
+        1.1279053797343574,
+        1.1279003948169513,
+        1.1279068235563778,
+        1.127902693274691,
+        1.1279003834614179,
+        1.127897309414231,
+        1.1278991140401795
+      ],
+      "pairedDeltasZjsMinusQjs": [
+        6941393,
+        6941801,
+        6941538,
+        6941880,
+        6941663,
+        6941537,
+        6941363,
+        6941469
+      ]
+    },
+    "branch_mispredicted_retired": {
+      "qjsMedian": 13219.0,
+      "qjsMAD": 134.5,
+      "zjsMedian": 10253.5,
+      "zjsMAD": 335.5,
+      "ratioMedian": 0.7830714877643555,
+      "ratioMAD": 0.023816761326609315,
+      "deltaMedian": -2832.5,
+      "deltaMAD": 377.5,
+      "pairedRatiosZjsOverQjs": [
+        0.8201904761904761,
+        0.8918979914240578,
+        0.7875588637399362,
+        0.729572437339955,
+        0.7785841117887748,
+        0.7616033755274262,
+        0.7569060773480663,
+        0.7959153470475063
+      ],
+      "pairedDeltasZjsMinusQjs": [
+        -2360,
+        -1437,
+        -2797,
+        -3485,
+        -2868,
+        -3164,
+        -3256,
+        -2758
+      ]
+    }
+  }
+}
