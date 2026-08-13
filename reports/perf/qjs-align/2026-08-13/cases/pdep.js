@@ -1,0 +1,7 @@
+var N = 20000000;
+function main(n) {
+    var s = 12345, a = 7, b = 0xFFFFF;
+    for (var i = 0; i < n; i++) { s = (s + a) & b; s = (s + a) & b; s = (s + a) & b; s = (s + a) & b; }
+    return s;
+}
+print(main(N) !== -1 ? 1 : 0);
