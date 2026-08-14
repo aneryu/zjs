@@ -1088,10 +1088,12 @@ fn cloneAndExpand(
     if (spec.hotExtensionMut()) |hot| {
         hot.script_or_module = rt.atoms.dup(caller.scriptOrModule());
         var facts = caller.callFacts();
-        // Spec has extra locals; leaf/exact-args frames assert var_count==0.
-        facts.execution.simple_inline_eligible = false;
-        facts.execution.strict_simple_inline_eligible = false;
-        facts.execution.strict_simple_snapshot_inline_eligible = false;
+        // Extra TAKE locals forbid Fast leaf / exact-args (those frames
+        // assert var_count==0). They do not invalidate simple_inline_base:
+        // kind / simple params / no global-decl are copied unchanged, so
+        // the inherited simple_* bits still admit setupSimpleInlineEntry
+        // (qjs:17828 alloca, the var_count>0 path). 0d4169ba over-cleared
+        // them and sent spec-copy plain calls through the general nest.
         facts.execution.simple_inline_empty_leaf = false;
         facts.execution.raw_this_inline_empty_leaf = false;
         facts.execution.simple_inline_exact_args_leaf = false;
