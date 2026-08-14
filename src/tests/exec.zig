@@ -21991,6 +21991,24 @@ test "small-function-inlining L1: own apply misses take" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "small-function-inlining L1: same-activation loop takes after M hits" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function main(n) {
+        \\  function K() { this.initialize.apply(this, arguments); }
+        \\  K.prototype.initialize = function (a, b) { this.a = a; this.b = b; };
+        \\  var i, s = 0, p;
+        \\  for (i = 0; i < n; i++) { p = new K(1, 2); s = s + p.a; }
+        \\  return s;
+        \\}
+        \\assert.sameValue(main(16), 16);
+        \\assert.sameValue(main(16), 16);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "small-function-inlining L1: replaced Function.prototype.apply misses take" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
