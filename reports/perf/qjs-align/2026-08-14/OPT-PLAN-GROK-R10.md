@@ -84,6 +84,17 @@ extra locals 改写／`InlinedSite.pc_map` 差量映射／栈重建含 setter-th
 进简报附录，不在包压力下修；③整包不交付，序列=grok rebase+重测+AWAIT-MEASURE →
 driver 跑 R-5 包验收 → 过线才合。
 
+**R-5 第一轮终判（2026-08-14，@2cd1a927）：FAIL——内联未触发。**
+case：N2 1.322 / N3 1.205（门 ≤1.05，≈delete-only 线）；头对头 pkg/delete-only N3 = **1.0274**
+（比纯删还慢=只付探测成本）。合规面全绿（gate 0/49775 / ReleaseSafe / lint 0）——
+非语义问题，机制未接通。诊断方向已下达（eligible 位/M 计数 key/特化安装/预算门）。
+**新协议**：grok AWAIT-MEASURE 前必须自跑目标 case 性能冒烟（头对头 vs delete-only，
+数字进回执；N3 ≤0.90 才够格提验收）——语义测试绿≠机制生效。
+zoo 未跑（case 门先死，省下 CPU19）。main 侧 ReleaseSafe 套件自身失败（exit 1），
+grok 报的 3 残留失败 pre-existing 分类成立方向，细节待补。
+
+**排程注记（用户裁定 2026-08-14）：布局工程批不自动执行——队列行进到它时暂停，交用户决断。**
+
 ## 4. 队列衔接
 
 R9（真帧瘦身+apply 段）→ **R10（本批）** → R11 EB 命名桶 → R12 TS RC/frame →
