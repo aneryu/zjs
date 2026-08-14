@@ -760,12 +760,9 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    // S publishes simple_field_ctor = true; the first `new` takes the writer,
-    // then `S.prototype = 42` forces both the writer's prototype gate and the
-    // direct instance route to fall back to the authoritative
-    // createConstructorInstance (Object.prototype realm default). NS is
-    // non-simple (arg mutation after the store), so its `new` must skip the
-    // writer entirely and still honor a replaced prototype object.
+    // Both S and NS run the true constructor body. Replacing S.prototype with
+    // a non-object still falls back to Object.prototype (qjs js_create_from_ctor).
+    // NS honors a replaced prototype object.
     const setup = try js.eval(
         \\function S(a) { this.a = a; }
         \\const before = new S(1);

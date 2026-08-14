@@ -7,9 +7,6 @@ const std = @import("std");
 // rejected --build-info approach), whereas the harness writes it once, outside
 // any timed window.
 const dossier_build_options = @import("dossier_options");
-const dossier_variant = dossier_build_options.zjs_dossier_simple_ctor;
-const dossier_bypass = !std.mem.eql(u8, dossier_variant, "c");
-const dossier_memo = std.mem.eql(u8, dossier_variant, "a");
 
 const zjs = @import("zjs");
 const builtin = @import("builtin");
@@ -384,12 +381,8 @@ fn writeResult(
     stats: SampleStats,
 ) !void {
     try output.print(
-        "{{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\",\n  \"dossier_variant\": \"{s}\",\n  \"dossier_simple_ctor_bypass\": {},\n  \"dossier_simple_ctor_memo\": {}",
-        .{
-            dossier_variant,
-            dossier_bypass,
-            dossier_memo,
-        },
+        "{{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\",\n  \"dossier_variant\": \"removed\",\n  \"dossier_simple_ctor_bypass\": false,\n  \"dossier_simple_ctor_memo\": false",
+        .{},
     );
     try output.writeAll(",\n  \"case\": ");
     try writeJsonString(output, options.case_name);
