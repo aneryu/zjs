@@ -61,8 +61,25 @@ R10 = EB 命名桶开刀（闭包/var_ref +223M、GC 环收集 +193M，从未动
 R11 = TS 的 RC destroy/trace + `pushExactSimpleFrame`；
 最后 = 布局工程批（get-arg 热段、热 handler 聚簇）＋（若仍需）B 裁决重启。
 
-## 6. 结果表（执行后填写）
+## 6. 结果表（2026-08-14 Phase 1 收口）
 
-| lane | 状态 | 实测 |
-|---|---|---|
-| （待裁决/执行） | | |
+| 靶 | 基线 | 两刀后 | 门 | 判 |
+|---|---|---|---|---|
+| N0 | 1.545 | 1.425 | ≤1.1 | 未过 |
+| N3g | 1.156 | 1.107 | ≤1.05 | 接近未过 |
+| G | 1.422 | 1.383 | ≤1.2 | 未过 |
+| N3 | 0.877 | 0.867 | 不回退 | 过 |
+
+两刀（`grok/opt-r9-n` @ a2653171，未克隆 handler，test-exec 436/436）：
+① 3205fe0c 准入 same() 去 outline SameValue（zjs-only 税删除，N0 ~4%）；
+② a2653171 热路径先探 own `.prototype` data slot。**driver 验收在途**（gate + 3-pad zoo）。
+
+**⭐ G 段分解（本批最重要的战略数据）**：
+`initialize.apply(this,arguments)` 1.42 → 直调 `initialize(a,b)` 1.31 → 字段写进 ctor 体 **0.97**。
+⇒ apply 机器只值 ~0.11；**ctor 体内多一层方法调用值 ~0.34**——弥散调用常数在单 case 中的具象化。
+faithful 手段到此为止（再往下=省略 arguments 对象=形态特判，已禁）。R9-G 空手收场是诚实结论。
+
+**bypass-off（case 级）**：关掉只伤 N3 形（0.87→1.17），G/N0 纹丝不动——
+**bypass 从来没有在帮 raytrace**；删除的 zoo 代价集中在 simple-ctor 重度基准（EB/splay/crypto）。
+
+**Phase 1 判定：未打穿（N3g 1.107 > 1.05，不假装通过）。** 后续见 R10 §0 与总判读。
