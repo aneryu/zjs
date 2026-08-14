@@ -1938,8 +1938,12 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                         const fused_args = (region_start + 2)[0..argc];
                         vm.frame.pc += 2;
                         small_inline.installInlineWindow(vm.frame, site, instance, fused_args, vm.rt);
-                        region_start[0].freeDuringActiveBytecode(vm.rt);
-                        region_start[1].freeDuringActiveBytecode(vm.rt);
+                        small_inline.releaseCallRegionAfterInline(
+                            vm.rt,
+                            .constructor,
+                            region_start[0..total],
+                            site.callee_fb.arg_count,
+                        );
                         vm.stack.setLen(region_base);
                         vm.code_base = live_code.ptr;
                         vm.frame.pc = site.pc_lo;
@@ -2013,8 +2017,12 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                         {
                             small_inline.probe_take += 1;
                             small_inline.installInlineWindow(vm.frame, site, instance, args, vm.rt);
-                            region_start[0].freeDuringActiveBytecode(vm.rt);
-                            region_start[1].freeDuringActiveBytecode(vm.rt);
+                            small_inline.releaseCallRegionAfterInline(
+                                vm.rt,
+                                .constructor,
+                                region_start[0..total],
+                                site.callee_fb.arg_count,
+                            );
                             vm.stack.setLen(region_base);
                             vm.frame.pc = site.pc_lo;
                             const npc = vm.code_base + site.pc_lo;

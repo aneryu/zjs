@@ -10125,12 +10125,16 @@ const function_mod = struct {
         const entry_code = fb.byteCode();
         const entry_rejects_plain_call = entry_code.len == 0 or
             entry_code[0] == opcode.op.check_ctor;
+        // Leftover operands at return stay on the caller stack after rewrite
+        // (`return_undef` → `undefined; goto`). The BFS proof is already
+        // computed for empty-leaf publication; AND it here so leftover ctor
+        // bodies never enter noteMonomorphic. Not a shape special case.
         const small_inline_eligible = scanSmallInlineEligible(
             fb,
             materializes_arguments_object,
             contains_direct_eval,
             class_syntax_excludes_inline,
-        );
+        ) and leaf_returns_balanced;
         if (fb.realmContext()) |realm| {
             realm.runtime.small_inline_published_bytes +|= entry_code.len;
         }

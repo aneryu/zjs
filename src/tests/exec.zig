@@ -14555,13 +14555,16 @@ test "zero-arg leaf leftover bodies are refused publication and balance rc" {
         return error.InvalidFunctionBytecode;
     try std.testing.expect(!resolved_drop.fb.simpleInlineEmptyLeaf());
     try std.testing.expect(!resolved_drop.fb.rawThisInlineEmptyLeaf());
+    try std.testing.expect(!resolved_drop.fb.smallInlineEligible());
     const resolved_switch = inline_calls.resolveInlineFunction(global, switch_fn) orelse
         return error.InvalidFunctionBytecode;
     try std.testing.expect(!resolved_switch.fb.simpleInlineEmptyLeaf());
     try std.testing.expect(!resolved_switch.fb.rawThisInlineEmptyLeaf());
+    try std.testing.expect(!resolved_switch.fb.smallInlineEligible());
     const resolved_branchy = inline_calls.resolveInlineFunction(global, branchy_fn) orelse
         return error.InvalidFunctionBytecode;
     try std.testing.expect(resolved_branchy.fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(resolved_branchy.fb.smallInlineEligible());
 
     _ = rt.runObjectCycleRemoval();
     const baseline_objects = rt.gc.liveCount();
@@ -21803,6 +21806,87 @@ test "small-function-inlining: call_constructor callers keep published frame geo
     // Deleted OSR spare was +9 locals / +4 stack on every call_constructor
     // caller. Published geometry must match the compiler's real slots.
     try std.testing.expectEqual(@as(u16, 0), outer_fb.var_count);
+}
+
+test "small-function-inlining: leftover-operand bodies are not small-inline eligible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function leftoverDrop() { ({ z: 1 }); }
+        \\function leftoverSwitch() { switch ({ x: 7 }) { default: return 5; } }
+        \\function leftoverCtor() { ({ z: 1 }); }
+        \\function balancedInc() { return this.v + 1; }
+        \\globalThis.__drop = leftoverDrop;
+        \\globalThis.__sw = leftoverSwitch;
+        \\globalThis.__ctor = leftoverCtor;
+        \\globalThis.__inc = balancedInc;
+    );
+    defer result.free(js.runtime);
+    const global = try js.context.globalObject();
+    const drop_fn = try global.getProperty(try js.runtime.internAtom("__drop"));
+    defer drop_fn.free(js.runtime);
+    const sw_fn = try global.getProperty(try js.runtime.internAtom("__sw"));
+    defer sw_fn.free(js.runtime);
+    const ctor_fn = try global.getProperty(try js.runtime.internAtom("__ctor"));
+    defer ctor_fn.free(js.runtime);
+    const inc_fn = try global.getProperty(try js.runtime.internAtom("__inc"));
+    defer inc_fn.free(js.runtime);
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(drop_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(sw_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(ctor_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(inc_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: leftover ctor is not specialized and does not overflow" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { ({ z: 1 }); }
+        \\function outer() { return new C(); }
+        \\var i, last;
+        \\for (i = 0; i < 256; i++) last = outer();
+        \\assert.sameValue(typeof last, "object");
+        \\globalThis.__C = C;
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const c_fn = try global.getProperty(try js.runtime.internAtom("__C"));
+    defer c_fn.free(js.runtime);
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(c_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    if (zjs.exec.small_inline.callerState(outer_fb)) |state| {
+        try std.testing.expectEqual(@as(u8, 0), state.inlined_len);
+    }
+}
+
+test "small-function-inlining: extra ctor args do not overwrite callee fields" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Pair(a, b) { this.x = a; this.y = b; }
+        \\function outer() { return new Pair(1, 2, { leak: 1 }); }
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = outer();
+        \\assert.sameValue(last.x, 1);
+        \\assert.sameValue(last.y, 2);
+        \\assert.sameValue(last.leak, undefined);
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(outer_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
 }
 
 test "small-function-inlining: monomorphic method is expanded" {
