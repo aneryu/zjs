@@ -150,3 +150,16 @@ R9（真帧瘦身+apply 段）→ **R10（本批）** → R11 EB 命名桶 → R
 
 公共契约 /tmp/lanes/COMMON.md（回传协议/一改动一 commit/CPU 纪律/机制红线）。
 driver 在 CPU 19 跑 R10 定损 3-pad（在途）。布局批维持 PAUSED 等用户。
+
+### 舰队进展（滚动）
+
+- **R11 预研（pQ）验收过**：新基线两桶原价在（closure +235M / GC 环 +200M = 现账 32%）；
+  fclosure 死案再确认（0.17%）；GC sentinel 三刀已批实施（grok/r11-gc-sentinel）。
+- **r11c 提纯（pW）验收过**：case-pure 1.2515（对 FW 1.2488 过门）；
+  **压扁 deriv_trees 嵌套函数 → 1.1592（−631M=超额一半）**；打断 Boyer 数据环不塌
+  ⇒ **两桶绑在同一构造：互捕获嵌套闭包本身就是 GC 要收的环**；
+  `sc_Pair`→字面量两侧皆慢（ctor 不再是载体）。头号可修=closure 创建链。
+- **closure 三刀已派 pW**（grok/r11-closure，attachFunctionCaptures→js_closure2 形／
+  capture cell 复用 qjs:17021／name-length 直路 qjs:17369；载具 case-pure 秒级迭代，
+  冒烟门 1.2515→≤1.21）。与 pQ 的 GC 刀两线独立并行。
+- **v11 设计已批**（发表门 ∧ leaf_returns_balanced；R-v11-a receiver 所有权修订）。
