@@ -2205,7 +2205,11 @@ pub fn resolveSameMachineConstructor(
     func: core.JSValue,
     new_target: core.JSValue,
 ) ?SameMachineConstructorTarget {
-    if (!new_target.sameValue(func)) return null;
+    // Direct `new F(...)` emits `dup`, so new_target and func are the same
+    // object. Admission only needs identity. Generic SameValue (NaN/±0/string)
+    // is an outline bl and was 4% of N0 — qjs never re-compares here
+    // (quickjs.c:20839-20856 holds new_target in a register).
+    if (!new_target.same(func)) return null;
     const resolved = inline_calls.resolveInlineDirectConstructorFunction(global, func) orelse return null;
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
@@ -2230,7 +2234,7 @@ pub fn resolveSameMachineSpreadConstructor(
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
-    const new_target_is_func = new_target.sameValue(func);
+    const new_target_is_func = new_target.same(func);
     if (!new_target_is_func) {
         // `callableObjectFromValue` is the native/bound-call adapter and
         // deliberately excludes the bytecode-function class. A super-call's
