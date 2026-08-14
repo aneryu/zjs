@@ -65,8 +65,9 @@ R5 逐 opcode 机器码对照给出**两个体制（regime）**的清晰图景�
 - 重开 H3/readfwd/String capacity/IMPL-TEARDOWN/14-store 无主 stall。
 - B 类机制（内联/IC/融合）——PARKED 维持。
 
-## 4. 结果表（执行后填写）
+## 4. 结果表（2026-08-14 终判）
 
 | lane | 状态 | 结果 |
 |---|---|---|
-| （待执行） | | |
+| R6-K 两刀 | **REJECTED（driver 三 pad 判读）** | gate 0/49775 通过，但 zoo 3-pad **0.9833/0.9818/0.9818 同号回退**：deltablue −7.1~7.4%、richards −4.8~5.2%、zlib −3.1~5.3%（navier +6.2% 为副作用不抵）。分支 `grok/opt-r6-k` 留档不合并。**教训（第三条证据）：克隆/新增 handler 在 256-way musttail 分派下有 I-cache 级代价**——与 R5-S、R6-F 的前端结论咬合。R9-N 已写死「原地瘦身禁克隆」。 |
+| R6-F 诊断 | DONE→并入 | fe_stall 46-85% 命名；候选 a（get_arg 热段）SEQUENCED-LAST |
