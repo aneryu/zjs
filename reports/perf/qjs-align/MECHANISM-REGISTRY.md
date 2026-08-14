@@ -116,7 +116,9 @@ pdfjs 一整轮 3.83M 次 concat 分桶 = **lhs 共享（rc>1）65.5% / lhs=rope
            1MB 外的 .text.zjs.tail_hot；移回后 9.2 页 vs qjs 5.5 页。
            四基准 fe_stall 占 Δcyc 46-85%，backend/iTLB 已排除
 性质:      工程化布局（许可域：不改逻辑执行模型的布局优化；非 pad 彩票）
-状态:      REGISTERED → R8（与 R6-K 两刀同族组包）
+状态:      REGISTERED → ⏸ SEQUENCED-LAST（用户裁定 2026-08-14：布局/padding 类工作
+           一律放到语义刀全部落地之后——每把语义刀都会重排布局，早做必被作废。
+           同规则适用于一切热 handler 聚簇/I-cache 布局候选）
 ```
 
 ## 组包规则（当前：`candidate-package` NOT AUTHORIZED）
