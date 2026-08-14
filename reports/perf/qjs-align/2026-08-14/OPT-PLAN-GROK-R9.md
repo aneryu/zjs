@@ -1,20 +1,20 @@
-# OPT-R9 计划 — grok 第九批：raytrace 攻坚（条件计划，待 bypass 裁决）
+# OPT-R9 计划 — grok 第九批：raytrace 攻坚 + bypass 三阶段收束
 
-日期：2026-08-14。制定者：driver。状态：**定稿；§0 裁决后即可派发**。
-目标：raytrace 0.777 → ≥1.0（+1.7pp，「每项 ≥1.0」下最大且唯一已全解释的项）。
+日期：2026-08-14。制定者：driver。状态：**用户已裁决 (c) 分阶段路线，可派发**。
+目标：raytrace 0.777 → ≥1.0（+1.7pp），并**零代价闭合 bypass 治理矛盾**。
 
-## 0. 前置裁决（用户）：bypass 三选项
+## 0. 已裁决路线（用户批准，2026-08-14）
 
-现状：`constructSimpleFieldConstructor` 仍在生产（`call_runtime.zig:2288`），
-N3 三字段 new 靠它 0.871 反超；08-11「必须删」裁定从未执行；R8-C1 提议扩大它。
+**Phase 1（本批 lane R9-N/R9-G）**：faithful 攻坚——bypass 不动不扩，
+把 G/N0 形在真帧路径上对齐 qjs 成本。判据：**N3g 1.161 → ≤1.05**。
+**Phase 2（Phase 1 达标后，driver）**：bypass 价值重估——`simple_ctor_bypass_enabled`
+comptime 开关一行切换，跑「开 vs 关」zoo A/B；若增益缩到噪声内，
+**执行 08-11 删除裁定，治理矛盾零代价闭合**。
+**Phase 3（仅当 Phase 1 打不穿）**：真帧地板证实架构性时，「扩大 bypass」作为
+诚实 fallback，与路径 B 一起作**政策**裁决（偏离账本+等价证明），不做单点例外。
 
-| 选项 | 内容 | 后果 |
-|---|---|---|
-| **(a) 执行删除** | 落实 08-11 原裁定 | EB/RT 立即恶化 ~300M（当年定价）；忠实性完备；raytrace 攻坚只剩 faithful 路 |
-| **(b) 正式改判＋扩大** | 承认 bypass 为已登记偏离，实施 R8-C1（G 形/N0 形打上） | +1.7pp 上限最快兑现；但推翻「不开例外口子」，须建偏离账本（同 B 的治理配套） |
-| **(c) faithful 攻坚（默认推荐）** | bypass 维持现状不扩大；把 G/N0 形在**真帧路径**上对齐 qjs 成本 | 无治理成本；上限略低于 (b)（G 1.419→N3g 1.161 的 apply 段 + N0 +92 的帧段都有 qjs 参照）；若打穿即证明「不需要 bypass 也能追平」，反过来为 (a) 铺路 |
-
-**driver 建议 (c) 先行**：R9 按 (c) 设计；若 R9 后 raytrace 仍距 1.0 显著，(b) 再议。
+**前置基线（R9-V 立即执行）**：现在就跑一次「bypass 关」的 zoo 全套，
+刷新过时的 290-330M 删除定价，作为 Phase 2 的对照基线。
 
 ## 1. Lane R9-N「构造真帧成本对齐」（CPU 5）
 
@@ -22,7 +22,10 @@ N3 三字段 new 靠它 0.871 反超；08-11「必须删」裁定从未执行；
 方法：R8-C 的 N0 case 秒级载具 + R5-C 反汇编样张，逐指令对照 qjs `OP_call_constructor`
 → `JS_CallConstructorInternal` 路径（自行定位行号），把 +92 分解到
 帧建/参数/proto 取/`new.target`/返回值判定/帧拆各段，逐段 FAITHFUL 瘦身。
-**吸收 R6-K leaf-call 刀的验收结论**（若 zoo 通过合入，N0 基线先更新再开工）。
+**⚠️ 设计约束（R6-K pad0 教训）：原地瘦身现有 handler/路径，禁止克隆新 handler**
+——R6-K 的 leaf-call 克隆刀 pad0 全线回退（deltablue −7.4%），与体制二结论一致：
+handler 越多，256-way 分派的 I-cache 越糟。R6-K 终判（pads 3/7）出来前不吸收其改动；
+若确认拒收，其 worktree 反汇编仍可作参照。
 验收：N0 case 比值 → ≤1.1；N3g（真帧 3 字段）1.161 同步收敛；N3 bypass 路径不许碰。
 
 ## 2. Lane R9-G「G 形 apply 转发成本对齐」（CPU 6）
@@ -38,9 +41,12 @@ zjs 侧逐段定价（arguments 对象建、逐元素搬运、二次帧）。
 
 ## 3. Lane R9-V「宏观验证与回归守护」（driver；CPU 19）
 
-- R6-K zoo 3-pad 判读（在途）→ 合入决策；
+- **立即：bypass-off 基线**——`simple_ctor_bypass_enabled=false` 构建一次，
+  zoo 全套单 pad 对照现 HEAD，刷新 bypass 的当前真实价值（Phase 2 对照基线）；
+- R6-K zoo 3-pad 判读（在途，pad0 已 0.9833 预警）→ 合入/拒收终判；
 - R9-N/R9-G 每出一刀：raytrace 单基准 16 samples 快验 → 批末组包 3-pad 全套
-  逐基准 lineage 判读；四资产 + N3 反超（0.871）不许回退。
+  逐基准 lineage 判读；四资产 + N3 反超（0.871）不许回退；
+- Phase 1 达标（N3g ≤1.05）后执行 Phase 2 重估与（若达标）删除流程。
 
 ## 4. 契约
 
