@@ -7297,6 +7297,43 @@ test "parked generator open cell death path reclaims cell and generator together
     }
 }
 
+test "cycle drain frees leftover-rc rings under repeated forceGC" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const body =
+        \\(function () {
+        \\  const rings = [];
+        \\  for (let i = 0; i < 32; i++) {
+        \\    let a = { n: i };
+        \\    let b = { peer: a };
+        \\    a.peer = b;
+        \\    a.self = function () { return a; };
+        \\    rings.push(a.self());
+        \\  }
+        \\  return rings.length;
+        \\})();
+    ;
+
+    const warm = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+    warm.free(js.runtime);
+    _ = try js.runtime.forceGC(null);
+    const cell_steady = js.runtime.gc.liveCountKind(.var_ref);
+    const object_steady = js.runtime.gc.liveCountKind(.object);
+    const fb_steady = js.runtime.gc.liveCountKind(.function_bytecode);
+
+    var round: usize = 0;
+    while (round < 8) : (round += 1) {
+        const result = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+        defer result.free(js.runtime);
+        try std.testing.expectEqual(@as(?i32, 32), result.asInt32());
+        _ = try js.runtime.forceGC(null);
+        try std.testing.expectEqual(cell_steady, js.runtime.gc.liveCountKind(.var_ref));
+        try std.testing.expectEqual(object_steady, js.runtime.gc.liveCountKind(.object));
+        try std.testing.expectEqual(fb_steady, js.runtime.gc.liveCountKind(.function_bytecode));
+    }
+}
+
 test "cycle scan restores a heap BigInt without list_del on an unlinked header" {
     // Heap BigInt is a refCountHeader() target but not a cycle-list member.
     // gc_scan_incref_child must restore its trial rc and must not list_del a

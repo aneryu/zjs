@@ -585,6 +585,14 @@ pub const HeaderList = struct {
         self.remove(header);
         return header;
     }
+
+    /// Successor of `header` on this list, or null at the sentinel.
+    /// Mirrors `list_for_each_safe`'s saved `el1` (qjs:6797).
+    pub fn nextAfter(self: *const HeaderList, header: *const Header) ?*Header {
+        const next = header.next.?;
+        if (next == &self.sentinel) return null;
+        return next;
+    }
 };
 
 const large_heap_size_class = std.math.maxInt(u16);
