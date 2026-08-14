@@ -7127,12 +7127,10 @@ pub fn qjsReflectSetCall(
     // qjs JS_SetPropertyInternal: when obj != this_obj (Reflect.set receiver),
     // `if (unlikely(p != p1)) goto retry2` (quickjs.c:9701-9702) skips the
     // own JS_PROP_LENGTH / set_array_length arm (9714-9717) and later takes
-    // the generic receiver path (9892-9929): gopd on Receiver, then
-    // DefineProperty/CreateProperty on Receiver. OrdinarySetWithOwnDescriptor,
-    // not ArraySetLength.
-    const receiver_value = if (args.len >= 4) args[3] else args[0];
-    if (!object_ops.sameObjectIdentity(receiver_value, args[0])) {
-        const ok = try ordinarySetWithReceiver(ctx, output, global, args[0], object, receiver_value, atom_id, set_value, caller_function, caller_frame);
+    // the generic receiver path (9892-9929). Only the 4-arg form can have a
+    // distinct receiver; the 3-arg path is identical to pre-X-02.
+    if (args.len >= 4 and !object_ops.sameObjectIdentity(args[3], args[0])) {
+        const ok = try ordinarySetWithReceiver(ctx, output, global, args[0], object, args[3], atom_id, set_value, caller_function, caller_frame);
         return core.JSValue.boolean(ok);
     }
     const value_to_set = try array_ops.arrayLengthAssignmentValue(ctx, output, global, object, atom_id, set_value, caller_function, caller_frame);
