@@ -1627,6 +1627,29 @@ pub const function_bytecode = struct {
         }
     };
 
+    /// Widest named-property reserve the constructor allocation profile will
+    /// learn. Larger instances still construct; they just stop growing the hint.
+    pub const max_ctor_alloc_capacity: u16 = 32;
+
+    pub const CtorAllocState = enum(u8) {
+        empty = 0,
+        live = 1,
+        inert = 2,
+    };
+
+    /// Learned property-slot reserve for `new`. Zero-fill is `empty`.
+    /// Lives in the FB hot tail (not Object/Shape) so qjs's 96-byte header
+    /// offsets stay untouched. No heap pointers — GC mark is unchanged.
+    pub const CtorAllocProfile = extern struct {
+        capacity: u16 = 0,
+        state: CtorAllocState = .empty,
+        _pad: [5]u8 = @splat(0),
+
+        comptime {
+            std.debug.assert(@sizeOf(@This()) == 8);
+        }
+    };
+
     /// Hot zjs-only state placed immediately after the exact code bytes. Code
     /// has byte alignment, so canonical access must use `*align(1)`. The
     /// execution snapshot is two bytes; explicit padding preserves the
@@ -1641,9 +1664,8 @@ pub const function_bytecode = struct {
         _call_facts_padding: u16 = 0,
         /// Stable ScriptOrModule identity used as the dynamic-import referrer.
         script_or_module: atom.Atom,
-        /// Reserved for `CtorAllocProfile` (R10 commit 2). Zero-fill = unlearned.
-        /// Keeps this record 64 bytes so Legacy adapter stays at base+96+64.
-        _ctor_alloc_tail: [56]u8 = @splat(0),
+        ctor_alloc: CtorAllocProfile = .{},
+        _ctor_alloc_pad: [48]u8 = @splat(0),
 
         comptime {
             std.debug.assert(@sizeOf(@This()) == 64);
@@ -1651,7 +1673,7 @@ pub const function_bytecode = struct {
             std.debug.assert(@offsetOf(@This(), "call_facts") == 0x00);
             std.debug.assert(@offsetOf(@This(), "_call_facts_padding") == 0x02);
             std.debug.assert(@offsetOf(@This(), "script_or_module") == 0x04);
-            std.debug.assert(@offsetOf(@This(), "_ctor_alloc_tail") == 0x08);
+            std.debug.assert(@offsetOf(@This(), "ctor_alloc") == 0x08);
         }
     };
 
@@ -1955,6 +1977,14 @@ pub const function_bytecode = struct {
         pub inline fn callFacts(self: *const FunctionBytecodeImpl) function_bytecode.CallFacts {
             const hot = self.hotExtension() orelse return .{};
             return hot.call_facts;
+        }
+        pub inline fn ctorAllocProfile(self: *const FunctionBytecodeImpl) ?*align(1) const function_bytecode.CtorAllocProfile {
+            const hot = self.hotExtension() orelse return null;
+            return &hot.ctor_alloc;
+        }
+        pub inline fn ctorAllocProfileMut(self: *const FunctionBytecodeImpl) ?*align(1) function_bytecode.CtorAllocProfile {
+            const hot = self.hotExtension() orelse return null;
+            return &@constCast(hot).ctor_alloc;
         }
         pub inline fn legacyBytecodeAdapter(self: *const FunctionBytecodeImpl) ?*const function_mod.BytecodeImpl {
             // The negative length is the complete representation

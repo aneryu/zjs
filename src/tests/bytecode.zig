@@ -470,7 +470,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
     );
     try std.testing.expectEqual(
         @as(usize, 8),
-        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "_ctor_alloc_tail"),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "ctor_alloc"),
     );
 }
 
@@ -904,7 +904,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     first.closureVar()[0].var_idx = 0xffff;
     first.hotExtensionMut().?.call_facts = @bitCast(@as(u16, 0xffff));
     first.hotExtensionMut().?._call_facts_padding = 0xffff;
-    first.hotExtensionMut().?._ctor_alloc_tail = @splat(0xaa);
+    first.hotExtensionMut().?.ctor_alloc = .{ .capacity = 0xffff, .state = .live };
     first.destroyUnpublishedFixture(rt);
 
     const second = try bytecode.FunctionBytecode.createFixture(rt, .{
@@ -935,9 +935,11 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), second.hotExtension().?.call_facts);
     try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?._call_facts_padding);
     try std.testing.expectEqual(atom_module.null_atom, second.hotExtension().?.script_or_module);
-    // Hot-extension tail ABA immunity: recycled FB allocations are zero-filled,
-    // so a later occupant cannot inherit a previous constructor-allocation profile.
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 56), &second.hotExtension().?._ctor_alloc_tail);
+    try std.testing.expectEqual(
+        bytecode.function_bytecode.CtorAllocState.empty,
+        second.hotExtension().?.ctor_alloc.state,
+    );
+    try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?.ctor_alloc.capacity);
     try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().flags.kind);
     try std.testing.expectEqual(@as(i32, 1), second.header.meta().rc);
 }

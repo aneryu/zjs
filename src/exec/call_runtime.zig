@@ -2297,8 +2297,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
             if (ownConstructorPrototypeData(target.function_object) orelse
                 (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null)) |prototype|
             {
-                const created = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
-                break :instance created.value();
+                break :instance try createProfiledConstructorInstance(ctx.runtime, prototype, target.resolved.fb);
             }
             break :instance try createConstructorInstance(
                 ctx,
@@ -2353,6 +2352,7 @@ fn constructOrdinaryBytecodeFunctionObject(
     }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     errdefer instance.free(ctx.runtime);
+    defer noteConstructorAllocation(fb, instance);
     const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     if (result.isObject()) {
         instance.free(ctx.runtime);
@@ -2837,12 +2837,47 @@ fn createBytecodeConstructorInstance(
         // later `new` (plus the simple-field fast path) takes the direct read
         // instead of the reflectConstructPrototypeVm chain below.
         if (function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
-            const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
-            errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
-            return instance.value();
+            return createProfiledConstructorInstance(
+                ctx.runtime,
+                prototype,
+                function_object.u.bytecode_function.function_bytecode,
+            );
         }
     }
     return createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
+}
+
+const max_ctor_alloc_capacity = bytecode.function_bytecode.max_ctor_alloc_capacity;
+
+fn createProfiledConstructorInstance(
+    rt: *core.JSRuntime,
+    prototype: *core.Object,
+    fb: ?*const bytecode.FunctionBytecode,
+) !core.JSValue {
+    const capacity: usize = if (fb) |function| blk: {
+        const profile = function.ctorAllocProfile() orelse break :blk 0;
+        break :blk if (profile.state == .live) profile.capacity else 0;
+    } else 0;
+    const instance = try core.Object.create(rt, core.class.ids.object, prototype);
+    errdefer core.Object.destroyFromHeader(rt, &instance.header);
+    // Reserving 1–3 slots costs more than the later put_field grows on this
+    // host (N3 1.21 → 1.28). Four or more named writes pay for the extra
+    // buffer. Threshold is a slot count, not a bytecode pattern.
+    if (capacity >= 4) try instance.reserveOwnPropertyCapacity(rt, capacity);
+    return instance.value();
+}
+
+pub fn noteConstructorAllocation(fb: *const bytecode.FunctionBytecode, instance: core.JSValue) void {
+    const object = object_ops.objectFromValue(instance) orelse return;
+    const observed = object.shape_ref.prop_count;
+    if (observed == 0) return;
+    const profile = fb.ctorAllocProfileMut() orelse return;
+    if (profile.state == .inert) return;
+    const cap: u16 = @intCast(@min(observed, @as(usize, max_ctor_alloc_capacity)));
+    if (profile.state == .empty or cap > profile.capacity) {
+        profile.capacity = cap;
+        profile.state = .live;
+    }
 }
 
 pub fn constructFunctionFromSource(

@@ -787,6 +787,53 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
     try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
 }
 
+test "constructor allocation profile reserves capacity without skipping the body" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function Vec(x, y, z) { this.x = x; this.y = y; this.z = z; }
+        \\function Quad(a, b, c, d) { this.a = a; this.b = b; this.c = c; this.d = d; }
+        \\function G() { this.initialize.apply(this, arguments); }
+        \\G.prototype.initialize = function(a, b) { this.a = a; this.b = b; };
+        \\function Mid(a) { this.a = a; throw new Error("boom"); }
+        \\function Keys(a) {
+        \\    this.seen = Object.keys(this).join(",");
+        \\    this.a = a;
+        \\    this.after = Object.keys(this).join(",");
+        \\}
+        \\function Override(a) { this.a = a; return { b: a }; }
+        \\const v1 = new Vec(1, 2, 3);
+        \\const v2 = new Vec(4, 5, 6);
+        \\const q1 = new Quad(1, 2, 3, 4);
+        \\const q2 = new Quad(5, 6, 7, 8);
+        \\const g1 = new G(7, 8);
+        \\const g2 = new G(9, 10);
+        \\let mid_ok = false;
+        \\try { new Mid(1); } catch (e) { mid_ok = e.message === "boom"; }
+        \\const k = new Keys(1);
+        \\const o = new Override(3);
+        \\class Base { constructor() { this.tag = 1; } }
+        \\class Derived extends Base { constructor() { super(); this.extra = 2; } }
+        \\const d = new Derived();
+        \\globalThis.__alloc_profile =
+        \\    (v1.x === 1 && v2.z === 6 && q1.a === 1 && q2.d === 8 &&
+        \\     g1.a === 7 && g2.b === 10 &&
+        \\     mid_ok &&
+        \\     k.seen === "" && k.after === "seen,a" &&
+        \\     o.b === 3 && o.a === undefined &&
+        \\     d.tag === 1 && d.extra === 2) ? 1 : 0;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const result_key = try js.runtime.internAtom("__alloc_profile");
+    defer js.runtime.atoms.free(result_key);
+    const result = try global.getProperty(result_key);
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+}
+
 test "constructor return fusion and abrupt teardown each release the fallback exactly once" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

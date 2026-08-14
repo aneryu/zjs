@@ -381,7 +381,7 @@ fn writeResult(
     stats: SampleStats,
 ) !void {
     try output.print(
-        "{{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\",\n  \"dossier_variant\": \"removed\",\n  \"dossier_simple_ctor_bypass\": false,\n  \"dossier_simple_ctor_memo\": false",
+        "{{\n  \"engine\": \"zjs\",\n  \"layer\": \"same-runtime\"",
         .{},
     );
     try output.writeAll(",\n  \"case\": ");

@@ -4579,6 +4579,9 @@ pub const Machine = struct {
         std.debug.assert(dying.continuation_payload == 0);
         const rt = self.ctx.runtime;
         const fallback = dying.native_caller;
+        if (!fallback.isUndefined()) {
+            call_runtime.noteConstructorAllocation(dying.frame.function, fallback);
+        }
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;

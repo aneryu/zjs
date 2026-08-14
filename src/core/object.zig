@@ -1928,6 +1928,13 @@ pub const Object = extern struct {
         return createInternal(rt, class_id, prototype, capacity, null);
     }
 
+    /// Grow the named-property value buffer without changing the shared empty
+    /// root shape. Constructor allocation profiles use this so later put_field
+    /// transitions stay on the qjs-mirrored hash-consed chain.
+    pub fn reserveOwnPropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
+        try self.ensurePropertyCapacity(rt, needed);
+    }
+
     /// Allocate the private generator object/state used while parameter
     /// initialization runs, but do not allocate a Shape or link the object into
     /// the GC registry yet. qjs keeps JSGeneratorData/JSAsyncFunctionState
