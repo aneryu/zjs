@@ -35,8 +35,8 @@ pub var probe_prep: u64 = 0;
 pub var probe_take: u64 = 0;
 
 pub fn writeProbeFile() void {
-    const dump = std.posix.getenv("ZJS_INLINE_PROBE") orelse return;
-    if (dump.len == 0) return;
+    const dump = std.c.getenv("ZJS_INLINE_PROBE") orelse return;
+    if (dump[0] == 0) return;
     std.debug.print("[inline-probe] prep={d} take={d} take_pct={d}\n", .{
         probe_prep,
         probe_take,
