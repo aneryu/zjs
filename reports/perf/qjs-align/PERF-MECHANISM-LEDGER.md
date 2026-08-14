@@ -29,4 +29,26 @@
 
 ---
 
-（deltablue accessor 内联、解释器 store IC 等候选将来按同一四条件逐个申报。）
+---
+
+## `small-function-inlining`（PROPOSED，方案甲）
+
+```
+参照:      V8/JSC 调用点内联 + inline-frame 栈重建（保 Error.stack）
+形态:      几何门（体长/argc/realm/单态）下把小函数体展开进调用点；
+           put_field/get_field 照跑；消的是 call+Entry+return，不是语义步骤。
+           现有 inline_calls 同机 Entry 不是本机制（那笔钱就是 R9 的 0.34）。
+通用性:    不认 initialize / sc_Pair / accessor 名字；多形不展开（无悬崖）
+等价面:    Error.stack 靠 InlinedSite 重建逻辑帧；中途 throw；ctor return 两分支；
+           setter 仍走 put_field。H3 reuse 明确禁止。
+覆盖:      EB sc_Pair（bypass-off −9.08% 主力回收）；
+           raytrace G 内层 initialize（~0.34）；
+           deltablue 短方法链
+配套:      与 classify 删除同包落地（先内联、删除搭便车）。
+           capacity-profile 降为次要（≤3 字段回收≈0）。
+状态:      PROPOSED——简报 /tmp/r10/INLINE-PROPOSAL.md，批准后写码
+```
+
+---
+
+（解释器 store IC 等候选将来按同一四条件逐个申报。）
