@@ -760,12 +760,9 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    // S publishes simple_field_ctor = true; the first `new` takes the writer,
-    // then `S.prototype = 42` forces both the writer's prototype gate and the
-    // direct instance route to fall back to the authoritative
-    // createConstructorInstance (Object.prototype realm default). NS is
-    // non-simple (arg mutation after the store), so its `new` must skip the
-    // writer entirely and still honor a replaced prototype object.
+    // Both S and NS run the true constructor body. Replacing S.prototype with
+    // a non-object still falls back to Object.prototype (qjs js_create_from_ctor).
+    // NS honors a replaced prototype object.
     const setup = try js.eval(
         \\function S(a) { this.a = a; }
         \\const before = new S(1);
@@ -784,6 +781,53 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const result_key = try js.runtime.internAtom("__ctor_gate_result");
+    defer js.runtime.atoms.free(result_key);
+    const result = try global.getProperty(result_key);
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+}
+
+test "constructor allocation profile reserves capacity without skipping the body" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function Vec(x, y, z) { this.x = x; this.y = y; this.z = z; }
+        \\function Quad(a, b, c, d) { this.a = a; this.b = b; this.c = c; this.d = d; }
+        \\function G() { this.initialize.apply(this, arguments); }
+        \\G.prototype.initialize = function(a, b) { this.a = a; this.b = b; };
+        \\function Mid(a) { this.a = a; throw new Error("boom"); }
+        \\function Keys(a) {
+        \\    this.seen = Object.keys(this).join(",");
+        \\    this.a = a;
+        \\    this.after = Object.keys(this).join(",");
+        \\}
+        \\function Override(a) { this.a = a; return { b: a }; }
+        \\const v1 = new Vec(1, 2, 3);
+        \\const v2 = new Vec(4, 5, 6);
+        \\const q1 = new Quad(1, 2, 3, 4);
+        \\const q2 = new Quad(5, 6, 7, 8);
+        \\const g1 = new G(7, 8);
+        \\const g2 = new G(9, 10);
+        \\let mid_ok = false;
+        \\try { new Mid(1); } catch (e) { mid_ok = e.message === "boom"; }
+        \\const k = new Keys(1);
+        \\const o = new Override(3);
+        \\class Base { constructor() { this.tag = 1; } }
+        \\class Derived extends Base { constructor() { super(); this.extra = 2; } }
+        \\const d = new Derived();
+        \\globalThis.__alloc_profile =
+        \\    (v1.x === 1 && v2.z === 6 && q1.a === 1 && q2.d === 8 &&
+        \\     g1.a === 7 && g2.b === 10 &&
+        \\     mid_ok &&
+        \\     k.seen === "" && k.after === "seen,a" &&
+        \\     o.b === 3 && o.a === undefined &&
+        \\     d.tag === 1 && d.extra === 2) ? 1 : 0;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const result_key = try js.runtime.internAtom("__alloc_profile");
     defer js.runtime.atoms.free(result_key);
     const result = try global.getProperty(result_key);
     defer result.free(js.runtime);
@@ -21349,4 +21393,324 @@ test "long numeric literals parse without a 128-byte cap" {
     , &output);
     defer result.free(js.runtime);
     try std.testing.expectEqualStrings("1.1111111111111112e+128\n2.288265886710203e+155\n", output.buffered());
+}
+
+test "small-function-inlining: sc_Pair constructor is eligible and arguments ctor is not" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function sc_Pair(car, cdr) { this.car = car; this.cdr = cdr; }
+        \\function usesArgs() { return arguments[0]; }
+        \\function big(a,b,c,d,e) { this.a=a; this.b=b; this.c=c; this.d=d; this.e=e; }
+        \\globalThis.__p = sc_Pair;
+        \\globalThis.__a = usesArgs;
+        \\globalThis.__b = big;
+    );
+    defer result.free(js.runtime);
+
+    const global = try js.context.globalObject();
+    const pair_fn = try global.getProperty(try js.runtime.internAtom("__p"));
+    defer pair_fn.free(js.runtime);
+    const args_fn = try global.getProperty(try js.runtime.internAtom("__a"));
+    defer args_fn.free(js.runtime);
+    const big_fn = try global.getProperty(try js.runtime.internAtom("__b"));
+    defer big_fn.free(js.runtime);
+
+    const pair_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(pair_fn).?;
+    const args_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(args_fn).?;
+    const big_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(big_fn).?;
+    const pair_fb = pair_obj.u.bytecode_function.function_bytecode.?;
+    try std.testing.expect(pair_fb.smallInlineEligible());
+    try std.testing.expect(!args_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!big_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: setter throw stack is setter, ctor, caller" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\Object.defineProperty(C.prototype, "x", {
+        \\  set: function setX(v) { throw new Error("boom"); }
+        \\});
+        \\try {
+        \\  outer(99);
+        \\} catch (e) {
+        \\  var s = String(e.stack);
+        \\  print(s.indexOf("setX") >= 0 ? "setX" : "no-setX");
+        \\  print(s.indexOf("C") >= 0 ? "C" : "no-C");
+        \\  print(s.indexOf("outer") >= 0 ? "outer" : "no-outer");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("setX\nC\nouter\n", output.buffered());
+}
+
+test "small-function-inlining: redefinition takes the new function" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function m1() { return 1; }
+        \\function m2() { return 2; }
+        \\var o = { m: m1 };
+        \\function outer(obj) { return obj.m(); }
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = outer(o);
+        \\o.m = m2;
+        \\assert.sameValue(outer(o), 2);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: new C field write is visible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.x = 1; }
+        \\function outer() { return new C(); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(o.x, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: polymorphic site is not specialized" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function A(v) { this.v = v; }
+        \\function B(v) { this.v = v + 1; }
+        \\function outer(C, v) { return new C(v); }
+        \\var i, last;
+        \\for (i = 0; i < 20; i++) last = outer(i & 1 ? A : B, i);
+        \\assert.sameValue(typeof last.v, "number");
+        \\assert.sameValue(outer(A, 10).v, 10);
+        \\assert.sameValue(outer(B, 10).v, 11);
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    if (zjs.exec.small_inline.callerState(outer_fb)) |state| {
+        try std.testing.expectEqual(@as(u8, 0), state.inlined_len);
+        var i: u8 = 0;
+        var saw_never = false;
+        while (i < state.site_len) : (i += 1) {
+            if (state.sites[i].never) saw_never = true;
+        }
+        try std.testing.expect(saw_never);
+    }
+}
+
+test "small-function-inlining: R-2 getter on callee is invoked once per new" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\var n = 0;
+        \\function RealC(v) { this.x = v; }
+        \\Object.defineProperty(globalThis, "C", {
+        \\  get: function () { n += 1; return RealC; },
+        \\  configurable: true
+        \\});
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\assert.sameValue(n, 16);
+        \\assert.sameValue(outer(7).x, 7);
+        \\assert.sameValue(n, 17);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: inner throw stack and caller catch" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function inner() { throw new Error("x"); }
+        \\function outer() { return inner(); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) { try { outer(); } catch (e) {} }
+        \\try { outer(); } catch (e) {
+        \\  var s = String(e.stack);
+        \\  print(s.indexOf("inner") >= 0 ? "inner" : "no-inner");
+        \\  print(s.indexOf("outer") >= 0 ? "outer" : "no-outer");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("inner\nouter\n", output.buffered());
+}
+
+test "small-function-inlining: primitive ctor return keeps instance" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.x = 1; return 0; }
+        \\function outer() { return new C(); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(typeof o, "object");
+        \\assert.sameValue(o.x, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: Reflect.construct with foreign NewTarget is not expanded" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function NT() {}
+        \\NT.prototype = { mark: 1 };
+        \\function outer(v) { return Reflect.construct(C, [v], NT); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(i);
+        \\assert.sameValue(o.x, 15);
+        \\assert.sameValue(o.mark, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: derived class constructor is not eligible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\class B {}
+        \\class D extends B { constructor(v) { super(); this.x = v; } }
+        \\globalThis.__d = D;
+    );
+    defer result.free(js.runtime);
+    const global = try js.context.globalObject();
+    const d_fn = try global.getProperty(try js.runtime.internAtom("__d"));
+    defer d_fn.free(js.runtime);
+    const d_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(d_fn).?;
+    try std.testing.expect(!d_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: next-entry specialize is installed on the caller" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Three(a, b, c) { this.x = a; this.y = b; this.z = c; }
+        \\function batch(n) {
+        \\  var i, s = 0, p;
+        \\  for (i = 0; i < n; i++) { p = new Three(1, 2, 3); s = s + p.x; }
+        \\  return s;
+        \\}
+        \\globalThis.__batch = batch;
+        \\assert.sameValue(batch(16), 16);
+        \\assert.sameValue(batch(16), 16);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const batch_fn = try global.getProperty(try js.runtime.internAtom("__batch"));
+    defer batch_fn.free(js.runtime);
+    const batch_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(batch_fn).?;
+    const batch_fb = batch_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(batch_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+    try std.testing.expect(state.?.specialized);
+}
+
+test "small-function-inlining: sibling constructor sites both specialize" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Pair(a, b) { this.x = a; this.y = b; }
+        \\function both(a, b) {
+        \\  var p = new Pair(a, b);
+        \\  var q = new Pair(b, a);
+        \\  return p.x + q.x;
+        \\}
+        \\globalThis.__both = both;
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = both(1, 2);
+        \\assert.sameValue(last, 3);
+        \\assert.sameValue(both(4, 5), 9);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const both_fn = try global.getProperty(try js.runtime.internAtom("__both"));
+    defer both_fn.free(js.runtime);
+    const both_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(both_fn).?;
+    const both_fb = both_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(both_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 2);
+}
+
+test "small-function-inlining: proto replacement after specialize is observed" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(i);
+        \\C.prototype = { mark: 1 };
+        \\o = outer(99);
+        \\assert.sameValue(o.x, 99);
+        \\assert.sameValue(o.mark, 1);
+        \\C.foo = 1;
+        \\o = outer(7);
+        \\assert.sameValue(o.x, 7);
+        \\assert.sameValue(o.mark, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: call_constructor callers keep published frame geometry" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    // Deleted OSR spare was +9 locals / +4 stack on every call_constructor
+    // caller. Published geometry must match the compiler's real slots.
+    try std.testing.expectEqual(@as(u16, 0), outer_fb.var_count);
+}
+
+test "small-function-inlining: monomorphic method is expanded" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Box(v) { this.v = v; }
+        \\Box.prototype.inc = function () { return this.v + 1; };
+        \\function outer(b) { return b.inc(); }
+        \\var i, last, box = new Box(3);
+        \\for (i = 0; i < 16; i++) last = outer(box);
+        \\assert.sameValue(last, 4);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }

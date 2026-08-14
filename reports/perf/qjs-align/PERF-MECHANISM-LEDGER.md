@@ -24,7 +24,7 @@
            待证：GC 在部分初始化窗口的扫描、Proxy/异常中途逃逸
 配套:      与 classifySimpleFieldConstructor 全套删除同批落地（R10「删特化上通用」），
            包级 zoo 验收不下凹
-状态:      PROPOSED——等 R9（真帧瘦身）落地后开工
+状态:      AWAIT-MEASURE——`grok/opt-r10` `a55cfb1e`（先删 `45dc3640` 后立）。zoo 3-pad 交 driver
 ```
 
 ---

@@ -30,7 +30,9 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const inline_calls = @import("inline_calls.zig");
+const small_inline = @import("small_inline.zig");
 const call_runtime = @import("call_runtime.zig");
+const object_ops = @import("object_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
@@ -1916,6 +1918,43 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
         const region_start = vm.stack.values + region_base;
         const func = region_start[0];
         const new_target = region_start[1];
+        const call_pc: u32 = @intCast(@intFromPtr(pc) - @intFromPtr(vm.code_base));
+        var entry_polled = false;
+        // v1.5 fused create-this. Poll first — qjs JS_CallConstructorInternal
+        // entry, quickjs.c:20817 js_poll_interrupts — then skip resolve /
+        // proto lookup / second poll (E1–E6).
+        if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+            if (site.kind == .constructor) {
+                exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+                    if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                    return coldNext(vb, vm);
+                };
+                entry_polled = true;
+                if (small_inline.tryFusedConstructor(vm.rt, site, func)) |instance| {
+                    const live_code = vm.function.byteCodeAssumeMaterialized();
+                    if (small_inline.windowFits(vm.frame, site) and site.pc_lo < live_code.len) {
+                        small_inline.probe_prep += 1;
+                        small_inline.probe_take += 1;
+                        const fused_args = (region_start + 2)[0..argc];
+                        vm.frame.pc += 2;
+                        small_inline.installInlineWindow(vm.frame, site, instance, fused_args, vm.rt);
+                        region_start[0].freeDuringActiveBytecode(vm.rt);
+                        region_start[1].freeDuringActiveBytecode(vm.rt);
+                        vm.stack.setLen(region_base);
+                        vm.code_base = live_code.ptr;
+                        vm.frame.pc = site.pc_lo;
+                        const npc = live_code.ptr + site.pc_lo;
+                        return @call(.always_tail, vm.active_dispatch_tbl[npc[0]], .{
+                            npc,
+                            vm.stack.topPtr(),
+                            vb,
+                            vm,
+                        });
+                    }
+                    instance.free(vm.rt);
+                }
+            }
+        }
         if (call_runtime.resolveSameMachineConstructor(vm.global, func, new_target)) |candidate| {
             if (candidate.resolved.fb.isDerivedClassConstructor()) {
                 return switch (pushDerivedConstructorEntry(
@@ -1935,12 +1974,14 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     .threw => .threw,
                 };
             }
-            // First JS_CallConstructorInternal poll: before instance creation,
-            // constructibility effects, and the inner bytecode-call poll.
-            exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
-                if (!constructorRegionRecover(vm, region_base, err)) return .threw;
-                return coldNext(vb, vm);
-            };
+            // qjs JS_CallConstructorInternal entry poll (quickjs.c:20817).
+            // Skip if the fused attempt already paid it.
+            if (!entry_polled) {
+                exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+                    if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                    return coldNext(vb, vm);
+                };
+            }
             const args = (region_start + 2)[0..argc];
             const prepared = call_runtime.prepareSameMachineConstructorAfterFirstPoll(
                 vm.ctx,
@@ -1964,6 +2005,49 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     return coldNext(vb, vm);
                 },
                 .instance => |instance| {
+                    small_inline.probe_prep += 1;
+                    const callee_fb = candidate.resolved.fb;
+                    if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+                        if (site.kind == .constructor and small_inline.calleeMatches(site, func) and
+                            small_inline.windowFits(vm.frame, site))
+                        {
+                            small_inline.probe_take += 1;
+                            small_inline.installInlineWindow(vm.frame, site, instance, args, vm.rt);
+                            region_start[0].freeDuringActiveBytecode(vm.rt);
+                            region_start[1].freeDuringActiveBytecode(vm.rt);
+                            vm.stack.setLen(region_base);
+                            vm.frame.pc = site.pc_lo;
+                            const npc = vm.code_base + site.pc_lo;
+                            return @call(.always_tail, vm.active_dispatch_tbl[npc[0]], .{
+                                npc,
+                                vm.stack.topPtr(),
+                                vb,
+                                vm,
+                            });
+                        }
+                    }
+                    if (object_ops.plainBytecodeFunctionObjectFromValue(func)) |callee_fn_obj| {
+                        if (small_inline.noteMonomorphic(
+                            vm.rt,
+                            @constCast(vm.function),
+                            call_pc,
+                            @constCast(callee_fb),
+                            callee_fn_obj,
+                        )) {
+                            if (object_ops.objectFromValue(vm.frame.current_function)) |caller_obj| {
+                                small_inline.specializeCallSite(
+                                    vm.rt,
+                                    caller_obj,
+                                    @constCast(vm.function),
+                                    call_pc,
+                                    @constCast(callee_fb),
+                                    callee_fn_obj,
+                                    .constructor,
+                                    argc,
+                                );
+                            }
+                        }
+                    }
                     // Parser-emitted direct construction owns two references
                     // to the same callable (`get_var; dup`). Recast that
                     // region as method-shaped setup: move the eager instance
