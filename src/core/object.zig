@@ -3402,7 +3402,7 @@ pub const Object = extern struct {
 
     /// Pass-B drain of a cycle-deferred object: its resources were freed by the
     /// resource pass; only the struct memory remains. Mirrors qjs Pass B
-    /// (quickjs.c:6797). Pass B filters retained weak husks before calling this.
+    /// (quickjs.c:6797). Pass B keeps only live-weakref husks before calling this.
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
@@ -7959,23 +7959,31 @@ pub const Object = extern struct {
         return garbage_count;
     }
 
-    /// Pass B: qjs gc_free_cycles second walk (quickjs.c:6797-6810) frees
-    /// OBJECT / FUNCTION_BYTECODE / MODULE structs (and ASYNC, which zjs does
-    /// not have as a GC kind). The object arm keeps a husk when rc or weakrefs
-    /// remain. var_ref / realm_context are zjs leftovers whose owners skipped
-    /// them via cycle_visited; they still have to be reclaimed here.
+    /// Pass B: qjs `gc_free_cycles` second walk (quickjs.c:6797-6810).
+    /// One `list_for_each_safe`, in-place free, no pop/continue revisit.
+    /// Keep only a JS object with remaining weakrefs (qjs:6803-6806). Leftover
+    /// rc after the resource pass is intra-cycle and is freed here so the next
+    /// GC does not walk the husk again. Still only the four qjs kinds (OBJECT /
+    /// FUNCTION_BYTECODE / MODULE; zjs has no ASYNC) plus var_ref / realm_context
+    /// leftovers whose owners skipped them via cycle_visited. Does not delete
+    /// `cycle_visited`, does not touch RC teardown or ScanIncref.
     pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
-        while (rt.gc.popCycleDeferredFree()) |h| {
+        const parked = &rt.gc.cycle_deferred_frees;
+        var cursor = gc.listFirst(&parked.sentinel);
+        while (cursor) |h| {
+            const next = parked.nextAfter(h);
+            parked.remove(h);
             switch (h.meta().flags.kind) {
                 .object => {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    if (rt.gc.phase == .remove_cycles and (h.meta().rc != 0 or obj.weakref_count != 0)) {
+                    // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
+                    if (rt.gc.phase == .remove_cycles and obj.weakref_count != 0) {
                         h.meta().flags.mark = false;
                         h.meta().flags.cycle_visited = false;
                         h.meta().flags.finalizing = false;
-                        continue;
+                    } else {
+                        freeCycleDeferredStruct(rt, obj);
                     }
-                    freeCycleDeferredStruct(rt, obj);
                 },
                 .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
                 .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
@@ -7983,6 +7991,7 @@ pub const Object = extern struct {
                 .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
                 else => {},
             }
+            cursor = next;
         }
     }
 
