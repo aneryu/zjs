@@ -21776,6 +21776,42 @@ test "small-function-inlining: next-entry specialize is installed on the caller"
     try std.testing.expect(state.?.specialized);
 }
 
+test "small-function-inlining: spec copy keeps simple_inline bits after extra TAKE locals" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\globalThis.__outer = outer;
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = outer(i);
+        \\assert.sameValue(last.x, 15);
+        \\assert.sameValue(outer(7).x, 7);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(outer_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+    // Extra TAKE window: not a Fast leaf (var_count==0), but still the
+    // qjs:17828 simple-inline shape (simple_inline_base holds).
+    try std.testing.expect(outer_fb.var_count > 0);
+    try std.testing.expect(outer_fb.simpleInlineEligible());
+    try std.testing.expect(!outer_fb.strictSimpleInlineEligible());
+    try std.testing.expect(!outer_fb.strictSimpleSnapshotInlineEligible());
+    try std.testing.expect(!outer_fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(!outer_fb.rawThisInlineEmptyLeaf());
+    try std.testing.expect(!outer_fb.simpleInlineExactArgsLeaf());
+    try std.testing.expect(!outer_fb.rawThisInlineExactArgsLeaf());
+    try std.testing.expectEqual(.none, outer_fb.exactArgsLeafKind());
+    try std.testing.expectEqual(.none, outer_fb.captureLeafKind());
+}
+
 test "small-function-inlining: sibling constructor sites both specialize" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
