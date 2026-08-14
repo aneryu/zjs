@@ -9554,6 +9554,8 @@ test "qjs alignment X-10 tagged template objects keep Array.prototype" {
     defer result.free(js.runtime);
     try std.testing.expectEqualStrings("function\ntrue\n", stream.buffered());
 }
+
+test "qjs alignment C4 Array instanceof follows prototype chain" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
