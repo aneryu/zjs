@@ -89,17 +89,19 @@ pdfjs 一整轮 3.83M 次 concat 分桶 = **lhs 共享（rc>1）65.5% / lhs=rope
 状态:      REGISTERED，单条 <0.3pp，进 R6 组包 + 三 pad
 ```
 
-## `simple-new-cost-alignment`（R7-R1，2026-08-14 登记）
+## `raytrace-ctor-gap`（R7-R1 → **R8 改写**，2026-08-14）
 
 ```
-来源:      R7 提纯——raytrace case 1.296，三刀消融后 1.002；构造成对税 1.00G = 全部超出
-上限:      raytrace 0.777→1.00 ⇒ geomean +1.7pp（当前登记册最大条目）
-性质:      FAITHFUL 约束下的成本对齐：3 字段 simple new 逼近对象字面量成本
-⛔ 红线:    不得重建 constructSimpleFieldConstructor 型 bypass（08-11 用户裁决）。
-           合法问题形态=「qjs 走完整字节码体+一帧 150 cyc，zjs 194 cyc 贵在哪」，
-           答案必须是让忠实构造路径变便宜，非跳过工作
-优势:      case-pure.js 提供秒级迭代载具（T 系列当年没有的东西）
-状态:      REGISTERED → R8 主线
+来源:      R7 提纯 + R8-C 价目阶梯（三 pad 零翻转）：
+           N3 三字段 new 0.871（zjs 反超，靠 call_frames=2 bypass）／N3g 真帧 1.161／
+           N0 空 new 1.553(+92)／G 形 initialize.apply 1.419(+306)
+上限:      raytrace 0.777→1.00 ⇒ +1.7pp（登记册最大条目）
+⚠️ R7-R1 原题「N3 逼近字面量」作废——N3 已比字面量更赢 qjs（0.871 vs 0.902）。
+真缺口:    G 形与 N0 形没享受 N3 待遇。两条路：
+           R8-C1（扩大 bypass 让 G 打上）——⛔ 与 08-11「必须删不开例外」冲突，
+           且 bypass 本体从未按裁定删除（call_runtime.zig:2288 仍在）= 在案治理矛盾；
+           或 faithful 攻坚（R9 计划 §0 选项 c）：真帧 N0 +92 与 apply 段逐指令对齐 qjs
+状态:      R9 条件计划已立（默认 faithful 先行），bypass 三选项待用户裁决
 ```
 
 ## `apply-arguments-residual`（R7-R2，2026-08-14 登记）
