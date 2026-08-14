@@ -83,3 +83,9 @@ faithful 手段到此为止（再往下=省略 arguments 对象=形态特判，�
 **bypass 从来没有在帮 raytrace**；删除的 zoo 代价集中在 simple-ctor 重度基准（EB/splay/crypto）。
 
 **Phase 1 判定：未打穿（N3g 1.107 > 1.05，不假装通过）。** 后续见 R10 §0 与总判读。
+
+**两刀合入终判（driver，3-pad zoo）**：geomean **+0.27/+0.18/+0.20%** 三 pad 同号正向；
+raytrace +2.26/—/+1.17；无基准三 pad 同号回退；资产无损；gate 0/49775（worktree+main 复核）。
+②号刀 diff 核证=own `.prototype` data 槽内联快探（同语义读、首构造走全 helper、exotic 退避、
+全构造器一致）。**已合入 main**。case 基线随之更新（N0 1.425 等），R10 的 delete-only
+对照线须在 rebase 后重测。
