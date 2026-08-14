@@ -29,6 +29,13 @@ R3 的「JS 级干净」仍然有效——它只证明**没有第二个 initiali
 4. src/ 只读；计数器 patch 留 lane worktree 不合并；发现的候选只登记不实施。
 5. 已封板方向不重启（调用边界弥散 stall／布局／NaN-boxing／tail_call／rope 表示／IMPL-TEARDOWN），
    但**允许台账把成本归到封板区**——封板的是「再投工程」，不是「不准记账」。
+6. **VERIFIED-LEDGER 是强制对照参考**：
+   `/home/aneryu/worktree-impl-audit/docs/qjs-align/IMPL-DIVERGENCE-2026-08-13/VERIFIED-LEDGER.md`
+   （已两轮核查）。每当 lane 要命名一个机制/解释一个桶，**先查对应子系统的已核实差异**，
+   LEDGER.md 产出中引用条目号（如 §4.2「数组容量增长」）；反向亦然——
+   若某已核实差异能解释你的桶，优先用它而不是新发明假设。
+   重点清单：**§4.2 常量与阈值**（尤其内存增长类）、**§4.4 zjs-only 机制**（44 条热频）、
+   §4.3 死代码表（防把不可达代码当活机制归因）、178 条「微观相同」（别在上面开实验）。
 
 ## 2. Lane R4-T「时间盒折差」（CPU 5，**头号 lane**）
 
@@ -43,9 +50,17 @@ R3 的「JS 级干净」仍然有效——它只证明**没有第二个 initiali
 3. **GC 对账**：每时间盒内 GC 触发次数/暂停总时长/回收字节，zjs vs qjs
    （zjs 侧找现成统计口，qjs 侧 `JS_ComputeMemoryUsage`/DUMP_GC 探一下有什么可用；
    实在没有就在计数器构建里加，频率专用）。
-4. **机制命名**：若坐实 GC 相位，对照两侧触发策略（qjs `gc_threshold` 增长策略 qjs:1986 一带
-   vs zjs 对应物）、堆增长曲线、shape/atom 表是否单调膨胀、rope/字符串累积。
-   预注册假设（可证伪）：zjs 的 GC 触发阈值策略使重复负载下每时间盒多跑整轮 GC。
+4. **机制命名**：若坐实 GC 相位，对照两侧触发策略与堆体积。
+   **VERIFIED-LEDGER §4.2 已核实的预注册嫌疑（优先于新假设）**：
+   - GC 阈值**初始**常量 ✅ 同（malloc_gc_threshold 256KB）⇒ 病灶只可能在**动态增长策略**
+     （qjs GC 后按 malloc_size 重算阈值的公式 vs zjs 对应物，逐行对照）或**堆体积本身**；
+   - **数组容量增长 ❌ 异**：100 元素 zjs 141 槽 2256B vs qjs 100 槽 1600B（+41%，
+     `object.zig:5382-5387` vs qjs:9530-9534 的 3/2+slack）；
+   - **属性容量增长 ❌ 异**：恒 ×2 vs 3/2+slack 回收（`shape.zig:17-22` vs qjs:5344/5334）；
+   - shape hash 初始 4×（64 vs 16 桶）、atom hash 初始 2×、`JS_PROP_INITIAL_SIZE` 4 vs 2。
+   预注册假设（可证伪）：**zjs 的容量策略使同负载堆大 20-40%，GC 每轮扫更多字节，
+   重复负载下每时间盒 GC 成本占比放大**——验证=直接量两侧时间盒末的 live bytes 与
+   GC 扫描字节总量。若堆体积同而 GC 次数多，才转向触发策略。
 
 **闭合判据**：折差表全谱 + TS 的折差被分解到 ≤±3% 或明确命名。
 
