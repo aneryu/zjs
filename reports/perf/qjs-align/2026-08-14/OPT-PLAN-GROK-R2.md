@@ -1,6 +1,6 @@
 # OPT-R2 计划 — grok 第二批：性能通道三 lane（回收 / 字符串 / tail_call）
 
-日期：2026-08-14。制定者：driver。执行者：grok。状态：**计划定稿，未派发**。
+日期：2026-08-14。制定者：driver。执行者：grok。状态：**三 lane 已执行，见 §7**。
 前批 = AUDIT-EXEC（正确性通道，17/17 落地，§10 审查记录）。本批是**性能通道**，
 每条 lane 按 PARITY-LEDGER 准入规则**先报预计 zoo 价值**。
 
@@ -145,4 +145,9 @@ worktree 命名 `worktree-grok-h{1,2,3}-*`，分支 `grok/opt-r2-h{1,2,3}`。
 
 | lane | phase | 状态 | 实测 |
 |---|---|---|---|
-| （待执行） | | | |
+| H1 | 1 拆 commit | **DONE** | `grok/opt-r2-h1-ladder` 五 commit 与 `b9f5731e` G2 足迹 **diff 0 行**。`/tmp/h1-bins/` |
+| H1 | 1 梯子 | **DONE** | 孤立：仅 X-02 −0.93%（余项非负）。**叠加** `cb4d3d16`：full G2 **−1.36%**（复现）；X-10 +0.13；X-02 +0.05；X-07 −0.51；X-07+08+09 −1.20。X-07 孤立/叠加 **符号相反** → 布局，不是该回滚的语义税。 |
+| H1 | 2 | **LANDED / 不回滚** | 未回滚 X-07/X-10。`grok/opt-r2-h1` `9737363a`：3-arg `Reflect.set` 跳过 identity（qjs `p!=p1`）。回收 −1.33% 要 3-pad lineage，不是改 `break`。 |
+| H2 | 1–2 | **BLOCKED** | FAM `destroyFlat` 按 `len` 算释放尺寸，不能用 slab slack 原地增长。决策简报 `/tmp/h2-bins/PHASE2-DECISION.md`。候补：pointer-based free（改释放协议）或维持 rope-accumulator。 |
+| H3 | 0 | **DONE** | qjs 发射=`resolve_labels` call+return→tail_call（34941）。handler=**嵌套 `JS_CallInternal` + goto done**，不是帧复用。qjs `return inner()` 的 Error.stack **保留 outer**；`return f(n-1)`×20000 **溢出**。 |
+| H3 | 1 | **LANDED + 开放决策** | 发射已合入 `grok/opt-r2-h3` `36cf6476`。现有 reuse handler 使 Error.stack 少一帧（与 qjs 不符）。关掉 reuse 会打碎 `machine_inits==1` 测试，已 revert。driver 选：保持 reuse（更快、zjs-only）或改 handler 对齐 qjs。 |
