@@ -1822,8 +1822,10 @@ pub const Machine = struct {
     /// ownership, so the caller can enter `pushExactSimpleFrameSlow`.
     /// HostError is unreachable here — qjs:17837 depth admission is a
     /// pure predicate; overflow throws only on the slow path.
-    /// Snapshot / open-var-ref / first-chunk / arena-miss shapes return
-    /// null so this function contains no `bl` (no 0x140 C frame).
+    /// Snapshot / first-chunk / arena-miss / open-var-ref windows longer
+    /// than `fast_open_var_ref_max` return null so this function contains
+    /// no `bl` (no 0x140 C frame). Small open windows are filled here
+    /// with unrolled NULL stores (qjs:17865-17866).
     noinline fn pushExactSimpleFrame(
         self: *Machine,
         comptime strict_this: bool,
@@ -1861,12 +1863,20 @@ pub const Machine = struct {
         const chunk_index = index / entries_per_chunk;
         if (chunk_index >= self.chunk_count) return null;
 
-        // @memset(open_var_refs) would be a compiler_rt.memset `bl`.
-        if (function.openVarRefCount() != 0) return null;
+        // qjs:17865-17866 fills the open-var-ref window with NULL in the
+        // same prologue. Admit small windows on this leaf with unrolled
+        // stores (no compiler_rt.memset `bl`, which would restore the
+        // 0x140 frame). Larger windows stay on Slow.
+        const open_n: usize = function.openVarRefCount();
+        if (open_n > fast_open_var_ref_max) return null;
 
         const var_count: usize = function.var_count;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const total = var_count + stack_count;
+        const open_slots: usize = if (open_n == 0)
+            0
+        else
+            (open_n * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+        const total = var_count + stack_count + open_slots;
         // Peek the active chunk (same predicates as `canCarveActiveMarked`)
         // then commit depth+carve together so this leaf never materializes
         // `?ActiveCarve` or a retreat `bl`.
@@ -1898,6 +1908,13 @@ pub const Machine = struct {
         const args = values[receiver_count + 1 ..][0..argc];
         const captures = target.captureSlice();
 
+        var open_var_refs: []?*core.VarRef = &.{};
+        if (open_n != 0) {
+            const open_bytes = slab_values[var_count + stack_count ..][0..open_slots];
+            open_var_refs = std.mem.bytesAsSlice(?*core.VarRef, std.mem.sliceAsBytes(open_bytes))[0..open_n];
+            storeOpenVarRefNulls(open_var_refs);
+        }
+
         entry.frame = .{
             .function = function,
             .this_value = if (method_receiver)
@@ -1912,7 +1929,7 @@ pub const Machine = struct {
             .locals = locals,
             .args = args,
             .var_refs = captures,
-            .open_var_refs = &.{},
+            .open_var_refs = open_var_refs,
             .storage_values = &.{},
             .ownership = .{
                 .this_value = if (method_receiver) .owned else .borrowed,
@@ -2914,6 +2931,23 @@ pub const Machine = struct {
         const value = slot.*;
         slot.* = core.JSValue.undefinedValue();
         return value;
+    }
+
+    /// EB open-ref miss histogram maxes at 16 (99.97% at ≤10). Unrolled
+    /// pointer stores keep this Fast leaf free of `compiler_rt.memset`.
+    const fast_open_var_ref_max: usize = 16;
+
+    inline fn storeOpenVarRefNulls(dst: []?*core.VarRef) void {
+        const n = dst.len;
+        std.debug.assert(n >= 1 and n <= fast_open_var_ref_max);
+        const p = dst.ptr;
+        comptime var k: usize = 1;
+        inline while (k <= fast_open_var_ref_max) : (k += 1) {
+            if (n == k) {
+                inline for (0..k) |i| p[i] = null;
+                return;
+            }
+        }
     }
 
     fn sourceHasStackRegion(source: ArgsSource) bool {
