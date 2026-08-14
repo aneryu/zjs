@@ -21394,3 +21394,105 @@ test "long numeric literals parse without a 128-byte cap" {
     defer result.free(js.runtime);
     try std.testing.expectEqualStrings("1.1111111111111112e+128\n2.288265886710203e+155\n", output.buffered());
 }
+
+test "small-function-inlining: sc_Pair constructor is eligible and arguments ctor is not" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function sc_Pair(car, cdr) { this.car = car; this.cdr = cdr; }
+        \\function usesArgs() { return arguments[0]; }
+        \\function big(a,b,c,d,e) { this.a=a; this.b=b; this.c=c; this.d=d; this.e=e; }
+        \\globalThis.__p = sc_Pair;
+        \\globalThis.__a = usesArgs;
+        \\globalThis.__b = big;
+    );
+    defer result.free(js.runtime);
+
+    const global = try js.context.globalObject();
+    const pair_fn = try global.getProperty(try js.runtime.internAtom("__p"));
+    defer pair_fn.free(js.runtime);
+    const args_fn = try global.getProperty(try js.runtime.internAtom("__a"));
+    defer args_fn.free(js.runtime);
+    const big_fn = try global.getProperty(try js.runtime.internAtom("__b"));
+    defer big_fn.free(js.runtime);
+
+    const pair_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(pair_fn).?;
+    const args_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(args_fn).?;
+    const big_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(big_fn).?;
+    const pair_fb = pair_obj.u.bytecode_function.function_bytecode.?;
+    try std.testing.expect(pair_fb.smallInlineEligible());
+    try std.testing.expect(!args_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!big_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: setter throw stack is setter, ctor, caller" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\Object.defineProperty(C.prototype, "x", {
+        \\  set: function setX(v) { throw new Error("boom"); }
+        \\});
+        \\try {
+        \\  outer(99);
+        \\} catch (e) {
+        \\  var s = String(e.stack);
+        \\  print(s.indexOf("setX") >= 0 ? "setX" : "no-setX");
+        \\  print(s.indexOf("C") >= 0 ? "C" : "no-C");
+        \\  print(s.indexOf("outer") >= 0 ? "outer" : "no-outer");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("setX\nC\nouter\n", output.buffered());
+}
+
+test "small-function-inlining: redefinition takes the new function" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function m1() { return 1; }
+        \\function m2() { return 2; }
+        \\var o = { m: m1 };
+        \\function outer(obj) { return obj.m(); }
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = outer(o);
+        \\o.m = m2;
+        \\assert.sameValue(outer(o), 2);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: new C field write is visible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.x = 1; }
+        \\function outer() { return new C(); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(o.x, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: polymorphic site is not specialized" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function A(v) { this.v = v; }
+        \\function B(v) { this.v = v + 1; }
+        \\function outer(C, v) { return new C(v); }
+        \\var i, last;
+        \\for (i = 0; i < 20; i++) last = outer(i & 1 ? A : B, i);
+        \\assert.sameValue(typeof last.v, "number");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}

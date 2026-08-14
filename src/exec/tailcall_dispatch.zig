@@ -30,7 +30,9 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const inline_calls = @import("inline_calls.zig");
+const small_inline = @import("small_inline.zig");
 const call_runtime = @import("call_runtime.zig");
+const object_ops = @import("object_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
@@ -1964,6 +1966,31 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     return coldNext(vb, vm);
                 },
                 .instance => |instance| {
+                    const call_pc: u32 = @intCast(@intFromPtr(pc) - @intFromPtr(vm.code_base));
+                    const callee_fb = candidate.resolved.fb;
+                    if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+                        if (site.kind == .constructor and small_inline.calleeMatches(site, func) and
+                            small_inline.windowFits(vm.frame, site))
+                        {
+                            small_inline.installInlineWindow(vm.frame, site, instance, args, vm.rt);
+                            call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+                            vm.frame.pc = site.pc_lo;
+                            return coldNext(vb, vm);
+                        }
+                    }
+                    if (small_inline.noteMonomorphic(vm.rt, @constCast(vm.function), call_pc, @constCast(callee_fb))) {
+                        if (object_ops.objectFromValue(vm.frame.current_function)) |caller_obj| {
+                            small_inline.specializeCallSite(
+                                vm.rt,
+                                caller_obj,
+                                @constCast(vm.function),
+                                call_pc,
+                                @constCast(callee_fb),
+                                .constructor,
+                                argc,
+                            );
+                        }
+                    }
                     // Parser-emitted direct construction owns two references
                     // to the same callable (`get_var; dup`). Recast that
                     // region as method-shaped setup: move the eager instance

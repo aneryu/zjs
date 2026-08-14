@@ -1612,7 +1612,10 @@ pub const function_bytecode = struct {
         /// before entering. Derived constructors keep the canonical qjs
         /// header bit; this covers only the base-class entry probe.
         entry_rejects_plain_call: bool = false,
-        _reserved: u2 = 0,
+        /// Geometry-only small-function body-expansion candidate. Not the
+        /// existing same-machine `simple_inline_eligible` Entry path.
+        small_inline_eligible: bool = false,
+        _reserved: u1 = 0,
     };
 
     /// Immutable execution policy published before a FunctionBytecode escapes.
@@ -2224,6 +2227,9 @@ pub const function_bytecode = struct {
         pub inline fn captureLeafKind(self: *const FunctionBytecodeImpl) ExactArgsLeafKind {
             return self.executionFlags().capture_leaf_kind;
         }
+        pub inline fn smallInlineEligible(self: *const FunctionBytecodeImpl) bool {
+            return self.executionFlags().small_inline_eligible;
+        }
         pub inline fn pc2lineBuf(self: *const FunctionBytecodeImpl) []u8 {
             if (self.legacyBytecodeAdapter()) |legacy| return @constCast(legacy.pc2line_buf);
             const dbg = self.debugInfo() orelse return &.{};
@@ -2496,6 +2502,11 @@ pub const function_bytecode = struct {
             const vardefs = layout_value.vardefsSliceMut(self);
             const cpool = layout_value.cpoolSliceMut(self);
             const closure_var = layout_value.closureVarSliceMut(self);
+
+            // Small-inline CallerState lives in the hot pad and is found via
+            // the live code pointer. Tear it down before the code pointer is
+            // cleared.
+            if (rt.small_inline_destroy) |cb| cb(rt, @ptrCast(self));
 
             self.byte_code = null;
             self.byte_code_len = 0;
@@ -9979,6 +9990,81 @@ const function_mod = struct {
         return false;
     }
 
+    /// Geometry-only body-expansion gate (OPT-R10 small-function-inlining).
+    /// Does not look at function names or field patterns. Forbidden opcodes
+    /// that require a real frame (eval / arguments / fclosure / new.target /
+    /// apply / generators) reject the candidate.
+    pub const small_inline_max_code: usize = 40;
+    pub const small_inline_max_slots: usize = 4;
+    pub const small_inline_max_stack: usize = 4;
+
+    fn scanSmallInlineEligible(
+        fb: *const FunctionBytecode,
+        materializes_arguments_object: bool,
+        contains_direct_eval: bool,
+        class_syntax_excludes_inline: bool,
+    ) bool {
+        if (fb.functionKind() != .normal) return false;
+        if (class_syntax_excludes_inline) return false;
+        if (fb.isDerivedClassConstructor()) return false;
+        if (!fb.hasSimpleParameterList()) return false;
+        if (materializes_arguments_object or contains_direct_eval) return false;
+        if (fb.closureVarCount() != 0 or fb.openVarRefCount() != 0) return false;
+        const code = fb.byteCode();
+        if (code.len == 0 or code.len > small_inline_max_code) return false;
+        if (@as(usize, fb.arg_count) + @as(usize, fb.var_count) > small_inline_max_slots) return false;
+        if (fb.stack_size > small_inline_max_stack) return false;
+
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size: usize = opcode.sizeOf(op_id);
+            if (size == 0 or pc + size > code.len) return false;
+            switch (op_id) {
+                opcode.op.eval,
+                opcode.op.apply_eval,
+                opcode.op.special_object,
+                opcode.op.fclosure,
+                opcode.op.fclosure8,
+                opcode.op.apply,
+                opcode.op.rest,
+                opcode.op.initial_yield,
+                opcode.op.yield,
+                opcode.op.yield_star,
+                opcode.op.async_yield_star,
+                opcode.op.await,
+                opcode.op.return_async,
+                opcode.op.get_super,
+                opcode.op.get_super_value,
+                opcode.op.put_super_value,
+                opcode.op.get_private_field,
+                opcode.op.put_private_field,
+                opcode.op.define_private_field,
+                opcode.op.define_class,
+                opcode.op.define_class_computed,
+                opcode.op.import,
+                opcode.op.with_get_var,
+                opcode.op.with_put_var,
+                opcode.op.with_delete_var,
+                opcode.op.with_make_ref,
+                opcode.op.with_get_ref,
+                opcode.op.make_loc_ref,
+                opcode.op.make_arg_ref,
+                opcode.op.make_var_ref_ref,
+                opcode.op.make_var_ref,
+                opcode.op.gosub,
+                opcode.op.@"catch",
+                opcode.op.nip_catch,
+                opcode.op.tail_call,
+                opcode.op.tail_call_method,
+                => return false,
+                else => {},
+            }
+            pc += size;
+        }
+        return true;
+    }
+
     /// Publish all zjs-only call classifications once, after the final FB
     /// tables/code and the normal stack-BFS result are complete. These facts
     /// are deliberately kept out of attach and call resolution: both paths
@@ -10031,6 +10117,15 @@ const function_mod = struct {
         const entry_code = fb.byteCode();
         const entry_rejects_plain_call = entry_code.len == 0 or
             entry_code[0] == opcode.op.check_ctor;
+        const small_inline_eligible = scanSmallInlineEligible(
+            fb,
+            materializes_arguments_object,
+            contains_direct_eval,
+            class_syntax_excludes_inline,
+        );
+        if (fb.realmContext()) |realm| {
+            realm.runtime.small_inline_published_bytes +|= entry_code.len;
+        }
 
         call_facts.execution = .{
             .has_mapped_arguments = has_mapped_arguments,
@@ -10045,6 +10140,7 @@ const function_mod = struct {
             .capture_leaf_kind = if (sloppy_capture) .sloppy else if (raw_capture) .raw_this else .none,
             .is_module = is_module,
             .entry_rejects_plain_call = entry_rejects_plain_call,
+            .small_inline_eligible = small_inline_eligible,
         };
         fb.hotExtensionRequiredMut().call_facts = call_facts;
         // Keep the header-resident hot mirror coherent with the authoritative
