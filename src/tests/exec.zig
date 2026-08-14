@@ -3377,6 +3377,95 @@ fn expectSingleDerivedThisClosureCapture(function: *const bytecode.FunctionBytec
     try std.testing.expectEqual(@as(usize, 1), this_capture_count);
 }
 
+test "js_function_set_properties publishes configurable length then name" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function namedPair(a, b) { return a; }
+        \\var dlen = Object.getOwnPropertyDescriptor(namedPair, "length");
+        \\var dname = Object.getOwnPropertyDescriptor(namedPair, "name");
+        \\globalThis.__r11_name_ok = (dlen.value === 2 && dlen.writable === false && dlen.enumerable === false && dlen.configurable === true
+        \\  && dname.value === "namedPair" && dname.writable === false && dname.enumerable === false && dname.configurable === true) ? 1 : 0;
+    );
+    setup.free(js.runtime);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__r11_name_ok");
+    defer js.runtime.atoms.free(key);
+    const result = try global.getProperty(key);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.asInt32() == @as(?i32, 1) or result.asNumber() == @as(?f64, 1.0));
+}
+
+test "get_var_ref reuses the open cell on a second capture of the same local" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("r11-reuse-open-cell");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    function.var_count = 1;
+    function.open_var_ref_count = 1;
+    function.vardefs = try rt.memory.alloc(bytecode.function_bytecode.BytecodeVarDef, 1);
+    function.vardefs[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{
+        .var_name = core.atom.null_atom,
+        .is_captured = true,
+        .var_ref_idx = 0,
+    });
+
+    var locals = [_]core.JSValue{core.JSValue.int32(7)};
+    var open_refs = [_]?*core.VarRef{null};
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
+    defer frame.deinit(&rt.memory, rt);
+    frame.locals = &locals;
+    frame.open_var_refs = &open_refs;
+    frame.ownership.storage = .borrowed;
+
+    const first = try frame.captureLocal(rt, 0);
+    const second = try frame.captureLocal(rt, 0);
+    defer first.freeCell(rt);
+    defer second.freeCell(rt);
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(first, open_refs[0].?);
+}
+
+test "js_closure2 attach roots captures through the function object" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function __r11_make(n) {
+        \\  var a = n, b = n + 1, c = n + 2;
+        \\  function inner() {
+        \\    function deeper() { return a + b + c; }
+        \\    return deeper;
+        \\  }
+        \\  return inner();
+        \\}
+        \\globalThis.__r11_fn = __r11_make(10);
+        \\globalThis.__r11_out = globalThis.__r11_fn();
+    );
+    setup.free(js.runtime);
+
+    const old_threshold = js.runtime.gcThreshold();
+    js.runtime.setGCThreshold(0);
+    defer js.runtime.setGCThreshold(old_threshold);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    const again = try js.eval("globalThis.__r11_out = globalThis.__r11_fn()");
+    again.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const out_key = try js.runtime.internAtom("__r11_out");
+    defer js.runtime.atoms.free(out_key);
+    const total = try global.getProperty(out_key);
+    defer total.free(js.runtime);
+    try std.testing.expect(total.asInt32() == @as(?i32, 33) or total.asNumber() == @as(?f64, 33.0));
+}
+
 test "var-ref growth promotes borrowed captures to owned cells" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
