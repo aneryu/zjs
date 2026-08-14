@@ -15,6 +15,7 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const object_ops = @import("object_ops.zig");
+const function_ops = @import("function_ops.zig");
 const Shape = @import("../core/shape.zig").Shape;
 
 const op = bytecode.opcode.op;
@@ -284,6 +285,13 @@ pub fn specializeCallSite(
         if (state.inlined_len >= max_sites) return;
     }
     if (budgetRemaining(rt) == 0) return;
+    // I4 install-time: no own apply on the proto-chain method, and
+    // Function.prototype.apply is still the realm builtin record.
+    if (analyzeApplyForward(callee)) |plan| {
+        const realm = callee.realmContext() orelse return;
+        const global = realm.global orelse return;
+        if (!applyForwardGuardHolds(rt, global, callee_fn_obj, @intCast(plan.method_atom))) return;
+    }
     const spec = cloneAndExpand(rt, base_fb, callee, callee_fn_obj, call_pc, kind, argc) orelse return;
     const next = JSValue.functionBytecode(&spec.header);
     caller_obj.setFunctionBytecodeValue(rt, next) catch {
@@ -1301,6 +1309,75 @@ fn sampleCtorCache(func_obj: *Object) ?CtorCache {
 pub fn calleeMatches(site: *const InlinedSite, func: JSValue) bool {
     const obj = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
     return if (site.callee_obj) |expected| obj == expected else false;
+}
+
+fn realmFunctionApply(rt: *JSRuntime, global: *Object) ?*Object {
+    const fproto = object_ops.functionPrototypeFromGlobal(rt, global) orelse return null;
+    return fproto.getOwnDataObjectBorrowed(core.atom.ids.apply);
+}
+
+fn isFunctionApplyBuiltin(obj: *const Object) bool {
+    if (obj.class_id != core.class.ids.c_function) return false;
+    const ref = core.function.decodeNativeBuiltinId(obj.nativeFunctionId()) orelse return false;
+    return ref.domain == .function and ref.id == @intFromEnum(function_ops.PrototypeMethod.apply);
+}
+
+fn lookupProtoChainDataFunction(start: *Object, atom_id: core.Atom) ?*Object {
+    var cur: ?*Object = start;
+    while (cur) |obj| {
+        if (obj.findProperty(atom_id)) |idx| {
+            const stored = obj.asDataAt(idx) orelse return null;
+            return object_ops.objectFromValue(stored);
+        }
+        cur = obj.getPrototype();
+    }
+    return null;
+}
+
+/// I4 / D5: proto-chain data function for `method_atom` has no own `apply`,
+/// and `Function.prototype.apply` is still the realm builtin record.
+pub fn applyForwardGuardHolds(
+    rt: *JSRuntime,
+    global: *Object,
+    ctor_obj: *Object,
+    method_atom: core.Atom,
+) bool {
+    if (method_atom == core.atom.null_atom) return false;
+    const apply_obj = realmFunctionApply(rt, global) orelse return false;
+    if (!isFunctionApplyBuiltin(apply_obj)) return false;
+    const proto = ctor_obj.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return false;
+    const method_fn = lookupProtoChainDataFunction(proto, method_atom) orelse return false;
+    if (method_fn.findProperty(core.atom.ids.apply) != null) return false;
+    return true;
+}
+
+pub fn applyForwardTakeOk(rt: *JSRuntime, global: *Object, site: *const InlinedSite, func: JSValue) bool {
+    if (!site.apply_forwarded) return true;
+    const ctor = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
+    return applyForwardGuardHolds(rt, global, ctor, site.apply_method_atom);
+}
+
+/// True when `call_pc` is the rewritten apply-forward `call_method`.
+pub fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
+    const site = siteForPc(fb, call_pc) orelse return false;
+    return site.apply_forwarded and site.apply_forward_call_pc == call_pc;
+}
+
+/// After `op_call_method` advances pc past the 3-byte instruction, recover
+/// the apply-forward site (or null). Used by enterEntry to attach
+/// `Entry.native_caller` (D8-L1) without inserting an InlinedSite ghost.
+pub fn applyForwardSiteAfterCall(fb: *const FunctionBytecode, pc_after: u32) ?*const InlinedSite {
+    if (pc_after < 3) return null;
+    const call_pc = pc_after - 3;
+    const site = siteForPc(fb, call_pc) orelse return null;
+    if (site.apply_forwarded and site.apply_forward_call_pc == call_pc) return site;
+    return null;
+}
+
+pub fn realmApplyBuiltin(rt: *JSRuntime, global: *Object) ?*Object {
+    const apply_obj = realmFunctionApply(rt, global) orelse return null;
+    if (!isFunctionApplyBuiltin(apply_obj)) return null;
+    return apply_obj;
 }
 
 /// v1.5 fused create-this. Caller must already have polled at
