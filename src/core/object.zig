@@ -193,12 +193,14 @@ fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
 /// Release the nullable module/ordinary closure slots and their single backing
 /// allocation.  Module creation deliberately leaves MODULE_IMPORT entries
 /// null until indexed linking; ordinary published functions are sealed.
+///
+/// qjs `js_bytecode_function_finalizer` (quickjs.c:6253-6256) is one loop of
+/// `free_var_ref` then `js_free_rt` of the pointer array. Keep that shape:
+/// null slots are skipped inside `free_var_ref`, not by a second helper.
 fn destroyOptionalVarRefCellSlice(rt: *JSRuntime, slot: *[]?*var_ref_mod.VarRef) void {
     const cells = slot.*;
     slot.* = &.{};
-    for (cells) |maybe_cell| {
-        if (maybe_cell) |cell| cell.freeCell(rt);
-    }
+    for (cells) |cell| var_ref_mod.VarRef.freeVarRef(rt, cell);
     if (cells.len != 0) rt.memory.free(?*var_ref_mod.VarRef, cells);
 }
 
@@ -3400,7 +3402,7 @@ pub const Object = extern struct {
 
     /// Pass-B drain of a cycle-deferred object: its resources were freed by the
     /// resource pass; only the struct memory remains. Mirrors qjs Pass B
-    /// (quickjs.c:6797). Pass B filters retained weak husks before calling this.
+    /// (quickjs.c:6797). Pass B keeps only live-weakref husks before calling this.
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
@@ -6517,10 +6519,11 @@ pub const Object = extern struct {
         return self.u.bytecode_function.captureSlots();
     }
 
-    /// Allocate the one and only module capture array with every slot null.
-    /// The attached FB fixes its exact length; a mismatch or second allocation
-    /// is invalid bytecode and leaves the function untouched.
-    pub fn allocateNullModuleCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+    /// qjs `js_closure2` (quickjs.c:17276-17280): `js_mallocz` the capture
+    /// array and attach it to the function object *before* the fill loop so
+    /// the object is the sole GC root. Null slots are skipped by mark/destroy.
+    /// Inline: qjs does this mallocz inside js_closure2, not as a sibling call.
+    pub inline fn allocateNullCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
         const storage = &self.u.bytecode_function;
         const fb = storage.function_bytecode orelse return error.InvalidBytecode;
@@ -6531,6 +6534,19 @@ pub const Object = extern struct {
         const slots = try rt.memory.alloc(?*var_ref_mod.VarRef, count);
         @memset(slots, null);
         storage.var_refs = slots.ptr;
+    }
+
+    /// Allocate the one and only module capture array with every slot null.
+    /// The attached FB fixes its exact length; a mismatch or second allocation
+    /// is invalid bytecode and leaves the function untouched.
+    pub fn allocateNullModuleCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+        return allocateNullCaptureSlots(self, rt, count);
+    }
+
+    /// Mutable view of the attached capture array during js_closure2 fill.
+    pub inline fn mutableCaptureSlots(self: *Object) []?*var_ref_mod.VarRef {
+        std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
+        return self.u.bytecode_function.captureSlots();
     }
 
     /// Replace one module capture slot, transferring the caller's owned cell
@@ -7943,23 +7959,31 @@ pub const Object = extern struct {
         return garbage_count;
     }
 
-    /// Pass B: qjs gc_free_cycles second walk (quickjs.c:6797-6810) frees
-    /// OBJECT / FUNCTION_BYTECODE / MODULE structs (and ASYNC, which zjs does
-    /// not have as a GC kind). The object arm keeps a husk when rc or weakrefs
-    /// remain. var_ref / realm_context are zjs leftovers whose owners skipped
-    /// them via cycle_visited; they still have to be reclaimed here.
+    /// Pass B: qjs `gc_free_cycles` second walk (quickjs.c:6797-6810).
+    /// One `list_for_each_safe`, in-place free, no pop/continue revisit.
+    /// Keep only a JS object with remaining weakrefs (qjs:6803-6806). Leftover
+    /// rc after the resource pass is intra-cycle and is freed here so the next
+    /// GC does not walk the husk again. Still only the four qjs kinds (OBJECT /
+    /// FUNCTION_BYTECODE / MODULE; zjs has no ASYNC) plus var_ref / realm_context
+    /// leftovers whose owners skipped them via cycle_visited. Does not delete
+    /// `cycle_visited`, does not touch RC teardown or ScanIncref.
     pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
-        while (rt.gc.popCycleDeferredFree()) |h| {
+        const parked = &rt.gc.cycle_deferred_frees;
+        var cursor = gc.listFirst(&parked.sentinel);
+        while (cursor) |h| {
+            const next = parked.nextAfter(h);
+            parked.remove(h);
             switch (h.meta().flags.kind) {
                 .object => {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    if (rt.gc.phase == .remove_cycles and (h.meta().rc != 0 or obj.weakref_count != 0)) {
+                    // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
+                    if (rt.gc.phase == .remove_cycles and obj.weakref_count != 0) {
                         h.meta().flags.mark = false;
                         h.meta().flags.cycle_visited = false;
                         h.meta().flags.finalizing = false;
-                        continue;
+                    } else {
+                        freeCycleDeferredStruct(rt, obj);
                     }
-                    freeCycleDeferredStruct(rt, obj);
                 },
                 .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
                 .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
@@ -7967,6 +7991,7 @@ pub const Object = extern struct {
                 .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
                 else => {},
             }
+            cursor = next;
         }
     }
 
