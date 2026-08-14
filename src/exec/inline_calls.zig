@@ -764,7 +764,10 @@ pub const Entry = struct {
         if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
         if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
         if (self.teardown.has_native_caller) self.releaseNativeCaller(rt);
-        if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+        // R-A1: do not read `frame.open_var_refs` — the hot exact constructor
+        // does not publish that slice. FB count is the publication truth;
+        // a non-zero count means Slow/Impl wrote a live window.
+        if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
         // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
         const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
         for (live_values) |v| v.free(rt);
@@ -786,7 +789,7 @@ pub const Entry = struct {
         std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
         if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
         if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-        if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+        if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
         // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
         const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
         for (live_values) |v| v.free(rt);
@@ -841,7 +844,7 @@ pub const Entry = struct {
             std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
             if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
             if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-            if (frame.open_var_refs.len != 0) frame.closeOpenVarRefs(rt);
+            if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
             // qjs done: close var refs first, then free local_buf..sp
             // (quickjs.c:20701-20706).
             const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
@@ -1822,8 +1825,10 @@ pub const Machine = struct {
     /// ownership, so the caller can enter `pushExactSimpleFrameSlow`.
     /// HostError is unreachable here — qjs:17837 depth admission is a
     /// pure predicate; overflow throws only on the slow path.
-    /// Snapshot / open-var-ref / first-chunk / arena-miss shapes return
-    /// null so this function contains no `bl` (no 0x140 C frame).
+    /// Snapshot / first-chunk / arena-miss / open-var-ref windows longer
+    /// than `fast_open_var_ref_max` return null so this function contains
+    /// no `bl` (no 0x140 C frame). Small open windows are filled here
+    /// with unrolled NULL stores (qjs:17865-17866).
     noinline fn pushExactSimpleFrame(
         self: *Machine,
         comptime strict_this: bool,
@@ -1861,12 +1866,20 @@ pub const Machine = struct {
         const chunk_index = index / entries_per_chunk;
         if (chunk_index >= self.chunk_count) return null;
 
-        // @memset(open_var_refs) would be a compiler_rt.memset `bl`.
-        if (function.openVarRefCount() != 0) return null;
+        // qjs:17865-17866 fills the open-var-ref window with NULL in the
+        // same prologue. Admit small windows on this leaf with unrolled
+        // stores (no compiler_rt.memset `bl`, which would restore the
+        // 0x140 frame). Larger windows stay on Slow.
+        const open_n: usize = function.openVarRefCount();
+        if (open_n > fast_open_var_ref_max) return null;
 
         const var_count: usize = function.var_count;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const total = var_count + stack_count;
+        const open_slots: usize = if (open_n == 0)
+            0
+        else
+            (open_n * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+        const total = var_count + stack_count + open_slots;
         // Peek the active chunk (same predicates as `canCarveActiveMarked`)
         // then commit depth+carve together so this leaf never materializes
         // `?ActiveCarve` or a retreat `bl`.
@@ -1887,7 +1900,6 @@ pub const Machine = struct {
         entry.continuation_payload = 0;
         entry.catch_target = null;
         entry.teardown = .{ .simple = true };
-        entry.profile_guard = .{};
         entry.arena_mark = .{ .chunk = active, .used = used };
         const locals = slab_values[0..var_count];
         const stack_window = slab_values[var_count..][0..stack_count];
@@ -1898,29 +1910,45 @@ pub const Machine = struct {
         const args = values[receiver_count + 1 ..][0..argc];
         const captures = target.captureSlice();
 
-        entry.frame = .{
-            .function = function,
-            .this_value = if (method_receiver)
-                takeSourceSlot(&values[0])
-            else if (strict_this)
-                core.JSValue.undefinedValue()
-            else
-                global.value(),
-            .current_function = takeSourceSlot(&values[receiver_count]),
-            .actual_arg_count = @intCast(argc),
-            .planned_stack_bytes = @intCast(planned_stack_bytes),
-            .locals = locals,
-            .args = args,
-            .var_refs = captures,
-            .open_var_refs = &.{},
-            .storage_values = &.{},
-            .ownership = .{
-                .this_value = if (method_receiver) .owned else .borrowed,
-                .var_refs = if (captures.len > 0) .borrowed else .owned,
-                .storage = .borrowed,
-            },
-            .cold = null,
+        var open_var_refs: []?*core.VarRef = &.{};
+        if (open_n != 0) {
+            const open_bytes = slab_values[var_count + stack_count ..][0..open_slots];
+            open_var_refs = std.mem.bytesAsSlice(?*core.VarRef, std.mem.sliceAsBytes(open_bytes))[0..open_n];
+            storeOpenVarRefNulls(open_var_refs);
+        }
+
+        // R13-A / R-A1: assign live fields only. A whole-struct Frame
+        // literal would store `storage_values=[]` (16B) over a reused
+        // slot. That slice is unpublished here: `ownership.storage=
+        // .borrowed` is the storage-free contract. Readers must not
+        // load the omitted slice — see close paths (FB count) and
+        // `deinitInlineCall` (owned-storage only). S1 admits open
+        // var-ref windows on this leaf, so `open_var_refs` IS live
+        // and must be published (empty or slab window) — G1's original
+        // omission predated S1.
+        // Kept zeroing: pc, cold, catch_target, teardown/return_action
+        // (C12), Stack.{memory,capacity,policy} (live grow/teardown).
+        entry.frame.function = function;
+        entry.frame.pc = 0;
+        entry.frame.this_value = if (method_receiver)
+            takeSourceSlot(&values[0])
+        else if (strict_this)
+            core.JSValue.undefinedValue()
+        else
+            global.value();
+        entry.frame.current_function = takeSourceSlot(&values[receiver_count]);
+        entry.frame.actual_arg_count = @intCast(argc);
+        entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
+        entry.frame.locals = locals;
+        entry.frame.args = args;
+        entry.frame.var_refs = captures;
+        entry.frame.open_var_refs = open_var_refs;
+        entry.frame.ownership = .{
+            .this_value = if (method_receiver) .owned else .borrowed,
+            .var_refs = if (captures.len > 0) .borrowed else .owned,
+            .storage = .borrowed,
         };
+        entry.frame.cold = null;
         entry.stack = .{
             .memory = &rt.memory,
             .values = stack_window.ptr,
@@ -2914,6 +2942,23 @@ pub const Machine = struct {
         const value = slot.*;
         slot.* = core.JSValue.undefinedValue();
         return value;
+    }
+
+    /// EB open-ref miss histogram maxes at 16 (99.97% at ≤10). Unrolled
+    /// pointer stores keep this Fast leaf free of `compiler_rt.memset`.
+    const fast_open_var_ref_max: usize = 16;
+
+    inline fn storeOpenVarRefNulls(dst: []?*core.VarRef) void {
+        const n = dst.len;
+        std.debug.assert(n >= 1 and n <= fast_open_var_ref_max);
+        const p = dst.ptr;
+        comptime var k: usize = 1;
+        inline while (k <= fast_open_var_ref_max) : (k += 1) {
+            if (n == k) {
+                inline for (0..k) |i| p[i] = null;
+                return;
+            }
+        }
     }
 
     fn sourceHasStackRegion(source: ArgsSource) bool {
