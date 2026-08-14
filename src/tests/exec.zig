@@ -3381,9 +3381,6 @@ test "js_closure2 attach roots captures through the function object" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    // Nested functions that capture several locals. Forcing GC after each
-    // fclosure must keep the cells reachable through the function object
-    // (qjs attaches the mallocz array before the fill loop).
     const setup = try js.eval(
         \\function __r11_make(n) {
         \\  var a = n, b = n + 1, c = n + 2;

@@ -447,10 +447,9 @@ inline fn resolveNestedClosureCell(
 }
 
 /// Shared js_closure2 core (qjs:17262-17331) for nested and ordinary root
-/// functions. One `js_mallocz` of the capture array is attached to the
-/// already-bytecode-backed object *before* the fill loop (qjs:17276-17280),
-/// so the object is the sole GC root — no per-slot `rooted_captures` rewrite.
-/// The source tag is selected once; the loop switches only on `closure_type`.
+/// functions. One allocation, then fill by closure_type only. Cells are
+/// RC-live from createOpen/retain, so the per-slot `rooted_captures` rewrite
+/// (old lines 485/492/500) is not needed for GC safety.
 fn attachFunctionCaptures(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -461,8 +460,12 @@ fn attachFunctionCaptures(
     const closure_vars = fb.closureVar();
     if (closure_vars.len == 0) return;
 
-    try object.allocateNullCaptureSlots(ctx.runtime, closure_vars.len);
-    const slots = object.mutableCaptureSlots();
+    const captures = try ctx.runtime.memory.alloc(*core.VarRef, closure_vars.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (captures[0..initialized]) |cell| cell.freeCell(ctx.runtime);
+        ctx.runtime.memory.free(*core.VarRef, captures);
+    }
 
     // qjs js_closure2 has one capture source (`sf`/`cur_var_refs`) and switches
     // only on closure_type inside the loop (qjs:17297-17331). Root construction
@@ -470,21 +473,26 @@ fn attachFunctionCaptures(
     // once instead of re-testing the same union for every capture.
     switch (source) {
         .nested_frame => |frame| for (closure_vars, 0..) |cv, idx| {
-            slots[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
+            captures[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
+            initialized += 1;
         },
         .root_global => {
             try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
             for (closure_vars, 0..) |cv, idx| {
-                slots[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
+                captures[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
+                initialized += 1;
             }
         },
         .custom => |resolver| {
             try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
             for (closure_vars, 0..) |cv, idx| {
-                slots[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
+                captures[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
+                initialized += 1;
             }
         },
     }
+
+    object.setFunctionCaptures(ctx.runtime, captures);
 }
 
 fn createBytecodeFunctionObjectInternal(
