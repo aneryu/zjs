@@ -7522,7 +7522,6 @@ pub const Object = extern struct {
 
     const DecrefVisitor = struct {
         registry: *gc.Registry,
-        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7574,14 +7573,13 @@ pub const Object = extern struct {
             // child whose trial refcount reaches zero to tmp_obj_list.
             if (h.meta().rc == 0 and h.meta().flags.mark) {
                 self.registry.detachCycleCandidate(h);
-                self.garbage.append(h);
+                gc.listAddTail(&self.registry.tmp_obj_list, h);
             }
         }
     };
 
     const ScanIncrefVisitor = struct {
         registry: *gc.Registry,
-        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: ScanIncrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7629,7 +7627,7 @@ pub const Object = extern struct {
             // recheck was redundant with the same invariant used by QuickJS's
             // gc_scan_incref_child.
             if (was_zero and h.meta().flags.mark) {
-                self.garbage.remove(h);
+                gc.listDel(h);
                 h.meta().flags.mark = false;
                 // Moving a newly revived zero-ref node to the main-list tail
                 // makes the enclosing list walk visit its children later,
@@ -7815,7 +7813,7 @@ pub const Object = extern struct {
         // changed. Everything below is therefore a committed, no-error path.
         try gcRemoveWeakObjects(rt);
 
-        var garbage: gc.HeaderList = .{};
+        gc.listInit(&rt.gc.tmp_obj_list);
 
         // Phase 1: gc_decref
         {
@@ -7823,7 +7821,6 @@ pub const Object = extern struct {
             while (gc_iter.next()) |h| {
                 traceChildren(rt, h, DecrefVisitor{
                     .registry = &rt.gc,
-                    .garbage = &garbage,
                 });
                 // Match qjs gc_decref: mark the current node after visiting
                 // its children, then move it immediately if its trial count
@@ -7831,7 +7828,7 @@ pub const Object = extern struct {
                 h.meta().flags.mark = true;
                 if (h.meta().rc == 0) {
                     rt.gc.detachCycleCandidate(h);
-                    garbage.append(h);
+                    gc.listAddTail(&rt.gc.tmp_obj_list, h);
                 }
             }
         }
@@ -7839,15 +7836,15 @@ pub const Object = extern struct {
         // Phase 2: gc_scan
         {
             // Walk the live list dynamically: reviving a trial-zero child moves
-            // it from `garbage` to the registry tail, so it is visited without
+            // it from tmp_obj_list to the registry tail, so it is visited without
             // recursion or an auxiliary worklist.
-            var cursor = rt.gc.gc_object_head;
+            var cursor = rt.gc.gc_obj_list.next;
             while (cursor) |h| {
+                if (h == &rt.gc.gc_obj_list) break;
                 std.debug.assert(h.meta().rc > 0);
                 h.meta().flags.mark = false;
                 traceChildren(rt, h, ScanIncrefVisitor{
                     .registry = &rt.gc,
-                    .garbage = &garbage,
                 });
                 cursor = h.next;
             }
@@ -7855,9 +7852,11 @@ pub const Object = extern struct {
 
         // Phase 3: restore refcounts of the detached dead-cycle partition.
         {
-            var cursor = garbage.head;
-            while (cursor) |h| : (cursor = h.next) {
+            var cursor = rt.gc.tmp_obj_list.next;
+            while (cursor) |h| {
+                if (h == &rt.gc.tmp_obj_list) break;
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
+                cursor = h.next;
             }
         }
 
@@ -7876,7 +7875,14 @@ pub const Object = extern struct {
         var garbage_shapes: gc.HeaderList = .{};
         var garbage_contexts: gc.HeaderList = .{};
         var garbage_modules: gc.HeaderList = .{};
-        while (garbage.popFront()) |h| {
+        garbage_objects.init();
+        garbage_bytecodes.init();
+        garbage_var_refs.init();
+        garbage_shapes.init();
+        garbage_contexts.init();
+        garbage_modules.init();
+        while (gc.listFirst(&rt.gc.tmp_obj_list)) |h| {
+            gc.listDel(h);
             switch (h.meta().flags.kind) {
                 .object => {
                     garbage_count += 1;

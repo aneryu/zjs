@@ -356,15 +356,16 @@ pub const BlockFlags = packed struct(u8) {
     /// GC kind tag (qjs `gc_obj_type`). Bits 0-2.
     kind: GcKind = .object,
     mark: bool = false,
-    in_cycle_list: bool = false,
+    /// Padding: former `in_cycle_list`. Membership is the cyclic list itself
+    /// (qjs `list_add_tail` / `list_del`, quickjs.c:6545/6548). Kept so
+    /// `finalizing` / `is_pinned` / `cycle_visited` stay at their historical
+    /// bit positions — `memory.zig` writes this flags byte by layout.
+    _pad_list: bool = false,
     finalizing: bool = false,
     is_pinned: bool = false,
-    /// Cycle-removal temporary-list membership. `detachCycleCandidate` sets it
-    /// when trial RC moves a header to the garbage list and
-    /// `restoreCycleCandidate` clears it when gc_scan revives that header. It is
-    /// therefore also the condemned-garbage flag after gc_scan completes. This
-    /// mirrors qjs deriving the same state from gc_obj_list/tmp_obj_list
-    /// membership instead of rescanning both lists to publish it afterwards.
+    /// Condemned-garbage flag after gc_scan. qjs derives the same state from
+    /// `tmp_obj_list` membership; query sites (`headerIsCycleGarbage`, realm
+    /// walk, var_ref release) cannot walk the list, so the bit stays.
     cycle_visited: bool = false,
 };
 
@@ -431,6 +432,7 @@ comptime {
     // prefix writers in memory.zig and object.zig store.
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .big_int })) == @intFromEnum(GcKind.big_int));
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .mark = true })) == 1 << 3);
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .cycle_visited = true })) == 1 << 7);
     // The contiguous kind ranges documented on RefKind.
     std.debug.assert(@intFromEnum(GcKind.object) == 0);
     std.debug.assert(@intFromEnum(GcKind.module) == 4 and @intFromEnum(GcKind.shape) == 5);
@@ -516,51 +518,70 @@ pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
 pub const ObjectHeader = Header;
 
+/// qjs `list.h` cyclic sentinel. `head` is a dummy `Header` — never call `meta()`
+/// on it. Linked nodes have non-null prev/next (a neighbor or the sentinel);
+/// unlinked nodes have both null (qjs `list_del` fail-safe).
+pub inline fn listInit(head: *Header) void {
+    head.prev = head;
+    head.next = head;
+}
+
+pub inline fn listEmpty(head: *const Header) bool {
+    return head.next == @constCast(head);
+}
+
+pub inline fn listAddTail(head: *Header, el: *Header) void {
+    const prev = head.prev.?;
+    el.prev = prev;
+    el.next = head;
+    prev.next = el;
+    head.prev = el;
+}
+
+/// qjs `list_del` (list.h:69-78 / remove_gc_object at quickjs.c:6548).
+/// Caller must pass a linked node. No head/tail null branches.
+pub inline fn listDel(el: *Header) void {
+    const prev = el.prev.?;
+    const next = el.next.?;
+    prev.next = next;
+    next.prev = prev;
+    el.prev = null;
+    el.next = null;
+}
+
+pub inline fn listFirst(head: *const Header) ?*Header {
+    const next = head.next.?;
+    if (next == @constCast(head)) return null;
+    return next;
+}
+
 /// Allocation-free temporary intrusive list for cycle partitioning and
-/// Pass-B struct deferral. Headers on one of these lists are detached from the
-/// Registry GC-object list (`in_cycle_list == false`), so the same two link
-/// words can be reused exactly as QuickJS reuses `JSGCObjectHeader.link`.
+/// Pass-B struct deferral. Same `Header.link` words as the Registry lists
+/// (qjs reuses `JSGCObjectHeader.link`). Call `init()` in place after the
+/// list reaches its stable address — the sentinel is self-referential.
 pub const HeaderList = struct {
-    head: ?*Header = null,
-    tail: ?*Header = null,
+    sentinel: Header = .{},
     count: usize = 0,
 
+    pub fn init(self: *HeaderList) void {
+        listInit(&self.sentinel);
+        self.count = 0;
+    }
+
     pub fn append(self: *HeaderList, header: *Header) void {
-        std.debug.assert(!header.meta().flags.in_cycle_list);
         std.debug.assert(header.prev == null and header.next == null);
-        header.prev = self.tail;
-        if (self.tail) |tail| {
-            tail.next = header;
-        } else {
-            self.head = header;
-        }
-        self.tail = header;
+        listAddTail(&self.sentinel, header);
         self.count += 1;
     }
 
     pub fn remove(self: *HeaderList, header: *Header) void {
-        const prev = header.prev;
-        const next = header.next;
-        if (prev) |node| {
-            node.next = next;
-        } else {
-            std.debug.assert(self.head == header);
-            self.head = next;
-        }
-        if (next) |node| {
-            node.prev = prev;
-        } else {
-            std.debug.assert(self.tail == header);
-            self.tail = prev;
-        }
-        header.prev = null;
-        header.next = null;
+        listDel(header);
         std.debug.assert(self.count != 0);
         self.count -= 1;
     }
 
     pub fn popFront(self: *HeaderList) ?*Header {
-        const header = self.head orelse return null;
+        const header = listFirst(&self.sentinel) orelse return null;
         self.remove(header);
         return header;
     }
@@ -769,21 +790,16 @@ pub const Registry = struct {
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
-    // qjs-style cycle-collection candidates (Object, FunctionBytecode, VarRef):
-    // each GC object header embeds its permanent list node, so add/remove are
-    // O(1) pointer splices.
-    gc_object_head: ?*GCObjectHeader = null,
-    gc_object_tail: ?*GCObjectHeader = null,
+    // qjs `rt->gc_obj_list` / `rt->tmp_obj_list` / RC zero-ref queue.
+    // Each is a cyclic sentinel (list.h). Call `initLists` after the Registry
+    // reaches its stable address — sentinels are self-referential.
+    gc_obj_list: Header = .{},
+    tmp_obj_list: Header = .{},
+    zero_ref_list: Header = .{},
     // No live-object counter: qjs add_gc_object/remove_gc_object
     // (quickjs.c:6540/6548) are pure list splices with no count scalar.
     // Diagnostics (`liveCount`) derive the count by walking, like
     // `liveCountKind` always has.
-    // QuickJS-style zero-ref queue. Once a value-bearing GC node reaches zero,
-    // its intrusive link is moved out of gc_object_* and into this queue. The
-    // outermost release drains it iteratively, so child releases performed by a
-    // destructor append work instead of recursing through the native stack.
-    zero_ref_head: ?*GCObjectHeader = null,
-    zero_ref_tail: ?*GCObjectHeader = null,
     // Header currently owned by the zero-ref drain. It has been detached from
     // both intrusive lists so its destructor may reuse the links, but remains
     // runtime-owned until the destructor performs final accounting/raw free.
@@ -821,6 +837,16 @@ pub const Registry = struct {
         };
     }
 
+    /// Bind cyclic sentinels after the Registry is in its final location
+    /// (qjs `init_list_head` on `JSRuntime` fields). Must run before any
+    /// header is published.
+    pub fn initLists(self: *Registry) void {
+        listInit(&self.gc_obj_list);
+        listInit(&self.tmp_obj_list);
+        listInit(&self.zero_ref_list);
+        self.cycle_deferred_frees.init();
+    }
+
     /// Park a resource-stripped GC object's struct for the Pass-B drain. The
     /// header is already unlinked from the GC object list by the resource pass.
     pub fn deferCycleStructFree(self: *Registry, header: *GCObjectHeader) void {
@@ -833,8 +859,7 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry, rt: anytype) void {
-        std.debug.assert(self.zero_ref_head == null);
-        std.debug.assert(self.zero_ref_tail == null);
+        std.debug.assert(listEmpty(&self.zero_ref_list));
         std.debug.assert(self.zero_ref_current == null);
         self.phase = .deinit;
 
@@ -861,7 +886,9 @@ pub const Registry = struct {
         var held_shapes: ?*GCObjectHeader = null;
         var held_var_refs: ?*GCObjectHeader = null;
         var held_function_bytecodes: ?*GCObjectHeader = null;
-        while (self.gc_object_tail) |h| {
+        while (!listEmpty(&self.gc_obj_list)) {
+            const h = self.gc_obj_list.prev.?;
+            std.debug.assert(h != &self.gc_obj_list);
             if (h.meta().flags.kind == .shape) {
                 self.removeGcObject(h);
                 h.next = held_shapes;
@@ -930,10 +957,9 @@ pub const Registry = struct {
         object.Object.drainCycleDeferredFrees(rt);
         rt.shapes.deinit();
 
-        self.gc_object_head = null;
-        self.gc_object_tail = null;
-        self.zero_ref_head = null;
-        self.zero_ref_tail = null;
+        listInit(&self.gc_obj_list);
+        listInit(&self.tmp_obj_list);
+        listInit(&self.zero_ref_list);
 
         std.debug.assert(self.cycle_deferred_frees.count == 0);
         if (self.external_tokens_capacity != 0) {
@@ -1214,8 +1240,8 @@ pub const Registry = struct {
         self.stats.allocation_debt = 0;
     }
 
-    pub fn statsSnapshot(self: Registry, rt: anytype) Stats {
-        var snapshot = self;
+    pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
+        var snapshot = self.*;
         snapshot.refreshSpacePageState();
         // Diagnostics that used to be maintained per allocation are recomputed
         // here, like qjs JS_ComputeMemoryUsage. The space accounts are the byte
@@ -1227,7 +1253,9 @@ pub const Registry = struct {
         const derived_heap_live = old_live +| large_live;
         var derived_old_count: usize = 0;
         var derived_large_count: usize = 0;
-        var iterator = snapshot.objectIterator();
+        // Walk the live Registry, not the by-value snapshot: nodes' prev/next
+        // point at this sentinel, not a copied dummy Header.
+        var iterator = self.objectIterator();
         while (iterator.next()) |header| {
             const bytes = heapByteSizeFromHeader(rt, header);
             if (snapshot.isLargeAllocation(bytes)) {
@@ -1333,7 +1361,6 @@ pub const Registry = struct {
     pub fn addInitializedWithSizeNoFail(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         std.debug.assert(h.meta().rc == 1);
         std.debug.assert(!h.meta().flags.mark);
-        std.debug.assert(!h.meta().flags.in_cycle_list);
         std.debug.assert(!h.meta().flags.finalizing);
         std.debug.assert(!h.meta().flags.is_pinned);
         std.debug.assert(!h.meta().flags.cycle_visited);
@@ -1350,15 +1377,8 @@ pub const Registry = struct {
         std.debug.assert(!h.meta().alloc_info.large);
         if (h.meta().alloc_info.standalone) h.meta().size_class = encodeHeapBytes(bytes);
         h.meta().alloc_info.heap_accounted = true;
-        // Fold the cycle-list flag into registration instead of a second RMW
-        // inside appendGcObject — qjs add_gc_object writes its header
-        // bookkeeping once and then just list_add_tail's (quickjs.c:6540-6546).
-        // The earlier in_cycle_list publication is unobservable: only
-        // straight-line owner-thread scalar code separates it from the splice.
-        // (heap_accounted now lives in the byte-2 AllocInfo, so the two bits
-        // are two single-byte RMWs rather than one; the appendGcObject-side
-        // store is still gone.)
-        if (tracked) h.meta().flags.in_cycle_list = true;
+        // qjs add_gc_object writes header bookkeeping once and then
+        // list_add_tail's (quickjs.c:6540-6546). No membership flag.
         // GC pacing is owned by MemoryAccount.allocated_bytes. The registry only
         // keeps the selected space's live-byte scalar; all other allocation
         // diagnostics are derived by statsSnapshot. The single cold arm stamps
@@ -1548,7 +1568,11 @@ pub const Registry = struct {
 
     pub fn unlinkObjectWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         self.recordHeapFreeWithBytes(h, bytes);
-        if (isCycleCandidate(h)) self.removeGcObject(h);
+        if (!isCycleCandidate(h)) return;
+        // Already unlinked, or condemned on tmp_obj_list / a partition list.
+        // qjs remove_gc_object is only called while the node is on gc_obj_list.
+        if (h.prev == null or h.meta().flags.cycle_visited) return;
+        listDel(h);
     }
 
     pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
@@ -1606,76 +1630,51 @@ pub const Registry = struct {
 
     pub const GcObjectIterator = struct {
         cursor: ?*GCObjectHeader,
+        sentinel: *const GCObjectHeader,
 
         pub fn next(self: *GcObjectIterator) ?*GCObjectHeader {
             const current = self.cursor orelse return null;
+            if (current == self.sentinel) return null;
             self.cursor = current.next;
             return current;
         }
     };
 
     pub fn objectIterator(self: *const Registry) GcObjectIterator {
-        return .{ .cursor = self.gc_object_head };
+        return .{
+            .cursor = self.gc_obj_list.next,
+            .sentinel = &self.gc_obj_list,
+        };
     }
 
     fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(isCycleCandidate(header));
-        std.debug.assert(!header.meta().flags.in_cycle_list);
         std.debug.assert(header.prev == null);
         std.debug.assert(header.next == null);
-
-        header.meta().flags.in_cycle_list = true;
-        self.linkGcObjectTail(header);
+        listAddTail(&self.gc_obj_list, header);
     }
 
-    /// Tail-link an already-flagged header (qjs list_add_tail, quickjs.c:6545).
-    /// `in_cycle_list` must already be set by the caller so the link is a pure
-    /// pointer splice. The tail pointer is cached in a local because LLVM
-    /// cannot prove the `header.prev` store does not alias
-    /// `self.gc_object_tail` and would otherwise reload it (this was the
-    /// hottest single load of the registration path).
+    /// qjs `list_add_tail` (quickjs.c:6545).
     inline fn linkGcObjectTail(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(header.meta().flags.in_cycle_list);
-        const tail = self.gc_object_tail;
-        header.prev = tail;
-        header.next = null;
-        if (tail) |prior| {
-            prior.next = header;
-        } else {
-            self.gc_object_head = header;
-        }
-        self.gc_object_tail = header;
+        listAddTail(&self.gc_obj_list, header);
     }
 
+    /// qjs `list_del` / `remove_gc_object` (quickjs.c:6548). Already-unlinked
+    /// headers (deinit shape self-remove) are a no-op; a linked node is spliced
+    /// with no head/tail null branches.
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
-        if (!header.meta().flags.in_cycle_list) return;
-        const prev = header.prev;
-        const next = header.next;
-
-        if (prev) |p| {
-            p.next = next;
-        } else {
-            self.gc_object_head = next;
-        }
-        if (next) |n| {
-            n.prev = prev;
-        } else {
-            self.gc_object_tail = prev;
-        }
-        header.prev = null;
-        header.next = null;
-        header.meta().flags.in_cycle_list = false;
+        _ = self;
+        if (header.prev == null) return;
+        listDel(header);
     }
 
     pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(header.meta().flags.in_cycle_list);
         std.debug.assert(!header.meta().flags.cycle_visited);
         self.removeGcObject(header);
         header.meta().flags.cycle_visited = true;
     }
 
     pub fn restoreCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(!header.meta().flags.in_cycle_list);
         std.debug.assert(header.meta().flags.cycle_visited);
         header.meta().flags.cycle_visited = false;
         self.appendGcObject(header);
@@ -1685,32 +1684,17 @@ pub const Registry = struct {
         std.debug.assert(header.meta().rc == 0);
         std.debug.assert(header.prev == null);
         std.debug.assert(header.next == null);
-
-        header.prev = self.zero_ref_tail;
-        if (self.zero_ref_tail) |tail| {
-            tail.next = header;
-        } else {
-            self.zero_ref_head = header;
-        }
-        self.zero_ref_tail = header;
+        listAddTail(&self.zero_ref_list, header);
     }
 
     fn popZeroRef(self: *Registry) ?*GCObjectHeader {
-        const header = self.zero_ref_head orelse return null;
-        const next = header.next;
-        self.zero_ref_head = next;
-        if (next) |next_header| {
-            next_header.prev = null;
-        } else {
-            self.zero_ref_tail = null;
-        }
-        header.prev = null;
-        header.next = null;
+        const header = listFirst(&self.zero_ref_list) orelse return null;
+        listDel(header);
         return header;
     }
 
     fn drainZeroRefs(self: *Registry, rt: anytype) void {
-        if (self.zero_ref_head == null) return;
+        if (listEmpty(&self.zero_ref_list)) return;
         self.stats.zero_ref_drains +|= 1;
         while (self.popZeroRef()) |queued| {
             std.debug.assert(queued.meta().rc == 0);
@@ -1726,8 +1710,7 @@ pub const Registry = struct {
     /// finalizers cannot unlink the next weak holder out from under the walk.
     pub fn beginDecrefPhase(self: *Registry) void {
         std.debug.assert(self.phase == .none);
-        std.debug.assert(self.zero_ref_head == null);
-        std.debug.assert(self.zero_ref_tail == null);
+        std.debug.assert(listEmpty(&self.zero_ref_list));
         // .none -> .decref; teardown's .deinit phase cannot overlap this
         // batch (asserted above).
         self.phase = .decref;
@@ -1780,42 +1763,41 @@ pub const Registry = struct {
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
-        if (self.gc_object_head == null) {
-            if (self.gc_object_tail != null) return error.CorruptGcList;
+        if (self.gc_obj_list.next == null or self.gc_obj_list.prev == null)
+            return error.CorruptGcList;
+        if (listEmpty(&self.gc_obj_list)) {
+            if (self.gc_obj_list.prev != &self.gc_obj_list) return error.CorruptGcList;
             return;
         }
-        if (self.gc_object_tail == null) return error.CorruptGcList;
 
-        var tortoise = self.gc_object_head;
-        var hare = self.gc_object_head;
-        while (hare) |hare_node| {
-            hare = hare_node.next orelse break;
-            hare = hare.?.next;
-            tortoise = tortoise.?.next;
-            if (hare != null and tortoise == hare) return error.CorruptGcList;
+        var tortoise: *GCObjectHeader = self.gc_obj_list.next.?;
+        var hare: *GCObjectHeader = self.gc_obj_list.next.?;
+        while (hare != &self.gc_obj_list) {
+            hare = hare.next orelse return error.CorruptGcList;
+            if (hare == &self.gc_obj_list) break;
+            hare = hare.next orelse return error.CorruptGcList;
+            tortoise = tortoise.next orelse return error.CorruptGcList;
+            if (hare != &self.gc_obj_list and tortoise == hare) return error.CorruptGcList;
         }
 
-        var previous: ?*GCObjectHeader = null;
-        var current = self.gc_object_head;
+        var previous: *GCObjectHeader = &self.gc_obj_list;
+        var current = self.gc_obj_list.next;
         while (current) |h| {
+            if (h == &self.gc_obj_list) break;
             if (!isCycleCandidate(h)) return error.CorruptGcList;
-            if (!h.meta().flags.in_cycle_list) return error.CorruptGcList;
             if (h.meta().rc < 0) return error.NegativeRefCount;
             if (h.meta().flags.mark and self.phase == .none) return error.MarkBitLeftSet;
-
             if (h.prev != previous) return error.CorruptGcList;
-
-            if (h.next) |next| {
-                if (next.prev != h) return error.CorruptGcList;
-            } else if (self.gc_object_tail != h) return error.CorruptGcList;
-
+            const next = h.next orelse return error.CorruptGcList;
+            if (next.prev != h) return error.CorruptGcList;
             previous = h;
-            current = h.next;
+            current = next;
         }
-        if (previous != self.gc_object_tail) return error.CorruptGcList;
+        if (previous.next != &self.gc_obj_list) return error.CorruptGcList;
+        if (self.gc_obj_list.prev != previous) return error.CorruptGcList;
     }
 
-    pub fn verifyHeapAccounting(self: Registry, rt: anytype) InvariantError!void {
+    pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!void {
         var heap_live_bytes: usize = 0;
         var old_live_bytes: usize = 0;
         var large_object_bytes: usize = 0;
@@ -1894,14 +1876,14 @@ pub const Registry = struct {
     /// Diagnostic/test-only: derived by walking, exactly like `liveCountKind`.
     /// The hot alloc/free paths keep no live-object counter (qjs
     /// add_gc_object/remove_gc_object are pure list splices).
-    pub fn liveCount(self: Registry) usize {
+    pub fn liveCount(self: *const Registry) usize {
         var count: usize = 0;
         var iterator = self.objectIterator();
         while (iterator.next()) |_| count += 1;
         return count;
     }
 
-    pub fn liveCountKind(self: Registry, kind: GcKind) usize {
+    pub fn liveCountKind(self: *const Registry, kind: GcKind) usize {
         var count: usize = 0;
         var iterator = self.objectIterator();
         while (iterator.next()) |header| {
@@ -1910,11 +1892,13 @@ pub const Registry = struct {
         return count;
     }
 
-    pub fn containsHeader(self: Registry, header: *const GCObjectHeader) bool {
+    pub fn containsHeader(self: *const Registry, header: *const GCObjectHeader) bool {
         if (self.zero_ref_current == header) return true;
-        var queued = self.zero_ref_head;
-        while (queued) |candidate| : (queued = candidate.next) {
+        var queued = self.zero_ref_list.next;
+        while (queued) |candidate| {
+            if (candidate == &self.zero_ref_list) break;
             if (candidate == header) return true;
+            queued = candidate.next;
         }
         var iterator = self.objectIterator();
         while (iterator.next()) |candidate| {
