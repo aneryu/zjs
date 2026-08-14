@@ -80,11 +80,42 @@ pub const InlinedSite = struct {
     ctor_shape: ?*Shape = null,
     proto: ?*Object = null,
     proto_slot: u32 = 0,
-    /// L1: expanded body contains a rewritten apply-forward `call_method`.
-    apply_forwarded: bool = false,
-    apply_method_atom: core.Atom = core.atom.null_atom,
-    apply_forward_call_pc: u32 = 0,
 };
+
+/// L1 apply-forward facts. Lives beside `CallerState.inlined`, not inside
+/// `InlinedSite`, so `findInlinedSite` keeps the v1.5 hot stride.
+pub const ApplyForwardCold = struct {
+    method_atom: core.Atom = core.atom.null_atom,
+    call_pc: u32 = no_forward_pc,
+};
+
+const no_forward_pc: u32 = std.math.maxInt(u32);
+
+/// v1.5 hot record (no L1 tail). `InlinedSite` must stay this width.
+const V15InlinedSite = struct {
+    pc_lo: u32,
+    pc_hi: u32,
+    call_pc: u32,
+    callee_fb: *FunctionBytecode,
+    callee_name: core.Atom,
+    callee_file: core.Atom,
+    parent: u8 = 0xFF,
+    kind: Kind,
+    this_slot: u16,
+    arg_base: u16,
+    argc: u16,
+    pc_map: [max_pc_map]u16 = @splat(0xFFFF),
+    pc_map_len: u16 = 0,
+    callee_obj: ?*Object = null,
+    ctor_shape: ?*Shape = null,
+    proto: ?*Object = null,
+    proto_slot: u32 = 0,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(InlinedSite) == @sizeOf(V15InlinedSite));
+    std.debug.assert(@alignOf(InlinedSite) == @alignOf(V15InlinedSite));
+}
 
 pub const SiteCount = struct {
     call_pc: u32 = 0,
@@ -98,6 +129,8 @@ pub const CallerState = struct {
     site_len: u8 = 0,
     copies: u8 = 0,
     inlined: [max_sites]InlinedSite = undefined,
+    /// Parallel to `inlined`. Unread on the findInlinedSite scan.
+    apply_forward: [max_sites]ApplyForwardCold = @splat(.{}),
     inlined_len: u8 = 0,
     specialized: bool = false,
 };
@@ -148,9 +181,26 @@ fn applyForwardEligible(fb: *FunctionBytecode) bool {
 fn anyApplyForwardSite(state: *const CallerState) bool {
     var i: u8 = 0;
     while (i < state.inlined_len) : (i += 1) {
-        if (state.inlined[i].apply_forwarded) return true;
+        if (state.apply_forward[i].call_pc != no_forward_pc) return true;
     }
     return false;
+}
+
+fn siteSlot(state: *const CallerState, site: *const InlinedSite) u8 {
+    const begin = @intFromPtr(&state.inlined[0]);
+    const p = @intFromPtr(site);
+    std.debug.assert(p >= begin);
+    const i = (p - begin) / @sizeOf(InlinedSite);
+    std.debug.assert(i < state.inlined_len);
+    return @intCast(i);
+}
+
+fn applyForwardColdOf(state: *const CallerState, site: *const InlinedSite) ApplyForwardCold {
+    return state.apply_forward[siteSlot(state, site)];
+}
+
+fn siteApplyForwarded(state: *const CallerState, site: *const InlinedSite) bool {
+    return applyForwardColdOf(state, site).call_pc != no_forward_pc;
 }
 
 fn markApplyForwardInlined(fb: *FunctionBytecode) void {
@@ -174,7 +224,8 @@ pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
         const site = state.inlined[i];
         rt.atoms.free(site.callee_name);
         rt.atoms.free(site.callee_file);
-        if (site.apply_method_atom != core.atom.null_atom) rt.atoms.free(site.apply_method_atom);
+        const fwd = state.apply_forward[i];
+        if (fwd.method_atom != core.atom.null_atom) rt.atoms.free(fwd.method_atom);
     }
     setBorrowedRealm(fb, null);
     rt.memory.destroy(CallerState, state);
@@ -1147,9 +1198,11 @@ fn cloneAndExpand(
             var copy = src_state.inlined[oi];
             copy.callee_name = rt.atoms.dup(copy.callee_name);
             copy.callee_file = rt.atoms.dup(copy.callee_file);
-            if (copy.apply_method_atom != core.atom.null_atom)
-                copy.apply_method_atom = rt.atoms.dup(copy.apply_method_atom);
             state.inlined[oi] = copy;
+            var fwd = src_state.apply_forward[oi];
+            if (fwd.method_atom != core.atom.null_atom)
+                fwd.method_atom = rt.atoms.dup(fwd.method_atom);
+            state.apply_forward[oi] = fwd;
         }
         state.inlined_len = src_state.inlined_len;
         state.copies = src_state.copies + 1;
@@ -1179,16 +1232,17 @@ fn cloneAndExpand(
             .ctor_shape = if (cache) |c| c.shape else null,
             .proto = if (cache) |c| c.proto else null,
             .proto_slot = if (cache) |c| c.slot else 0,
-            .apply_forwarded = item.forward_call_rel != 0xFFFFFFFF,
-            .apply_method_atom = if (item.method_atom != 0)
-                rt.atoms.dup(@as(core.Atom, @intCast(item.method_atom)))
-            else
-                core.atom.null_atom,
-            .apply_forward_call_pc = if (item.forward_call_rel != 0xFFFFFFFF)
-                item.pc_lo + item.forward_call_rel
-            else
-                0,
         };
+        state.apply_forward[state.inlined_len] = if (item.forward_call_rel != 0xFFFFFFFF)
+            .{
+                .method_atom = if (item.method_atom != 0)
+                    rt.atoms.dup(@as(core.Atom, @intCast(item.method_atom)))
+                else
+                    core.atom.null_atom,
+                .call_pc = item.pc_lo + item.forward_call_rel,
+            }
+        else
+            .{};
         state.inlined_len += 1;
     }
     state.specialized = true;
@@ -1204,12 +1258,14 @@ fn cloneAndExpand(
 /// R-v11-a consumes `callee.arg_count` (extras stay in the region and are
 /// DROPped). L1 apply-forward rewrites to a live-argv `call_method` whose
 /// argc is the *site* argc (I6); those slots must be MOVEd into the window.
-pub fn consumedArgSlots(site: *const InlinedSite) u16 {
-    return if (site.apply_forwarded) site.argc else site.callee_fb.arg_count;
+pub fn consumedArgSlots(fb: *const FunctionBytecode, site: *const InlinedSite) u16 {
+    const state = callerState(fb);
+    const forwarded = if (state) |st| siteApplyForwarded(st, site) else false;
+    return if (forwarded) site.argc else site.callee_fb.arg_count;
 }
 
-pub fn windowFits(frame: *const frame_mod.Frame, site: *const InlinedSite) bool {
-    const arg_slots = consumedArgSlots(site);
+pub fn windowFits(frame: *const frame_mod.Frame, fb: *const FunctionBytecode, site: *const InlinedSite) bool {
+    const arg_slots = consumedArgSlots(fb, site);
     const need = @as(usize, site.arg_base) + @as(usize, arg_slots);
     return site.this_slot < frame.locals.len and need <= frame.locals.len;
 }
@@ -1219,6 +1275,7 @@ pub fn windowFits(frame: *const frame_mod.Frame, site: *const InlinedSite) bool 
 /// past the consumed count stay in `args` for `releaseCallRegionAfterInline`.
 pub fn installInlineWindow(
     frame: *frame_mod.Frame,
+    fb: *const FunctionBytecode,
     site: *const InlinedSite,
     this_value: JSValue,
     args: []JSValue,
@@ -1231,7 +1288,7 @@ pub fn installInlineWindow(
     } else {
         this_value.free(rt);
     }
-    const arg_slots = consumedArgSlots(site);
+    const arg_slots = consumedArgSlots(fb, site);
     var i: u16 = 0;
     while (i < arg_slots) : (i += 1) {
         const slot = site.arg_base + i;
@@ -1422,10 +1479,18 @@ pub fn applyForwardGuardHolds(
     return true;
 }
 
-pub inline fn applyForwardTakeOk(rt: *JSRuntime, global: *Object, site: *const InlinedSite, func: JSValue) bool {
-    if (!site.apply_forwarded) return true;
+pub inline fn applyForwardTakeOk(
+    rt: *JSRuntime,
+    global: *Object,
+    fb: *const FunctionBytecode,
+    site: *const InlinedSite,
+    func: JSValue,
+) bool {
+    const state = callerState(fb) orelse return true;
+    const fwd = applyForwardColdOf(state, site);
+    if (fwd.call_pc == no_forward_pc) return true;
     const ctor = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
-    return applyForwardGuardHolds(rt, global, ctor, site.apply_method_atom);
+    return applyForwardGuardHolds(rt, global, ctor, fwd.method_atom);
 }
 
 /// True when `call_pc` is the rewritten apply-forward `call_method`.
@@ -1435,7 +1500,9 @@ pub inline fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool
     // on every non-apply `op_call_method`.
     if (!fb.call_facts_mirror.execution.apply_forward_inlined) return false;
     const site = siteForPc(fb, call_pc) orelse return false;
-    return site.apply_forwarded and site.apply_forward_call_pc == call_pc;
+    const state = callerState(fb) orelse return false;
+    const fwd = applyForwardColdOf(state, site);
+    return fwd.call_pc == call_pc;
 }
 
 /// After `op_call_method` advances pc past the 3-byte instruction, recover
@@ -1446,7 +1513,8 @@ pub fn applyForwardSiteAfterCall(fb: *const FunctionBytecode, pc_after: u32) ?*c
     if (pc_after < 3) return null;
     const call_pc = pc_after - 3;
     const site = siteForPc(fb, call_pc) orelse return null;
-    if (site.apply_forwarded and site.apply_forward_call_pc == call_pc) return site;
+    const state = callerState(fb) orelse return null;
+    if (applyForwardColdOf(state, site).call_pc == call_pc) return site;
     return null;
 }
 
@@ -1472,6 +1540,10 @@ pub fn tryFusedConstructor(rt: *JSRuntime, site: *const InlinedSite, func: JSVal
     if (proto != expected_proto) return null;
     const instance = core.Object.createPlainObject(rt, proto) catch return null;
     return instance.value();
+}
+
+test "InlinedSite hot stride matches v1.5" {
+    try std.testing.expectEqual(@sizeOf(V15InlinedSite), @sizeOf(InlinedSite));
 }
 
 test "rewrite sc_Pair-shaped body keeps put_field" {
