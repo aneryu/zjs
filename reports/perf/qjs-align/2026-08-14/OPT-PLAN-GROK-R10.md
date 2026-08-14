@@ -185,3 +185,17 @@ agent 自建 binary 仅限方向性迭代。
 - **r12 pushExact 刀已批**：热路径叶子化（96B CSR+224B error-union 帧解剖），
   riders=反汇编证据/noinline/失败语义/频次先补；§c 红利=inline_exact 撤展开独立二 commit。
 - **r11c closure 三刀 driver 复测回退 13%**（1.3772 vs 1.2479，非构建环境）→ 逐刀 bisect 中。
+
+## ⚠️ 反转的反转（2026-08-15 凌晨，@f10248ef）——「恢复九成」判定作废
+
+真相链：main 自 R10 合并起**从零不可构建**（root.zig:25→writeProbeFile→std.posix.getenv
+在 zig 0.16 不存在；v11/r11c 各自打了本地 getenv 修补故可构建）。driver 定损脚本的
+`build && cp || { cp }` 兜底在构建失败时**静默拷贝 zig-out 陈旧二进制**并报 built——
+pkg-p* 实为无 R10 代码的旧 main（0 个 inline-probe 字符串、case-pure 1.2479≈旧 main 1.2515）。
+⇒「3-pad 中性/EB 0.9992 恢复九成」= 旧 main vs 旧 main 的空对照，作废；
+**grok 侧 0.8895 才是真实包价**，v1.5 结构性天花板叙事恢复有效；
+「agent 二进制是假象」的指控方向说反，已向舰队更正致歉。
+main 构建已修（cb38df4a）；第 13 条修正案 = 构建成功必须以**产物指纹**验证
+（新 sha + 版本应有符号/字符串探针），禁止一切 || 兜底。
+真实定损（指纹验证构建）流水在途。closure 三刀 bisect 结论同步失效待重判
+（其基线怀疑对象 f32749f6 无辜）。
