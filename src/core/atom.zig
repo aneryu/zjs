@@ -76,6 +76,7 @@ pub const ids = struct {
     pub const with_object: Atom = 85;
     pub const lastIndex: Atom = 86;
     pub const target: Atom = 87;
+    pub const apply: Atom = 91;
     pub const source: Atom = 109;
     pub const rawJSON: Atom = 114;
     pub const new_target: Atom = 115;
