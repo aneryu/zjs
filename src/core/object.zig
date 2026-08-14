@@ -2963,11 +2963,13 @@ pub const Object = extern struct {
     }
 
     pub fn cachedIteratorNext(self: *const Object, rt: *JSRuntime) ?JSValue {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         const slot = self.cachedIteratorNextSlotIfPresent(rt) orelse return null;
         return slot.*;
     }
 
     pub fn clearCachedIteratorNext(self: *Object, rt: *JSRuntime) void {
+        if (rt.cached_iterator_next_entries.len == 0) return;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
         const old_cached = rt.cached_iterator_next_entries[index].value;
         rt.cached_iterator_next_entries[index].value = null;
@@ -2976,17 +2978,20 @@ pub const Object = extern struct {
     }
 
     fn clearCachedIteratorNextWithoutFree(rt: *JSRuntime, self: *Object) void {
+        if (rt.cached_iterator_next_entries.len == 0) return;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
         rt.cached_iterator_next_entries[index].value = null;
         removeCachedIteratorNextEntryAt(rt, index);
     }
 
     fn cachedIteratorNextSlotIfPresent(self: *const Object, rt: *JSRuntime) ?*?JSValue {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return null;
         return &rt.cached_iterator_next_entries[index].value;
     }
 
     fn cachedIteratorNextEntryIndex(rt: *const JSRuntime, self: *const Object) ?usize {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         for (rt.cached_iterator_next_entries, 0..) |entry, index| {
             if (entry.object == self) return index;
         }
@@ -7549,11 +7554,6 @@ pub const Object = extern struct {
             self.visitHeader(&record.header);
         }
 
-        pub fn visitSymbol(self: DecrefVisitor, symbol: *u32) void {
-            _ = self;
-            _ = symbol;
-        }
-
         pub fn visitWeakCollectionEntry(self: DecrefVisitor, entry: *WeakCollectionEntry) void {
             _ = self;
             _ = entry;
@@ -7608,11 +7608,6 @@ pub const Object = extern struct {
             self.visitHeader(&record.header);
         }
 
-        pub fn visitSymbol(self: ScanIncrefVisitor, symbol: *u32) void {
-            _ = self;
-            _ = symbol;
-        }
-
         pub fn visitWeakCollectionEntry(self: ScanIncrefVisitor, entry: *WeakCollectionEntry) void {
             _ = self;
             _ = entry;
@@ -7665,11 +7660,6 @@ pub const Object = extern struct {
 
         pub fn visitModule(self: ScanRestoreVisitor, record: *module_mod.ModuleRecord) void {
             self.visitHeader(&record.header);
-        }
-
-        pub fn visitSymbol(self: ScanRestoreVisitor, symbol: *u32) void {
-            _ = self;
-            _ = symbol;
         }
 
         pub fn visitWeakCollectionEntry(self: ScanRestoreVisitor, entry: *WeakCollectionEntry) void {
@@ -8225,19 +8215,6 @@ pub const Object = extern struct {
                 if (opt_val.*) |*stored| try callVisitValue(vis, stored);
             }
 
-            inline fn callVisitSymbol(vis: anytype, sym_ptr: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitSymbol")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitSymbol)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitSymbol(sym_ptr);
-                    } else {
-                        vis.visitSymbol(sym_ptr);
-                    }
-                }
-            }
-
             inline fn callVisitWeakCollectionEntry(vis: anytype, entry: anytype) !void {
                 const VisType = @TypeOf(vis);
                 const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
@@ -8280,20 +8257,14 @@ pub const Object = extern struct {
             // qjs js_global_object_mark (quickjs.c:17062-17067).
             try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
         }
-        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
-            try Helper.traceOptValue(visitor, slot);
+        if (rt.cached_iterator_next_entries.len != 0) {
+            if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
+                try Helper.traceOptValue(visitor, slot);
+            }
         }
-        // Property key atoms (including symbol keys) live in the shape;
-        // visit them from there. Visitors only read symbol atoms (set
-        // insertion / no-op), so revisiting a shared shape from several
-        // objects is safe.
-        for (self.shape_ref.props()[0..self.shape_ref.prop_count]) |*prop| {
-            // `atom_id` is a packed-struct field (bit offset 32); visitors only
-            // read symbol atoms (set insertion / no-op, never mutate a shared
-            // shape's key), so pass a byte-aligned local copy.
-            var key_atom = prop.atom_id;
-            try Helper.callVisitSymbol(visitor, &key_atom);
-        }
+        // qjs:6568 / qjs:6582 mark_children OBJECT arm marks the shape header
+        // then property values. Key atoms (prs->atom) are not GC edges — they
+        // live on the atom RC table, held by the shape.
         // Only entries with a matching shape property record carry a derivable
         // kind. A property mid-`appendPreparedPropertyEntry` can have an entry
         // pushed before the shape transition completes (the shape-storage alloc
@@ -8536,11 +8507,6 @@ pub const Object = extern struct {
                 try collectValueObject(cv.rt, cv.visited, val_ptr.*);
             }
 
-            pub fn visitSymbol(cv: *@This(), sym_ptr: *atom.Atom) !void {
-                _ = cv;
-                _ = sym_ptr;
-            }
-
             pub fn visitWeakCollectionEntry(cv: *@This(), entry: *WeakCollectionEntry) !void {
                 try collectValueObject(cv.rt, cv.visited, entry.value);
             }
@@ -8628,11 +8594,6 @@ pub const Object = extern struct {
 
             pub fn visitValue(av: *@This(), val_ptr: *JSValue) !void {
                 try accumulateValueIncoming(val_ptr.*, av.visited, av.incoming, av.internal_bytecodes, av.processed_bytecodes);
-            }
-
-            pub fn visitSymbol(av: *@This(), sym_ptr: *atom.Atom) !void {
-                _ = av;
-                _ = sym_ptr;
             }
 
             pub fn visitWeakCollectionEntry(av: *@This(), entry: *WeakCollectionEntry) !void {
