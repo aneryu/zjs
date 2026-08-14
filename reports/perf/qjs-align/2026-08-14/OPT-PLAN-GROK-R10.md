@@ -73,10 +73,16 @@ capacity-profile 降级为包内次要项（或按 R1 预检结果裁掉）。
 
 **用户已裁：方案甲**（2026-08-14）——先建 small-function-inlining（申报→设计→实施），
 删除与它同包落地，「不下凹」承诺保住。~~方案乙~~。
-执行状态：grok 已在 `grok/opt-r10` 打了 delete commit `45dc3640` 并起了 capacity-profile
-初版（保留在分支、暂不交付）；裁决已经由 herdr interject 转达，下一交付物 =
-`/tmp/r10/INLINE-PROPOSAL.md`（内联判据／inline-frame 栈重建元数据／去优化协议／
-等价证明面／三靶预计覆盖，先简报后写码）。
+
+**实施状态（2026-08-14 深夜）**：申报已批（`4d295a60`，六修订写回）；
+`grok/opt-r10` @ `a4e489c7`：delete `45dc3640` → profile `a55cfb1e`（降级）→
+**v1 构造器体展开 `327a1655`**（只开 `call_constructor`；几何发表位／M=8 克隆／
+extra locals 改写／`InlinedSite.pc_map` 差量映射／栈重建含 setter-throw 测例）→
+批复测例 `a4e489c7`。test-exec 448/448（Debug）。
+**driver 三问批复**：①立即 rebase 到 main（含 R9-N）并重测 delete-only 新对照线；
+②**v1 只吃 EB**，`call_method`（deltablue）另开 v1.1——「leftover 体栈溢」写一页诊断
+进简报附录，不在包压力下修；③整包不交付，序列=grok rebase+重测+AWAIT-MEASURE →
+driver 跑 R-5 包验收 → 过线才合。
 
 ## 4. 队列衔接
 
