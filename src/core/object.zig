@@ -6519,10 +6519,10 @@ pub const Object = extern struct {
         return self.u.bytecode_function.captureSlots();
     }
 
-    /// Allocate the one and only module capture array with every slot null.
-    /// The attached FB fixes its exact length; a mismatch or second allocation
-    /// is invalid bytecode and leaves the function untouched.
-    pub fn allocateNullModuleCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+    /// qjs `js_closure2` (quickjs.c:17276-17280): `js_mallocz` the capture
+    /// array and attach it to the function object *before* the fill loop so
+    /// the object is the sole GC root. Null slots are skipped by mark/destroy.
+    pub fn allocateNullCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
         const storage = &self.u.bytecode_function;
         const fb = storage.function_bytecode orelse return error.InvalidBytecode;
@@ -6533,6 +6533,19 @@ pub const Object = extern struct {
         const slots = try rt.memory.alloc(?*var_ref_mod.VarRef, count);
         @memset(slots, null);
         storage.var_refs = slots.ptr;
+    }
+
+    /// Allocate the one and only module capture array with every slot null.
+    /// The attached FB fixes its exact length; a mismatch or second allocation
+    /// is invalid bytecode and leaves the function untouched.
+    pub fn allocateNullModuleCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+        return allocateNullCaptureSlots(self, rt, count);
+    }
+
+    /// Mutable view of the attached capture array during js_closure2 fill.
+    pub fn mutableCaptureSlots(self: *Object) []?*var_ref_mod.VarRef {
+        std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
+        return self.u.bytecode_function.captureSlots();
     }
 
     /// Replace one module capture slot, transferring the caller's owned cell
