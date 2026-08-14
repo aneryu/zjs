@@ -163,3 +163,25 @@ driver 在 CPU 19 跑 R10 定损 3-pad（在途）。布局批维持 PAUSED 等�
   capture cell 复用 qjs:17021／name-length 直路 qjs:17369；载具 case-pure 秒级迭代，
   冒烟门 1.2515→≤1.21）。与 pQ 的 GC 刀两线独立并行。
 - **v11 设计已批**（发表门 ∧ leaf_returns_balanced；R-v11-a receiver 所有权修订）。
+
+## R10 终局定损（driver 3-pad + EB 重测，2026-08-14 深夜）——叙事改写
+
+**包实际达成「不下凹」**：3-pad geomean **0.9986/0.9994/0.9992**（中位 −0.08%）；
+**EB 单基准重测 0.9992**（16 samples，driver 构建对）。
+⇒ 删除损失 −9.08% 被 v1+v1.5 **收回 ~9 成**——「结构性天花板 1/4」的两次 FAIL 判定
+（v1 0.9060 / v1.5 0.8895）是**二进制来源假象**（grok 侧提供的测量构建），
+非机制事实。方案甲承诺兑现。
+**新铁律（测量合同第 13 条候选）：验收测量只认 driver 亲手从确切 commit 构建的二进制**；
+agent 自建 binary 仅限方向性迭代。
+遗留观察：raytrace 三 pad 同号 −0.9~−1.9%（疑 never-eligible ctor 站点的 note/probe 常数，
+待查）；mandreel pad0 −1.4% 混号（惯性布局敏感）。
+
+## 舰队滚动（续）
+
+- **v11**：method-TAKE CLOSED-FOR-DELTABLUE（四放置全 ≥1.09，输给自家 leaf/exact 臂
+  =内联盈利边界钉死）；四件 v1/v1.5 加固拆 commit 待并包。
+- **微刀包（pV）落地待并**：keyatom 循环净删 49 行 + iterator 空表三处早退
+  （全网 27.6M 空扫，hit=insert=0）。pV 转 v2-L1 实施。
+- **r12 pushExact 刀已批**：热路径叶子化（96B CSR+224B error-union 帧解剖），
+  riders=反汇编证据/noinline/失败语义/频次先补；§c 红利=inline_exact 撤展开独立二 commit。
+- **r11c closure 三刀 driver 复测回退 13%**（1.3772 vs 1.2479，非构建环境）→ 逐刀 bisect 中。
