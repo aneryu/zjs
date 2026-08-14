@@ -187,6 +187,28 @@ worktree 命名 `worktree-grok-h{1,2,3}-*`，分支 `grok/opt-r2-h{1,2,3}`。
   （合同第 9 条，频次先行）；b) `memory.zig` 页元数据是否支持指针→槽类查询的只读侦察；
   c) 两者都成立再立改造项（触碰全部字符串释放路径，届时单独过一轮 ReleaseSafe + 全量语义）。
 
+### H2 侦察结果（2026-08-14，不立项）
+
+pdfjs 一整轮（`PdfJS: 7766`，`/tmp/h2-bins/census`）：
+
+| 桶 | 次数 | 占 add_total |
+|---|---:|---:|
+| add_total | 3,832,362 | 100% |
+| lhs=rope | 1,173,734 | 30.6% |
+| lhs=flat·rc==1 | **24,129** | **0.63%** |
+| lhs=flat·rc>1 | 2,509,426 | 65.5% |
+| add_loc 字符串臂 | 543,448 | — |
+| acc_rope 新建 | 110,136 | — |
+| rope 尾追加命中 | 326,736 | — |
+
+闸门 `flat·rc==1 ≥ 545k`（1.090M 的一半）**未过**（24,129 = 2.2%）。
+acc_rope（add_loc 上对 qjs inplace 的替身）110k，仍远低于一半。
+`[PROGRESS] H2 BLOCKED flat_rc1=24129 acc_rope=110136 << 545k`
+
+memory.zig：指针→槽类 **已存在**（`headerClassIndex` / `block_size_idx`，rawFree 已读头不反推 size）。
+`destroyFlat`+`allocated_bytes`+`classIndex(len)` assert 仍把释放绑在逻辑长度上。
+b 成立、a 不成立 ⇒ **不立项**。全文 `/tmp/h2-bins/RECON.md`。
+
 ### 遗留
 
 - h3 分支保留供将来「对齐价值」参考；`machine_inits` 测试群未动。
