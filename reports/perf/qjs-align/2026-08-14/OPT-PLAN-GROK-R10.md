@@ -95,6 +95,16 @@ grok 报的 3 残留失败 pre-existing 分类成立方向，细节待补。
 
 **排程注记（用户裁定 2026-08-14）：布局工程批不自动执行——队列行进到它时暂停，交用户决断。**
 
+**R-5 第二轮前的 driver 定案（2026-08-14）——「删 OSR 不修 OSR」**：
+grok BLOCKED 于 same-invocation jump 的 JSContext 泄漏。driver 评估：该 jump 是被
+N3 case 形态（单次 `main(5e6)` 大循环）逼出的伪需求——**已核实 earley-boyer.js:991-993**，
+最热 `new sc_Pair` 位于 `sc_cons(car,cdr)` 两行函数体内，每次构造=caller 全新进入，
+**next-entry 特化对真靶足够**。定案：①删 jump+spare-locals（泄漏整体消失，帧尺寸须验证回原状）；
+②泄漏存档附录 B「OSR hazard」不修不查；③case 载具修正 N2f/N3f（循环入函数、贴 EB 形态、
+重定 delete-only 对照线、门 ≤1.05）；原 N2/N3 标注「OSR 场景 v1 不覆盖」；
+④冒烟 N3f 头对头 ≤0.90 才回传；⑤R-1 16KB floor 批准；
+⑥回传后 driver 先跑 **EB 单基准 A/B（真门，EB 收回 ≥2/3）**，过了才进全套 zoo。
+
 ## 4. 队列衔接
 
 R9（真帧瘦身+apply 段）→ **R10（本批）** → R11 EB 命名桶 → R12 TS RC/frame →
