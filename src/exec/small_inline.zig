@@ -53,7 +53,7 @@ pub const InlinedSite = struct {
     pc_map_len: u16 = 0,
 };
 
-const SiteCount = struct {
+pub const SiteCount = struct {
     call_pc: u32 = 0,
     callee: ?*FunctionBytecode = null,
     count: u8 = 0,
@@ -111,6 +111,19 @@ fn ensureCallerState(rt: *JSRuntime, fb: *FunctionBytecode) ?*CallerState {
     state.* = .{};
     setCallerState(fb, state);
     return state;
+}
+
+fn hasTrailingAfterReturn(code: []const u8) bool {
+    var pc: usize = 0;
+    if (code.len > 0 and code[0] == op.check_ctor) pc = 1;
+    while (pc < code.len) {
+        const opc = code[pc];
+        const size: usize = bytecode.opcode.sizeOf(opc);
+        if (size == 0 or pc + size > code.len) return true;
+        pc += size;
+        if (opc == op.return_undef or opc == op.@"return") return pc < code.len;
+    }
+    return false;
 }
 
 fn budgetRemaining(rt: *const JSRuntime) usize {
@@ -207,6 +220,7 @@ pub fn specializeCallSite(
     argc: u16,
 ) void {
     if (caller.isDirectOrIndirectEval() or caller.executionFlags().is_module) return;
+    if (hasTrailingAfterReturn(callee.byteCode())) return;
     if (callerState(caller)) |state| {
         if (state.copies >= max_copies) return;
         if (state.inlined_len >= max_sites) return;

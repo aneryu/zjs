@@ -21492,6 +21492,128 @@ test "small-function-inlining: polymorphic site is not specialized" {
         \\var i, last;
         \\for (i = 0; i < 20; i++) last = outer(i & 1 ? A : B, i);
         \\assert.sameValue(typeof last.v, "number");
+        \\assert.sameValue(outer(A, 10).v, 10);
+        \\assert.sameValue(outer(B, 10).v, 11);
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    if (zjs.exec.small_inline.callerState(outer_fb)) |state| {
+        try std.testing.expectEqual(@as(u8, 0), state.inlined_len);
+        var i: u8 = 0;
+        var saw_never = false;
+        while (i < state.site_len) : (i += 1) {
+            if (state.sites[i].never) saw_never = true;
+        }
+        try std.testing.expect(saw_never);
+    }
+}
+
+test "small-function-inlining: R-2 getter on callee is invoked once per new" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\var n = 0;
+        \\function RealC(v) { this.x = v; }
+        \\Object.defineProperty(globalThis, "C", {
+        \\  get: function () { n += 1; return RealC; },
+        \\  configurable: true
+        \\});
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\assert.sameValue(n, 16);
+        \\assert.sameValue(outer(7).x, 7);
+        \\assert.sameValue(n, 17);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: inner throw stack and caller catch" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function inner() { throw new Error("x"); }
+        \\function outer() { return inner(); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) { try { outer(); } catch (e) {} }
+        \\try { outer(); } catch (e) {
+        \\  var s = String(e.stack);
+        \\  print(s.indexOf("inner") >= 0 ? "inner" : "no-inner");
+        \\  print(s.indexOf("outer") >= 0 ? "outer" : "no-outer");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("inner\nouter\n", output.buffered());
+}
+
+test "small-function-inlining: primitive ctor return keeps instance" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.x = 1; return 0; }
+        \\function outer() { return new C(); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(typeof o, "object");
+        \\assert.sameValue(o.x, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: Reflect.construct with foreign NewTarget is not expanded" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function NT() {}
+        \\NT.prototype = { mark: 1 };
+        \\function outer(v) { return Reflect.construct(C, [v], NT); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(i);
+        \\assert.sameValue(o.x, 15);
+        \\assert.sameValue(o.mark, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: derived class constructor is not eligible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\class B {}
+        \\class D extends B { constructor(v) { super(); this.x = v; } }
+        \\globalThis.__d = D;
+    );
+    defer result.free(js.runtime);
+    const global = try js.context.globalObject();
+    const d_fn = try global.getProperty(try js.runtime.internAtom("__d"));
+    defer d_fn.free(js.runtime);
+    const d_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(d_fn).?;
+    try std.testing.expect(!d_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: monomorphic method is expanded" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Box(v) { this.v = v; }
+        \\Box.prototype.inc = function () { return this.v + 1; };
+        \\function outer(b) { return b.inc(); }
+        \\var i, last, box = new Box(3);
+        \\for (i = 0; i < 16; i++) last = outer(box);
+        \\assert.sameValue(last, 4);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
