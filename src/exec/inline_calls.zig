@@ -1257,7 +1257,7 @@ pub const Machine = struct {
         return level;
     }
 
-    pub fn entryAt(self: *Machine, index: usize) *Entry {
+    pub inline fn entryAt(self: *Machine, index: usize) *Entry {
         return &self.chunks[index / entries_per_chunk][index % entries_per_chunk];
     }
 
@@ -1812,15 +1812,132 @@ pub const Machine = struct {
     /// setup, and link are one unit; every other shape retains the generic
     /// fallback above.
     ///
-    /// The out-of-line symbol stays authoritative for every cold caller
-    /// (driver fallback, strict/method shapes). The fixed-arity hot call
-    /// handlers alone expand `pushExactSimpleFrameImpl` in place, so their
-    /// steady-state loop crosses no bl/outparam seam: the error-union result
-    /// otherwise round-trips through a caller stack slot (`strh`+`str` in the
-    /// callee epilogue against an immediate `ldrh`+`ldr` readback after the
-    /// return — a store-to-load forward across the call boundary) and the
-    /// callee re-saves the caller's entire callee-saved register file.
+    /// Hot probe for the outlined exact-simple constructor (method sloppy
+    /// is the production `recv.m(x)` shell). `noinline` is load-bearing
+    /// (same reason as `setupSimpleInlineEntry`): folding this body into
+    /// `op_call_method` re-couples its register file with the handler's
+    /// `bl callMethod` frame.
+    ///
+    /// Returns null without mutating depth, slots, arena, or source
+    /// ownership, so the caller can enter `pushExactSimpleFrameSlow`.
+    /// HostError is unreachable here — qjs:17837 depth admission is a
+    /// pure predicate; overflow throws only on the slow path.
+    /// Snapshot / open-var-ref / first-chunk / arena-miss shapes return
+    /// null so this function contains no `bl` (no 0x140 C frame).
     noinline fn pushExactSimpleFrame(
+        self: *Machine,
+        comptime strict_this: bool,
+        comptime snapshot_args: bool,
+        comptime method_receiver: bool,
+        global: *core.Object,
+        target: *const InlineTarget,
+        source: ArgsSource,
+        caller_fp: usize,
+    ) ?*Entry {
+        comptime std.debug.assert(!method_receiver or !strict_this);
+        if (comptime snapshot_args) return null;
+
+        const function = target.fb;
+        const argc = source.argCount();
+        // qjs:17832-17836 alloca_size. Exact calls do not pad argv
+        // (`arg_buf = argv`, qjs:17841), matching `qjsBytecodeFrameAllocaSize`
+        // with copy_argv=false and argc >= arg_count.
+        const planned_stack_bytes = @as(usize, function.var_count) * @sizeOf(core.JSValue) +
+            @as(usize, function.stack_size) * @sizeOf(core.JSValue) +
+            @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
+
+        const rt = self.ctx.runtime;
+        // qjs:17837 first — predicate only. Use the caller's frame address
+        // (the handler, ≅ JS_CallInternal) so this leaf does not need its
+        // own `@frameAddress()` / x29. Overflow still throws only on Slow.
+        if (rt.hot.call_depth >= rt.hot.stack_size) return null;
+        const base = rt.hot.active_bytecode_stack_bytes;
+        const accumulated = base +% planned_stack_bytes;
+        if (accumulated < base) return null;
+        const sp = caller_fp -| planned_stack_bytes;
+        if (sp < rt.hot.native_stack_limit) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+
+        // @memset(open_var_refs) would be a compiler_rt.memset `bl`.
+        if (function.openVarRefCount() != 0) return null;
+
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const total = var_count + stack_count;
+        // Peek the active chunk (same predicates as `canCarveActiveMarked`)
+        // then commit depth+carve together so this leaf never materializes
+        // `?ActiveCarve` or a retreat `bl`.
+        const arena = &rt.vm_stack;
+        if (arena.chunk_count == 0) return null;
+        const active = arena.active;
+        const used = arena.used[active];
+        const chunk = arena.chunks[active];
+        if (chunk.len - used < total) return null;
+
+        rt.hot.active_bytecode_stack_bytes = accumulated;
+        rt.hot.call_depth = rt.hot.call_depth + 1;
+        arena.used[active] = used + total;
+        const slab_values = chunk[used .. used + total];
+
+        const entry = self.entryAt(index);
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.teardown = .{ .simple = true };
+        entry.profile_guard = .{};
+        entry.arena_mark = .{ .chunk = active, .used = used };
+        const locals = slab_values[0..var_count];
+        const stack_window = slab_values[var_count..][0..stack_count];
+        @memset(locals, core.JSValue.undefinedValue()); // qjs:17860-17861
+
+        const values = source.slice();
+        const receiver_count: usize = @intFromBool(method_receiver);
+        const args = values[receiver_count + 1 ..][0..argc];
+        const captures = target.captureSlice();
+
+        entry.frame = .{
+            .function = function,
+            .this_value = if (method_receiver)
+                takeSourceSlot(&values[0])
+            else if (strict_this)
+                core.JSValue.undefinedValue()
+            else
+                global.value(),
+            .current_function = takeSourceSlot(&values[receiver_count]),
+            .actual_arg_count = @intCast(argc),
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .locals = locals,
+            .args = args,
+            .var_refs = captures,
+            .open_var_refs = &.{},
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = if (method_receiver) .owned else .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = .borrowed,
+            },
+            .cold = null,
+        };
+        entry.stack = .{
+            .memory = &rt.memory,
+            .values = stack_window.ptr,
+            .top_ptr = stack_window.ptr,
+            .capacity = stack_window.len,
+            .policy = rt.vm_stack_arena_policy,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
+    /// Authoritative fallible constructor. HostError (stack overflow,
+    /// OOM) lives only here. Depth is re-checked in qjs:17837 order via
+    /// `enterInlineCallDepthBytes`.
+    noinline fn pushExactSimpleFrameSlow(
         self: *Machine,
         comptime strict_this: bool,
         comptime snapshot_args: bool,
@@ -1830,6 +1947,24 @@ pub const Machine = struct {
         source: ArgsSource,
     ) HostError!*Entry {
         return pushExactSimpleFrameImpl(self, strict_this, snapshot_args, method_receiver, global, target, source);
+    }
+
+    inline fn pushExactSimpleOrSlow(
+        self: *Machine,
+        comptime strict_this: bool,
+        comptime snapshot_args: bool,
+        comptime method_receiver: bool,
+        global: *core.Object,
+        target: *const InlineTarget,
+        source: ArgsSource,
+    ) HostError!*Entry {
+        if (comptime snapshot_args) {
+            return self.pushExactSimpleFrameSlow(strict_this, snapshot_args, method_receiver, global, target, source);
+        }
+        if (self.pushExactSimpleFrame(strict_this, snapshot_args, method_receiver, global, target, source, @frameAddress())) |entry| {
+            return entry;
+        }
+        return self.pushExactSimpleFrameSlow(strict_this, snapshot_args, method_receiver, global, target, source);
     }
 
     /// Shared straight-line body of `pushExactSimpleFrame`. `inline` is the
@@ -2775,7 +2910,7 @@ pub const Machine = struct {
         return if (source.metadata.has_receiver) &source.values[0] else null;
     }
 
-    fn takeSourceSlot(slot: *core.JSValue) core.JSValue {
+    inline fn takeSourceSlot(slot: *core.JSValue) core.JSValue {
         const value = slot.*;
         slot.* = core.JSValue.undefinedValue();
         return value;
@@ -2862,10 +2997,10 @@ pub const Machine = struct {
             if (inline_exact) {
                 return self.pushExactSimpleFrameImpl(false, false, false, global, target, source);
             }
-            return self.pushExactSimpleFrame(false, false, false, global, target, source);
+            return self.pushExactSimpleOrSlow(false, false, false, global, target, source);
         }
         if (isStrictSimpleInlineFrame(false, target, source)) {
-            return self.pushExactSimpleFrame(true, false, false, global, target, source);
+            return self.pushExactSimpleOrSlow(true, false, false, global, target, source);
         }
         return self.pushFrame(.generic_after_exact_plain, false, false, global, target, source);
     }
@@ -2966,10 +3101,10 @@ pub const Machine = struct {
         // instead of walking every eligibility byte on their way out.
         if (argc >= function.arg_count) {
             if (execution.simple_inline_eligible) {
-                return self.pushExactSimpleFrame(false, false, true, global, target, source);
+                return self.pushExactSimpleOrSlow(false, false, true, global, target, source);
             }
             if (execution.strict_simple_snapshot_inline_eligible) {
-                return self.pushExactSimpleFrame(false, true, true, global, target, source);
+                return self.pushExactSimpleOrSlow(false, true, true, global, target, source);
             }
         }
         return self.pushFrame(.generic, false, false, global, target, source);
