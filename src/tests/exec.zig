@@ -21929,6 +21929,7 @@ test "small-function-inlining L1: apply-arguments ctor specializes" {
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 1);
     try std.testing.expect(state.?.inlined[0].apply_forwarded);
+    try std.testing.expect(outer_fb.applyForwardInlined());
 }
 
 test "small-function-inlining L1: next-entry take does not leak initialize return" {

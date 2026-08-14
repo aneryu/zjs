@@ -1615,7 +1615,10 @@ pub const function_bytecode = struct {
         /// Geometry-only small-function body-expansion candidate. Not the
         /// existing same-machine `simple_inline_eligible` Entry path.
         small_inline_eligible: bool = false,
-        _reserved: u1 = 0,
+        /// This image contains a rewritten L1 apply-forward `call_method`.
+        /// Hot `op_call_method` consults this bit before any CallerState walk
+        /// so non-apply call sites pay zero L1 marginal cost.
+        apply_forward_inlined: bool = false,
     };
 
     /// Immutable execution policy published before a FunctionBytecode escapes.
@@ -2229,6 +2232,9 @@ pub const function_bytecode = struct {
         }
         pub inline fn smallInlineEligible(self: *const FunctionBytecodeImpl) bool {
             return self.executionFlags().small_inline_eligible;
+        }
+        pub inline fn applyForwardInlined(self: *const FunctionBytecodeImpl) bool {
+            return self.executionFlags().apply_forward_inlined;
         }
         pub inline fn pc2lineBuf(self: *const FunctionBytecodeImpl) []u8 {
             if (self.legacyBytecodeAdapter()) |legacy| return @constCast(legacy.pc2line_buf);

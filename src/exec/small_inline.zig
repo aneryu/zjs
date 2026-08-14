@@ -125,6 +125,40 @@ fn setCallerState(fb: *FunctionBytecode, state: ?*CallerState) void {
 }
 
 const borrowed_realm_off: usize = @sizeOf(usize);
+/// Callee-side L1 analysis memo in the hot-extension pad. Distinct from the
+/// CallerState pointer (off 0) and borrowed-realm word (off 8). 0 = unknown.
+const apply_forward_memo_off: usize = 2 * @sizeOf(usize);
+const apply_forward_memo_no: u8 = 1;
+const apply_forward_memo_yes: u8 = 2;
+
+fn applyForwardEligible(fb: *FunctionBytecode) bool {
+    if (fb.hotExtension()) |hot| {
+        const memo = hot._ctor_alloc_pad[apply_forward_memo_off];
+        if (memo == apply_forward_memo_yes) return true;
+        if (memo == apply_forward_memo_no) return false;
+    }
+    const yes = analyzeApplyForward(fb) != null;
+    if (fb.hotExtensionMut()) |hot| {
+        hot._ctor_alloc_pad[apply_forward_memo_off] =
+            if (yes) apply_forward_memo_yes else apply_forward_memo_no;
+    }
+    return yes;
+}
+
+fn anyApplyForwardSite(state: *const CallerState) bool {
+    var i: u8 = 0;
+    while (i < state.inlined_len) : (i += 1) {
+        if (state.inlined[i].apply_forwarded) return true;
+    }
+    return false;
+}
+
+fn markApplyForwardInlined(fb: *FunctionBytecode) void {
+    var flags = fb.executionFlags();
+    if (flags.apply_forward_inlined) return;
+    flags.apply_forward_inlined = true;
+    fb.setExecutionFlags(flags);
+}
 
 fn setBorrowedRealm(fb: *FunctionBytecode, realm: ?*core.JSContext) void {
     const hot = fb.hotExtensionMut() orelse return;
@@ -224,7 +258,7 @@ pub fn noteMonomorphic(
     callee: *FunctionBytecode,
     callee_obj: *Object,
 ) bool {
-    if (!callee.smallInlineEligible() and analyzeApplyForward(callee) == null) return false;
+    if (!callee.smallInlineEligible() and !applyForwardEligible(callee)) return false;
     if (callee == caller) return false;
     if (callee.realmContext() != caller.realmContext()) return false;
     if (findInlinedSite(caller, call_pc) != null) return false;
@@ -1159,6 +1193,7 @@ fn cloneAndExpand(
     }
     state.specialized = true;
     setBorrowedRealm(spec, caller.realmContext());
+    if (anyApplyForwardSite(state)) markApplyForwardInlined(spec);
 
     owned = false;
     rt.gc.addInitializedWithSizeNoFail(&spec.header, spec.heapByteSize());
@@ -1387,14 +1422,18 @@ pub fn applyForwardGuardHolds(
     return true;
 }
 
-pub fn applyForwardTakeOk(rt: *JSRuntime, global: *Object, site: *const InlinedSite, func: JSValue) bool {
+pub inline fn applyForwardTakeOk(rt: *JSRuntime, global: *Object, site: *const InlinedSite, func: JSValue) bool {
     if (!site.apply_forwarded) return true;
     const ctor = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
     return applyForwardGuardHolds(rt, global, ctor, site.apply_method_atom);
 }
 
 /// True when `call_pc` is the rewritten apply-forward `call_method`.
-pub fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
+pub inline fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
+    // Header mirror, not hotExtension().call_facts: the FAM word sits at the
+    // end of the bytecode image and would miss the caller's first cache line
+    // on every non-apply `op_call_method`.
+    if (!fb.call_facts_mirror.execution.apply_forward_inlined) return false;
     const site = siteForPc(fb, call_pc) orelse return false;
     return site.apply_forwarded and site.apply_forward_call_pc == call_pc;
 }
@@ -1403,6 +1442,7 @@ pub fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
 /// the apply-forward site (or null). Used by enterEntry to attach
 /// `Entry.native_caller` (D8-L1) without inserting an InlinedSite ghost.
 pub fn applyForwardSiteAfterCall(fb: *const FunctionBytecode, pc_after: u32) ?*const InlinedSite {
+    if (!fb.call_facts_mirror.execution.apply_forward_inlined) return null;
     if (pc_after < 3) return null;
     const call_pc = pc_after - 3;
     const site = siteForPc(fb, call_pc) orelse return null;

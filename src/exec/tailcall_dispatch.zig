@@ -1639,6 +1639,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     // Skip leaf arms (they overlay resume on native_caller) and
                     // attach Function.prototype.apply as D8-L1 native_caller.
                     if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
+                        @branchHint(.unlikely);
                         const target = resolved.bind(receiver, method);
                         return pushAndEnterApplyForward(vb, vm, &target, region_start, argc);
                     }
@@ -2041,9 +2042,9 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     return coldNext(vb, vm);
                 },
                 .instance => |instance| {
-                    small_inline.probe_prep += 1;
                     const callee_fb = candidate.resolved.fb;
                     if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+                        small_inline.probe_prep += 1;
                         if (site.kind == .constructor and small_inline.calleeMatches(site, func) and
                             small_inline.windowFits(vm.frame, site) and
                             small_inline.applyForwardTakeOk(vm.rt, vm.global, site, func))
