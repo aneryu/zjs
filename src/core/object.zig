@@ -7621,18 +7621,15 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
-            const was_zero = h.meta().rc == 0;
+            // qjs gc_scan_incref_child (quickjs.c:6719-6728):
+            //   rc++; if (rc == 1) { list_del; list_add_tail(gc_obj); mark = 0; }
+            // The extra `mark` predicate was a 100% hit-rate tax (VERIFIED-LEDGER
+            // 03 A.6).
             h.meta().rc += 1;
-            // mark implies membership in the cycle-candidate set; the kind
-            // recheck was redundant with the same invariant used by QuickJS's
-            // gc_scan_incref_child.
-            if (was_zero and h.meta().flags.mark) {
+            if (h.meta().rc == 1) {
                 gc.listDel(h);
-                h.meta().flags.mark = false;
-                // Moving a newly revived zero-ref node to the main-list tail
-                // makes the enclosing list walk visit its children later,
-                // exactly like QuickJS gc_scan_incref_child.
                 self.registry.restoreCycleCandidate(h);
+                h.meta().flags.mark = false;
             }
         }
     };
