@@ -33,9 +33,9 @@ pub const max_pc_map: usize = 64;
 const budget_fraction_num: usize = 3;
 const budget_fraction_den: usize = 100;
 const budget_cap_bytes: usize = 256 * 1024;
-/// R-1 is a *cap* against TS-scale runaway. 3% of a 200-byte N3 script is
-/// 6 bytes and would block the only specialize the case needs. Floor lets
-/// microbenchmarks and small callers through; zoo/TS still hit the 3%/256KB cap.
+/// R-1 is a *cap* against TS-scale runaway. 3% of a ~200-byte micro is 6B and
+/// would block the only clone the case needs. Driver approved a 16KB floor
+/// (INLINE-PROPOSAL §8); zoo/TS still hit the 3%/256KB cap.
 const budget_floor_bytes: usize = 16 * 1024;
 
 pub const Kind = enum(u8) { method, constructor };
@@ -71,7 +71,6 @@ pub const CallerState = struct {
     inlined: [max_sites]InlinedSite = undefined,
     inlined_len: u8 = 0,
     specialized: bool = false,
-    live_spec: ?*FunctionBytecode = null,
 };
 
 fn decodeCallerState(raw: usize) ?*CallerState {
@@ -96,6 +95,14 @@ fn setCallerState(fb: *FunctionBytecode, state: ?*CallerState) void {
     std.mem.writeInt(usize, hot._ctor_alloc_pad[0..@sizeOf(usize)], raw, .little);
 }
 
+const borrowed_realm_off: usize = @sizeOf(usize);
+
+fn setBorrowedRealm(fb: *FunctionBytecode, realm: ?*core.JSContext) void {
+    const hot = fb.hotExtensionMut() orelse return;
+    const raw: usize = if (realm) |ctx| @intFromPtr(ctx) else 0;
+    std.mem.writeInt(usize, hot._ctor_alloc_pad[borrowed_realm_off..][0..@sizeOf(usize)], raw, .little);
+}
+
 pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
     const state = callerStateMut(fb) orelse return;
     setCallerState(fb, null);
@@ -105,10 +112,7 @@ pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
         rt.atoms.free(site.callee_name);
         rt.atoms.free(site.callee_file);
     }
-    if (state.live_spec) |spec| {
-        state.live_spec = null;
-        core.gc.release(rt, &spec.header);
-    }
+    setBorrowedRealm(fb, null);
     rt.memory.destroy(CallerState, state);
 }
 
@@ -135,24 +139,6 @@ fn hasTrailingAfterReturn(code: []const u8) bool {
         if (size == 0 or pc + size > code.len) return true;
         pc += size;
         if (opc == op.return_undef or opc == op.@"return") return pc < code.len;
-    }
-    return false;
-}
-
-pub const spare_locals: u16 = 9;
-
-pub fn reservedSpareLocals(fb: *const FunctionBytecode) u16 {
-    return if (codeHasCallConstructor(fb.byteCode())) spare_locals else 0;
-}
-
-fn codeHasCallConstructor(code: []const u8) bool {
-    var pc: usize = 0;
-    while (pc < code.len) {
-        const opc = code[pc];
-        const size: usize = bytecode.opcode.sizeOf(opc);
-        if (size == 0 or pc + size > code.len) return false;
-        if (opc == op.call_constructor) return true;
-        pc += size;
     }
     return false;
 }
@@ -258,88 +244,11 @@ pub fn specializeCallSite(
     }
     if (budgetRemaining(rt) == 0) return;
     const spec = cloneAndExpand(rt, caller, callee, call_pc, kind, argc) orelse return;
-    _ = caller_obj;
-    // Keep the user-visible FB. The spec is a sidecar owned by CallerState
-    // so the live invocation can jump into expanded code without changing
-    // planned_stack_bytes / function identity.
-    if (callerStateMut(caller)) |src_state| {
-        if (src_state.live_spec) |old| core.gc.release(rt, &old.header);
-        spec.header.retain();
-        src_state.live_spec = spec;
-        src_state.specialized = true;
-        if (src_state.inlined_len < max_sites) {
-            if (callerState(spec)) |spec_state| {
-                if (spec_state.inlined_len > 0) {
-                    var copy = spec_state.inlined[0];
-                    copy.callee_name = rt.atoms.dup(copy.callee_name);
-                    copy.callee_file = rt.atoms.dup(copy.callee_file);
-                    src_state.inlined[src_state.inlined_len] = copy;
-                    src_state.inlined_len += 1;
-                }
-            }
-        }
-    } else {
+    const next = JSValue.functionBytecode(&spec.header);
+    caller_obj.setFunctionBytecodeValue(rt, next) catch {
         core.gc.release(rt, &spec.header);
-    }
-}
-
-pub const Adopted = struct {
-    fb: *FunctionBytecode,
-    site: *const InlinedSite,
-};
-
-/// If the function object already points at a specialized copy, switch the
-/// live frame onto it so the *current* invocation (N3's 5e6-iteration `main`)
-/// can jump into the expanded body. Requires the spare locals reserved at
-/// publish for `call_constructor` callers.
-pub fn tryFinishInline(
-    frame: *frame_mod.Frame,
-    function_ptr: **const FunctionBytecode,
-    code_base_ptr: *[*]const u8,
-    off: usize,
-) bool {
-    const site = blk: {
-        if (callerState(frame.function)) |st| {
-            var i: u8 = 0;
-            while (i < st.inlined_len) : (i += 1) {
-                if (st.inlined[i].pc_hi == off) break :blk st.inlined[i];
-            }
-        }
-        return false;
+        return;
     };
-    function_ptr.* = frame.function;
-    code_base_ptr.* = frame.function.byteCodeAssumeMaterialized().ptr;
-    frame.pc = site.call_pc + 3;
-    return true;
-}
-
-pub fn adoptedCode(fb: *const FunctionBytecode) ?[]const u8 {
-    const st = callerState(fb) orelse return null;
-    const spec = st.live_spec orelse return null;
-    return spec.byteCode();
-}
-
-pub fn liveCodeLen(fb: *const FunctionBytecode) ?usize {
-    const code = adoptedCode(fb) orelse return null;
-    return code.len;
-}
-
-pub fn adoptCallerSpec(
-    caller_obj: *Object,
-    frame: *frame_mod.Frame,
-    current_fn: *const FunctionBytecode,
-    call_pc: u32,
-) ?Adopted {
-    _ = caller_obj;
-    const site = findInlinedSite(current_fn, call_pc) orelse return null;
-    const spec = blk: {
-        if (callerState(current_fn)) |st| {
-            if (st.live_spec) |s| break :blk s;
-        }
-        return null;
-    };
-    if (!windowFits(frame, site)) return null;
-    return .{ .fb = spec, .site = site };
 }
 
 const Rewrite = struct {
@@ -483,7 +392,7 @@ fn rewriteBody(callee: *const FunctionBytecode, this_slot: u16, arg_base: u16, v
                 } else {
                     if (!emitByte(&out, op.@"undefined")) return null;
                 }
-                // No goto: tryFinishInline fires at pc_hi after this op.
+                if (!emitGoto(&out, 0)) return null;
                 recordMap(&out, map_from, src_pc);
                 emitted = si + 1;
                 break;
@@ -604,28 +513,19 @@ fn cloneAndExpand(
     const call_size = bytecode.opcode.sizeOf(call_op);
     if (call_size == 0 or call_pc + call_size > caller_code.len) return null;
 
-    const spare = reservedSpareLocals(caller);
-    const need: u16 = 1 + callee.arg_count + callee.var_count;
-    const this_slot: u16 = if (spare >= need) caller.var_count - spare else caller.var_count;
+    const this_slot: u16 = caller.var_count;
     const arg_base: u16 = this_slot + 1;
     const var_base: u16 = arg_base + callee.arg_count;
-    const extra_vars: u16 = if (spare >= need) 0 else need;
+    const extra_vars: u16 = 1 + callee.arg_count + callee.var_count;
     const new_var_count: u16 = caller.var_count + extra_vars;
 
     var rewritten = rewriteBody(callee, this_slot, arg_base, var_base, kind) orelse return null;
-    // Patch return gotos to land at the original instruction after the call.
-    // The expanded body is appended after caller_code, so the continuation
-    // offset from an emit_pc in the body is:
-    //   target = caller_code.len + rewritten.len   wait — no:
-    // We keep the call opcode as the guard. The body is appended. After the
-    // body we emit a goto back to call_pc + call_size.
-    // Return sequences inside the body jump to (appended_len) which is a
-    // trailing goto we emit last? Simpler: each return is a goto whose
-    // target is the instruction *after* the appended body, and that
-    // instruction is `goto (call_pc + call_size)`.
+    // Keep the call opcode as the guard. The body is appended. After the
+    // body we emit a goto back to call_pc + call_size. Return sequences
+    // inside the body jump to that trailing goto.
     const after_body_rel: usize = rewritten.len;
-    // Return-from-inline is intercepted at pc_hi (tryFinishInline), so the
-    // rewritten body must not continue into a spec copy of the caller.
+    if (!emitGoto(&rewritten, 0)) return null;
+
     var rp: usize = 0;
     while (rp + 5 <= after_body_rel) {
         const opc = rewritten.code[rp];
@@ -639,6 +539,12 @@ fn cloneAndExpand(
         }
         rp += sz;
     }
+    const body_abs: usize = caller_code.len;
+    const trailing_abs = body_abs + after_body_rel;
+    const cont_abs = @as(usize, call_pc) + call_size;
+    const trail_from: i64 = @intCast(trailing_abs + 1);
+    const trail_diff: i32 = std.math.cast(i32, @as(i64, @intCast(cont_abs)) - trail_from) orelse return null;
+    std.mem.writeInt(i32, rewritten.code[after_body_rel + 1 ..][0..4], trail_diff, .little);
 
     const new_len = caller_code.len + rewritten.len;
     if (budgetRemaining(rt) < new_len) return null;
@@ -673,9 +579,9 @@ fn cloneAndExpand(
         .is_direct_or_indirect_eval = caller.isDirectOrIndirectEval(),
     });
     spec.defined_arg_count = caller.defined_arg_count;
-    // Intentionally no realm retain: spec is a code sidecar. The live
-    // frame keeps the entry FB (and its realm). Extra retain here kept
-    // JSContext alive past TestEngine.deinit.
+    // Expanded body reuses the caller's operand stack (the call it replaces
+    // already reserved func/new_target/args). Adding callee.stack_size bloated
+    // every next-entry frame of a looping caller (N3f).
     spec.stack_size = caller.stack_size;
     spec.var_ref_count = caller.openVarRefCount();
     spec.func_name = rt.atoms.dup(caller.funcName());
@@ -684,9 +590,10 @@ fn cloneAndExpand(
     @memcpy(dst_code[0..caller_code.len], caller_code);
     @memcpy(dst_code[caller_code.len..], rewritten.code[0..rewritten.len]);
 
+    const src_cpool = caller.cpoolSlice();
     const dst_cpool = new_layout.cpoolSliceMut(spec);
-    for (dst_cpool) |*dst_v| {
-        dst_v.* = JSValue.undefinedValue();
+    for (src_cpool, dst_cpool) |src_v, *dst_v| {
+        dst_v.* = src_v.dup();
     }
 
     const src_vars = caller.allVarDefs();
@@ -736,8 +643,8 @@ fn cloneAndExpand(
     }
 
     var state = ensureCallerState(rt, spec) orelse return null;
-    // Do not inherit the source caller's heap state pointer (we just created
-    // a fresh one). Record the inlined site.
+    // Weak: callee stays alive via its function object / parent cpool. A retain
+    // here pins callee.realm and keeps JSContext past TestEngine.deinit.
     state.inlined[0] = .{
         .pc_lo = @intCast(caller_code.len),
         .pc_hi = @intCast(caller_code.len + after_body_rel),
@@ -756,6 +663,7 @@ fn cloneAndExpand(
     state.inlined_len = 1;
     state.specialized = true;
     state.copies = 1;
+    setBorrowedRealm(spec, caller.realmContext());
     if (callerState(caller)) |src_state| {
         state.copies = src_state.copies + 1;
         src_state.copies = state.copies;
@@ -776,19 +684,30 @@ pub fn installInlineWindow(
     frame: *frame_mod.Frame,
     site: *const InlinedSite,
     this_value: JSValue,
-    args: []const JSValue,
+    args: []JSValue,
     rt: *JSRuntime,
 ) void {
     const locals = frame.locals;
     if (site.this_slot < locals.len) {
-        valueReplace(rt, &locals[site.this_slot], this_value.dup());
+        // `this_value` is the owned instance from prepare. Move it; a dup
+        // here leaked one object per inlined `new` (N3f = 5e6).
+        valueReplace(rt, &locals[site.this_slot], this_value);
+    } else {
+        this_value.free(rt);
     }
     var i: u16 = 0;
     while (i < site.argc) : (i += 1) {
         const slot = site.arg_base + i;
-        if (slot >= locals.len) break;
-        const v = if (i < args.len) args[i] else JSValue.undefinedValue();
-        valueReplace(rt, &locals[slot], v.dup());
+        const v = if (i < args.len) blk: {
+            const owned = args[i];
+            args[i] = JSValue.undefinedValue();
+            break :blk owned;
+        } else JSValue.undefinedValue();
+        if (slot < locals.len) {
+            valueReplace(rt, &locals[slot], v);
+        } else {
+            v.free(rt);
+        }
     }
 }
 

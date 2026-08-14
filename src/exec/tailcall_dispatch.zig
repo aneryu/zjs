@@ -1968,8 +1968,27 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                 .instance => |instance| {
                     const call_pc: u32 = @intCast(@intFromPtr(pc) - @intFromPtr(vm.code_base));
                     const callee_fb = candidate.resolved.fb;
-                    if (object_ops.objectFromValue(vm.frame.current_function)) |caller_obj| {
-                        if (small_inline.noteMonomorphic(vm.rt, @constCast(vm.function), call_pc, @constCast(callee_fb))) {
+                    if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+                        if (site.kind == .constructor and small_inline.calleeMatches(site, func) and
+                            small_inline.windowFits(vm.frame, site))
+                        {
+                            small_inline.installInlineWindow(vm.frame, site, instance, args, vm.rt);
+                            // Args were stolen; only func + new_target remain owned.
+                            region_start[0].freeDuringActiveBytecode(vm.rt);
+                            region_start[1].freeDuringActiveBytecode(vm.rt);
+                            vm.stack.setLen(region_base);
+                            vm.frame.pc = site.pc_lo;
+                            const npc = vm.code_base + site.pc_lo;
+                            return @call(.always_tail, vm.active_dispatch_tbl[npc[0]], .{
+                                npc,
+                                vm.stack.topPtr(),
+                                vb,
+                                vm,
+                            });
+                        }
+                    }
+                    if (small_inline.noteMonomorphic(vm.rt, @constCast(vm.function), call_pc, @constCast(callee_fb))) {
+                        if (object_ops.objectFromValue(vm.frame.current_function)) |caller_obj| {
                             small_inline.specializeCallSite(
                                 vm.rt,
                                 caller_obj,
@@ -1980,10 +1999,6 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                                 argc,
                             );
                         }
-                        // Same-invocation adopt/jump is not enabled: executing
-                        // the sidecar body currently leaks JSContext (see
-                        // INLINE-PROPOSAL appendix B). N3's 5e6 news are one
-                        // main() entry so next-entry specialize never fires.
                     }
                     // Parser-emitted direct construction owns two references
                     // to the same callable (`get_var; dup`). Recast that

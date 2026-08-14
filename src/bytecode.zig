@@ -2400,6 +2400,14 @@ pub const function_bytecode = struct {
         }
 
         noinline fn realmContextSlow(self: *const FunctionBytecodeImpl) ?*context.RealmContext {
+            // Next-entry inline specs borrow the entry realm in the hot pad
+            // (not RealmRef) so GC does not visit or retain it. See appendix B.
+            if (self.hotExtension()) |hot| {
+                const raw = std.mem.readInt(usize, hot._ctor_alloc_pad[@sizeOf(usize)..][0..@sizeOf(usize)], .little);
+                if (raw != 0 and raw != 0xaaaaaaaaaaaaaaaa) {
+                    return @ptrFromInt(raw);
+                }
+            }
             if (self.legacyBytecodeAdapter()) |legacy| return legacy.realm;
             return null;
         }
@@ -8759,16 +8767,12 @@ pub const pipeline_finalize = struct {
         // artifact allocation. Source and pc2line remain independent moved
         // owners, matching QuickJS's debug-tail ownership.
         if (lowered.code.len == 0) return error.InvalidBytecode;
-        const inline_spare: usize = if (bytecode_function.codeHasCallConstructor(lowered.code))
-            bytecode_function.small_inline_spare_locals
-        else
-            0;
         const layout = try fb_mod.FunctionLayout.init(
             true,
             true,
             fd.cpool.len,
             fd.args.len,
-            fd.vars.len + inline_spare,
+            fd.vars.len,
             fd.closure_var.len,
             lowered.code.len,
         );
@@ -8791,14 +8795,9 @@ pub const pipeline_finalize = struct {
             out.* = fb_mod.BytecodeVarDef.fromCompile(arg, arg.scope_next);
             out.var_name = atom.null_atom;
         }
-        for (fd.vars, vardefs[fd.args.len..][0..fd.vars.len]) |local, *out| {
+        for (fd.vars, vardefs[fd.args.len..]) |local, *out| {
             out.* = fb_mod.BytecodeVarDef.fromCompile(local, local.scope_next);
             out.var_name = atom.null_atom;
-        }
-        if (inline_spare != 0) {
-            for (vardefs[fd.args.len + fd.vars.len ..]) |*out| {
-                out.* = .{ .var_name = atom.null_atom };
-            }
         }
 
         const closure_var = layout.closureVarSliceMut(fb);
@@ -8826,7 +8825,7 @@ pub const pipeline_finalize = struct {
             .is_direct_or_indirect_eval = fd.is_direct_eval or fd.is_indirect_eval,
         });
         fb.defined_arg_count = @intCast(fd.defined_arg_count);
-        fb.stack_size = lowered.stack_size + @as(u16, if (inline_spare != 0) 4 else 0);
+        fb.stack_size = lowered.stack_size;
         fb.var_ref_count = lowered.open_var_ref_count;
 
         // Realm retention is an infallible refcount operation and belongs to
@@ -10006,22 +10005,6 @@ const function_mod = struct {
     pub const small_inline_max_code: usize = 40;
     pub const small_inline_max_slots: usize = 4;
     pub const small_inline_max_stack: usize = 4;
-    /// Extra locals reserved on any function that contains `call_constructor`,
-    /// so a same-invocation specialize can adopt the copy without growing the
-    /// live slab (N3's 5e6 `new`s are one `main` entry).
-    pub const small_inline_spare_locals: u16 = 9;
-
-    pub fn codeHasCallConstructor(code: []const u8) bool {
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size: usize = opcode.sizeOf(op_id);
-            if (size == 0 or pc + size > code.len) return false;
-            if (op_id == opcode.op.call_constructor) return true;
-            pc += size;
-        }
-        return false;
-    }
 
     fn scanSmallInlineEligible(
         fb: *const FunctionBytecode,

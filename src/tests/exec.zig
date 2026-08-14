@@ -21604,29 +21604,51 @@ test "small-function-inlining: derived class constructor is not eligible" {
     try std.testing.expect(!d_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
 }
 
-test "small-function-inlining: same-invocation main loop specializes" {
+test "small-function-inlining: next-entry specialize is installed on the caller" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const result = try js.eval(
-        \\function main(n) {
-        \\  function Three(a, b, c) { this.x = a; this.y = b; this.z = c; }
+        \\function Three(a, b, c) { this.x = a; this.y = b; this.z = c; }
+        \\function batch(n) {
         \\  var i, s = 0, p;
         \\  for (i = 0; i < n; i++) { p = new Three(1, 2, 3); s = s + p.x; }
         \\  return s;
         \\}
-        \\globalThis.__main = main;
-        \\assert.sameValue(main(16), 16);
+        \\globalThis.__batch = batch;
+        \\assert.sameValue(batch(16), 16);
+        \\assert.sameValue(batch(16), 16);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
     const global = try js.context.globalObject();
-    const main_fn = try global.getProperty(try js.runtime.internAtom("__main"));
-    defer main_fn.free(js.runtime);
-    const main_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(main_fn).?;
-    const main_fb = main_obj.u.bytecode_function.function_bytecode.?;
-    const state = zjs.exec.small_inline.callerState(main_fb);
+    const batch_fn = try global.getProperty(try js.runtime.internAtom("__batch"));
+    defer batch_fn.free(js.runtime);
+    const batch_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(batch_fn).?;
+    const batch_fb = batch_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(batch_fb);
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 1);
+    try std.testing.expect(state.?.specialized);
+}
+
+test "small-function-inlining: call_constructor callers keep published frame geometry" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    // Deleted OSR spare was +9 locals / +4 stack on every call_constructor
+    // caller. Published geometry must match the compiler's real slots.
+    try std.testing.expectEqual(@as(u16, 0), outer_fb.var_count);
 }
 
 test "small-function-inlining: monomorphic method is expanded" {
