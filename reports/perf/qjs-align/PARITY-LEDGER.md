@@ -81,13 +81,19 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
   tag-before-payload 无收益、16B 宽度不是病因、C ABI 边界已被编译器消除。
 - **布局彩票**：7-pad zoo 极差仅 0.380pp，最好 pad +0.268%，且源码一改排名重排——**不是杠杆**。
 
-## 存活假设（2026-08-13 更新：只剩一个）
+## 存活假设（2026-08-14 更新：**零存活**）
 
-1. ~~跨 benchmark 的 call/frame 固定税~~ —— **CLOSED**。三个继续条件全不满足：
+1. ~~跨 benchmark 的 call/frame 固定税~~ —— **CLOSED**（08-13）。三个继续条件全不满足：
    PdfJS backtrace 税 14.074M < 20M；跨 Zoo 暴露 132.237M raw → 校准后仅 **0.1355 pp** < 0.20 pp；
    return 区域虽 13/15 基准 8/8 同向但仍是未具名区域、且与已封板的弥散调用税重叠。
-2. **2-slot read-forwarding**（`A1/A2 codegen harness`，机器码可行性完全未知）
+2. ~~2-slot read-forwarding~~ —— **CLOSED（08-13 harness NO-GO）**。死在预注册汇编硬门：
+   A2 消掉消费者内存载入，但 16B JSValue 走 GP 通道，依赖边变成 **FP→GP→FP 串行跨域链**
+   （+1 条 fmov，两个冷构建一致）＝登记的 hard stop，未获 PMU 授权。
+   `2026-08-13/READFWD-HARNESS-OUTCOME.md`。
+3. OPT-R2 的两条新尝试同轮死亡：tail_call 发射（上界 −4.5%）、
+   字符串 concat 对齐（rope 盈余在共享 lhs 的惰性 concat 本身，qjs 同样无法 inplace）。
 
-**目前没有已验证的追平方向。** 若这两条都死亡，需要做一次架构边界决策
-（路径 A：严格 QuickJS-faithful 的累积式收敛；路径 B：扩大允许的实现机制），
-**而不是继续寻找第九个微机制。**
+**追平假设清零，架构边界决策（路径 A：严格 faithful 累积收敛 / 路径 B：扩大允许机制）到期。**
+裁决前置证据 = **OPT-R3 JS 函数级归因扫荡**（`2026-08-14/OPT-PLAN-GROK-R3.md`）：
+四大赤字基准从未做过 JS 级归因（该方法是 08-12 战役唯一大赢的来源），
+路径 A 的剩余空间在 60% 赤字未具名前不可判。

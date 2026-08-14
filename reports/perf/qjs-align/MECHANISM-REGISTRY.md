@@ -42,10 +42,17 @@ BLOCKER:              语义资格未核实
 ```
 CAUSALITY:            proven（下游成本已验证）
 PERFORMANCE VALUE:    9.615M cycles，PdfJS 赤字的 4.38%
-PRODUCTION CANDIDATE: BLOCKED
-BLOCKER:              上游 rope-population mismatch 未命名
-STATUS TEXT:          validated downstream cost; upstream rope-population mismatch unresolved
+PRODUCTION CANDIDATE: BLOCKED（2026-08-14 起改为价值/表示层理由）
+BLOCKER:              上游已命名（OPT-R2 H2 侦察），但修复=表示层决策，0.06pp 不值得
 ```
+
+**2026-08-14 H2 侦察收案**（`/tmp/h2-bins/RECON.md`，计数器分支 `grok/opt-r2-h2-recon` 不合并）：
+pdfjs 一整轮 3.83M 次 concat 分桶 = **lhs 共享（rc>1）65.5% / lhs=rope 30.6% / lhs=flat·rc==1 仅 0.63%**。
+「flat·rc==1 本可原地增长」假设被证伪（24k << 545k 闸门）；rope 盈余来自
+**共享 lhs 上的惰性 concat 策略本身**——qjs 在该桶同样无法 inplace（全新分配+双拷贝），
+差异是「懒 rope vs 急拷贝」的表示层选择。`memory.zig` 侧指针→槽类基础设施已存在
+（`headerClassIndex`/`rawFree` 读头），残余绑定只在 `destroyFlat`/`allocated_bytes`/assert——
+但频次闸门未过，**不立项**。若未来走路径 B 重审表示层，本段是起点。
 
 来源：同上。证据显示 **zjs 在选定热操作数上比 QuickJS 多产生 1.090M 个 rope**。
 
