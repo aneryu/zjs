@@ -42,7 +42,7 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 
 | benchmark | ratio | log 赤字 | 占比 | 修到 1.0 的贡献 | 主要正赤字区域 | zjs 已领先区域 | 已命名机制 |
 |---|---:|---:|---:|---:|---|---|---|
-| raytrace | 0.777 | 0.2517 | 22.4% | **1.68 pp** | 调用机制合计 +515M（49.2%）、apply/arguments +249M | 属性读 −24M、RC 销毁 −45M | apply length 前缀（已落地 fb680e41） |
+| raytrace | 0.777 | 0.2517 | 22.4% | **1.68 pp** | **R7 提纯钉死：`new Vector/Color`+`initialize.apply` 成对税 = 1.00G = 全部宏观超出**（z 构造税 1.41G vs q 0.42G = **3.39x**）；case 1.296→三刀后 1.002（三 pad 稳，driver CPU19 亲验 1.298/1.007） | 属性读 −24M、RC 销毁 −45M | **R7-R1 上限 +1.7pp**（simple new 的忠实路径成本对齐——⚠️不得重建已删 bypass，问题仍是「qjs 全体+帧 150cyc、zjs 194」）；R7-R2 apply（~20%，或被 R1 吸收） |
 | pdfjs | 0.785 | 0.2415 | 21.5% | **1.61 pp** | dispatch +150M / string+regexp +70M / call +62M | arith −31M, alloc −19M, frontend −17M, RC −15M | backtrace 发布 14.07M；rope strict-eq 9.62M |
 | earley-boyer | 0.799 | 0.2242 | 20.0% | **1.49 pp** | 闭包+var_ref +223M、GC 环收集 +193M、构造 bypass 准入税 +182M | 属性读 −216M、属性发布 −222M | fclosure 常驻 handler（已落地，zoo 效应零） |
 | typescript | 0.830 | 0.1864 | 16.6% | 1.24 pp | **R4 订正：内层循环税 1.215x 平台（5 轮无漂移，GC 21=21）**；「fixed-work 1.03-1.08x」是前端摊销稀释（zjs 前端快）。净 +132M（782M 是 dec6961d 旧账）；other 顶符号=RC destroy/trace + `pushExactSimpleFrame`；property 两侧 37%=37%（X-10 后 +180M 不复存在） | 前端/编译（折差 +17% 全是它） | audit-exec X-10 实测 +1.71%（`6d8295ce` 二分） |

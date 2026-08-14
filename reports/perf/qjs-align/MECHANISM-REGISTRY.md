@@ -89,6 +89,36 @@ pdfjs 一整轮 3.83M 次 concat 分桶 = **lhs 共享（rc>1）65.5% / lhs=rope
 状态:      REGISTERED，单条 <0.3pp，进 R6 组包 + 三 pad
 ```
 
+## `simple-new-cost-alignment`（R7-R1，2026-08-14 登记）
+
+```
+来源:      R7 提纯——raytrace case 1.296，三刀消融后 1.002；构造成对税 1.00G = 全部超出
+上限:      raytrace 0.777→1.00 ⇒ geomean +1.7pp（当前登记册最大条目）
+性质:      FAITHFUL 约束下的成本对齐：3 字段 simple new 逼近对象字面量成本
+⛔ 红线:    不得重建 constructSimpleFieldConstructor 型 bypass（08-11 用户裁决）。
+           合法问题形态=「qjs 走完整字节码体+一帧 150 cyc，zjs 194 cyc 贵在哪」，
+           答案必须是让忠实构造路径变便宜，非跳过工作
+优势:      case-pure.js 提供秒级迭代载具（T 系列当年没有的东西）
+状态:      REGISTERED → R8 主线
+```
+
+## `apply-arguments-residual`（R7-R2，2026-08-14 登记）
+
+```
+来源:      R7-R——apply/arguments 残余 ~20% 缺口；可能被 R1 吸收，R1 落地后再定价
+状态:      REGISTERED（低优先）
+```
+
+## `get-arg-hot-section`（R6-F 候选 a，2026-08-14 登记）
+
+```
+来源:      R6-F——zlib 热 27 opcode 的 handler 跨 269 页，唯一原因是 get_arg0 被钉在
+           1MB 外的 .text.zjs.tail_hot；移回后 9.2 页 vs qjs 5.5 页。
+           四基准 fe_stall 占 Δcyc 46-85%，backend/iTLB 已排除
+性质:      工程化布局（许可域：不改逻辑执行模型的布局优化；非 pad 彩票）
+状态:      REGISTERED → R8（与 R6-K 两刀同族组包）
+```
+
 ## 组包规则（当前：`candidate-package` NOT AUTHORIZED）
 
 上述两项合计 23.689M ≈ **+0.06 pp**，仅为 MDE 的约五分之一。
