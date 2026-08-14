@@ -886,7 +886,11 @@ pub fn installInlineWindow(
 /// Move + free on the same slot is a double-free (mirror of the N3f
 /// installInlineWindow dup-and-keep leak). After this returns, the caller
 /// `setLen`s past the region; abandoned slots must not hold a live ref.
-pub fn releaseCallRegionAfterInline(
+///
+/// R1 keeps this walker on the extras>0 cold arm only (`noinline` so the
+/// ctor handler does not eat the loop). The 2-slot TAKE success path
+/// inlines the two DROPs beside `setLen` via `releaseCtorTakeRegion`.
+pub noinline fn releaseCallRegionAfterInline(
     rt: *JSRuntime,
     kind: Kind,
     region: []JSValue,
@@ -902,6 +906,27 @@ pub fn releaseCallRegionAfterInline(
     while (i < region.len) : (i += 1) {
         region[i].freeDuringActiveBytecode(rt);
     }
+}
+
+/// R1 — last two beats of a constructor TAKE before `setLen`.
+///
+/// EB's 4.44M hits are exactly `[func, new_target]` (argc == consumed).
+/// Those two DROPs are the v11 table's constructor columns; fusing them
+/// here deletes the `bl releaseCallRegionAfterInline` from the take
+/// sequence. extras (`argc > consumed`) keep the outlined walker so the
+/// protocol stays bit-for-bit and the handler does not grow a loop.
+pub inline fn releaseCtorTakeRegion(
+    rt: *JSRuntime,
+    region: []JSValue,
+    consumed_args: u16,
+) void {
+    std.debug.assert(region.len >= 2);
+    if (region.len > 2 + @as(usize, consumed_args)) {
+        releaseCallRegionAfterInline(rt, .constructor, region, consumed_args);
+        return;
+    }
+    region[0].freeDuringActiveBytecode(rt);
+    region[1].freeDuringActiveBytecode(rt);
 }
 
 fn valueReplace(rt: *JSRuntime, slot: *JSValue, next: JSValue) void {
