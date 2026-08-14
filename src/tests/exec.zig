@@ -21903,3 +21903,116 @@ test "small-function-inlining: monomorphic method is expanded" {
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
+
+test "small-function-inlining L1: apply-arguments ctor specializes" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function K() { this.initialize.apply(this, arguments); }
+        \\K.prototype.initialize = function (a, b) { this.a = a; this.b = b; };
+        \\function outer(a, b) { return new K(a, b); }
+        \\globalThis.__outer = outer;
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(1, 2);
+        \\assert.sameValue(o.a, 1);
+        \\assert.sameValue(o.b, 2);
+        \\assert.sameValue(outer(7, 8).a, 7);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(outer_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+    try std.testing.expect(state.?.inlined[0].apply_forwarded);
+}
+
+test "small-function-inlining L1: forwarded argc is the site argc" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function K() { this.initialize.apply(this, arguments); }
+        \\K.prototype.initialize = function () { this.n = arguments.length; };
+        \\function outer() { return new K(1, 2, 3); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(o.n, 3);
+        \\assert.sameValue(outer().n, 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining L1: Error.stack is initialize, apply native, ctor" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function C() { this.initialize.apply(this, arguments); }
+        \\C.prototype.initialize = function init(a) { this.a = a; throw new Error("boom"); };
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) { try { outer(i); } catch (e) {} }
+        \\try { outer(99); } catch (e) {
+        \\  var s = String(e.stack);
+        \\  var iInit = s.indexOf("init");
+        \\  var iApply = s.indexOf("apply (native)");
+        \\  var iC = s.indexOf("\n    at C");
+        \\  print(iInit >= 0 && iApply > iInit && iC > iApply ? "order" : "bad");
+        \\  print(s.indexOf("apply (native)", iApply + 1) == -1 ? "once" : "dup");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("order\nonce\n", output.buffered());
+}
+
+test "small-function-inlining L1: own apply misses take" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.initialize.apply(this, arguments); }
+        \\C.prototype.initialize = function (a) { this.a = a; this.via = "init"; };
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\C.prototype.initialize.apply = function (thisArg, args) {
+        \\  thisArg.a = args[0];
+        \\  thisArg.via = "own";
+        \\};
+        \\assert.sameValue(outer(99).via, "own");
+        \\assert.sameValue(outer(99).a, 99);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining L1: replaced Function.prototype.apply misses take" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.initialize.apply(this, arguments); }
+        \\C.prototype.initialize = function (a) { this.a = a; };
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\var saved = Function.prototype.apply;
+        \\var seen = 0;
+        \\Function.prototype.apply = function (thisArg, args) {
+        \\  seen += 1;
+        \\  return saved.call(this, thisArg, args);
+        \\};
+        \\try {
+        \\  assert.sameValue(outer(7).a, 7);
+        \\  assert.sameValue(seen, 1);
+        \\} finally {
+        \\  Function.prototype.apply = saved;
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
