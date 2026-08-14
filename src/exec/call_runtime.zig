@@ -2868,16 +2868,16 @@ fn createProfiledConstructorInstance(
 }
 
 pub fn noteConstructorAllocation(fb: *const bytecode.FunctionBytecode, instance: core.JSValue) void {
-    const object = object_ops.objectFromValue(instance) orelse return;
-    const observed = object.shape_ref.prop_count;
-    if (observed == 0) return;
     const profile = fb.ctorAllocProfileMut() orelse return;
     if (profile.state == .inert) return;
-    const cap: u16 = @intCast(@min(observed, @as(usize, max_ctor_alloc_capacity)));
-    if (profile.state == .empty or cap > profile.capacity) {
-        profile.capacity = cap;
-        profile.state = .live;
-    }
+    const object = object_ops.objectFromValue(instance) orelse return;
+    const observed = object.shape_ref.prop_count;
+    // Steady state: one compare, no store. Small-ctor recovery is ~0, so this
+    // hook must not become a net tax (DESIGN R3).
+    if (profile.state == .live and observed <= profile.capacity) return;
+    if (observed == 0) return;
+    profile.capacity = @intCast(@min(observed, @as(usize, max_ctor_alloc_capacity)));
+    profile.state = .live;
 }
 
 pub fn constructFunctionFromSource(
