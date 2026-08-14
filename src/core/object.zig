@@ -2963,11 +2963,13 @@ pub const Object = extern struct {
     }
 
     pub fn cachedIteratorNext(self: *const Object, rt: *JSRuntime) ?JSValue {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         const slot = self.cachedIteratorNextSlotIfPresent(rt) orelse return null;
         return slot.*;
     }
 
     pub fn clearCachedIteratorNext(self: *Object, rt: *JSRuntime) void {
+        if (rt.cached_iterator_next_entries.len == 0) return;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
         const old_cached = rt.cached_iterator_next_entries[index].value;
         rt.cached_iterator_next_entries[index].value = null;
@@ -2976,17 +2978,20 @@ pub const Object = extern struct {
     }
 
     fn clearCachedIteratorNextWithoutFree(rt: *JSRuntime, self: *Object) void {
+        if (rt.cached_iterator_next_entries.len == 0) return;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
         rt.cached_iterator_next_entries[index].value = null;
         removeCachedIteratorNextEntryAt(rt, index);
     }
 
     fn cachedIteratorNextSlotIfPresent(self: *const Object, rt: *JSRuntime) ?*?JSValue {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return null;
         return &rt.cached_iterator_next_entries[index].value;
     }
 
     fn cachedIteratorNextEntryIndex(rt: *const JSRuntime, self: *const Object) ?usize {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         for (rt.cached_iterator_next_entries, 0..) |entry, index| {
             if (entry.object == self) return index;
         }
@@ -8252,8 +8257,10 @@ pub const Object = extern struct {
             // qjs js_global_object_mark (quickjs.c:17062-17067).
             try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
         }
-        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
-            try Helper.traceOptValue(visitor, slot);
+        if (rt.cached_iterator_next_entries.len != 0) {
+            if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
+                try Helper.traceOptValue(visitor, slot);
+            }
         }
         // qjs:6568 / qjs:6582 mark_children OBJECT arm marks the shape header
         // then property values. Key atoms (prs->atom) are not GC edges — they
