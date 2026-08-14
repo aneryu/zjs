@@ -45,3 +45,13 @@ EB 0.8969/0.8916/0.8863；**raytrace 0.9275/0.9212/0.9162**（第二大洞，三
 splay −1.7~2.4%；zlib −1.2~1.6%；TS **+0.9~1.0%**（v1.5 在 TS 的小赢显影）；资产无损。
 回收对位：EB←wave-2（终审接力中）；raytrace←wave-3 v2-L1（合规已全绿，方向 +37%）；
 splay←wave-2 微刀覆盖面。
+
+## Wave-2 判决（2026-08-15，@665e1468 合入，gate 0/49775）
+
+3-pad **+1.85%/+1.93%/+1.78% 同号 ACCEPTED**。账面 geomean ≈ **0.9336**（超越 R10 前 0.929）。
+DB **+9.5~9.9%**（→~0.96）/richards **+8.4~9.5%**（→~0.985）/TS +3.2~3.9%（→~0.86）/
+box2d·gbemu·splay·mandreel·pdfjs 小正/raytrace +1.7%（仍 ~0.73 等 wave-3）。
+资产：crypto pad3 单翻号=布局、regexp 混号轻负挂观察、code-load/navier 中性。
+**EB 三 pad ≈0——分桶冒烟有效但分数未动（尸检已派 pQ）**，EB ~0.71 现为最差项。
+pushExact 刀=本波最大功臣（DB/richards/TS 三兑现）。
+Wave-3（v2-L1+G1）组装完毕 @77b70583，全链验证在途——raytrace 的关键一战。
