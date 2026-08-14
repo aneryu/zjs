@@ -525,7 +525,9 @@ fn createBytecodeFunctionObjectInternal(
     if (realm != ctx or realm.global != global or ctx.global != global) return error.InvalidBytecode;
     const class_id = bytecodeFunctionClassId(fb);
     const function_prototype = try bytecodeFunctionPrototypeForRealm(ctx, realm, class_id, fb.functionKind());
-    const object = try core.Object.create(ctx.runtime, class_id, function_prototype);
+    // length + name (+ lazy prototype later). qjs NewObjectClass then
+    // js_function_set_properties (quickjs.c:17378 / 5853-5861).
+    const object = try core.Object.createWithOwnPropertyCapacity(ctx.runtime, class_id, function_prototype, 3);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     // Pool.get/fclosure hands this constructor an owned FunctionBytecode
     // value. Move that exact reference into the object; attachment performs no
@@ -536,21 +538,39 @@ fn createBytecodeFunctionObjectInternal(
     try attachFunctionCaptures(ctx, global, fb, object, capture_source);
 
     // qjs js_closure publishes ordinary function properties only after
-    // js_closure2 has attached the complete capture array. zjs propagates
-    // property OOM and tears the still-unexposed object down, rather than
-    // copying qjs's void-helper quirk.
+    // js_closure2 has attached the complete capture array (qjs:17391-17392).
     const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
         fb.func_name
+    else if (ctx.runtime.atoms.kind(name_fallback) != null)
+        name_fallback
     else
-        name_fallback;
-    try object.defineOwnProperty(ctx.runtime, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(fb.defined_arg_count), false, false, true));
-    if (ctx.runtime.atoms.kind(effective_name) != null) {
-        const name_value = try functionNameValueFromAtom(ctx.runtime, effective_name, null);
-        defer name_value.free(ctx.runtime);
-        try object.defineOwnProperty(ctx.runtime, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
-    }
+        core.atom.ids.empty_string;
+    try jsFunctionSetProperties(ctx.runtime, object, effective_name, fb.defined_arg_count);
 
     return object.value();
+}
+
+/// qjs `js_function_set_properties` (quickjs.c:5853-5861): length then name,
+/// both CONFIGURABLE only. Fresh bytecode function — assume-new, no
+/// objectHasNonEmptyName probe.
+fn jsFunctionSetProperties(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    name_atom: core.Atom,
+    length: i32,
+) HostError!void {
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.length,
+        core.Descriptor.data(core.JSValue.int32(length), false, false, true),
+    );
+    const name_value = try functionNameValueFromAtom(rt, name_atom, null);
+    defer name_value.free(rt);
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.name,
+        core.Descriptor.data(name_value, false, false, true),
+    );
 }
 
 /// qjs `js_closure` installs the generic function prototype policy. Class
