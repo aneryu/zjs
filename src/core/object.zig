@@ -7623,14 +7623,19 @@ pub const Object = extern struct {
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
             // qjs gc_scan_incref_child (quickjs.c:6719-6728):
             //   rc++; if (rc == 1) { list_del; list_add_tail(gc_obj); mark = 0; }
-            // The extra `mark` predicate was a 100% hit-rate tax (VERIFIED-LEDGER
-            // 03 A.6).
+            // qjs only feeds this to cycle-list members (JS_MarkValue skips
+            // JS_TAG_BIG_INT). zjs visitValue uses refCountHeader(), so a heap
+            // BigInt is trial-decref'd and can come back rc 0→1 while never
+            // having been linked. Membership is the cyclic list itself (the
+            // former in_cycle_list bit): unlinked nodes have prev == null.
+            // list_del on those is SEGV — test262
+            // built-ins/Array/fromAsync/asyncitems-arraylike-promise.js.
             h.meta().rc += 1;
-            if (h.meta().rc == 1) {
-                gc.listDel(h);
-                self.registry.restoreCycleCandidate(h);
-                h.meta().flags.mark = false;
-            }
+            if (h.meta().rc != 1) return;
+            if (h.prev == null) return;
+            gc.listDel(h);
+            self.registry.restoreCycleCandidate(h);
+            h.meta().flags.mark = false;
         }
     };
 

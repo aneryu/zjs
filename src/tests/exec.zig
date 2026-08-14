@@ -7208,6 +7208,22 @@ test "parked generator open cell death path reclaims cell and generator together
     }
 }
 
+test "cycle scan restores a heap BigInt without list_del on an unlinked header" {
+    // Heap BigInt is a refCountHeader() target but not a cycle-list member.
+    // gc_scan_incref_child must restore its trial rc and must not list_del a
+    // null prev (the in_cycle_list replacement). Short 1n is not enough —
+    // only a heap bigint exercises the header.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\var live = { x: 0x10000000000000000n };
+        \\$262.gc();
+        \\assert.sameValue(live.x === 0x10000000000000000n, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "generator continuation keeps its FunctionBytecode alive after every source binding is dropped" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
