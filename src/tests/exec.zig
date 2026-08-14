@@ -21631,6 +21631,55 @@ test "small-function-inlining: next-entry specialize is installed on the caller"
     try std.testing.expect(state.?.specialized);
 }
 
+test "small-function-inlining: sibling constructor sites both specialize" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Pair(a, b) { this.x = a; this.y = b; }
+        \\function both(a, b) {
+        \\  var p = new Pair(a, b);
+        \\  var q = new Pair(b, a);
+        \\  return p.x + q.x;
+        \\}
+        \\globalThis.__both = both;
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = both(1, 2);
+        \\assert.sameValue(last, 3);
+        \\assert.sameValue(both(4, 5), 9);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const both_fn = try global.getProperty(try js.runtime.internAtom("__both"));
+    defer both_fn.free(js.runtime);
+    const both_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(both_fn).?;
+    const both_fb = both_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(both_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 2);
+}
+
+test "small-function-inlining: proto replacement after specialize is observed" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(i);
+        \\C.prototype = { mark: 1 };
+        \\o = outer(99);
+        \\assert.sameValue(o.x, 99);
+        \\assert.sameValue(o.mark, 1);
+        \\C.foo = 1;
+        \\o = outer(7);
+        \\assert.sameValue(o.x, 7);
+        \\assert.sameValue(o.mark, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "small-function-inlining: call_constructor callers keep published frame geometry" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

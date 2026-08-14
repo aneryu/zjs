@@ -2320,8 +2320,8 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
         );
     };
     errdefer instance.free(ctx.runtime);
-    const interrupt_global = ctx.global orelse global;
-    try exception_ops.pollInterrupt(ctx, interrupt_global);
+    // E6: the CallConstructorInternal entry poll (quickjs.c:20817) is paid by
+    // the caller. A second poll here was the eliminated per-`new` tax.
     return .{ .instance = instance };
 }
 

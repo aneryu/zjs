@@ -14,6 +14,7 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const object_ops = @import("object_ops.zig");
+const Shape = @import("../core/shape.zig").Shape;
 
 const op = bytecode.opcode.op;
 const FunctionBytecode = bytecode.FunctionBytecode;
@@ -29,6 +30,19 @@ pub const monomorph_hits: u8 = 8;
 pub const max_sites: u8 = 16;
 pub const max_copies: u8 = 4;
 pub const max_pc_map: usize = 64;
+
+pub var probe_prep: u64 = 0;
+pub var probe_take: u64 = 0;
+
+pub fn writeProbeFile() void {
+    const dump = std.posix.getenv("ZJS_INLINE_PROBE") orelse return;
+    if (dump.len == 0) return;
+    std.debug.print("[inline-probe] prep={d} take={d} take_pct={d}\n", .{
+        probe_prep,
+        probe_take,
+        if (probe_prep == 0) 0 else probe_take * 100 / probe_prep,
+    });
+}
 
 const budget_fraction_num: usize = 3;
 const budget_fraction_den: usize = 100;
@@ -55,11 +69,17 @@ pub const InlinedSite = struct {
     /// Expanded-rel-pc → original callee pc. 0xFFFF = unknown (map to body start).
     pc_map: [max_pc_map]u16 = @splat(0xFFFF),
     pc_map_len: u16 = 0,
+    /// R-v15-b: take guard is this object pointer, not FB identity.
+    callee_obj: ?*Object = null,
+    /// R-v15-a: ctor object shape. Any own-property add changes this pointer.
+    ctor_shape: ?*Shape = null,
+    proto: ?*Object = null,
+    proto_slot: u32 = 0,
 };
 
 pub const SiteCount = struct {
     call_pc: u32 = 0,
-    callee: ?*FunctionBytecode = null,
+    callee_obj: ?*Object = null,
     count: u8 = 0,
     never: bool = false,
 };
@@ -184,34 +204,36 @@ pub fn mapCalleePc(site: *const InlinedSite, expanded_pc: usize) usize {
 }
 
 /// Count a monomorphic hit. Returns true when the caller should be specialized
-/// for this site (next entry will see the expanded body). Never allocates on
-/// the ineligible / never / already-specialized legs beyond the first pad load.
+/// for this site (next entry will see the expanded body). Per-site: already
+/// inlined call_pcs and `never` sites do not allocate. Caller-level
+/// `specialized` does **not** block sibling sites (v1.5).
 pub fn noteMonomorphic(
     rt: *JSRuntime,
     caller: *FunctionBytecode,
     call_pc: u32,
     callee: *FunctionBytecode,
+    callee_obj: *Object,
 ) bool {
     if (!callee.smallInlineEligible()) return false;
     if (callee == caller) return false;
     if (callee.realmContext() != caller.realmContext()) return false;
+    if (findInlinedSite(caller, call_pc) != null) return false;
     const state = ensureCallerState(rt, caller) orelse return false;
-    if (state.specialized) return false;
+    if (state.copies >= max_copies) return false;
 
     var i: u8 = 0;
     while (i < state.site_len) : (i += 1) {
         const slot = &state.sites[i];
         if (slot.call_pc != call_pc) continue;
         if (slot.never) return false;
-        if (slot.callee) |seen| {
-            if (seen != callee) {
+        if (slot.callee_obj) |seen| {
+            if (seen != callee_obj) {
                 slot.never = true;
-                slot.callee = null;
+                slot.callee_obj = null;
                 return false;
             }
         } else {
-            // Weak: the count window is 8 calls while the callee is live.
-            slot.callee = callee;
+            slot.callee_obj = callee_obj;
         }
         if (slot.count < 255) slot.count += 1;
         return slot.count == monomorph_hits;
@@ -219,7 +241,7 @@ pub fn noteMonomorphic(
     if (state.site_len >= max_sites) return false;
     state.sites[state.site_len] = .{
         .call_pc = call_pc,
-        .callee = callee,
+        .callee_obj = callee_obj,
         .count = 1,
         .never = false,
     };
@@ -233,17 +255,26 @@ pub fn specializeCallSite(
     caller: *FunctionBytecode,
     call_pc: u32,
     callee: *FunctionBytecode,
+    callee_fn_obj: *Object,
     kind: Kind,
     argc: u16,
 ) void {
     if (caller.isDirectOrIndirectEval() or caller.executionFlags().is_module) return;
+    if (caller.byteCode().len > 2048) return;
     if (hasTrailingAfterReturn(callee.byteCode())) return;
-    if (callerState(caller)) |state| {
+    const base_fb = caller_obj.u.bytecode_function.function_bytecode orelse caller;
+    // One clone expands every same-argc constructor site. A second clone of an
+    // already-expanded spec is unsafe (while/goto images).
+    if (callerState(base_fb)) |st| {
+        if (st.inlined_len > 0) return;
+    }
+    if (findInlinedSite(base_fb, call_pc) != null) return;
+    if (callerState(base_fb)) |state| {
         if (state.copies >= max_copies) return;
         if (state.inlined_len >= max_sites) return;
     }
     if (budgetRemaining(rt) == 0) return;
-    const spec = cloneAndExpand(rt, caller, callee, call_pc, kind, argc) orelse return;
+    const spec = cloneAndExpand(rt, base_fb, callee, callee_fn_obj, call_pc, kind, argc) orelse return;
     const next = JSValue.functionBytecode(&spec.header);
     caller_obj.setFunctionBytecodeValue(rt, next) catch {
         core.gc.release(rt, &spec.header);
@@ -499,54 +530,144 @@ fn patchJump(out: *Rewrite, emit_pc: usize, opc: u8, new_target: usize) ?void {
     }
 }
 
+fn collectSameCalleeConstructorPcs(
+    caller: *const FunctionBytecode,
+    trigger_pc: u32,
+    trigger_obj: *Object,
+    out: *[max_sites]u32,
+) u8 {
+    const code = caller.byteCode();
+    var n: u8 = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opc = code[pc];
+        const sz = bytecode.opcode.sizeOf(opc);
+        if (sz == 0 or pc + sz > code.len) break;
+        if (opc == op.call_constructor) {
+            var include = pc == trigger_pc;
+            if (!include and sz >= 3) {
+                const site_argc = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+                const trig_sz = bytecode.opcode.sizeOf(code[trigger_pc]);
+                const trig_argc = if (trig_sz >= 3)
+                    std.mem.readInt(u16, code[trigger_pc + 1 ..][0..2], .little)
+                else
+                    site_argc;
+                if (site_argc == trig_argc) {
+                    var banned = false;
+                    if (callerState(caller)) |st| {
+                        var i: u8 = 0;
+                        while (i < st.site_len) : (i += 1) {
+                            const slot = st.sites[i];
+                            if (slot.call_pc != pc) continue;
+                            if (slot.never or (slot.callee_obj != null and slot.callee_obj != trigger_obj))
+                                banned = true;
+                            break;
+                        }
+                    }
+                    include = !banned;
+                }
+            }
+            if (include and n < max_sites) {
+                out[n] = @intCast(pc);
+                n += 1;
+            }
+        }
+        pc += sz;
+    }
+    if (n == 0 and trigger_pc < code.len and n < max_sites) {
+        out[0] = trigger_pc;
+        n = 1;
+    }
+    return n;
+}
+
 fn cloneAndExpand(
     rt: *JSRuntime,
     caller: *FunctionBytecode,
     callee: *FunctionBytecode,
+    callee_fn_obj: *Object,
     call_pc: u32,
     kind: Kind,
     argc: u16,
 ) ?*FunctionBytecode {
     const caller_code = caller.byteCode();
     if (call_pc >= caller_code.len) return null;
-    const call_op = caller_code[call_pc];
-    const call_size = bytecode.opcode.sizeOf(call_op);
-    if (call_size == 0 or call_pc + call_size > caller_code.len) return null;
 
-    const this_slot: u16 = caller.var_count;
-    const arg_base: u16 = this_slot + 1;
-    const var_base: u16 = arg_base + callee.arg_count;
-    const extra_vars: u16 = 1 + callee.arg_count + callee.var_count;
-    const new_var_count: u16 = caller.var_count + extra_vars;
+    var pcs: [max_sites]u32 = undefined;
+    const site_n = collectSameCalleeConstructorPcs(caller, call_pc, callee_fn_obj, &pcs);
+    if (site_n == 0) return null;
 
-    var rewritten = rewriteBody(callee, this_slot, arg_base, var_base, kind) orelse return null;
-    // Keep the call opcode as the guard. The body is appended. After the
-    // body we emit a goto back to call_pc + call_size. Return sequences
-    // inside the body jump to that trailing goto.
-    const after_body_rel: usize = rewritten.len;
-    if (!emitGoto(&rewritten, 0)) return null;
+    const extra_each: u16 = 1 + callee.arg_count + callee.var_count;
+    const new_var_count: u16 = caller.var_count + extra_each * site_n;
 
-    var rp: usize = 0;
-    while (rp + 5 <= after_body_rel) {
-        const opc = rewritten.code[rp];
-        const sz = bytecode.opcode.sizeOf(opc);
-        if (sz == 0) break;
-        if (opc == op.goto) {
-            const cur = std.mem.readInt(i32, rewritten.code[rp + 1 ..][0..4], .little);
-            if (cur == 0) {
-                patchJump(&rewritten, rp, op.goto, after_body_rel) orelse return null;
+    var combined: [2048]u8 = undefined;
+    if (caller_code.len > combined.len) return null;
+    @memcpy(combined[0..caller_code.len], caller_code);
+    var combined_len: usize = caller_code.len;
+
+    const Pending = struct {
+        call_pc: u32,
+        this_slot: u16,
+        arg_base: u16,
+        argc: u16,
+        pc_lo: u32,
+        pc_hi: u32,
+        pc_map: [max_pc_map]u16,
+        pc_map_len: u16,
+    };
+    var pending: [max_sites]Pending = undefined;
+
+    var si: u8 = 0;
+    while (si < site_n) : (si += 1) {
+        const site_pc = pcs[si];
+        if (site_pc >= caller_code.len) return null;
+        const call_size = bytecode.opcode.sizeOf(caller_code[site_pc]);
+        if (call_size == 0 or site_pc + call_size > caller_code.len) return null;
+        const site_argc: u16 = if (call_size >= 3)
+            std.mem.readInt(u16, caller_code[site_pc + 1 ..][0..2], .little)
+        else
+            argc;
+        const this_slot: u16 = caller.var_count + extra_each * si;
+        const arg_base: u16 = this_slot + 1;
+        const var_base: u16 = arg_base + callee.arg_count;
+        var rewritten = rewriteBody(callee, this_slot, arg_base, var_base, kind) orelse return null;
+        const after_body_rel: usize = rewritten.len;
+        if (!emitGoto(&rewritten, 0)) return null;
+        var rp: usize = 0;
+        while (rp + 5 <= after_body_rel) {
+            const opc = rewritten.code[rp];
+            const sz = bytecode.opcode.sizeOf(opc);
+            if (sz == 0) break;
+            if (opc == op.goto) {
+                const cur = std.mem.readInt(i32, rewritten.code[rp + 1 ..][0..4], .little);
+                if (cur == 0) {
+                    patchJump(&rewritten, rp, op.goto, after_body_rel) orelse return null;
+                }
             }
+            rp += sz;
         }
-        rp += sz;
+        const body_abs: usize = combined_len;
+        const trailing_abs = body_abs + after_body_rel;
+        const cont_abs = @as(usize, site_pc) + call_size;
+        const trail_from: i64 = @intCast(trailing_abs + 1);
+        const trail_diff: i32 = std.math.cast(i32, @as(i64, @intCast(cont_abs)) - trail_from) orelse return null;
+        std.mem.writeInt(i32, rewritten.code[after_body_rel + 1 ..][0..4], trail_diff, .little);
+        if (combined_len + rewritten.len > combined.len) return null;
+        @memcpy(combined[combined_len..][0..rewritten.len], rewritten.code[0..rewritten.len]);
+        pending[si] = .{
+            .call_pc = site_pc,
+            .this_slot = this_slot,
+            .arg_base = arg_base,
+            .argc = site_argc,
+            .pc_lo = @intCast(combined_len),
+            .pc_hi = @intCast(combined_len + after_body_rel),
+            .pc_map = rewritten.pc_map,
+            .pc_map_len = @intCast(rewritten.map_len),
+        };
+        combined_len += rewritten.len;
     }
-    const body_abs: usize = caller_code.len;
-    const trailing_abs = body_abs + after_body_rel;
-    const cont_abs = @as(usize, call_pc) + call_size;
-    const trail_from: i64 = @intCast(trailing_abs + 1);
-    const trail_diff: i32 = std.math.cast(i32, @as(i64, @intCast(cont_abs)) - trail_from) orelse return null;
-    std.mem.writeInt(i32, rewritten.code[after_body_rel + 1 ..][0..4], trail_diff, .little);
 
-    const new_len = caller_code.len + rewritten.len;
+    const new_len = combined_len;
     if (budgetRemaining(rt) < new_len) return null;
 
     const src_layout = caller.layout();
@@ -587,8 +708,7 @@ fn cloneAndExpand(
     spec.func_name = rt.atoms.dup(caller.funcName());
 
     const dst_code = new_layout.byteCodeSliceMut(spec);
-    @memcpy(dst_code[0..caller_code.len], caller_code);
-    @memcpy(dst_code[caller_code.len..], rewritten.code[0..rewritten.len]);
+    @memcpy(dst_code[0..new_len], combined[0..new_len]);
 
     const src_cpool = caller.cpoolSlice();
     const dst_cpool = new_layout.cpoolSliceMut(spec);
@@ -634,8 +754,19 @@ fn cloneAndExpand(
     }
     if (spec.hotExtensionMut()) |hot| {
         hot.script_or_module = rt.atoms.dup(caller.scriptOrModule());
-        hot.call_facts = caller.callFacts();
-        spec.call_facts_mirror = hot.call_facts;
+        var facts = caller.callFacts();
+        // Spec has extra locals; leaf/exact-args frames assert var_count==0.
+        facts.execution.simple_inline_eligible = false;
+        facts.execution.strict_simple_inline_eligible = false;
+        facts.execution.strict_simple_snapshot_inline_eligible = false;
+        facts.execution.simple_inline_empty_leaf = false;
+        facts.execution.raw_this_inline_empty_leaf = false;
+        facts.execution.simple_inline_exact_args_leaf = false;
+        facts.execution.raw_this_inline_exact_args_leaf = false;
+        facts.execution.exact_args_leaf_kind = .none;
+        facts.execution.capture_leaf_kind = .none;
+        hot.call_facts = facts;
+        spec.call_facts_mirror = facts;
         // Carry ctor profile across; inlining state is rebuilt below.
         if (caller.hotExtension()) |src_hot| {
             hot.ctor_alloc = src_hot.ctor_alloc;
@@ -643,31 +774,47 @@ fn cloneAndExpand(
     }
 
     var state = ensureCallerState(rt, spec) orelse return null;
-    // Weak: callee stays alive via its function object / parent cpool. A retain
-    // here pins callee.realm and keeps JSContext past TestEngine.deinit.
-    state.inlined[0] = .{
-        .pc_lo = @intCast(caller_code.len),
-        .pc_hi = @intCast(caller_code.len + after_body_rel),
-        .call_pc = call_pc,
-        .callee_fb = callee,
-        .callee_name = rt.atoms.dup(callee.funcName()),
-        .callee_file = rt.atoms.dup(callee.filenameAtom()),
-        .parent = 0xFF,
-        .kind = kind,
-        .this_slot = this_slot,
-        .arg_base = arg_base,
-        .argc = argc,
-        .pc_map = rewritten.pc_map,
-        .pc_map_len = @intCast(rewritten.map_len),
-    };
-    state.inlined_len = 1;
-    state.specialized = true;
-    state.copies = 1;
-    setBorrowedRealm(spec, caller.realmContext());
     if (callerState(caller)) |src_state| {
+        var oi: u8 = 0;
+        while (oi < src_state.inlined_len and oi < max_sites) : (oi += 1) {
+            var copy = src_state.inlined[oi];
+            copy.callee_name = rt.atoms.dup(copy.callee_name);
+            copy.callee_file = rt.atoms.dup(copy.callee_file);
+            state.inlined[oi] = copy;
+        }
+        state.inlined_len = src_state.inlined_len;
         state.copies = src_state.copies + 1;
         src_state.copies = state.copies;
+    } else {
+        state.copies = 1;
     }
+    const cache = sampleCtorCache(callee_fn_obj);
+    var pi: u8 = 0;
+    while (pi < site_n and state.inlined_len < max_sites) : (pi += 1) {
+        const item = pending[pi];
+        state.inlined[state.inlined_len] = .{
+            .pc_lo = item.pc_lo,
+            .pc_hi = item.pc_hi,
+            .call_pc = item.call_pc,
+            .callee_fb = callee,
+            .callee_name = rt.atoms.dup(callee.funcName()),
+            .callee_file = rt.atoms.dup(callee.filenameAtom()),
+            .parent = 0xFF,
+            .kind = kind,
+            .this_slot = item.this_slot,
+            .arg_base = item.arg_base,
+            .argc = item.argc,
+            .pc_map = item.pc_map,
+            .pc_map_len = item.pc_map_len,
+            .callee_obj = callee_fn_obj,
+            .ctor_shape = if (cache) |c| c.shape else null,
+            .proto = if (cache) |c| c.proto else null,
+            .proto_slot = if (cache) |c| c.slot else 0,
+        };
+        state.inlined_len += 1;
+    }
+    state.specialized = true;
+    setBorrowedRealm(spec, caller.realmContext());
 
     owned = false;
     rt.gc.addInitializedWithSizeNoFail(&spec.header, spec.heapByteSize());
@@ -763,12 +910,46 @@ fn resolveCalleeLocation(data: ?*const anyopaque, pc: usize) core.BacktraceLocat
     };
 }
 
-/// True when `func` is the expected monomorphic callee for an already
-/// specialized site. Uses the function object's live FB, one read.
+const CtorCache = struct {
+    shape: *Shape,
+    proto: *Object,
+    slot: u32,
+};
+
+fn sampleCtorCache(func_obj: *Object) ?CtorCache {
+    if (func_obj.hasExoticMethods()) return null;
+    const index = func_obj.findProperty(core.atom.ids.prototype) orelse return null;
+    const stored = func_obj.asDataAt(index) orelse return null;
+    const proto = object_ops.objectFromValue(stored) orelse return null;
+    return .{
+        .shape = func_obj.shape_ref,
+        .proto = proto,
+        .slot = @intCast(index),
+    };
+}
+
+/// R-v15-b: callee **object** pointer, not FB identity.
 pub fn calleeMatches(site: *const InlinedSite, func: JSValue) bool {
     const obj = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
-    const fb = obj.u.bytecode_function.function_bytecode orelse return false;
-    return fb == site.callee_fb;
+    return if (site.callee_obj) |expected| obj == expected else false;
+}
+
+/// v1.5 fused create-this. Caller must already have polled at
+/// JS_CallConstructorInternal entry (quickjs.c:20817).
+pub fn tryFusedConstructor(rt: *JSRuntime, site: *const InlinedSite, func: JSValue) ?JSValue {
+    if (site.kind != .constructor) return null;
+    const expected_obj = site.callee_obj orelse return null;
+    const expected_shape = site.ctor_shape orelse return null;
+    const expected_proto = site.proto orelse return null;
+    const obj = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
+    if (obj != expected_obj) return null;
+    // R-v15-a: shape pointer, not a cached slot index alone.
+    if (obj.shape_ref != expected_shape) return null;
+    const stored = obj.asDataAt(site.proto_slot) orelse return null;
+    const proto = object_ops.objectFromValue(stored) orelse return null;
+    if (proto != expected_proto) return null;
+    const instance = core.Object.createPlainObject(rt, proto) catch return null;
+    return instance.value();
 }
 
 test "rewrite sc_Pair-shaped body keeps put_field" {
