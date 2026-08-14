@@ -547,12 +547,11 @@ noinline fn pollRetreatedCallRegionCold(
     return false;
 }
 
-inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16, comptime layout: inline_calls.RegionLayout, comptime inline_exact: bool) Outcome {
-    comptime std.debug.assert(layout == .plain or !inline_exact);
+inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16, comptime layout: inline_calls.RegionLayout) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(layout == .method));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (layout) {
-        .plain => vm.machine.pushPlainCall(inline_exact, vm.global, vm.stack, target, region_start, argc),
+        .plain => vm.machine.pushPlainCall(vm.global, vm.stack, target, region_start, argc),
         .method => vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc),
     } catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
@@ -1484,16 +1483,12 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     // rather than kept alive with its own capacity gate,
                     // eligibility assertion, and outline constructor.
                     const target = resolved.bind(JSValue.undefinedValue(), func);
-                    // Fixed nonzero arity only: the recursive/leaf-heavy call
-                    // family (fib's op_call1..3). The operand form and call0's
-                    // non-leaf remainder keep the compact out-of-line
-                    // constructor so text growth stays on the measured hot
-                    // instances.
-                    const inline_exact = comptime switch (argc_source) {
-                        .one, .two, .three => true,
-                        .operand, .zero => false,
-                    };
-                    return pushAndEnter(vb, vm, &target, region_start, argc, .plain, inline_exact);
+                    // Every exact-simple plain call `bl`s the outlined leaf
+                    // (`pushExactSimpleFrame`). The retired `inline_exact`
+                    // expansion of Impl into op_call1..3 is withdrawn so
+                    // those handlers stop carrying ~200 insn of constructor
+                    // body (r12-KNIFE §c / R6-K I-cache).
+                    return pushAndEnter(vb, vm, &target, region_start, argc, .plain);
                 }
             }
             vm.stack.setTopPtr(sp);
@@ -1664,7 +1659,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         // constructor with the plain arm; see the opCall site.
                     }
                     const target = resolved.bind(receiver, method);
-                    return pushAndEnter(vb, vm, &target, region_start, argc, .method, false);
+                    return pushAndEnter(vb, vm, &target, region_start, argc, .method);
                 }
             } else if (method_obj.class_id == core.class.ids.c_function) {
                 // Native c_function fast dispatch (Phase 2a/2b): skip
@@ -3652,7 +3647,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, getter)) |target| {
         const region_start = sp - 2;
         vm.stack.setTopPtr(region_start);
-        return pushAndEnter(var_buf, vm, &target, region_start, 0, .method, false);
+        return pushAndEnter(var_buf, vm, &target, region_start, 0, .method);
     }
     vm.stack.setTopPtr(sp);
     const value = call_runtime.callValueOrBytecodeRootPreRooted(

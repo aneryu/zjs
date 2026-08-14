@@ -39,6 +39,7 @@ pub fn writeProbeFile() void {
     // std.c.getenv is the supported spelling (same fix as grok f32749f6).
     const raw = std.c.getenv("ZJS_INLINE_PROBE") orelse return;
     if (raw[0] == 0) return;
+
     std.debug.print("[inline-probe] prep={d} take={d} take_pct={d}\n", .{
         probe_prep,
         probe_take,
