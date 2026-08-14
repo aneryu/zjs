@@ -69,11 +69,16 @@ pub const CallerState = struct {
     specialized: bool = false,
 };
 
+fn decodeCallerState(raw: usize) ?*CallerState {
+    if (raw == 0 or raw == 0xaaaaaaaaaaaaaaaa) return null;
+    if (raw % @alignOf(CallerState) != 0) return null;
+    return @ptrFromInt(raw);
+}
+
 pub fn callerState(fb: *const FunctionBytecode) ?*CallerState {
     const hot = fb.hotExtension() orelse return null;
     const raw = std.mem.readInt(usize, hot._ctor_alloc_pad[0..@sizeOf(usize)], .little);
-    if (raw == 0) return null;
-    return @ptrFromInt(raw);
+    return decodeCallerState(raw);
 }
 
 fn callerStateMut(fb: *FunctionBytecode) ?*CallerState {
