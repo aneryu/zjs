@@ -464,6 +464,20 @@ noinline fn iteratorNextCallSetupRecover(vm: *Vm, depth: u8, err: HostError) boo
 /// into the callee's first opcode. No driver round-trip: no Outcome encode,
 /// no tail_request staging, no driver-side spill/reload detour. Expanded
 /// inline into the (Handler-signature) caller so the tail calls are legal.
+/// D8-L1: reuse Entry.native_caller for the skipped Function.prototype.apply
+/// builtin (same ownership as Function.prototype.call's fused arm). Must run
+/// while `vm.function` is still the caller. Does not insert an InlinedSite
+/// ghost — consumeInlineThenPhysical would otherwise double-print apply.
+noinline fn attachApplyForwardNativeCaller(vm: *Vm, entry: *inline_calls.Entry) void {
+    if (entry.teardown.has_native_caller) return;
+    if (entry.teardown.empty_leaf or entry.teardown.exact_args_leaf) return;
+    if (entry.teardown.constructor_completion) return;
+    if (small_inline.applyForwardSiteAfterCall(vm.function, @intCast(vm.frame.pc)) == null) return;
+    const apply_obj = small_inline.realmApplyBuiltin(vm.rt, vm.global) orelse return;
+    entry.native_caller = apply_obj.value().dup();
+    entry.teardown.has_native_caller = true;
+}
+
 inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8) Outcome {
     // Enter the entry pushCall handed back instead of reloading
     // `machine.top` — qjs enters the callee via the alloca result pointer
@@ -557,6 +571,20 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+}
+
+/// L1 apply-forward twin of pushAndEnter: generic/simple method entry plus
+/// D8-L1 `native_caller` = realm Function.prototype.apply. Leaf arms overlay
+/// resume words on that slot, so they are not used here.
+inline fn pushAndEnterApplyForward(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16) Outcome {
+    const source_count = @as(usize, argc) + 2;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
+    const entry = vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    attachApplyForwardNativeCaller(vm, entry);
     return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
@@ -1580,6 +1608,7 @@ fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.
 // unrelated source/layout changes cannot move its prologue across a cache line.
 fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     vm.syncPc(pc, 1); // frame.pc now at the 2-byte argc operand
+    const call_pc: u32 = @intCast(@intFromPtr(pc) - @intFromPtr(vm.code_base));
     const argc = readInt(u16, pc + 1);
     // Inline the bytecode-method resolution (recv.method() where method is a plain
     // bytecode function — OOP recursion, chained calls) instead of paying
@@ -1606,6 +1635,13 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     vm.frame.pc += 2;
                     vm.stack.setTopPtr(region_start);
                     const execution = resolved.call_facts.execution;
+                    // L1 apply-forward: live-argv call_method of initialize.
+                    // Skip leaf arms (they overlay resume on native_caller) and
+                    // attach Function.prototype.apply as D8-L1 native_caller.
+                    if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
+                        const target = resolved.bind(receiver, method);
+                        return pushAndEnterApplyForward(vb, vm, &target, region_start, argc);
+                    }
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
                     // pushFrame/fallback/setup constructor chain. The receiver rides
@@ -1919,7 +1955,9 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
         // entry, quickjs.c:20817 js_poll_interrupts — then skip resolve /
         // proto lookup / second poll (E1–E6).
         if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
-            if (site.kind == .constructor) {
+            if (site.kind == .constructor and
+                small_inline.applyForwardTakeOk(vm.rt, vm.global, site, func))
+            {
                 exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
                     if (!constructorRegionRecover(vm, region_base, err)) return .threw;
                     return coldNext(vb, vm);
@@ -1937,7 +1975,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                             vm.rt,
                             .constructor,
                             region_start[0..total],
-                            site.callee_fb.arg_count,
+                            small_inline.consumedArgSlots(site),
                         );
                         vm.stack.setLen(region_base);
                         vm.code_base = live_code.ptr;
@@ -2008,7 +2046,8 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     const callee_fb = candidate.resolved.fb;
                     if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
                         if (site.kind == .constructor and small_inline.calleeMatches(site, func) and
-                            small_inline.windowFits(vm.frame, site))
+                            small_inline.windowFits(vm.frame, site) and
+                            small_inline.applyForwardTakeOk(vm.rt, vm.global, site, func))
                         {
                             small_inline.probe_take += 1;
                             small_inline.installInlineWindow(vm.frame, site, instance, args, vm.rt);
@@ -2016,7 +2055,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                                 vm.rt,
                                 .constructor,
                                 region_start[0..total],
-                                site.callee_fb.arg_count,
+                                small_inline.consumedArgSlots(site),
                             );
                             vm.stack.setLen(region_base);
                             vm.frame.pc = site.pc_lo;

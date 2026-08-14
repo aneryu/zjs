@@ -5,7 +5,8 @@
 //! the deleted simple-field constructor bypass.
 //!
 //! Approved gates: K=40, D=2, M=8, ≤4 specialized copies per caller.
-//! v1 does not expand accessor get, apply, or arguments.
+//! L1 apply-arguments-forwarding rewrites a proven `fn.apply(this, arguments)`
+//! ctor body to a live-argv `call_method` (no L2 initialize expansion).
 
 const std = @import("std");
 
@@ -14,6 +15,7 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const object_ops = @import("object_ops.zig");
+const function_ops = @import("function_ops.zig");
 const Shape = @import("../core/shape.zig").Shape;
 
 const op = bytecode.opcode.op;
@@ -78,6 +80,10 @@ pub const InlinedSite = struct {
     ctor_shape: ?*Shape = null,
     proto: ?*Object = null,
     proto_slot: u32 = 0,
+    /// L1: expanded body contains a rewritten apply-forward `call_method`.
+    apply_forwarded: bool = false,
+    apply_method_atom: core.Atom = core.atom.null_atom,
+    apply_forward_call_pc: u32 = 0,
 };
 
 pub const SiteCount = struct {
@@ -134,6 +140,7 @@ pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
         const site = state.inlined[i];
         rt.atoms.free(site.callee_name);
         rt.atoms.free(site.callee_file);
+        if (site.apply_method_atom != core.atom.null_atom) rt.atoms.free(site.apply_method_atom);
     }
     setBorrowedRealm(fb, null);
     rt.memory.destroy(CallerState, state);
@@ -217,7 +224,7 @@ pub fn noteMonomorphic(
     callee: *FunctionBytecode,
     callee_obj: *Object,
 ) bool {
-    if (!callee.smallInlineEligible()) return false;
+    if (!callee.smallInlineEligible() and analyzeApplyForward(callee) == null) return false;
     if (callee == caller) return false;
     if (callee.realmContext() != caller.realmContext()) return false;
     if (findInlinedSite(caller, call_pc) != null) return false;
@@ -278,12 +285,247 @@ pub fn specializeCallSite(
         if (state.inlined_len >= max_sites) return;
     }
     if (budgetRemaining(rt) == 0) return;
+    // I4 install-time: no own apply on the proto-chain method, and
+    // Function.prototype.apply is still the realm builtin record.
+    if (analyzeApplyForward(callee)) |plan| {
+        const realm = callee.realmContext() orelse return;
+        const global = realm.global orelse return;
+        if (!applyForwardGuardHolds(rt, global, callee_fn_obj, @intCast(plan.method_atom))) return;
+    }
     const spec = cloneAndExpand(rt, base_fb, callee, callee_fn_obj, call_pc, kind, argc) orelse return;
     const next = JSValue.functionBytecode(&spec.header);
     caller_obj.setFunctionBytecodeValue(rt, next) catch {
         core.gc.release(rt, &spec.header);
         return;
     };
+}
+
+const ApplyForwardPlan = struct {
+    args_local: u16,
+    method_atom: u32,
+    method_get_pc: u32,
+    apply_get_pc: u32,
+    thisarg_pc: u32,
+    args_get_pc: u32,
+    call_pc: u32,
+    special_pc: u32,
+    special_put_pc: u32,
+};
+
+fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
+    return switch (opc) {
+        op.get_loc0, op.put_loc0 => 0,
+        op.get_loc1, op.put_loc1 => 1,
+        op.get_loc2, op.put_loc2 => 2,
+        op.get_loc3, op.put_loc3 => 3,
+        op.get_loc8, op.put_loc8 => src[pc + 1],
+        op.get_loc, op.put_loc => std.mem.readInt(u16, src[pc + 1 ..][0..2], .little),
+        else => null,
+    };
+}
+
+fn isPutLoc(opc: u8) bool {
+    return switch (opc) {
+        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc => true,
+        else => false,
+    };
+}
+
+fn isGetLoc(opc: u8) bool {
+    return switch (opc) {
+        op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.get_loc8, op.get_loc => true,
+        else => false,
+    };
+}
+
+fn isPutArg(opc: u8) bool {
+    return switch (opc) {
+        op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.put_arg => true,
+        else => false,
+    };
+}
+
+fn isForwardForbiddenOp(opc: u8) bool {
+    return switch (opc) {
+        op.apply,
+        op.apply_eval,
+        op.rest,
+        op.eval,
+        op.with_get_var,
+        op.with_put_var,
+        op.with_delete_var,
+        op.with_make_ref,
+        op.with_get_ref,
+        op.fclosure,
+        op.fclosure8,
+        => true,
+        else => false,
+    };
+}
+
+/// S1–S8 static predicate for L1 apply-arguments-forwarding. Dataflow only:
+/// arguments has a single use as the array-like argument of `.apply`, the
+/// apply thisArg is the constructor `this`, and there is no rest/eval/with/
+/// OP_apply/spread. Does not match function or field names.
+fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
+    if (!fb.hasSimpleParameterList()) return null; // S1
+    if (fb.closureVarCount() != 0 or fb.openVarRefCount() != 0) return null; // S2
+    if (fb.functionKind() != .normal) return null;
+    if (fb.isDerivedClassConstructor()) return null;
+    const code = fb.byteCode();
+    if (code.len == 0 or code.len > max_code) return null;
+
+    var special_pc: ?usize = null;
+    var special_put_pc: ?usize = null;
+    var args_local: ?u16 = null;
+    var get_args_count: u8 = 0;
+    var get_args_pc: ?usize = null;
+    var put_args_count: u8 = 0;
+    var apply_get_pc: ?usize = null;
+    var method_get_pc: ?usize = null;
+    var method_atom: ?u32 = null;
+    var call_pc: ?usize = null;
+    var prev_pc: usize = 0;
+    var prev_op: u8 = 0;
+    var saw_jump_before_call = false;
+
+    var pc: usize = 0;
+    if (code[0] == op.check_ctor) pc = 1;
+
+    while (pc < code.len) {
+        const opc = code[pc];
+        const size: usize = bytecode.opcode.sizeOf(opc);
+        if (size == 0 or pc + size > code.len) return null;
+        if (isForwardForbiddenOp(opc)) return null; // S2 / S3
+        if (isPutArg(opc)) return null; // S7
+        switch (opc) {
+            op.if_false, op.if_true, op.goto, op.if_false8, op.if_true8, op.goto8, op.goto16 => {
+                if (call_pc == null) saw_jump_before_call = true;
+            },
+            else => {},
+        }
+        if (opc == op.special_object) {
+            const subtype = code[pc + 1];
+            if (subtype == bytecode.opcode.special_object_subtype.arguments or
+                subtype == bytecode.opcode.special_object_subtype.mapped_arguments)
+            {
+                if (special_pc != null) return null;
+                special_pc = pc;
+            } else return null;
+        }
+        if (isPutLoc(opc)) {
+            if (special_pc != null and special_put_pc == null and prev_op == op.special_object) {
+                args_local = locIndexOf(opc, code, pc);
+                special_put_pc = pc;
+                put_args_count += 1;
+            } else if (args_local) |al| {
+                if (locIndexOf(opc, code, pc) == al) return null;
+            }
+        }
+        if (isGetLoc(opc)) {
+            if (args_local) |al| {
+                if (locIndexOf(opc, code, pc) == al) {
+                    get_args_count += 1;
+                    get_args_pc = pc;
+                }
+            }
+        }
+        if (opc == op.get_field or opc == op.get_field2) {
+            const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (atom_id == core.atom.ids.apply and opc == op.get_field2) {
+                if (apply_get_pc != null) return null;
+                apply_get_pc = pc;
+                if (prev_op != op.get_field) return null;
+                method_get_pc = prev_pc;
+                method_atom = std.mem.readInt(u32, code[prev_pc + 1 ..][0..4], .little);
+                if (method_atom == core.atom.ids.apply) return null;
+            }
+        }
+        if (opc == op.call_method) {
+            const argc = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+            if (apply_get_pc != null and call_pc == null) {
+                if (argc != 2) return null; // S5: apply(thisArg, argArray)
+                call_pc = pc;
+            } else if (call_pc == null) return null;
+        }
+        if (opc == op.call or opc == op.call0 or opc == op.call1 or
+            opc == op.call2 or opc == op.call3 or opc == op.call_constructor)
+        {
+            if (call_pc == null) return null;
+        }
+        prev_pc = pc;
+        prev_op = opc;
+        pc += size;
+    }
+
+    if (saw_jump_before_call) return null;
+    const sp = special_pc orelse return null;
+    const spp = special_put_pc orelse return null;
+    const al = args_local orelse return null;
+    const agp = apply_get_pc orelse return null;
+    const mgp = method_get_pc orelse return null;
+    const ma = method_atom orelse return null;
+    const cp = call_pc orelse return null;
+    const gap = get_args_pc orelse return null;
+    if (get_args_count != 1 or put_args_count != 1) return null; // S4
+    if (gap != prevOpBefore(code, cp)) return null;
+
+    const tap = prevOpBefore(code, gap);
+    const this_opc = code[tap];
+    const this_local = firstThisLocal(code) orelse return null;
+    if (this_opc == op.push_this) {
+        // ok
+    } else if (isGetLoc(this_opc)) {
+        const idx = locIndexOf(this_opc, code, tap) orelse return null;
+        if (idx != this_local) return null; // S6
+    } else return null;
+
+    const before_method = prevOpBefore(code, mgp);
+    const bm_op = code[before_method];
+    if (bm_op == op.push_this) {
+        // ok
+    } else if (isGetLoc(bm_op)) {
+        const idx = locIndexOf(bm_op, code, before_method) orelse return null;
+        if (idx != this_local) return null;
+    } else return null;
+
+    return .{
+        .args_local = al,
+        .method_atom = ma,
+        .method_get_pc = @intCast(mgp),
+        .apply_get_pc = @intCast(agp),
+        .thisarg_pc = @intCast(tap),
+        .args_get_pc = @intCast(gap),
+        .call_pc = @intCast(cp),
+        .special_pc = @intCast(sp),
+        .special_put_pc = @intCast(spp),
+    };
+}
+
+fn prevOpBefore(code: []const u8, target: usize) usize {
+    var pc: usize = if (code.len > 0 and code[0] == op.check_ctor) 1 else 0;
+    var last: usize = pc;
+    while (pc < target) {
+        last = pc;
+        const sz = bytecode.opcode.sizeOf(code[pc]);
+        if (sz == 0) break;
+        pc += sz;
+    }
+    return last;
+}
+
+fn firstThisLocal(code: []const u8) ?u16 {
+    var pc: usize = if (code.len > 0 and code[0] == op.check_ctor) 1 else 0;
+    var prev_op: u8 = 0;
+    while (pc < code.len) {
+        const opc = code[pc];
+        const size: usize = bytecode.opcode.sizeOf(opc);
+        if (size == 0 or pc + size > code.len) return null;
+        if (isPutLoc(opc) and prev_op == op.push_this) return locIndexOf(opc, code, pc);
+        prev_op = opc;
+        pc += size;
+    }
+    return null;
 }
 
 const Rewrite = struct {
@@ -295,6 +537,8 @@ const Rewrite = struct {
     arg_base: u16,
     var_base: u16,
     kind: Kind,
+    forward_call_rel: u32 = 0xFFFFFFFF,
+    method_atom: u32 = 0,
 };
 
 fn emitByte(out: *Rewrite, b: u8) bool {
@@ -325,6 +569,20 @@ fn emitLocOp(out: *Rewrite, get: bool, slot: u16) bool {
     return emitSlice(out, &buf);
 }
 
+fn emitCallMethod(out: *Rewrite, argc: u16) bool {
+    if (!emitByte(out, op.call_method)) return false;
+    var buf: [2]u8 = undefined;
+    std.mem.writeInt(u16, &buf, argc, .little);
+    return emitSlice(out, &buf);
+}
+
+fn emitGetField2(out: *Rewrite, atom_id: u32) bool {
+    if (!emitByte(out, op.get_field2)) return false;
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, atom_id, .little);
+    return emitSlice(out, &buf);
+}
+
 fn emitGoto(out: *Rewrite, target: i32) bool {
     if (!emitByte(out, op.goto)) return false;
     var buf: [4]u8 = undefined;
@@ -340,14 +598,26 @@ fn recordMap(out: *Rewrite, start_len: usize, callee_pc: usize) void {
     if (out.len > out.map_len) out.map_len = @min(out.len, max_pc_map);
 }
 
-fn rewriteBody(callee: *const FunctionBytecode, this_slot: u16, arg_base: u16, var_base: u16, kind: Kind) ?Rewrite {
+fn rewriteBody(
+    callee: *const FunctionBytecode,
+    this_slot: u16,
+    arg_base: u16,
+    var_base: u16,
+    kind: Kind,
+    site_argc: u16,
+) ?Rewrite {
     var out = Rewrite{
         .this_slot = this_slot,
         .arg_base = arg_base,
         .var_base = var_base,
         .kind = kind,
     };
+    const plan = analyzeApplyForward(callee);
     const src = callee.byteCode();
+    // Mapping is indexed by source pc. Regular inlines stay within K;
+    // apply-forward bodies are also small (G-ctor is 22B). Reject overflow
+    // rather than write past old_to_new.
+    if (src.len > max_code) return null;
     var old_to_new: [max_code + 1]u16 = @splat(0xFFFF);
     var pc: usize = 0;
     if (src.len > 0 and src[0] == op.check_ctor) {
@@ -375,6 +645,45 @@ fn rewriteBody(callee: *const FunctionBytecode, this_slot: u16, arg_base: u16, v
         const src_pc = starts[si];
         const opc = src[src_pc];
         const size: usize = bytecode.opcode.sizeOf(opc);
+        if (plan) |p| {
+            if (src_pc == p.special_pc or src_pc == p.special_put_pc or
+                src_pc == p.apply_get_pc or src_pc == p.thisarg_pc or
+                src_pc == p.args_get_pc)
+            {
+                old_to_new[src_pc] = @intCast(out.len);
+                emit_at[si] = out.len;
+                emitted = si + 1;
+                continue;
+            }
+            if (src_pc == p.method_get_pc) {
+                emit_at[si] = out.len;
+                old_to_new[src_pc] = @intCast(out.len);
+                const map_from = out.len;
+                if (!emitGetField2(&out, p.method_atom)) return null;
+                recordMap(&out, map_from, src_pc);
+                emitted = si + 1;
+                continue;
+            }
+            if (src_pc == p.call_pc) {
+                emit_at[si] = out.len;
+                old_to_new[src_pc] = @intCast(out.len);
+                const map_from = out.len;
+                var ai: u16 = 0;
+                while (ai < site_argc) : (ai += 1) {
+                    if (!emitLocOp(&out, true, arg_base + ai)) return null;
+                }
+                out.forward_call_rel = @intCast(out.len);
+                out.method_atom = p.method_atom;
+                if (!emitCallMethod(&out, site_argc)) return null;
+                // call_method leaves initialize's return; the ctor result is
+                // `this`. Drop the unused value so it cannot pile up across
+                // next-entry takes.
+                if (!emitByte(&out, op.drop)) return null;
+                recordMap(&out, map_from, src_pc);
+                emitted = si + 1;
+                continue;
+            }
+        }
         emit_at[si] = out.len;
         old_to_new[src_pc] = @intCast(out.len);
         const map_from = out.len;
@@ -601,7 +910,18 @@ fn cloneAndExpand(
     const site_n = collectSameCalleeConstructorPcs(caller, call_pc, callee_fn_obj, &pcs);
     if (site_n == 0) return null;
 
-    const extra_each: u16 = 1 + callee.arg_count + callee.var_count;
+    var max_site_argc: u16 = argc;
+    var argc_i: u8 = 0;
+    while (argc_i < site_n) : (argc_i += 1) {
+        const site_pc = pcs[argc_i];
+        const call_size = bytecode.opcode.sizeOf(caller_code[site_pc]);
+        if (call_size >= 3) {
+            const site_argc = std.mem.readInt(u16, caller_code[site_pc + 1 ..][0..2], .little);
+            if (site_argc > max_site_argc) max_site_argc = site_argc;
+        }
+    }
+    const extra_args: u16 = @max(callee.arg_count, max_site_argc);
+    const extra_each: u16 = 1 + extra_args + callee.var_count;
     const new_var_count: u16 = caller.var_count + extra_each * site_n;
 
     var combined: [2048]u8 = undefined;
@@ -618,6 +938,8 @@ fn cloneAndExpand(
         pc_hi: u32,
         pc_map: [max_pc_map]u16,
         pc_map_len: u16,
+        forward_call_rel: u32,
+        method_atom: u32,
     };
     var pending: [max_sites]Pending = undefined;
 
@@ -633,8 +955,8 @@ fn cloneAndExpand(
             argc;
         const this_slot: u16 = caller.var_count + extra_each * si;
         const arg_base: u16 = this_slot + 1;
-        const var_base: u16 = arg_base + callee.arg_count;
-        var rewritten = rewriteBody(callee, this_slot, arg_base, var_base, kind) orelse return null;
+        const var_base: u16 = arg_base + extra_args;
+        var rewritten = rewriteBody(callee, this_slot, arg_base, var_base, kind, site_argc) orelse return null;
         const after_body_rel: usize = rewritten.len;
         if (!emitGoto(&rewritten, 0)) return null;
         var rp: usize = 0;
@@ -667,6 +989,8 @@ fn cloneAndExpand(
             .pc_hi = @intCast(combined_len + after_body_rel),
             .pc_map = rewritten.pc_map,
             .pc_map_len = @intCast(rewritten.map_len),
+            .forward_call_rel = rewritten.forward_call_rel,
+            .method_atom = rewritten.method_atom,
         };
         combined_len += rewritten.len;
     }
@@ -789,6 +1113,8 @@ fn cloneAndExpand(
             var copy = src_state.inlined[oi];
             copy.callee_name = rt.atoms.dup(copy.callee_name);
             copy.callee_file = rt.atoms.dup(copy.callee_file);
+            if (copy.apply_method_atom != core.atom.null_atom)
+                copy.apply_method_atom = rt.atoms.dup(copy.apply_method_atom);
             state.inlined[oi] = copy;
         }
         state.inlined_len = src_state.inlined_len;
@@ -819,6 +1145,15 @@ fn cloneAndExpand(
             .ctor_shape = if (cache) |c| c.shape else null,
             .proto = if (cache) |c| c.proto else null,
             .proto_slot = if (cache) |c| c.slot else 0,
+            .apply_forwarded = item.forward_call_rel != 0xFFFFFFFF,
+            .apply_method_atom = if (item.method_atom != 0)
+                rt.atoms.dup(@as(core.Atom, @intCast(item.method_atom)))
+            else
+                core.atom.null_atom,
+            .apply_forward_call_pc = if (item.forward_call_rel != 0xFFFFFFFF)
+                item.pc_lo + item.forward_call_rel
+            else
+                0,
         };
         state.inlined_len += 1;
     }
@@ -831,15 +1166,22 @@ fn cloneAndExpand(
     return spec;
 }
 
+/// R-v11-a consumes `callee.arg_count` (extras stay in the region and are
+/// DROPped). L1 apply-forward rewrites to a live-argv `call_method` whose
+/// argc is the *site* argc (I6); those slots must be MOVEd into the window.
+pub fn consumedArgSlots(site: *const InlinedSite) u16 {
+    return if (site.apply_forwarded) site.argc else site.callee_fb.arg_count;
+}
+
 pub fn windowFits(frame: *const frame_mod.Frame, site: *const InlinedSite) bool {
-    const arg_slots = site.callee_fb.arg_count;
+    const arg_slots = consumedArgSlots(site);
     const need = @as(usize, site.arg_base) + @as(usize, arg_slots);
     return site.this_slot < frame.locals.len and need <= frame.locals.len;
 }
 
-/// Move `this_value` and `args[0..callee.arg_count]` into the caller's local
+/// Move `this_value` and `args[0..consumedArgSlots]` into the caller's local
 /// window. Each stored value is taken by ownership (no dup). Extra entries
-/// past `callee.arg_count` stay in `args` for `releaseCallRegionAfterInline`.
+/// past the consumed count stay in `args` for `releaseCallRegionAfterInline`.
 pub fn installInlineWindow(
     frame: *frame_mod.Frame,
     site: *const InlinedSite,
@@ -854,7 +1196,7 @@ pub fn installInlineWindow(
     } else {
         this_value.free(rt);
     }
-    const arg_slots = site.callee_fb.arg_count;
+    const arg_slots = consumedArgSlots(site);
     var i: u16 = 0;
     while (i < arg_slots) : (i += 1) {
         const slot = site.arg_base + i;
@@ -978,6 +1320,75 @@ fn sampleCtorCache(func_obj: *Object) ?CtorCache {
 pub fn calleeMatches(site: *const InlinedSite, func: JSValue) bool {
     const obj = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
     return if (site.callee_obj) |expected| obj == expected else false;
+}
+
+fn realmFunctionApply(rt: *JSRuntime, global: *Object) ?*Object {
+    const fproto = object_ops.functionPrototypeFromGlobal(rt, global) orelse return null;
+    return fproto.getOwnDataObjectBorrowed(core.atom.ids.apply);
+}
+
+fn isFunctionApplyBuiltin(obj: *const Object) bool {
+    if (obj.class_id != core.class.ids.c_function) return false;
+    const ref = core.function.decodeNativeBuiltinId(obj.nativeFunctionId()) orelse return false;
+    return ref.domain == .function and ref.id == @intFromEnum(function_ops.PrototypeMethod.apply);
+}
+
+fn lookupProtoChainDataFunction(start: *Object, atom_id: core.Atom) ?*Object {
+    var cur: ?*Object = start;
+    while (cur) |obj| {
+        if (obj.findProperty(atom_id)) |idx| {
+            const stored = obj.asDataAt(idx) orelse return null;
+            return object_ops.objectFromValue(stored);
+        }
+        cur = obj.getPrototype();
+    }
+    return null;
+}
+
+/// I4 / D5: proto-chain data function for `method_atom` has no own `apply`,
+/// and `Function.prototype.apply` is still the realm builtin record.
+pub fn applyForwardGuardHolds(
+    rt: *JSRuntime,
+    global: *Object,
+    ctor_obj: *Object,
+    method_atom: core.Atom,
+) bool {
+    if (method_atom == core.atom.null_atom) return false;
+    const apply_obj = realmFunctionApply(rt, global) orelse return false;
+    if (!isFunctionApplyBuiltin(apply_obj)) return false;
+    const proto = ctor_obj.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return false;
+    const method_fn = lookupProtoChainDataFunction(proto, method_atom) orelse return false;
+    if (method_fn.findProperty(core.atom.ids.apply) != null) return false;
+    return true;
+}
+
+pub fn applyForwardTakeOk(rt: *JSRuntime, global: *Object, site: *const InlinedSite, func: JSValue) bool {
+    if (!site.apply_forwarded) return true;
+    const ctor = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return false;
+    return applyForwardGuardHolds(rt, global, ctor, site.apply_method_atom);
+}
+
+/// True when `call_pc` is the rewritten apply-forward `call_method`.
+pub fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
+    const site = siteForPc(fb, call_pc) orelse return false;
+    return site.apply_forwarded and site.apply_forward_call_pc == call_pc;
+}
+
+/// After `op_call_method` advances pc past the 3-byte instruction, recover
+/// the apply-forward site (or null). Used by enterEntry to attach
+/// `Entry.native_caller` (D8-L1) without inserting an InlinedSite ghost.
+pub fn applyForwardSiteAfterCall(fb: *const FunctionBytecode, pc_after: u32) ?*const InlinedSite {
+    if (pc_after < 3) return null;
+    const call_pc = pc_after - 3;
+    const site = siteForPc(fb, call_pc) orelse return null;
+    if (site.apply_forwarded and site.apply_forward_call_pc == call_pc) return site;
+    return null;
+}
+
+pub fn realmApplyBuiltin(rt: *JSRuntime, global: *Object) ?*Object {
+    const apply_obj = realmFunctionApply(rt, global) orelse return null;
+    if (!isFunctionApplyBuiltin(apply_obj)) return null;
+    return apply_obj;
 }
 
 /// v1.5 fused create-this. Caller must already have polled at
