@@ -1,7 +1,5 @@
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
-const builtin = @import("builtin");
-const build_options = @import("build_options");
 const bytecode = @import("../bytecode.zig");
 const bignum = @import("../libs/bigint.zig");
 const core = @import("../core/root.zig");
@@ -34,10 +32,6 @@ const runWithArgs = zjs_vm.runWithArgs;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
 const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
 const exceptions = @import("exceptions.zig");
-
-const dossier_simple_ctor = build_options.zjs_dossier_simple_ctor;
-const simple_ctor_bypass_enabled = !std.mem.eql(u8, dossier_simple_ctor, "c");
-const simple_ctor_memo_enabled = std.mem.eql(u8, dossier_simple_ctor, "a");
 
 const string_ops = @import("string_ops.zig");
 
@@ -2200,12 +2194,28 @@ pub const SameMachineConstructorTarget = struct {
     new_target_is_func: bool,
 };
 
+/// Own `.prototype` data slot without materializing auto_init or taking the
+/// outline `getOwnConstructorPrototypeObject` (9% of N0). First construct of
+/// a function still falls through to the full helper to publish the lazy slot.
+fn ownConstructorPrototypeData(function_object: *core.Object) ?*core.Object {
+    if (function_object.hasExoticMethods()) return null;
+    const index = function_object.findProperty(core.atom.ids.prototype) orelse return null;
+    const flags = function_object.propFlagsAt(index);
+    if (flags.deleted or flags.kind != .data) return null;
+    const stored = function_object.asDataAt(index) orelse return null;
+    return object_ops.objectFromValue(stored);
+}
+
 pub fn resolveSameMachineConstructor(
     global: *core.Object,
     func: core.JSValue,
     new_target: core.JSValue,
 ) ?SameMachineConstructorTarget {
-    if (!new_target.sameValue(func)) return null;
+    // Direct `new F(...)` emits `dup`, so new_target and func are the same
+    // object. Admission only needs identity. Generic SameValue (NaN/±0/string)
+    // is an outline bl and was 4% of N0 — qjs never re-compares here
+    // (quickjs.c:20839-20856 holds new_target in a register).
+    if (!new_target.same(func)) return null;
     const resolved = inline_calls.resolveInlineDirectConstructorFunction(global, func) orelse return null;
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
@@ -2230,7 +2240,7 @@ pub fn resolveSameMachineSpreadConstructor(
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
-    const new_target_is_func = new_target.sameValue(func);
+    const new_target_is_func = new_target.same(func);
     if (!new_target_is_func) {
         // `callableObjectFromValue` is the native/bound-call adapter and
         // deliberately excludes the bytecode-function class. A super-call's
@@ -2256,12 +2266,11 @@ pub const SameMachineConstructorPreparation = union(enum) {
 };
 
 /// Continue an admitted constructor after OP_call_constructor has paid the
-/// outer JS_CallConstructorInternal interrupt poll. Keep the existing
-/// simple-field writer first; only its miss creates an instance for a
-/// same-Machine bytecode frame. Derived entry is handled separately by the
-/// opcode adapter, so this ordinary path keeps its established shape. The
-/// second poll remains after instance creation and before bytecode-frame stack
-/// preflight, matching JS_CallInternal's constructor entry ordering.
+/// outer JS_CallConstructorInternal interrupt poll. Creates the eager
+/// instance for a same-Machine bytecode frame. Derived entry is handled
+/// separately by the opcode adapter. The second poll remains after instance
+/// creation and before bytecode-frame stack preflight, matching
+/// JS_CallInternal's constructor entry ordering.
 pub fn prepareSameMachineConstructorAfterFirstPoll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2274,33 +2283,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!SameMachineConstructorPreparation {
     std.debug.assert(!target.resolved.fb.isDerivedClassConstructor());
-    // Publication-time gate: the simple-field probe used to be an
-    // unconditional outline call per `new` (432B-frame scan + memo chain +
-    // sret) although the answer is a pure function of the published bytecode.
-    // qjs JS_CallConstructorInternal has no probe at all (quickjs.c:20839-
-    // 20856), so a non-simple constructor — every RayTrace constructor — now
-    // reads one already-loaded CallFacts bit instead. The writer itself is
-    // entered only when the bit says simple AND resolution proved
-    // new_target == func, which is exactly the pair of conditions it used to
-    // re-derive per call.
-    if (comptime simple_ctor_bypass_enabled) {
-        if (target.resolved.call_facts.execution.simple_field_ctor and target.new_target_is_func) {
-            if (try constructSimpleFieldConstructor(
-                true,
-                ctx,
-                global,
-                func,
-                target.function_object,
-                target.resolved.fb,
-                args,
-                new_target,
-                false,
-            )) |constructed| {
-                return .{ .completed = constructed };
-            }
-        }
-    }
-
+    _ = args;
     const instance = instance: {
         if (target.new_target_is_func) {
             // Direct route: resolution proved new_target == func, so skip
@@ -2311,9 +2294,10 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
             // `F.prototype = 42` — keeps the authoritative
             // createConstructorInstance fallback, mirroring qjs
             // js_create_from_ctor's non-object-prototype arm.
-            if (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
-                const created = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
-                break :instance created.value();
+            if (ownConstructorPrototypeData(target.function_object) orelse
+                (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null)) |prototype|
+            {
+                break :instance try createProfiledConstructorInstance(ctx.runtime, prototype, target.resolved.fb);
             }
             break :instance try createConstructorInstance(
                 ctx,
@@ -2336,8 +2320,8 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
         );
     };
     errdefer instance.free(ctx.runtime);
-    const interrupt_global = ctx.global orelse global;
-    try exception_ops.pollInterrupt(ctx, interrupt_global);
+    // E6: the CallConstructorInternal entry poll (quickjs.c:20817) is paid by
+    // the caller. A second poll here was the eliminated per-`new` tax.
     return .{ .instance = instance };
 }
 
@@ -2366,11 +2350,9 @@ fn constructOrdinaryBytecodeFunctionObject(
     if (fb.isDerivedClassConstructor()) {
         return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     }
-    if (comptime simple_ctor_bypass_enabled) {
-        if (try constructSimpleFieldConstructor(false, ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
-    }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     errdefer instance.free(ctx.runtime);
+    defer noteConstructorAllocation(fb, instance);
     const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     if (result.isObject()) {
         instance.free(ctx.runtime);
@@ -2855,119 +2837,47 @@ fn createBytecodeConstructorInstance(
         // later `new` (plus the simple-field fast path) takes the direct read
         // instead of the reflectConstructPrototypeVm chain below.
         if (function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
-            const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
-            errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
-            return instance.value();
+            return createProfiledConstructorInstance(
+                ctx.runtime,
+                prototype,
+                function_object.u.bytecode_function.function_bytecode,
+            );
         }
     }
     return createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
 }
 
-const SimpleCtorFacts = bytecode.function_bytecode.SimpleCtorFacts;
+const max_ctor_alloc_capacity = bytecode.function_bytecode.max_ctor_alloc_capacity;
 
-fn constructSimpleFieldConstructor(
-    /// Comptime split of the retired per-call sameValue: the prepare route
-    /// (op_call_constructor / spread) enters only under
-    /// `SameMachineConstructorTarget.new_target_is_func`, whose resolution
-    /// already proved `new_target == func`, so its instantiation carries no
-    /// comparison. The recursive [[Construct]] adapter still proves it here —
-    /// that is spread-super's sameValue load-bearing wall.
-    comptime assume_new_target_is_func: bool,
-    ctx: *core.JSContext,
-    caller_global: *core.Object,
-    func: core.JSValue,
-    function_object: *core.Object,
-    fb: *const bytecode.FunctionBytecode,
-    args: []const core.JSValue,
-    new_target: core.JSValue,
-    copy_argv: bool,
-) !?core.JSValue {
-    if (comptime assume_new_target_is_func) {
-        std.debug.assert(new_target.sameValue(func));
-    } else {
-        if (!new_target.sameValue(func)) return null;
-    }
-    const rt = ctx.runtime;
-    // The classification is a pure function of the FunctionBytecode's immutable
-    // published bytecode, so it is computed once and memoized in the FB itself.
-    // Variant B (and any extension-less fixture record) has no memo slot and
-    // re-scans into `scratch` on every construct.
-    var scratch: SimpleCtorFacts = undefined;
-    const facts: *align(1) const SimpleCtorFacts = facts: {
-        if (comptime simple_ctor_memo_enabled) {
-            if (fb.simpleCtorMemoMut()) |memo| {
-                if (memo.state == .unknown) memo.* = classifySimpleFieldConstructor(fb);
-                break :facts memo;
-            }
-        }
-        scratch = classifySimpleFieldConstructor(fb);
-        break :facts &scratch;
-    };
-    if (comptime builtin.mode == .Debug) {
-        // Two-way publication/runtime lockstep: the CallFacts bit published
-        // by publishExecutionFlags must match the lazily-derived
-        // classification, or the publish-time gate would silently starve the
-        // fast path (bit clear, pattern simple) or admit a non-simple body
-        // (bit set, pattern rejected). Canonical published FBs only: the
-        // legacy stack adapter borrows MUTABLE fixture bytecode, so its
-        // init-time bit can go legitimately stale, and extension-less
-        // records never published any CallFacts word.
-        if (fb.legacyBytecodeAdapter() == null and fb.simpleCtorMemoMut() != null) {
-            std.debug.assert((facts.state == .simple) ==
-                fb.callFacts().execution.simple_field_ctor);
-        }
-    }
-    if (facts.state != .simple) return null;
-    const prototype = (function_object.getOwnConstructorPrototypeObject(rt) catch return null) orelse return null;
-    // The prototype materialization above can allocate/GC on the FIRST
-    // construct only and never re-enters construction; the memo lives in the
-    // FB allocation the caller already holds alive, so these slices stay valid
-    // across it.
-    const field_len: usize = facts.field_count;
-    const field_atoms = facts.atoms[0..field_len];
-    const field_args = facts.arg_indices[0..field_len];
-    if (prototypeChainBlocksSimpleFieldStore(prototype, field_atoms)) return null;
-
+fn createProfiledConstructorInstance(
+    rt: *core.JSRuntime,
+    prototype: *core.Object,
+    fb: ?*const bytecode.FunctionBytecode,
+) !core.JSValue {
+    const capacity: usize = if (fb) |function| blk: {
+        const profile = function.ctorAllocProfile() orelse break :blk 0;
+        break :blk if (profile.state == .live) profile.capacity else 0;
+    } else 0;
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
-    // This fast path replaces the bytecode JS_CallInternal body, but not its
-    // caller-Realm entry poll. QuickJS creates the base instance first and then
-    // takes this second constructor poll before executing field stores.
-    try exception_ops.pollInterrupt(ctx, caller_global);
-    const call_depth_guard = try call_vm.enterCallDepth(
-        ctx,
-        caller_global,
-        call_vm.qjsBytecodeFrameAllocaSize(fb, args.len, copy_argv),
-    );
-    defer call_depth_guard.deinit();
-    for (field_atoms, field_args) |atom_id, arg_index| {
-        const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
-        // `field_atoms` point into immutable FunctionBytecode owned by the
-        // active constructor object, so the operand atom stays rooted across
-        // property/shape allocation just as it does for qjs OP_put_field.
-        try instance.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, atom_id, value);
-    }
+    // Reserving 1–3 slots costs more than the later put_field grows on this
+    // host (N3 1.21 → 1.28). Four or more named writes pay for the extra
+    // buffer. Threshold is a slot count, not a bytecode pattern.
+    if (capacity >= 4) try instance.reserveOwnPropertyCapacity(rt, capacity);
     return instance.value();
 }
 
-/// The pattern scanner moved next to `SimpleCtorFacts` in bytecode.zig so
-/// both publication funnels (publishExecutionFlags / LegacyExecutionAdapter)
-/// evaluate the identical predicate they publish as the `simple_field_ctor`
-/// CallFacts bit; the runtime memo above keeps calling it lazily.
-const classifySimpleFieldConstructor = bytecode.function_bytecode.classifySimpleFieldConstructor;
-
-// `align(1)`: the atoms are read straight out of the FunctionBytecode's
-// byte-aligned hot extension tail.
-fn prototypeChainBlocksSimpleFieldStore(prototype: *core.Object, atoms: []align(1) const core.Atom) bool {
-    var current: ?*core.Object = prototype;
-    while (current) |object| {
-        if (object.hasExoticMethods() or object.proxyTarget() != null) return true;
-        for (atoms) |atom_id| {
-            if (object.hasOwnProperty(atom_id)) return true;
-        }
-        current = object.getPrototype();
-    }
-    return false;
+pub fn noteConstructorAllocation(fb: *const bytecode.FunctionBytecode, instance: core.JSValue) void {
+    const profile = fb.ctorAllocProfileMut() orelse return;
+    if (profile.state == .inert) return;
+    const object = object_ops.objectFromValue(instance) orelse return;
+    const observed = object.shape_ref.prop_count;
+    // Steady state: one compare, no store. Small-ctor recovery is ~0, so this
+    // hook must not become a net tax (DESIGN R3).
+    if (profile.state == .live and observed <= profile.capacity) return;
+    if (observed == 0) return;
+    profile.capacity = @intCast(@min(observed, @as(usize, max_ctor_alloc_capacity)));
+    profile.state = .live;
 }
 
 pub fn constructFunctionFromSource(
@@ -7124,6 +7034,15 @@ pub fn qjsReflectSetCall(
         const ok = try ordinarySetWithReceiver(ctx, output, global, args[0], object, receiver_value, atom_id, set_value, caller_function, caller_frame);
         return core.JSValue.boolean(ok);
     }
+    // qjs JS_SetPropertyInternal: when obj != this_obj (Reflect.set receiver),
+    // `if (unlikely(p != p1)) goto retry2` (quickjs.c:9701-9702) skips the
+    // own JS_PROP_LENGTH / set_array_length arm (9714-9717) and later takes
+    // the generic receiver path (9892-9929). Only the 4-arg form can have a
+    // distinct receiver; the 3-arg path is identical to pre-X-02.
+    if (args.len >= 4 and !object_ops.sameObjectIdentity(args[3], args[0])) {
+        const ok = try ordinarySetWithReceiver(ctx, output, global, args[0], object, args[3], atom_id, set_value, caller_function, caller_frame);
+        return core.JSValue.boolean(ok);
+    }
     const value_to_set = try array_ops.arrayLengthAssignmentValue(ctx, output, global, object, atom_id, set_value, caller_function, caller_frame);
     defer if (!value_to_set.same(set_value)) value_to_set.free(ctx.runtime);
     object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
@@ -7463,7 +7382,7 @@ pub fn qjsReflectOwnKeysCall(
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
     const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
-    const out = try core.Object.createArray(ctx.runtime, null);
+    const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
     for (keys) |key| {
         const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);

@@ -2793,8 +2793,9 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     errdefer core.Object.destroyFromHeader(rt, &out.header);
     if (limit == 0) return out.value();
 
-    var compiled = regexp_adapter.compile(rt.memory.allocator, source.items, split_flags.items) catch |err| switch (err) {
+    var compiled = regexp_adapter.compileWithRuntime(rt, source.items, split_flags.items) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return null,
+        error.StackOverflow => return error.StackOverflow,
         else => |other| return other,
     };
     defer compiled.deinit(rt.memory.allocator);

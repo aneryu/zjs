@@ -1,0 +1,6271 @@
+{
+ "tool": "zjs-zoo-fixed-pmu",
+ "schemaVersion": 1,
+ "direction": "ratios are zjs/qjs; below 1.0 means zjs used fewer counters or wall time",
+ "workload": "temporary source copies set doWarmup=false and doDeterministic=true; both engines execute identical deterministicIterations/minIterations batches",
+ "iterationDivisor": 16,
+ "timestamp": "2026-08-14T04:59:18Z",
+ "samplesPerEnginePerBench": 8,
+ "samplingOrder": "paired ABBA by sample parity",
+ "firstPositionCounts": {
+  "qjs": 60,
+  "zjs": 60
+ },
+ "firstPositionBalanced": true,
+ "cpu": 5,
+ "effectiveAffinity": [
+  5
+ ],
+ "pmu": "armv8_pmuv3_1",
+ "events": [
+  "armv8_pmuv3_1/instructions/",
+  "armv8_pmuv3_1/cycles/",
+  "armv8_pmuv3_1/branch-instructions/",
+  "armv8_pmuv3_1/branch-misses/",
+  "armv8_pmuv3_1/cache-references/",
+  "armv8_pmuv3_1/cache-misses/"
+ ],
+ "kernel": "6.17.0-1014-nvidia",
+ "cpuModel": null,
+ "binaries": {
+  "zjs": {
+   "path": "/tmp/r3-bins/prod/bin/zjs",
+   "sha256": "12bc8b8a3cb3b3c6feea8a1bea61f254caf6fde32fddc5b808d789170cf3309d",
+   "repo": {
+    "path": "/home/aneryu/zjs",
+    "commit": "7ebde5b5a997ee78af579be37c008a02e46a8d59",
+    "dirty": false
+   }
+  },
+  "qjs": {
+   "path": "/home/aneryu/quickjs/qjs",
+   "sha256": "b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d",
+   "repo": {
+    "path": "/home/aneryu/quickjs",
+    "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "dirty": false
+   }
+  }
+ },
+ "zoo": {
+  "path": "/home/aneryu/javascript-zoo",
+  "commit": "a17d4e0aabe52719fab1074f4b566d16d08a563c",
+  "dirty": false
+ },
+ "benchmarks": {
+  "raytrace": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/raytrace.js",
+    "sha256": "5a6110dddc78de04c9782ceb5047d3a23178fab23e7e50d38c4b8767128ace7d",
+    "fixedWorkSha256": "ac4d2cc50a5d4a6f8a804ab07ee9628dbb3d18f30b010b85a0ea297617aadfc8"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 15543742912,
+       "cycles": 3250184046,
+       "branch-instructions": 2610249798,
+       "branch-misses": 6802290,
+       "cache-references": 6070809768,
+       "cache-misses": 4003158
+      },
+      "wallSeconds": 0.8440303010866046,
+      "stdout": "RayTrace: 3380",
+      "scores": {
+       "RayTrace": 3380
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15543208178,
+       "cycles": 3218922118,
+       "branch-instructions": 2610159378,
+       "branch-misses": 7004390,
+       "cache-references": 6070724706,
+       "cache-misses": 5862963
+      },
+      "wallSeconds": 0.8357464540749788,
+      "stdout": "RayTrace: 3408",
+      "scores": {
+       "RayTrace": 3408
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15549240638,
+       "cycles": 3224514504,
+       "branch-instructions": 2611656900,
+       "branch-misses": 6793611,
+       "cache-references": 6071005376,
+       "cache-misses": 5231755
+      },
+      "wallSeconds": 0.845660446677357,
+      "stdout": "RayTrace: 3404",
+      "scores": {
+       "RayTrace": 3404
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15557728609,
+       "cycles": 3240308038,
+       "branch-instructions": 2615323715,
+       "branch-misses": 6821623,
+       "cache-references": 6079083277,
+       "cache-misses": 7112718
+      },
+      "wallSeconds": 0.8406228693202138,
+      "stdout": "RayTrace: 3388",
+      "scores": {
+       "RayTrace": 3388
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15548543025,
+       "cycles": 3242861915,
+       "branch-instructions": 2611482692,
+       "branch-misses": 6782194,
+       "cache-references": 6075496570,
+       "cache-misses": 8085906
+      },
+      "wallSeconds": 0.8416522829793394,
+      "stdout": "RayTrace: 3384",
+      "scores": {
+       "RayTrace": 3384
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15568639210,
+       "cycles": 3231207346,
+       "branch-instructions": 2617972758,
+       "branch-misses": 6786735,
+       "cache-references": 6081884048,
+       "cache-misses": 4024050
+      },
+      "wallSeconds": 0.8386112079024315,
+      "stdout": "RayTrace: 3396",
+      "scores": {
+       "RayTrace": 3396
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15570308252,
+       "cycles": 3238489985,
+       "branch-instructions": 2618921902,
+       "branch-misses": 7292803,
+       "cache-references": 6098009019,
+       "cache-misses": 5846570
+      },
+      "wallSeconds": 0.8404914741404355,
+      "stdout": "RayTrace: 3388",
+      "scores": {
+       "RayTrace": 3388
+      }
+     },
+     {
+      "counters": {
+       "instructions": 15553663995,
+       "cycles": 3243466246,
+       "branch-instructions": 2613078633,
+       "branch-misses": 6798369,
+       "cache-references": 6076311206,
+       "cache-misses": 6837221
+      },
+      "wallSeconds": 0.8419290250167251,
+      "stdout": "RayTrace: 3384",
+      "scores": {
+       "RayTrace": 3384
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 19508715301,
+       "cycles": 4200816390,
+       "branch-instructions": 3809964245,
+       "branch-misses": 12445913,
+       "cache-references": 8551772250,
+       "cache-misses": 21521860
+      },
+      "wallSeconds": 1.0879181381314993,
+      "stdout": "RayTrace: 2613",
+      "scores": {
+       "RayTrace": 2613
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19504485916,
+       "cycles": 4169722498,
+       "branch-instructions": 3808696852,
+       "branch-misses": 12019595,
+       "cache-references": 8539453969,
+       "cache-misses": 17992380
+      },
+      "wallSeconds": 1.079702959395945,
+      "stdout": "RayTrace: 2633",
+      "scores": {
+       "RayTrace": 2633
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19493705549,
+       "cycles": 4156883384,
+       "branch-instructions": 3804238147,
+       "branch-misses": 12033899,
+       "cache-references": 8525868875,
+       "cache-misses": 15499536
+      },
+      "wallSeconds": 1.0758635778911412,
+      "stdout": "RayTrace: 2640",
+      "scores": {
+       "RayTrace": 2640
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19482077543,
+       "cycles": 4163148557,
+       "branch-instructions": 3801323801,
+       "branch-misses": 12001175,
+       "cache-references": 8520555087,
+       "cache-misses": 16623197
+      },
+      "wallSeconds": 1.0775410290807486,
+      "stdout": "RayTrace: 2635",
+      "scores": {
+       "RayTrace": 2635
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19490054578,
+       "cycles": 4177579061,
+       "branch-instructions": 3803759628,
+       "branch-misses": 12255293,
+       "cache-references": 8540084821,
+       "cache-misses": 17346721
+      },
+      "wallSeconds": 1.0817739362828434,
+      "stdout": "RayTrace: 2628",
+      "scores": {
+       "RayTrace": 2628
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19478426845,
+       "cycles": 4188362897,
+       "branch-instructions": 3801072380,
+       "branch-misses": 12204830,
+       "cache-references": 8532470007,
+       "cache-misses": 21904634
+      },
+      "wallSeconds": 1.0843781577423215,
+      "stdout": "RayTrace: 2621",
+      "scores": {
+       "RayTrace": 2621
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19480406097,
+       "cycles": 4169327924,
+       "branch-instructions": 3800437718,
+       "branch-misses": 11985334,
+       "cache-references": 8526980543,
+       "cache-misses": 19956274
+      },
+      "wallSeconds": 1.0782229769974947,
+      "stdout": "RayTrace: 2633",
+      "scores": {
+       "RayTrace": 2633
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19492153077,
+       "cycles": 4265298062,
+       "branch-instructions": 3804778975,
+       "branch-misses": 12428228,
+       "cache-references": 8589294274,
+       "cache-misses": 23467775
+      },
+      "wallSeconds": 1.1041044420562685,
+      "stdout": "RayTrace: 2573",
+      "scores": {
+       "RayTrace": 2573
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 15551452316.5,
+     "zjsMedian": 19491103827.5,
+     "pairedRatiosZjsOverQjs": [
+      1.255084789516107,
+      1.2548558632578073,
+      1.2536757262190876,
+      1.2522443367298361,
+      1.2534971634745822,
+      1.2511322654640669,
+      1.2511252687947105,
+      1.2532193754002978
+     ],
+     "ratioMedian": 1.2533582694374399,
+     "ratioMAD": 0.001305763263985571
+    },
+    "cycles": {
+     "qjsMedian": 3239399011.5,
+     "zjsMedian": 4173650779.5,
+     "pairedRatiosZjsOverQjs": [
+      1.2924856963623161,
+      1.295378497877655,
+      1.2891501585256941,
+      1.2848002437353458,
+      1.288238343321504,
+      1.2962222626118034,
+      1.28742961791188,
+      1.3150431478237743
+     ],
+     "ratioMedian": 1.2908179274440053,
+     "ratioMAD": 0.00397443998288749
+    },
+    "branch-instructions": {
+     "qjsMedian": 2612367766.5,
+     "zjsMedian": 3803998887.5,
+     "pairedRatiosZjsOverQjs": [
+      1.4596167186447955,
+      1.459181720511781,
+      1.4566377945740117,
+      1.4534811806270032,
+      1.4565517281245683,
+      1.4519144129306483,
+      1.4511458761323537,
+      1.4560522316283468
+     ],
+     "ratioMedian": 1.4563019798764576,
+     "ratioMAD": 0.0028502699423889055
+    },
+    "branch-misses": {
+     "qjsMedian": 6800329.5,
+     "zjsMedian": 12119364.5,
+     "pairedRatiosZjsOverQjs": [
+      1.8296651568809916,
+      1.716008817327419,
+      1.7713553219340936,
+      1.7592844107626586,
+      1.8069806024422186,
+      1.7983360187188684,
+      1.6434468338168466,
+      1.8281190679705677
+     ],
+     "ratioMedian": 1.784845670326481,
+     "ratioMAD": 0.03441732860395452
+    },
+    "cache-references": {
+     "qjsMedian": 6075903888.0,
+     "zjsMedian": 8535961988.0,
+     "pairedRatiosZjsOverQjs": [
+      1.4086707666376674,
+      1.4066613761220357,
+      1.4043586435789708,
+      1.4016184182304632,
+      1.4056603806131356,
+      1.4029320420546103,
+      1.3983220615830316,
+      1.4135705007206638
+     ],
+     "ratioMedian": 1.4050095120960533,
+     "ratioMAD": 0.0027342819535165486
+    },
+    "cache-misses": {
+     "qjsMedian": 5854766.5,
+     "zjsMedian": 18974327.0,
+     "pairedRatiosZjsOverQjs": [
+      5.3762204739358275,
+      3.0688203217383427,
+      2.962588271048625,
+      2.3371089645336705,
+      2.145303321606756,
+      5.44342987785937,
+      3.4133302089943336,
+      3.4323557772960682
+     ],
+     "ratioMedian": 3.241075265366338,
+     "ratioMAD": 0.5912266475751904
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.8411375761497766,
+     "zjsMedian": 1.0807384478393942,
+     "pairedRatiosZjsOverQjs": [
+      1.2889562575311733,
+      1.2919025311222914,
+      1.2722169780060828,
+      1.2818364434364287,
+      1.2852979290372797,
+      1.2930642322973627,
+      1.282848202713996,
+      1.3113984780775734
+     ],
+     "ratioMedian": 1.2871270932842265,
+     "ratioMAD": 0.005033043842931351
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.800721449037832,
+    "zjsIPC": 4.670037062812193,
+    "ipcRatioZjsOverQjs": 0.97277817769414
+   }
+  },
+  "pdfjs": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/pdfjs.js",
+    "sha256": "f8a4ad16ccd53959b4fc807991afe2d3c5c190cc38d5f3a2725d4ba9bd478807",
+    "fixedWorkSha256": "1a7ebe21975991190a0e3e57d2682fe340306b8a5b4e403f3b2f5ef302ea5deb"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 5884253460,
+       "cycles": 1108285188,
+       "branch-instructions": 1047930620,
+       "branch-misses": 3371041,
+       "cache-references": 2164121061,
+       "cache-misses": 3572838
+      },
+      "wallSeconds": 0.29570480016991496,
+      "stdout": "PdfJS: 10025",
+      "scores": {
+       "PdfJS": 10025
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5884250176,
+       "cycles": 1101202207,
+       "branch-instructions": 1047976956,
+       "branch-misses": 3377829,
+       "cache-references": 2163206104,
+       "cache-misses": 4227288
+      },
+      "wallSeconds": 0.29276207089424133,
+      "stdout": "PdfJS: 9975",
+      "scores": {
+       "PdfJS": 9975
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5884360203,
+       "cycles": 1106699554,
+       "branch-instructions": 1048017855,
+       "branch-misses": 3372544,
+       "cache-references": 2163935472,
+       "cache-misses": 3547650
+      },
+      "wallSeconds": 0.2953675049357116,
+      "stdout": "PdfJS: 9975",
+      "scores": {
+       "PdfJS": 9975
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5883893528,
+       "cycles": 1112106615,
+       "branch-instructions": 1047860831,
+       "branch-misses": 3378590,
+       "cache-references": 2163373379,
+       "cache-misses": 4369022
+      },
+      "wallSeconds": 0.29669651854783297,
+      "stdout": "PdfJS: 9926",
+      "scores": {
+       "PdfJS": 9926
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5884897179,
+       "cycles": 1096846694,
+       "branch-instructions": 1048221936,
+       "branch-misses": 3347420,
+       "cache-references": 2163080139,
+       "cache-misses": 4393216
+      },
+      "wallSeconds": 0.2917334600351751,
+      "stdout": "PdfJS: 10025",
+      "scores": {
+       "PdfJS": 10025
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5884965509,
+       "cycles": 1113092547,
+       "branch-instructions": 1048240963,
+       "branch-misses": 3362926,
+       "cache-references": 2162302725,
+       "cache-misses": 4498710
+      },
+      "wallSeconds": 0.29631280712783337,
+      "stdout": "PdfJS: 9926",
+      "scores": {
+       "PdfJS": 9926
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5883749261,
+       "cycles": 1114805505,
+       "branch-instructions": 1047854284,
+       "branch-misses": 3359431,
+       "cache-references": 2162027748,
+       "cache-misses": 3473504
+      },
+      "wallSeconds": 0.2978389565832913,
+      "stdout": "PdfJS: 9878",
+      "scores": {
+       "PdfJS": 9878
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5883681533,
+       "cycles": 1102336341,
+       "branch-instructions": 1047829367,
+       "branch-misses": 3372287,
+       "cache-references": 2163076618,
+       "cache-misses": 4592329
+      },
+      "wallSeconds": 0.2936369897797704,
+      "stdout": "PdfJS: 9975",
+      "scores": {
+       "PdfJS": 9975
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 6187455787,
+       "cycles": 1324593842,
+       "branch-instructions": 1213325155,
+       "branch-misses": 4417437,
+       "cache-references": 2658397615,
+       "cache-misses": 4054351
+      },
+      "wallSeconds": 0.35189473209902644,
+      "stdout": "PdfJS: 7788",
+      "scores": {
+       "PdfJS": 7788
+      }
+     },
+     {
+      "counters": {
+       "instructions": 6187241730,
+       "cycles": 1321181270,
+       "branch-instructions": 1213279413,
+       "branch-misses": 4420344,
+       "cache-references": 2657802682,
+       "cache-misses": 3994727
+      },
+      "wallSeconds": 0.3496366599574685,
+      "stdout": "PdfJS: 7818",
+      "scores": {
+       "PdfJS": 7818
+      }
+     },
+     {
+      "counters": {
+       "instructions": 6186160516,
+       "cycles": 1323437873,
+       "branch-instructions": 1212831296,
+       "branch-misses": 4423790,
+       "cache-references": 2658906862,
+       "cache-misses": 5190299
+      },
+      "wallSeconds": 0.3517153887078166,
+      "stdout": "PdfJS: 7788",
+      "scores": {
+       "PdfJS": 7788
+      }
+     },
+     {
+      "counters": {
+       "instructions": 6186915243,
+       "cycles": 1326912279,
+       "branch-instructions": 1213145140,
+       "branch-misses": 4417199,
+       "cache-references": 2658737192,
+       "cache-misses": 4386037
+      },
+      "wallSeconds": 0.35187582205981016,
+      "stdout": "PdfJS: 7818",
+      "scores": {
+       "PdfJS": 7818
+      }
+     },
+     {
+      "counters": {
+       "instructions": 6187474797,
+       "cycles": 1325243397,
+       "branch-instructions": 1213322437,
+       "branch-misses": 4409503,
+       "cache-references": 2658981793,
+       "cache-misses": 3998118
+      },
+      "wallSeconds": 0.3524511852301657,
+      "stdout": "PdfJS: 7818",
+      "scores": {
+       "PdfJS": 7818
+      }
+     },
+     {
+      "counters": {
+       "instructions": 6186648137,
+       "cycles": 1322482010,
+       "branch-instructions": 1213009311,
+       "branch-misses": 4398703,
+       "cache-references": 2658011595,
+       "cache-misses": 4119334
+      },
+      "wallSeconds": 0.3514852300286293,
+      "stdout": "PdfJS: 7788",
+      "scores": {
+       "PdfJS": 7788
+      }
+     },
+     {
+      "counters": {
+       "instructions": 6188315304,
+       "cycles": 1326015724,
+       "branch-instructions": 1213669672,
+       "branch-misses": 4438983,
+       "cache-references": 2658983600,
+       "cache-misses": 4596984
+      },
+      "wallSeconds": 0.35252294689416885,
+      "stdout": "PdfJS: 7788",
+      "scores": {
+       "PdfJS": 7788
+      }
+     },
+     {
+      "counters": {
+       "instructions": 6187796988,
+       "cycles": 1318361113,
+       "branch-instructions": 1213462042,
+       "branch-misses": 4419721,
+       "cache-references": 2659601556,
+       "cache-misses": 4285799
+      },
+      "wallSeconds": 0.3502163151279092,
+      "stdout": "PdfJS: 7818",
+      "scores": {
+       "PdfJS": 7818
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 5884251818.0,
+     "zjsMedian": 6187348758.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0515277475827833,
+      1.0514919564833947,
+      1.0512885517861625,
+      1.0515002036590217,
+      1.051415956608339,
+      1.0512632788652083,
+      1.0517639398773828,
+      1.0516879530773884
+     ],
+     "ratioMedian": 1.051496080071208,
+     "ratioMAD": 0.0001359982345247035
+    },
+    "cycles": {
+     "qjsMedian": 1107492371.0,
+     "zjsMedian": 1324015857.5,
+     "pairedRatiosZjsOverQjs": [
+      1.195174181106172,
+      1.1997626426842058,
+      1.1958420586839777,
+      1.1931520423516229,
+      1.2082302880150724,
+      1.1881150525752284,
+      1.1894592537018374,
+      1.195969926750333
+     ],
+     "ratioMedian": 1.195508119895075,
+     "ratioMAD": 0.0033053001662914916
+    },
+    "branch-instructions": {
+     "qjsMedian": 1047953788.0,
+     "zjsMedian": 1213300925.0,
+     "pairedRatiosZjsOverQjs": [
+      1.1578296614712908,
+      1.1577348204591629,
+      1.1572620544713907,
+      1.1577349816981564,
+      1.157505290940601,
+      1.157185564975865,
+      1.1582427924682703,
+      1.1580721825674887
+     ],
+     "ratioMedian": 1.1577349010786597,
+     "ratioMAD": 0.0002834458134438611
+    },
+    "branch-misses": {
+     "qjsMedian": 3371664.0,
+     "zjsMedian": 4418579.0,
+     "pairedRatiosZjsOverQjs": [
+      1.3104073786109394,
+      1.308634628928818,
+      1.3117071267268863,
+      1.3074090078997451,
+      1.3172840575726978,
+      1.3079987487087137,
+      1.3213496571294365,
+      1.3106004915951697
+     ],
+     "ratioMedian": 1.3105039351030545,
+     "ratioMAD": 0.0021872462842886797
+    },
+    "cache-references": {
+     "qjsMedian": 2163143121.5,
+     "zjsMedian": 2658822027.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2283959815869099,
+      1.2286405243982244,
+      1.2287366681699277,
+      1.2289774931172432,
+      1.2292571805634798,
+      1.229250448731687,
+      1.229856370927576,
+      1.2295457007246888
+     ],
+     "ratioMedian": 1.2291139709244652,
+     "ratioMAD": 0.0004045162773805844
+    },
+    "cache-misses": {
+     "qjsMedian": 4298155.0,
+     "zjsMedian": 4202566.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1347704541879593,
+      0.944985768653567,
+      1.463024537369808,
+      1.0038944642530983,
+      0.9100663386457666,
+      0.9156700476358779,
+      1.32344284042857,
+      0.9332517334886068
+     ],
+     "ratioMedian": 0.9744401164533326,
+     "ratioMAD": 0.06157192331251038
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.2955361525528133,
+     "zjsMedian": 0.3517956053838134,
+     "pairedRatiosZjsOverQjs": [
+      1.1900203577920418,
+      1.1942689805735553,
+      1.1907721155188327,
+      1.1859789382836363,
+      1.2081273954234448,
+      1.1861965516630328,
+      1.1836025446039495,
+      1.192684598049359
+     ],
+     "ratioMedian": 1.1903962366554373,
+     "ratioMAD": 0.0040362144552612556
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.3131307917605515,
+    "zjsIPC": 4.673168167474158,
+    "ipcRatioZjsOverQjs": 0.8795507490086958
+   }
+  },
+  "earley-boyer": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/earley-boyer.js",
+    "sha256": "5af40115948d48fdc30d404708bcfabe41437af1a66c9714cedc8b017ca56272",
+    "fixedWorkSha256": "258d3bcaf64b009251186cc7dd2b7d3d0a85c0e3674a437d243faf2fb2b40c17"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 25857198552,
+       "cycles": 5392666218,
+       "branch-instructions": 4430390960,
+       "branch-misses": 9012633,
+       "cache-references": 10112245091,
+       "cache-misses": 77308882
+      },
+      "wallSeconds": 1.3959443499334157,
+      "stdout": "EarleyBoyer: 4398",
+      "scores": {
+       "EarleyBoyer": 4398
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25854456487,
+       "cycles": 5380348255,
+       "branch-instructions": 4429570526,
+       "branch-misses": 8901145,
+       "cache-references": 10109924669,
+       "cache-misses": 78692155
+      },
+      "wallSeconds": 1.3927755770273507,
+      "stdout": "EarleyBoyer: 4413",
+      "scores": {
+       "EarleyBoyer": 4413
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25932322453,
+       "cycles": 5464905940,
+       "branch-instructions": 4457116481,
+       "branch-misses": 9216464,
+       "cache-references": 10148563952,
+       "cache-misses": 75798517
+      },
+      "wallSeconds": 1.4211963997222483,
+      "stdout": "EarleyBoyer: 4346",
+      "scores": {
+       "EarleyBoyer": 4346
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25855097350,
+       "cycles": 5389935332,
+       "branch-instructions": 4429755196,
+       "branch-misses": 8932193,
+       "cache-references": 10109943457,
+       "cache-misses": 80287406
+      },
+      "wallSeconds": 1.3943634061142802,
+      "stdout": "EarleyBoyer: 4408",
+      "scores": {
+       "EarleyBoyer": 4408
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25873915785,
+       "cycles": 5417411363,
+       "branch-instructions": 4434525196,
+       "branch-misses": 9127607,
+       "cache-references": 10118611227,
+       "cache-misses": 79403616
+      },
+      "wallSeconds": 1.4009719341993332,
+      "stdout": "EarleyBoyer: 4385",
+      "scores": {
+       "EarleyBoyer": 4385
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25882472646,
+       "cycles": 5403360291,
+       "branch-instructions": 4437585961,
+       "branch-misses": 9055829,
+       "cache-references": 10123093780,
+       "cache-misses": 75343714
+      },
+      "wallSeconds": 1.398317338898778,
+      "stdout": "EarleyBoyer: 4395",
+      "scores": {
+       "EarleyBoyer": 4395
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25855040365,
+       "cycles": 5407149946,
+       "branch-instructions": 4429771835,
+       "branch-misses": 8966289,
+       "cache-references": 10107181603,
+       "cache-misses": 78828831
+      },
+      "wallSeconds": 1.3987317942082882,
+      "stdout": "EarleyBoyer: 4393",
+      "scores": {
+       "EarleyBoyer": 4393
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25876388811,
+       "cycles": 5428482427,
+       "branch-instructions": 4435094295,
+       "branch-misses": 8946261,
+       "cache-references": 10112731255,
+       "cache-misses": 78754854
+      },
+      "wallSeconds": 1.4054402601905167,
+      "stdout": "EarleyBoyer: 4375",
+      "scores": {
+       "EarleyBoyer": 4375
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 29895626232,
+       "cycles": 6717095038,
+       "branch-instructions": 5972699529,
+       "branch-misses": 19676053,
+       "cache-references": 13078162282,
+       "cache-misses": 99424420
+      },
+      "wallSeconds": 1.73653062293306,
+      "stdout": "EarleyBoyer: 3503",
+      "scores": {
+       "EarleyBoyer": 3503
+      }
+     },
+     {
+      "counters": {
+       "instructions": 29869115688,
+       "cycles": 6705192410,
+       "branch-instructions": 5962038879,
+       "branch-misses": 19785585,
+       "cache-references": 13081728472,
+       "cache-misses": 102938269
+      },
+      "wallSeconds": 1.7328992430120707,
+      "stdout": "EarleyBoyer: 3510",
+      "scores": {
+       "EarleyBoyer": 3510
+      }
+     },
+     {
+      "counters": {
+       "instructions": 29901482507,
+       "cycles": 6737611059,
+       "branch-instructions": 5975228634,
+       "branch-misses": 19689868,
+       "cache-references": 13076634610,
+       "cache-misses": 102502797
+      },
+      "wallSeconds": 1.7414802950806916,
+      "stdout": "EarleyBoyer: 3493",
+      "scores": {
+       "EarleyBoyer": 3493
+      }
+     },
+     {
+      "counters": {
+       "instructions": 29895897575,
+       "cycles": 6726809255,
+       "branch-instructions": 5972769678,
+       "branch-misses": 19831716,
+       "cache-references": 13081654946,
+       "cache-misses": 101741613
+      },
+      "wallSeconds": 1.7385468701831996,
+      "stdout": "EarleyBoyer: 3499",
+      "scores": {
+       "EarleyBoyer": 3499
+      }
+     },
+     {
+      "counters": {
+       "instructions": 29943138438,
+       "cycles": 6753276237,
+       "branch-instructions": 5991603366,
+       "branch-misses": 19916334,
+       "cache-references": 13111292922,
+       "cache-misses": 102942661
+      },
+      "wallSeconds": 1.744836618192494,
+      "stdout": "EarleyBoyer: 3487",
+      "scores": {
+       "EarleyBoyer": 3487
+      }
+     },
+     {
+      "counters": {
+       "instructions": 29884285876,
+       "cycles": 6719709073,
+       "branch-instructions": 5968419488,
+       "branch-misses": 19780970,
+       "cache-references": 13078974970,
+       "cache-misses": 104803110
+      },
+      "wallSeconds": 1.7369319247081876,
+      "stdout": "EarleyBoyer: 3501",
+      "scores": {
+       "EarleyBoyer": 3501
+      }
+     },
+     {
+      "counters": {
+       "instructions": 29945619969,
+       "cycles": 6812929877,
+       "branch-instructions": 5992857269,
+       "branch-misses": 19939305,
+       "cache-references": 13103431724,
+       "cache-misses": 106458524
+      },
+      "wallSeconds": 1.7611343362368643,
+      "stdout": "EarleyBoyer: 3454",
+      "scores": {
+       "EarleyBoyer": 3454
+      }
+     },
+     {
+      "counters": {
+       "instructions": 29881227077,
+       "cycles": 6766652541,
+       "branch-instructions": 5967219689,
+       "branch-misses": 19761917,
+       "cache-references": 13082307162,
+       "cache-misses": 117899393
+      },
+      "wallSeconds": 1.750030301976949,
+      "stdout": "EarleyBoyer: 3477",
+      "scores": {
+       "EarleyBoyer": 3477
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 25865557168.5,
+     "zjsMedian": 29895761903.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1561819495595602,
+      1.1552791954075163,
+      1.1530584104525827,
+      1.1562864053575106,
+      1.1572712335779909,
+      1.1546147960719841,
+      1.1582120757211203,
+      1.1547680511083351
+     ],
+     "ratioMedian": 1.1557305724835383,
+     "ratioMAD": 0.0010391488933786386
+    },
+    "cycles": {
+     "qjsMedian": 5405255118.5,
+     "zjsMedian": 6732210157.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2455981450472928,
+      1.2462376210998631,
+      1.2328869211974032,
+      1.248031532969049,
+      1.246587306093041,
+      1.2436166961127042,
+      1.2599853795510039,
+      1.2465090625225672
+     ],
+     "ratioMedian": 1.246373341811215,
+     "ratioMAD": 0.0012166939608780902
+    },
+    "branch-instructions": {
+     "qjsMedian": 4432458078.0,
+     "zjsMedian": 5972734603.5,
+     "pairedRatiosZjsOverQjs": [
+      1.3481201959205875,
+      1.3459631907890295,
+      1.3406041012101608,
+      1.3483295156791775,
+      1.351126242648143,
+      1.3449698868830544,
+      1.3528591295944252,
+      1.3454549761720456
+     ],
+     "ratioMedian": 1.3470416933548086,
+     "ratioMAD": 0.0018292618272586214
+    },
+    "branch-misses": {
+     "qjsMedian": 8989461.0,
+     "zjsMedian": 19783277.5,
+     "pairedRatiosZjsOverQjs": [
+      2.183163677029787,
+      2.222813469503081,
+      2.1363798524032642,
+      2.2202516224179214,
+      2.1819885540646085,
+      2.1843356361963107,
+      2.223807976744894,
+      2.208958245237871
+     ],
+     "ratioMedian": 2.1966469407170908,
+     "ratioMAD": 0.019131534176656473
+    },
+    "cache-references": {
+     "qjsMedian": 10112488173.0,
+     "zjsMedian": 13081691709.0,
+     "pairedRatiosZjsOverQjs": [
+      1.293299575347486,
+      1.2939491539548682,
+      1.2885206884293179,
+      1.2939394766785193,
+      1.2957601223984647,
+      1.2919938562497442,
+      1.2964476387869253,
+      1.293647268192929
+     ],
+     "ratioMedian": 1.293793372435724,
+     "ratioMAD": 0.0011466566371088893
+    },
+    "cache-misses": {
+     "qjsMedian": 78723504.5,
+     "zjsMedian": 102940465.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2860672335165835,
+      1.3081134834851071,
+      1.35230610118665,
+      1.2672175882728107,
+      1.2964480232235267,
+      1.3910000507806133,
+      1.350502381546163,
+      1.4970428743350854
+     ],
+     "ratioMedian": 1.329307932515635,
+     "ratioMAD": 0.03805030414557986
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.398524566553533,
+     "zjsMedian": 1.7400135826319456,
+     "pairedRatiosZjsOverQjs": [
+      1.243982701040976,
+      1.2442056506409007,
+      1.2253621634708882,
+      1.246839140040305,
+      1.2454472324527202,
+      1.2421586119185792,
+      1.25909366150764,
+      1.2451829875285634
+     ],
+     "ratioMedian": 1.244694319084732,
+     "ratioMAD": 0.0014488671617806093
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.785261121158309,
+    "zjsIPC": 4.440705385944475,
+    "ipcRatioZjsOverQjs": 0.9279964611146586
+   }
+  },
+  "typescript": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/typescript.js",
+    "sha256": "63828b58ce93751cf9ce4d49d0ccebb8c3310228f81b08a8c1b667d875033918",
+    "fixedWorkSha256": "7e9f5cf9a9dd1195f1039453ba2c4c52cdc74579db11ef95783b644f1fce54f9"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 16147574967,
+       "cycles": 4650420599,
+       "branch-instructions": 2649079654,
+       "branch-misses": 9708438,
+       "cache-references": 6232671591,
+       "cache-misses": 84660165
+      },
+      "wallSeconds": 1.22125751292333,
+      "stdout": "Typescript: 24080",
+      "scores": {
+       "Typescript": 24080
+      }
+     },
+     {
+      "counters": {
+       "instructions": 16143949959,
+       "cycles": 4633804787,
+       "branch-instructions": 2648416698,
+       "branch-misses": 9715343,
+       "cache-references": 6229418097,
+       "cache-misses": 84269336
+      },
+      "wallSeconds": 1.2187577104195952,
+      "stdout": "Typescript: 24195",
+      "scores": {
+       "Typescript": 24195
+      }
+     },
+     {
+      "counters": {
+       "instructions": 16144975878,
+       "cycles": 4636510868,
+       "branch-instructions": 2648727970,
+       "branch-misses": 9621300,
+       "cache-references": 6229508988,
+       "cache-misses": 84850777
+      },
+      "wallSeconds": 1.2198704248294234,
+      "stdout": "Typescript: 24172",
+      "scores": {
+       "Typescript": 24172
+      }
+     },
+     {
+      "counters": {
+       "instructions": 16143965914,
+       "cycles": 4623055922,
+       "branch-instructions": 2648436923,
+       "branch-misses": 9699648,
+       "cache-references": 6229804776,
+       "cache-misses": 76154297
+      },
+      "wallSeconds": 1.216386937070638,
+      "stdout": "Typescript: 24264",
+      "scores": {
+       "Typescript": 24264
+      }
+     },
+     {
+      "counters": {
+       "instructions": 16145444751,
+       "cycles": 4629905294,
+       "branch-instructions": 2648765241,
+       "branch-misses": 9687906,
+       "cache-references": 6231757777,
+       "cache-misses": 85470336
+      },
+      "wallSeconds": 1.2173704500310123,
+      "stdout": "Typescript: 24195",
+      "scores": {
+       "Typescript": 24195
+      }
+     },
+     {
+      "counters": {
+       "instructions": 16143650192,
+       "cycles": 4614437502,
+       "branch-instructions": 2648294022,
+       "branch-misses": 9619320,
+       "cache-references": 6227997723,
+       "cache-misses": 82230554
+      },
+      "wallSeconds": 1.2144177476875484,
+      "stdout": "Typescript: 24264",
+      "scores": {
+       "Typescript": 24264
+      }
+     },
+     {
+      "counters": {
+       "instructions": 16144686154,
+       "cycles": 4624108150,
+       "branch-instructions": 2648540149,
+       "branch-misses": 9690423,
+       "cache-references": 6229308700,
+       "cache-misses": 84439066
+      },
+      "wallSeconds": 1.2170985331758857,
+      "stdout": "Typescript: 24218",
+      "scores": {
+       "Typescript": 24218
+      }
+     },
+     {
+      "counters": {
+       "instructions": 16145111209,
+       "cycles": 4606518266,
+       "branch-instructions": 2648849809,
+       "branch-misses": 9814530,
+       "cache-references": 6231477642,
+       "cache-misses": 75352831
+      },
+      "wallSeconds": 1.2133280509151518,
+      "stdout": "Typescript: 24310",
+      "scores": {
+       "Typescript": 24310
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 17889877792,
+       "cycles": 4823452356,
+       "branch-instructions": 3536379561,
+       "branch-misses": 9931155,
+       "cache-references": 7930764907,
+       "cache-misses": 76304995
+      },
+      "wallSeconds": 1.274423492141068,
+      "stdout": "Typescript: 21058",
+      "scores": {
+       "Typescript": 21058
+      }
+     },
+     {
+      "counters": {
+       "instructions": 17891743854,
+       "cycles": 4769654392,
+       "branch-instructions": 3536954685,
+       "branch-misses": 9851824,
+       "cache-references": 7926393997,
+       "cache-misses": 75568541
+      },
+      "wallSeconds": 1.2597665740177035,
+      "stdout": "Typescript: 21322",
+      "scores": {
+       "Typescript": 21322
+      }
+     },
+     {
+      "counters": {
+       "instructions": 17890840466,
+       "cycles": 4762095948,
+       "branch-instructions": 3536520656,
+       "branch-misses": 9936839,
+       "cache-references": 7929030772,
+       "cache-misses": 82943817
+      },
+      "wallSeconds": 1.2579672550782561,
+      "stdout": "Typescript: 21358",
+      "scores": {
+       "Typescript": 21358
+      }
+     },
+     {
+      "counters": {
+       "instructions": 17888102400,
+       "cycles": 4761153592,
+       "branch-instructions": 3535935043,
+       "branch-misses": 9877110,
+       "cache-references": 7923343293,
+       "cache-misses": 84328732
+      },
+      "wallSeconds": 1.2579492121003568,
+      "stdout": "Typescript: 21358",
+      "scores": {
+       "Typescript": 21358
+      }
+     },
+     {
+      "counters": {
+       "instructions": 17891600686,
+       "cycles": 4748777974,
+       "branch-instructions": 3536699817,
+       "branch-misses": 9880609,
+       "cache-references": 7923892150,
+       "cache-misses": 81002011
+      },
+      "wallSeconds": 1.2561651710420847,
+      "stdout": "Typescript: 21376",
+      "scores": {
+       "Typescript": 21376
+      }
+     },
+     {
+      "counters": {
+       "instructions": 17889316308,
+       "cycles": 4748149043,
+       "branch-instructions": 3536121272,
+       "branch-misses": 9871810,
+       "cache-references": 7922723371,
+       "cache-misses": 81685721
+      },
+      "wallSeconds": 1.2550094602629542,
+      "stdout": "Typescript: 21430",
+      "scores": {
+       "Typescript": 21430
+      }
+     },
+     {
+      "counters": {
+       "instructions": 17890701243,
+       "cycles": 4756073366,
+       "branch-instructions": 3536520182,
+       "branch-misses": 9865238,
+       "cache-references": 7924836446,
+       "cache-misses": 81514378
+      },
+      "wallSeconds": 1.2569789867848158,
+      "stdout": "Typescript: 21358",
+      "scores": {
+       "Typescript": 21358
+      }
+     },
+     {
+      "counters": {
+       "instructions": 17891025061,
+       "cycles": 4752966061,
+       "branch-instructions": 3536671080,
+       "branch-misses": 9920694,
+       "cache-references": 7925799821,
+       "cache-misses": 85979185
+      },
+      "wallSeconds": 1.2574798739515245,
+      "stdout": "Typescript: 21394",
+      "scores": {
+       "Typescript": 21394
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 16144831016.0,
+     "zjsMedian": 17890770854.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1078987295962803,
+      1.1082630892339722,
+      1.1081367108376425,
+      1.108036432639361,
+      1.1081516156370885,
+      1.1081332966979838,
+      1.1081479734164674,
+      1.1081388557439449
+     ],
+     "ratioMedian": 1.1081377832907937,
+     "ratioMAD": 1.2011235984266122e-05
+    },
+    "cycles": {
+     "qjsMedian": 4627006722.0,
+     "zjsMedian": 4758613479.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0372077650432754,
+      1.0293170755447276,
+      1.0270861178967046,
+      1.0298715119025117,
+      1.0256749701023151,
+      1.0289767801475362,
+      1.0285385228284507,
+      1.0317914282639251
+     ],
+     "ratioMedian": 1.0291469278461318,
+     "ratioMAD": 0.0013926970029035646
+    },
+    "branch-instructions": {
+     "qjsMedian": 2648634059.5,
+     "zjsMedian": 3536520419.0,
+     "pairedRatiosZjsOverQjs": [
+      1.3349464806240212,
+      1.3354978042809484,
+      1.33517699667739,
+      1.3351026079921482,
+      1.3352258487297175,
+      1.3352449700163995,
+      1.3352715016743362,
+      1.3351723710357033
+     ],
+     "ratioMedian": 1.3352014227035538,
+     "ratioMAD": 5.6813141814049395e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 9695035.5,
+     "zjsMedian": 9878859.5,
+     "pairedRatiosZjsOverQjs": [
+      1.022940559542122,
+      1.0140479857479041,
+      1.0327958799746395,
+      1.0182957154733863,
+      1.0198910889515236,
+      1.0262482171296932,
+      1.018039976170287,
+      1.0108170233317337
+     ],
+     "ratioMedian": 1.019093402212455,
+     "ratioMAD": 0.004446286897108909
+    },
+    "cache-references": {
+     "qjsMedian": 6229656882.0,
+     "zjsMedian": 7925318133.5,
+     "pairedRatiosZjsOverQjs": [
+      1.272450311428578,
+      1.272413229225574,
+      1.2728179359358522,
+      1.271844556594176,
+      1.2715340412050806,
+      1.2721140442523569,
+      1.272185538982841,
+      1.2718973374116456
+     ],
+     "ratioMedian": 1.2721497916175988,
+     "ratioMAD": 0.00028197870947721526
+    },
+    "cache-misses": {
+     "qjsMedian": 84354201.0,
+     "zjsMedian": 81600049.5,
+     "pairedRatiosZjsOverQjs": [
+      0.901309311173679,
+      0.8967501654457085,
+      0.9775257214203236,
+      1.107340430179534,
+      0.9477207507409354,
+      0.9933743240985583,
+      0.965363330759722,
+      1.141021297527627
+     ],
+     "ratioMedian": 0.9714445260900229,
+     "ratioMAD": 0.04692949513271566
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.217234491603449,
+     "zjsMedian": 1.2577145430259407,
+     "pairedRatiosZjsOverQjs": [
+      1.0435337991006288,
+      1.0336480854623595,
+      1.0312302269760822,
+      1.0341686298685606,
+      1.0318676381623064,
+      1.0334248347841581,
+      1.0327668241492876,
+      1.0363890235646256
+     ],
+     "ratioMedian": 1.0335364601232588,
+     "ratioMAD": 0.0012192289674618495
+    }
+   },
+   "derived": {
+    "qjsIPC": 3.489260333086674,
+    "zjsIPC": 3.759660441734314,
+    "ipcRatioZjsOverQjs": 1.0774949653608787
+   }
+  },
+  "deltablue": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/deltablue.js",
+    "sha256": "c56b4042b3ce16073483333ae3e0432bd4ef94089f357dd71e8cc8a50c76ca73",
+    "fixedWorkSha256": "e9b32adfc7ac6b25513c2b0d5356a655d91e4a3e4594b8d24228aa735eb6a5a5"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 19386729761,
+       "cycles": 4982312275,
+       "branch-instructions": 2858341818,
+       "branch-misses": 2124083,
+       "cache-references": 7761880024,
+       "cache-misses": 23871467
+      },
+      "wallSeconds": 1.2890387158840895,
+      "stdout": "DeltaBlue: 1423",
+      "scores": {
+       "DeltaBlue": 1423
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19385982258,
+       "cycles": 4971503858,
+       "branch-instructions": 2858243377,
+       "branch-misses": 2089412,
+       "cache-references": 7760549942,
+       "cache-misses": 25135088
+      },
+      "wallSeconds": 1.2860813131555915,
+      "stdout": "DeltaBlue: 1426",
+      "scores": {
+       "DeltaBlue": 1426
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19386477979,
+       "cycles": 4958707161,
+       "branch-instructions": 2858314355,
+       "branch-misses": 2030594,
+       "cache-references": 7759319174,
+       "cache-misses": 21922574
+      },
+      "wallSeconds": 1.281313634943217,
+      "stdout": "DeltaBlue: 1429",
+      "scores": {
+       "DeltaBlue": 1429
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19386452138,
+       "cycles": 4973762912,
+       "branch-instructions": 2858209718,
+       "branch-misses": 2239116,
+       "cache-references": 7763764196,
+       "cache-misses": 25033708
+      },
+      "wallSeconds": 1.2862695772200823,
+      "stdout": "DeltaBlue: 1426",
+      "scores": {
+       "DeltaBlue": 1426
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19387365873,
+       "cycles": 4980448054,
+       "branch-instructions": 2858577291,
+       "branch-misses": 2111976,
+       "cache-references": 7761738489,
+       "cache-misses": 28067928
+      },
+      "wallSeconds": 1.2878472045995295,
+      "stdout": "DeltaBlue: 1424",
+      "scores": {
+       "DeltaBlue": 1424
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19385252696,
+       "cycles": 4968035498,
+       "branch-instructions": 2857720409,
+       "branch-misses": 2033739,
+       "cache-references": 7758067631,
+       "cache-misses": 24637596
+      },
+      "wallSeconds": 1.2845159429125488,
+      "stdout": "DeltaBlue: 1428",
+      "scores": {
+       "DeltaBlue": 1428
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19388578888,
+       "cycles": 4975264987,
+       "branch-instructions": 2858658871,
+       "branch-misses": 2134558,
+       "cache-references": 7761463684,
+       "cache-misses": 23761059
+      },
+      "wallSeconds": 1.2852934561669827,
+      "stdout": "DeltaBlue: 1426",
+      "scores": {
+       "DeltaBlue": 1426
+      }
+     },
+     {
+      "counters": {
+       "instructions": 19387133118,
+       "cycles": 4985010062,
+       "branch-instructions": 2858165763,
+       "branch-misses": 2166159,
+       "cache-references": 7761307435,
+       "cache-misses": 21610898
+      },
+      "wallSeconds": 1.2889554877765477,
+      "stdout": "DeltaBlue: 1423",
+      "scores": {
+       "DeltaBlue": 1423
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 25618832479,
+       "cycles": 5697036790,
+       "branch-instructions": 4732695078,
+       "branch-misses": 2242019,
+       "cache-references": 11955911178,
+       "cache-misses": 24584782
+      },
+      "wallSeconds": 1.4723745081573725,
+      "stdout": "DeltaBlue: 1244",
+      "scores": {
+       "DeltaBlue": 1244
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25618261261,
+       "cycles": 5696557424,
+       "branch-instructions": 4732513418,
+       "branch-misses": 2243511,
+       "cache-references": 11953679971,
+       "cache-misses": 26075953
+      },
+      "wallSeconds": 1.472644804045558,
+      "stdout": "DeltaBlue: 1245",
+      "scores": {
+       "DeltaBlue": 1245
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25617271677,
+       "cycles": 5698899939,
+       "branch-instructions": 4732493597,
+       "branch-misses": 2276687,
+       "cache-references": 11953880806,
+       "cache-misses": 26407939
+      },
+      "wallSeconds": 1.472768952138722,
+      "stdout": "DeltaBlue: 1245",
+      "scores": {
+       "DeltaBlue": 1245
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25617376324,
+       "cycles": 5693509758,
+       "branch-instructions": 4732288120,
+       "branch-misses": 2244222,
+       "cache-references": 11953975290,
+       "cache-misses": 25536217
+      },
+      "wallSeconds": 1.4709769361652434,
+      "stdout": "DeltaBlue: 1245",
+      "scores": {
+       "DeltaBlue": 1245
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25617152475,
+       "cycles": 5691206829,
+       "branch-instructions": 4732364541,
+       "branch-misses": 2283516,
+       "cache-references": 11954921717,
+       "cache-misses": 24033570
+      },
+      "wallSeconds": 1.4693661630153656,
+      "stdout": "DeltaBlue: 1246",
+      "scores": {
+       "DeltaBlue": 1246
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25619385305,
+       "cycles": 5696676251,
+       "branch-instructions": 4732924304,
+       "branch-misses": 2186851,
+       "cache-references": 11955966682,
+       "cache-misses": 23899155
+      },
+      "wallSeconds": 1.470596686936915,
+      "stdout": "DeltaBlue: 1245",
+      "scores": {
+       "DeltaBlue": 1245
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25621737841,
+       "cycles": 5706630925,
+       "branch-instructions": 4733286340,
+       "branch-misses": 2249877,
+       "cache-references": 11956527625,
+       "cache-misses": 24514532
+      },
+      "wallSeconds": 1.4736807337030768,
+      "stdout": "DeltaBlue: 1243",
+      "scores": {
+       "DeltaBlue": 1243
+      }
+     },
+     {
+      "counters": {
+       "instructions": 25619916547,
+       "cycles": 5693576989,
+       "branch-instructions": 4732621569,
+       "branch-misses": 2233402,
+       "cache-references": 11954369634,
+       "cache-misses": 24053834
+      },
+      "wallSeconds": 1.4704268388450146,
+      "stdout": "DeltaBlue: 1246",
+      "scores": {
+       "DeltaBlue": 1246
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 19386603870.0,
+     "zjsMedian": 25618546870.0,
+     "pairedRatiosZjsOverQjs": [
+      1.32146229894518,
+      1.3214837876181451,
+      1.3213989516171725,
+      1.3214061109091007,
+      1.3213322863358128,
+      1.32159150601562,
+      1.3214861176265906,
+      1.3214907222777135
+     ],
+     "ratioMedian": 1.3214730432816626,
+     "ratioMAD": 4.2305684306409574e-05
+    },
+    "cycles": {
+     "qjsMedian": 4974513949.5,
+     "zjsMedian": 5696616837.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1434523722220924,
+      1.1458418994955148,
+      1.149271322941105,
+      1.1447087162646004,
+      1.1427098058836616,
+      1.1466657702613703,
+      1.1470003989558355,
+      1.1421395179121707
+     ],
+     "ratioMedian": 1.1452753078800577,
+     "ratioMAD": 0.0017740133668715519
+    },
+    "branch-instructions": {
+     "qjsMedian": 2858278866.0,
+     "zjsMedian": 4732567493.5,
+     "pairedRatiosZjsOverQjs": [
+      1.6557484651403578,
+      1.6557419343930138,
+      1.6556938843068576,
+      1.6556826079617997,
+      1.655496444297472,
+      1.6561887191953073,
+      1.6557716585274929,
+      1.655824735662821
+     ],
+     "ratioMedian": 1.6557451997666859,
+     "ratioMAD": 5.6953632357248374e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 2118029.5,
+     "zjsMedian": 2243866.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0555232540347999,
+      1.0737523284062693,
+      1.1211926165447155,
+      1.0022803642151634,
+      1.0812225138922034,
+      1.0752859634397531,
+      1.054024767656817,
+      1.031042504266769
+     ],
+     "ratioMedian": 1.0646377912205347,
+     "ratioMAD": 0.013616447445443547
+    },
+    "cache-references": {
+     "qjsMedian": 7761385559.5,
+     "zjsMedian": 11954645675.5,
+     "pairedRatiosZjsOverQjs": [
+      1.5403370241529,
+      1.5403135164824895,
+      1.5405837210634634,
+      1.53971385377197,
+      1.5402376328373617,
+      1.5411011157244705,
+      1.5404990748907303,
+      1.540252043114692
+     ],
+     "ratioMedian": 1.5403252703176946,
+     "ratioMAD": 0.00013072102668432173
+    },
+    "cache-misses": {
+     "qjsMedian": 24254531.5,
+     "zjsMedian": 24549657.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0298814898975417,
+      1.0374323336365483,
+      1.2046002900936723,
+      1.0200732947751887,
+      0.856264488066237,
+      0.9700278793434229,
+      1.0317104132437869,
+      1.1130418550862624
+     ],
+     "ratioMedian": 1.0307959515706644,
+     "ratioMAD": 0.03574536451135857
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.2861754451878369,
+     "zjsMedian": 1.471675722161308,
+     "pairedRatiosZjsOverQjs": [
+      1.1422267539478377,
+      1.1450635266849538,
+      1.1494211190564514,
+      1.1435992596080482,
+      1.140947588943427,
+      1.1448644877092309,
+      1.146571412646809,
+      1.1407894630880586
+     ],
+     "ratioMedian": 1.1442318736586397,
+     "ratioMAD": 0.0021723293494856355
+    }
+   },
+   "derived": {
+    "qjsIPC": 3.8971855475344666,
+    "zjsIPC": 4.497151133872447,
+    "ipcRatioZjsOverQjs": 1.15394842740232
+   }
+  },
+  "richards": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/richards.js",
+    "sha256": "98872e3ef6a399a7e783e90b6e8ba9ec39ee8be2af330142d2c83396881cbc80",
+    "fixedWorkSha256": "4e0e348f303d1529df42f9bddf953eb385d94ceeef40c6dade94e20db2fcc9c9"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 18451577802,
+       "cycles": 4314653984,
+       "branch-instructions": 2761343231,
+       "branch-misses": 1865659,
+       "cache-references": 7033167471,
+       "cache-misses": 522105
+      },
+      "wallSeconds": 1.1164572113193572,
+      "stdout": "Richards: 1637",
+      "scores": {
+       "Richards": 1637
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18452009277,
+       "cycles": 4320154942,
+       "branch-instructions": 2761413725,
+       "branch-misses": 1882934,
+       "cache-references": 7036781956,
+       "cache-misses": 987369
+      },
+      "wallSeconds": 1.1182743981480598,
+      "stdout": "Richards: 1634",
+      "scores": {
+       "Richards": 1634
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451853839,
+       "cycles": 4321216464,
+       "branch-instructions": 2761396113,
+       "branch-misses": 1874899,
+       "cache-references": 7034428675,
+       "cache-misses": 903520
+      },
+      "wallSeconds": 1.1181010091677308,
+      "stdout": "Richards: 1636",
+      "scores": {
+       "Richards": 1636
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451836395,
+       "cycles": 4321490537,
+       "branch-instructions": 2761392332,
+       "branch-misses": 1874679,
+       "cache-references": 7036301224,
+       "cache-misses": 540975
+      },
+      "wallSeconds": 1.1185132949613035,
+      "stdout": "Richards: 1634",
+      "scores": {
+       "Richards": 1634
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451749273,
+       "cycles": 4312037559,
+       "branch-instructions": 2761377602,
+       "branch-misses": 1869406,
+       "cache-references": 7033043929,
+       "cache-misses": 554062
+      },
+      "wallSeconds": 1.1159740248695016,
+      "stdout": "Richards: 1637",
+      "scores": {
+       "Richards": 1637
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451672230,
+       "cycles": 4317309494,
+       "branch-instructions": 2761350082,
+       "branch-misses": 1913823,
+       "cache-references": 7035319541,
+       "cache-misses": 723447
+      },
+      "wallSeconds": 1.11658744700253,
+      "stdout": "Richards: 1636",
+      "scores": {
+       "Richards": 1636
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451782876,
+       "cycles": 4380632845,
+       "branch-instructions": 2761368768,
+       "branch-misses": 1815624,
+       "cache-references": 7036697312,
+       "cache-misses": 555117
+      },
+      "wallSeconds": 1.1336238896474242,
+      "stdout": "Richards: 1611",
+      "scores": {
+       "Richards": 1611
+      }
+     },
+     {
+      "counters": {
+       "instructions": 18451761388,
+       "cycles": 4319106465,
+       "branch-instructions": 2761369436,
+       "branch-misses": 1863022,
+       "cache-references": 7035952150,
+       "cache-misses": 793094
+      },
+      "wallSeconds": 1.1181839662604034,
+      "stdout": "Richards: 1634",
+      "scores": {
+       "Richards": 1634
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 21691766399,
+       "cycles": 4780603731,
+       "branch-instructions": 4167154846,
+       "branch-misses": 3691633,
+       "cache-references": 10073745270,
+       "cache-misses": 998307
+      },
+      "wallSeconds": 1.236530720256269,
+      "stdout": "Richards: 1477",
+      "scores": {
+       "Richards": 1477
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21691950999,
+       "cycles": 4763812420,
+       "branch-instructions": 4167187651,
+       "branch-misses": 3633929,
+       "cache-references": 10059661207,
+       "cache-misses": 2299531
+      },
+      "wallSeconds": 1.2312769913114607,
+      "stdout": "Richards: 1483",
+      "scores": {
+       "Richards": 1483
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21691584747,
+       "cycles": 4762055215,
+       "branch-instructions": 4167129674,
+       "branch-misses": 3774571,
+       "cache-references": 10060535024,
+       "cache-misses": 955937
+      },
+      "wallSeconds": 1.2317507821135223,
+      "stdout": "Richards: 1483",
+      "scores": {
+       "Richards": 1483
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21691857298,
+       "cycles": 4771877330,
+       "branch-instructions": 4167170040,
+       "branch-misses": 3742573,
+       "cache-references": 10062147296,
+       "cache-misses": 1860862
+      },
+      "wallSeconds": 1.2346672951243818,
+      "stdout": "Richards: 1481",
+      "scores": {
+       "Richards": 1481
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21691882568,
+       "cycles": 4789904701,
+       "branch-instructions": 4167190762,
+       "branch-misses": 3687482,
+       "cache-references": 10067168981,
+       "cache-misses": 2659090
+      },
+      "wallSeconds": 1.2387621882371604,
+      "stdout": "Richards: 1475",
+      "scores": {
+       "Richards": 1475
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21691826310,
+       "cycles": 4764800226,
+       "branch-instructions": 4167170145,
+       "branch-misses": 3680009,
+       "cache-references": 10060823426,
+       "cache-misses": 1291128
+      },
+      "wallSeconds": 1.2323536700569093,
+      "stdout": "Richards: 1482",
+      "scores": {
+       "Richards": 1482
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21691557320,
+       "cycles": 4765776037,
+       "branch-instructions": 4167121442,
+       "branch-misses": 3696069,
+       "cache-references": 10062664254,
+       "cache-misses": 1013310
+      },
+      "wallSeconds": 1.232502130791545,
+      "stdout": "Richards: 1482",
+      "scores": {
+       "Richards": 1482
+      }
+     },
+     {
+      "counters": {
+       "instructions": 21691632353,
+       "cycles": 4770053024,
+       "branch-instructions": 4167126249,
+       "branch-misses": 3747190,
+       "cache-references": 10064037765,
+       "cache-misses": 2010074
+      },
+      "wallSeconds": 1.23377825319767,
+      "stdout": "Richards: 1481",
+      "scores": {
+       "Richards": 1481
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 18451772132.0,
+     "zjsMedian": 21691796354.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1756049608206833,
+      1.1755874752371012,
+      1.1755775292969466,
+      1.1755934116063356,
+      1.1756003318200952,
+      1.1756021914768209,
+      1.1755805639905905,
+      1.17558599945407
+     ],
+     "ratioMedian": 1.1755904434217184,
+     "ratioMAD": 9.883914752317757e-06
+    },
+    "cycles": {
+     "qjsMedian": 4319630703.5,
+     "zjsMedian": 4767914530.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1079923787000947,
+      1.1026948070049105,
+      1.1020172802433348,
+      1.1042202427944365,
+      1.1108216557628552,
+      1.1036503712837595,
+      1.087919532548727,
+      1.1044073728337698
+     ],
+     "ratioMedian": 1.103935307039098,
+     "ratioMAD": 0.0015792634149753848
+    },
+    "branch-instructions": {
+     "qjsMedian": 2761373519.0,
+     "zjsMedian": 4167162443.0,
+     "pairedRatiosZjsOverQjs": [
+      1.5091042646266382,
+      1.5090776196529552,
+      1.5090662489101576,
+      1.5090829331672093,
+      1.509098487284681,
+      1.509106060895324,
+      1.5090782116066868,
+      1.5090795873500789
+     ],
+     "ratioMedian": 1.509081260258644,
+     "ratioMAD": 9.325977087693005e-06
+    },
+    "branch-misses": {
+     "qjsMedian": 1872042.5,
+     "zjsMedian": 3693851.0,
+     "pairedRatiosZjsOverQjs": [
+      1.9787286958656432,
+      1.9299290362806132,
+      2.01321297840577,
+      1.9963807137115208,
+      1.9725420802115752,
+      1.9228575474325473,
+      2.035701775257432,
+      2.0113503758946485
+     ],
+     "ratioMedian": 1.987554704788582,
+     "ratioMAD": 0.024726972361627242
+    },
+    "cache-references": {
+     "qjsMedian": 7035635845.5,
+     "zjsMedian": 10062405775.0,
+     "pairedRatiosZjsOverQjs": [
+      1.432319834773916,
+      1.429582623122563,
+      1.4301850923237913,
+      1.4300336179012907,
+      1.4314099389439487,
+      1.4300449847896965,
+      1.4300265888714128,
+      1.4303732530358382
+     ],
+     "ratioMedian": 1.4301150385567438,
+     "ratioMAD": 0.00017333208221270713
+    },
+    "cache-misses": {
+     "qjsMedian": 639282.0,
+     "zjsMedian": 1575995.0,
+     "pairedRatiosZjsOverQjs": [
+      1.9120809032665842,
+      2.328947941448435,
+      1.0580142110855322,
+      3.439829936688387,
+      4.799264342257725,
+      1.7846891341038114,
+      1.825398969946876,
+      2.5344713237018563
+     ],
+     "ratioMedian": 2.12051442235751,
+     "ratioMAD": 0.3748910947990225
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.118142487714067,
+     "zjsMedian": 1.2331401919946074,
+     "pairedRatiosZjsOverQjs": [
+      1.1075486885834314,
+      1.1010508631428395,
+      1.101645354054718,
+      1.1038467765080047,
+      1.110027796912224,
+      1.1036785997954326,
+      1.0872231452134213,
+      1.103376805986455
+     ],
+     "ratioMedian": 1.1035277028909438,
+     "ratioMAD": 0.002179594292165077
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.271608708829986,
+    "zjsIPC": 4.549535486791797,
+    "ipcRatioZjsOverQjs": 1.0650637258481328
+   }
+  },
+  "zlib": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/zlib.js",
+    "sha256": "661926572b2fdff05c66039ab9726c22d6f67a092fa4ea68c7df5cb112d7fb2e",
+    "fixedWorkSha256": "989b505be16c5bd1afb2d316fc2d9ae0daee3a576a9abd311d489f28fae0e18c"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 89629246130,
+       "cycles": 15471745376,
+       "branch-instructions": 12962968705,
+       "branch-misses": 6922413,
+       "cache-references": 32275427759,
+       "cache-misses": 13254963
+      },
+      "wallSeconds": 3.979663616977632,
+      "stdout": "zlib: 3872",
+      "scores": {
+       "zlib": 3872
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89626231771,
+       "cycles": 15450908797,
+       "branch-instructions": 12962496298,
+       "branch-misses": 6897707,
+       "cache-references": 32287218058,
+       "cache-misses": 13832408
+      },
+      "wallSeconds": 3.976828086655587,
+      "stdout": "zlib: 3871",
+      "scores": {
+       "zlib": 3871
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89626111527,
+       "cycles": 15349870376,
+       "branch-instructions": 12962435966,
+       "branch-misses": 6892386,
+       "cache-references": 32289844182,
+       "cache-misses": 13333450
+      },
+      "wallSeconds": 3.9513353519141674,
+      "stdout": "zlib: 3893",
+      "scores": {
+       "zlib": 3893
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89626235204,
+       "cycles": 15424009261,
+       "branch-instructions": 12962492029,
+       "branch-misses": 6867492,
+       "cache-references": 32291779273,
+       "cache-misses": 13734395
+      },
+      "wallSeconds": 3.9687512759119272,
+      "stdout": "zlib: 3882",
+      "scores": {
+       "zlib": 3882
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89626152911,
+       "cycles": 15401739378,
+       "branch-instructions": 12962470785,
+       "branch-misses": 6877635,
+       "cache-references": 32283270234,
+       "cache-misses": 14784541
+      },
+      "wallSeconds": 3.9628286859951913,
+      "stdout": "zlib: 3888",
+      "scores": {
+       "zlib": 3888
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89626446069,
+       "cycles": 15451542510,
+       "branch-instructions": 12962526123,
+       "branch-misses": 6882015,
+       "cache-references": 32276080259,
+       "cache-misses": 14616394
+      },
+      "wallSeconds": 3.976244207005948,
+      "stdout": "zlib: 3875",
+      "scores": {
+       "zlib": 3875
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89625720258,
+       "cycles": 15460663835,
+       "branch-instructions": 12962428791,
+       "branch-misses": 6875910,
+       "cache-references": 32274740794,
+       "cache-misses": 13672657
+      },
+      "wallSeconds": 3.9768666201271117,
+      "stdout": "zlib: 3872",
+      "scores": {
+       "zlib": 3872
+      }
+     },
+     {
+      "counters": {
+       "instructions": 89625188346,
+       "cycles": 15433350442,
+       "branch-instructions": 12962366098,
+       "branch-misses": 6894383,
+       "cache-references": 32277265882,
+       "cache-misses": 13357868
+      },
+      "wallSeconds": 3.9709349181503057,
+      "stdout": "zlib: 3879",
+      "scores": {
+       "zlib": 3879
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 83841726585,
+       "cycles": 16870609078,
+       "branch-instructions": 15529597450,
+       "branch-misses": 8398462,
+       "cache-references": 35962479484,
+       "cache-misses": 13642599
+      },
+      "wallSeconds": 4.349548678845167,
+      "stdout": "zlib: 3547",
+      "scores": {
+       "zlib": 3547
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83841624105,
+       "cycles": 16690046535,
+       "branch-instructions": 15529551302,
+       "branch-misses": 8408341,
+       "cache-references": 35978466867,
+       "cache-misses": 13747101
+      },
+      "wallSeconds": 4.29423371469602,
+      "stdout": "zlib: 3586",
+      "scores": {
+       "zlib": 3586
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83842187574,
+       "cycles": 16851382125,
+       "branch-instructions": 15529589190,
+       "branch-misses": 8417985,
+       "cache-references": 35960781431,
+       "cache-misses": 13671274
+      },
+      "wallSeconds": 4.337985075078905,
+      "stdout": "zlib: 3550",
+      "scores": {
+       "zlib": 3550
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83840958267,
+       "cycles": 16689327590,
+       "branch-instructions": 15529407666,
+       "branch-misses": 8394223,
+       "cache-references": 35965008884,
+       "cache-misses": 15433476
+      },
+      "wallSeconds": 4.295379138085991,
+      "stdout": "zlib: 3585",
+      "scores": {
+       "zlib": 3585
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83840037239,
+       "cycles": 16532722365,
+       "branch-instructions": 15529334736,
+       "branch-misses": 8422072,
+       "cache-references": 35986855005,
+       "cache-misses": 13644092
+      },
+      "wallSeconds": 4.254188049118966,
+      "stdout": "zlib: 3619",
+      "scores": {
+       "zlib": 3619
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83841127529,
+       "cycles": 16705913415,
+       "branch-instructions": 15529467695,
+       "branch-misses": 8398930,
+       "cache-references": 35973114356,
+       "cache-misses": 15165301
+      },
+      "wallSeconds": 4.298165679909289,
+      "stdout": "zlib: 3582",
+      "scores": {
+       "zlib": 3582
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83841498557,
+       "cycles": 17038562486,
+       "branch-instructions": 15529527425,
+       "branch-misses": 8379643,
+       "cache-references": 35955263991,
+       "cache-misses": 15199320
+      },
+      "wallSeconds": 4.382882204838097,
+      "stdout": "zlib: 3513",
+      "scores": {
+       "zlib": 3513
+      }
+     },
+     {
+      "counters": {
+       "instructions": 83842705011,
+       "cycles": 16969589830,
+       "branch-instructions": 15529736613,
+       "branch-misses": 8413402,
+       "cache-references": 35960800747,
+       "cache-misses": 15280168
+      },
+      "wallSeconds": 4.364341903012246,
+      "stdout": "zlib: 3528",
+      "scores": {
+       "zlib": 3528
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 89626192341.0,
+     "zjsMedian": 83841561331.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9354282246599992,
+      0.935458542084197,
+      0.9354660839965417,
+      0.93545107720042,
+      0.9354416597826564,
+      0.9354507648831004,
+      0.9354624801413107,
+      0.9354814930745071
+     ],
+     "ratioMedian": 0.9354548096423085,
+     "ratioMAD": 9.472426617695984e-06
+    },
+    "cycles": {
+     "qjsMedian": 15442129619.5,
+     "zjsMedian": 16778647770.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0904140850307644,
+      1.0801983724245783,
+      1.0978191810236821,
+      1.0820356307876053,
+      1.0734321597868035,
+      1.0811809503283047,
+      1.1020589198393886,
+      1.0995402387688489
+     ],
+     "ratioMedian": 1.0862248579091849,
+     "ratioMAD": 0.008810404299551933
+    },
+    "branch-instructions": {
+     "qjsMedian": 12962481407.0,
+     "zjsMedian": 15529539363.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1979969869101061,
+      1.1980370867605241,
+      1.1980455857782866,
+      1.198026400421866,
+      1.1980227376072732,
+      1.1980278803408049,
+      1.1980414839989226,
+      1.1980634164773456
+     ],
+     "ratioMedian": 1.1980324835506644,
+     "ratioMAD": 9.373195824724512e-06
+    },
+    "branch-misses": {
+     "qjsMedian": 6887200.5,
+     "zjsMedian": 8403635.5,
+     "pairedRatiosZjsOverQjs": [
+      1.2132275262975498,
+      1.2190052433366625,
+      1.2213455543551972,
+      1.2223127453224554,
+      1.2245593143573337,
+      1.2204172760448793,
+      1.2186958526216893,
+      1.2203270401426785
+     ],
+     "ratioMedian": 1.2203721580937787,
+     "ratioMAD": 0.0015216101146028338
+    },
+    "cache-references": {
+     "qjsMedian": 32280268058.0,
+     "zjsMedian": 35963744184.0,
+     "pairedRatiosZjsOverQjs": [
+      1.1142371141455085,
+      1.1143253903872774,
+      1.1136870536850212,
+      1.1137512299940462,
+      1.1147214871404034,
+      1.114544085506452,
+      1.1140372658758648,
+      1.114121650776319
+     ],
+     "ratioMedian": 1.1141793824609136,
+     "ratioMAD": 0.0002553554859510143
+    },
+    "cache-misses": {
+     "qjsMedian": 13703526.0,
+     "zjsMedian": 14456201.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0292445931384342,
+      0.9938328163830911,
+      1.0253365783049397,
+      1.1237099267932806,
+      0.9228620624745807,
+      1.0375542011251202,
+      1.1116581071257767,
+      1.1439076954496032
+     ],
+     "ratioMedian": 1.0333993971317772,
+     "ratioMAD": 0.05891264537134283
+    },
+    "wallSeconds": {
+     "qjsMedian": 3.973589562578127,
+     "zjsMedian": 4.318075377494097,
+     "pairedRatiosZjsOverQjs": [
+      1.0929438006492733,
+      1.0798137664299599,
+      1.0978529253350846,
+      1.0822999073175763,
+      1.0735230781369507,
+      1.0809611925585785,
+      1.1020943429825183,
+      1.0990716274557308
+     ],
+     "ratioMedian": 1.0876218539834248,
+     "ratioMAD": 0.009019579452562376
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.804004664474641,
+    "zjsIPC": 4.996920042681127,
+    "ipcRatioZjsOverQjs": 0.8609434918731982
+   }
+  },
+  "box2d": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/box2d.js",
+    "sha256": "5861c95848d670f97d4c4e32e71c43f8abf8a5b9bca29f9b6854166b25fa6211",
+    "fixedWorkSha256": "2f98346e24c510ceb3269a00fec08bdf142d4c1099bcc8b6387cb505b798cfe8"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 5418968094,
+       "cycles": 1193134513,
+       "branch-instructions": 866659699,
+       "branch-misses": 1669673,
+       "cache-references": 1946065207,
+       "cache-misses": 11096616
+      },
+      "wallSeconds": 0.31663629692047834,
+      "stdout": "Box2D: 7366",
+      "scores": {
+       "Box2D": 7366
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5419269267,
+       "cycles": 1194814673,
+       "branch-instructions": 866798944,
+       "branch-misses": 1619074,
+       "cache-references": 1945165248,
+       "cache-misses": 10947281
+      },
+      "wallSeconds": 0.3170792111195624,
+      "stdout": "Box2D: 7392",
+      "scores": {
+       "Box2D": 7392
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418632212,
+       "cycles": 1195621226,
+       "branch-instructions": 866611648,
+       "branch-misses": 1617730,
+       "cache-references": 1945063948,
+       "cache-misses": 10559359
+      },
+      "wallSeconds": 0.31669212272390723,
+      "stdout": "Box2D: 7366",
+      "scores": {
+       "Box2D": 7366
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418743519,
+       "cycles": 1195938767,
+       "branch-instructions": 866627191,
+       "branch-misses": 1622522,
+       "cache-references": 1946270042,
+       "cache-misses": 12386819
+      },
+      "wallSeconds": 0.3155957031995058,
+      "stdout": "Box2D: 7342",
+      "scores": {
+       "Box2D": 7342
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418563346,
+       "cycles": 1197274810,
+       "branch-instructions": 866602154,
+       "branch-misses": 1667590,
+       "cache-references": 1946735296,
+       "cache-misses": 12638569
+      },
+      "wallSeconds": 0.3174995523877442,
+      "stdout": "Box2D: 7342",
+      "scores": {
+       "Box2D": 7342
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418774674,
+       "cycles": 1194996532,
+       "branch-instructions": 866683469,
+       "branch-misses": 1675939,
+       "cache-references": 1946990104,
+       "cache-misses": 11088269
+      },
+      "wallSeconds": 0.3165682200342417,
+      "stdout": "Box2D: 7366",
+      "scores": {
+       "Box2D": 7366
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418733712,
+       "cycles": 1198134494,
+       "branch-instructions": 866635478,
+       "branch-misses": 1624704,
+       "cache-references": 1945705969,
+       "cache-misses": 12502135
+      },
+      "wallSeconds": 0.3174119838513434,
+      "stdout": "Box2D: 7342",
+      "scores": {
+       "Box2D": 7342
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5418511128,
+       "cycles": 1191161278,
+       "branch-instructions": 866575467,
+       "branch-misses": 1671476,
+       "cache-references": 1945285576,
+       "cache-misses": 11213612
+      },
+      "wallSeconds": 0.3156639449298382,
+      "stdout": "Box2D: 7392",
+      "scores": {
+       "Box2D": 7392
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 5499271302,
+       "cycles": 1269473091,
+       "branch-instructions": 1131754374,
+       "branch-misses": 2023922,
+       "cache-references": 2294907989,
+       "cache-misses": 12760870
+      },
+      "wallSeconds": 0.3363155201077461,
+      "stdout": "Box2D: 6855",
+      "scores": {
+       "Box2D": 6855
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5499386043,
+       "cycles": 1274695777,
+       "branch-instructions": 1131794893,
+       "branch-misses": 2034758,
+       "cache-references": 2296230323,
+       "cache-misses": 12955070
+      },
+      "wallSeconds": 0.33789143105968833,
+      "stdout": "Box2D: 6834",
+      "scores": {
+       "Box2D": 6834
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5500076030,
+       "cycles": 1272496446,
+       "branch-instructions": 1132009262,
+       "branch-misses": 2046068,
+       "cache-references": 2295247654,
+       "cache-misses": 12605329
+      },
+      "wallSeconds": 0.33698512287810445,
+      "stdout": "Box2D: 6834",
+      "scores": {
+       "Box2D": 6834
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5499249350,
+       "cycles": 1269276759,
+       "branch-instructions": 1131756823,
+       "branch-misses": 2045820,
+       "cache-references": 2294608548,
+       "cache-misses": 12711095
+      },
+      "wallSeconds": 0.3365803062915802,
+      "stdout": "Box2D: 6855",
+      "scores": {
+       "Box2D": 6855
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5499285441,
+       "cycles": 1270037265,
+       "branch-instructions": 1131762891,
+       "branch-misses": 2021858,
+       "cache-references": 2294511533,
+       "cache-misses": 12629645
+      },
+      "wallSeconds": 0.3367063240148127,
+      "stdout": "Box2D: 6855",
+      "scores": {
+       "Box2D": 6855
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5499744831,
+       "cycles": 1273519638,
+       "branch-instructions": 1131955524,
+       "branch-misses": 2040027,
+       "cache-references": 2295472361,
+       "cache-misses": 12751026
+      },
+      "wallSeconds": 0.3375920560210943,
+      "stdout": "Box2D: 6834",
+      "scores": {
+       "Box2D": 6834
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5499399521,
+       "cycles": 1269432311,
+       "branch-instructions": 1131787962,
+       "branch-misses": 2032220,
+       "cache-references": 2294294796,
+       "cache-misses": 12636702
+      },
+      "wallSeconds": 0.3359478246420622,
+      "stdout": "Box2D: 6855",
+      "scores": {
+       "Box2D": 6855
+      }
+     },
+     {
+      "counters": {
+       "instructions": 5499426456,
+       "cycles": 1275475088,
+       "branch-instructions": 1131797123,
+       "branch-misses": 2039445,
+       "cache-references": 2295344240,
+       "cache-misses": 15983994
+      },
+      "wallSeconds": 0.3370413673110306,
+      "stdout": "Box2D: 6834",
+      "scores": {
+       "Box2D": 6834
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 5418738615.5,
+     "zjsMedian": 5499392782.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0148189113881134,
+      1.014783686148954,
+      1.0150303277309791,
+      1.0148569185306,
+      1.0148973242251729,
+      1.0149425214871004,
+      1.014886468552858,
+      1.0149331294314174
+     ],
+     "ratioMedian": 1.0148918963890154,
+     "ratioMAD": 4.592907024347781e-05
+    },
+    "cycles": {
+     "qjsMedian": 1195308879.0,
+     "zjsMedian": 1271266855.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0639815353325548,
+      1.0668564805949616,
+      1.0642973027981355,
+      1.0613225309051295,
+      1.0607733950403584,
+      1.0657099028300778,
+      1.0595073569428508,
+      1.0707828667345245
+     ],
+     "ratioMedian": 1.064139419065345,
+     "ratioMAD": 0.002766974844916059
+    },
+    "branch-instructions": {
+     "qjsMedian": 866631334.5,
+     "zjsMedian": 1131791427.5,
+     "pairedRatiosZjsOverQjs": [
+      1.3058809303188794,
+      1.305717895521571,
+      1.3062474576847598,
+      1.305932741037201,
+      1.3059774727954345,
+      1.306077206371638,
+      1.305956184267822,
+      1.3060571942085686
+     ],
+     "ratioMedian": 1.3059668285316284,
+     "ratioMAD": 8.813194484458275e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 1646147.0,
+     "zjsMedian": 2037101.5,
+     "pairedRatiosZjsOverQjs": [
+      1.2121666937178717,
+      1.256741816618635,
+      1.2647771877878262,
+      1.2608889124461795,
+      1.2124431065189885,
+      1.217244183708357,
+      1.250824765618845,
+      1.2201461462802936
+     ],
+     "ratioMedian": 1.2354854559495694,
+     "ratioMAD": 0.022149355049823294
+    },
+    "cache-references": {
+     "qjsMedian": 1945885588.0,
+     "zjsMedian": 2295077821.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1792554436229639,
+      1.180480848792133,
+      1.1800371172166726,
+      1.1789774792207381,
+      1.1786458784173603,
+      1.1789851197928842,
+      1.1791580190192652,
+      1.1799523259303701
+     ],
+     "ratioMedian": 1.1792067313211145,
+     "ratioMAD": 0.0003950525020652851
+    },
+    "cache-misses": {
+     "qjsMedian": 11155114.0,
+     "zjsMedian": 12731060.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1499785159727975,
+      1.183405267481487,
+      1.1937589204041648,
+      1.026179118303093,
+      0.9992939074035992,
+      1.1499564088858234,
+      1.0107635215905124,
+      1.4254099392773711
+     ],
+     "ratioMedian": 1.1499674624293106,
+     "ratioMAD": 0.08378990105053585
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.3166642098221928,
+     "zjsMedian": 0.3368457234464586,
+     "pairedRatiosZjsOverQjs": [
+      1.0621508758745057,
+      1.065637289391004,
+      1.0640780073077116,
+      1.066492043077053,
+      1.0604938541885325,
+      1.0664117073551431,
+      1.0583967894526625,
+      1.067722090927882
+     ],
+     "ratioMedian": 1.0648576483493577,
+     "ratioMAD": 0.0021705836012736457
+    }
+   },
+   "derived": {
+    "qjsIPC": 4.533337542036279,
+    "zjsIPC": 4.3259153325735396,
+    "ipcRatioZjsOverQjs": 0.954245143332175
+   }
+  },
+  "mandreel": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/mandreel.js",
+    "sha256": "e44d4c50d11448f4d8a0ec624e8915a93b8449f094fd9da9ce7b319ba7aa465a",
+    "fixedWorkSha256": "7d5661e916105081a578bb9768115b75f79e2503d59fdae06241f618f6d68259"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 37552038803,
+       "cycles": 6400558011,
+       "branch-instructions": 5695134853,
+       "branch-misses": 4957904,
+       "cache-references": 13615518144,
+       "cache-misses": 6441160
+      },
+      "wallSeconds": 1.655543252825737,
+      "stdout": "Mandreel: 2006\nMandreelLatency: 11984",
+      "scores": {
+       "Mandreel": 2006,
+       "MandreelLatency": 11984
+      }
+     },
+     {
+      "counters": {
+       "instructions": 37551576030,
+       "cycles": 6425180512,
+       "branch-instructions": 5695057712,
+       "branch-misses": 4847707,
+       "cache-references": 13617357148,
+       "cache-misses": 6486205
+      },
+      "wallSeconds": 1.6618857341818511,
+      "stdout": "Mandreel: 1990\nMandreelLatency: 11898",
+      "scores": {
+       "Mandreel": 1990,
+       "MandreelLatency": 11898
+      }
+     },
+     {
+      "counters": {
+       "instructions": 37551365617,
+       "cycles": 6404335008,
+       "branch-instructions": 5695031881,
+       "branch-misses": 4822533,
+       "cache-references": 13614891338,
+       "cache-misses": 6354799
+      },
+      "wallSeconds": 1.6563844210468233,
+      "stdout": "Mandreel: 2004\nMandreelLatency: 11785",
+      "scores": {
+       "Mandreel": 2004,
+       "MandreelLatency": 11785
+      }
+     },
+     {
+      "counters": {
+       "instructions": 37551320280,
+       "cycles": 6391588363,
+       "branch-instructions": 5695021947,
+       "branch-misses": 4819512,
+       "cache-references": 13616012208,
+       "cache-misses": 6933038
+      },
+      "wallSeconds": 1.6529426188208163,
+      "stdout": "Mandreel: 2009\nMandreelLatency: 11955",
+      "scores": {
+       "Mandreel": 2009,
+       "MandreelLatency": 11955
+      }
+     },
+     {
+      "counters": {
+       "instructions": 37551156303,
+       "cycles": 6404164882,
+       "branch-instructions": 5694982293,
+       "branch-misses": 4848988,
+       "cache-references": 13614168513,
+       "cache-misses": 6731589
+      },
+      "wallSeconds": 1.65635155281052,
+      "stdout": "Mandreel: 2006\nMandreelLatency: 11926",
+      "scores": {
+       "Mandreel": 2006,
+       "MandreelLatency": 11926
+      }
+     },
+     {
+      "counters": {
+       "instructions": 37551409480,
+       "cycles": 6404720820,
+       "branch-instructions": 5695037693,
+       "branch-misses": 4820705,
+       "cache-references": 13613983810,
+       "cache-misses": 7124008
+      },
+      "wallSeconds": 1.6553902751766145,
+      "stdout": "Mandreel: 2006\nMandreelLatency: 11841",
+      "scores": {
+       "Mandreel": 2006,
+       "MandreelLatency": 11841
+      }
+     },
+     {
+      "counters": {
+       "instructions": 37551294137,
+       "cycles": 6401894785,
+       "branch-instructions": 5695004520,
+       "branch-misses": 4831598,
+       "cache-references": 13615503814,
+       "cache-misses": 6498505
+      },
+      "wallSeconds": 1.656406382098794,
+      "stdout": "Mandreel: 2004\nMandreelLatency: 11870",
+      "scores": {
+       "Mandreel": 2004,
+       "MandreelLatency": 11870
+      }
+     },
+     {
+      "counters": {
+       "instructions": 37550727123,
+       "cycles": 6394113769,
+       "branch-instructions": 5694896858,
+       "branch-misses": 4901285,
+       "cache-references": 13614874946,
+       "cache-misses": 6477582
+      },
+      "wallSeconds": 1.6542130168527365,
+      "stdout": "Mandreel: 2001\nMandreelLatency: 11955",
+      "scores": {
+       "Mandreel": 2001,
+       "MandreelLatency": 11955
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 36979374497,
+       "cycles": 6781255707,
+       "branch-instructions": 7323502564,
+       "branch-misses": 5426261,
+       "cache-references": 15590429671,
+       "cache-misses": 7959312
+      },
+      "wallSeconds": 1.7547461912035942,
+      "stdout": "Mandreel: 1854\nMandreelLatency: 11955",
+      "scores": {
+       "Mandreel": 1854,
+       "MandreelLatency": 11955
+      }
+     },
+     {
+      "counters": {
+       "instructions": 36980459691,
+       "cycles": 6873666418,
+       "branch-instructions": 7323698565,
+       "branch-misses": 5474955,
+       "cache-references": 15584345469,
+       "cache-misses": 7922238
+      },
+      "wallSeconds": 1.7788303848356009,
+      "stdout": "Mandreel: 1840\nMandreelLatency: 11841",
+      "scores": {
+       "Mandreel": 1840,
+       "MandreelLatency": 11841
+      }
+     },
+     {
+      "counters": {
+       "instructions": 36979976225,
+       "cycles": 6845779747,
+       "branch-instructions": 7323616521,
+       "branch-misses": 5493030,
+       "cache-references": 15564119605,
+       "cache-misses": 7811396
+      },
+      "wallSeconds": 1.7707599238492548,
+      "stdout": "Mandreel: 1854\nMandreelLatency: 11813",
+      "scores": {
+       "Mandreel": 1854,
+       "MandreelLatency": 11813
+      }
+     },
+     {
+      "counters": {
+       "instructions": 36979736560,
+       "cycles": 6778288815,
+       "branch-instructions": 7323577708,
+       "branch-misses": 5477987,
+       "cache-references": 15586844749,
+       "cache-misses": 7882365
+      },
+      "wallSeconds": 1.7549688699655235,
+      "stdout": "Mandreel: 1860\nMandreelLatency: 11955",
+      "scores": {
+       "Mandreel": 1860,
+       "MandreelLatency": 11955
+      }
+     },
+     {
+      "counters": {
+       "instructions": 36980509335,
+       "cycles": 6813173302,
+       "branch-instructions": 7323688930,
+       "branch-misses": 5502327,
+       "cache-references": 15588196829,
+       "cache-misses": 7991931
+      },
+      "wallSeconds": 1.76151063432917,
+      "stdout": "Mandreel: 1854\nMandreelLatency: 11841",
+      "scores": {
+       "Mandreel": 1854,
+       "MandreelLatency": 11841
+      }
+     },
+     {
+      "counters": {
+       "instructions": 36980941718,
+       "cycles": 6992219875,
+       "branch-instructions": 7323765414,
+       "branch-misses": 5603974,
+       "cache-references": 15594933445,
+       "cache-misses": 8209402
+      },
+      "wallSeconds": 1.808557506185025,
+      "stdout": "Mandreel: 1808\nMandreelLatency: 11304",
+      "scores": {
+       "Mandreel": 1808,
+       "MandreelLatency": 11304
+      }
+     },
+     {
+      "counters": {
+       "instructions": 36979912462,
+       "cycles": 6803542387,
+       "branch-instructions": 7323571200,
+       "branch-misses": 5473465,
+       "cache-references": 15589050531,
+       "cache-misses": 7905413
+      },
+      "wallSeconds": 1.761956073809415,
+      "stdout": "Mandreel: 1856\nMandreelLatency: 11841",
+      "scores": {
+       "Mandreel": 1856,
+       "MandreelLatency": 11841
+      }
+     },
+     {
+      "counters": {
+       "instructions": 36979330283,
+       "cycles": 6834326565,
+       "branch-instructions": 7323473527,
+       "branch-misses": 5618072,
+       "cache-references": 15589085435,
+       "cache-misses": 8476361
+      },
+      "wallSeconds": 1.7685541431419551,
+      "stdout": "Mandreel: 1856\nMandreelLatency: 11898",
+      "scores": {
+       "Mandreel": 1856,
+       "MandreelLatency": 11898
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 37551342948.5,
+     "zjsMedian": 36979944343.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9847501141281775,
+      0.9847911486180039,
+      0.9847837919444047,
+      0.9847785985755492,
+      0.984803478130062,
+      0.984808352871446,
+      0.9847839684854695,
+      0.984783334870498
+     ],
+     "ratioMedian": 0.9847838802149371,
+     "ratioMAD": 6.275021227353239e-06
+    },
+    "cycles": {
+     "qjsMedian": 6403029833.5,
+     "zjsMedian": 6823749933.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0594788290873598,
+      1.0698012927671658,
+      1.0689290517202126,
+      1.0605014638049213,
+      1.0638660040046108,
+      1.0917290654052272,
+      1.062738863334818,
+      1.0688465691890319
+     ],
+     "ratioMedian": 1.0663562865968212,
+     "ratioMAD": 0.0035312147161739027
+    },
+    "branch-instructions": {
+     "qjsMedian": 5695026914.0,
+     "zjsMedian": 7323597114.5,
+     "pairedRatiosZjsOverQjs": [
+      1.285922590602439,
+      1.2859744247311677,
+      1.2859658512945908,
+      1.2859612791936446,
+      1.2859897631291897,
+      1.285990683257801,
+      1.28596407154388,
+      1.2859712317198915
+     ],
+     "ratioMedian": 1.2859685415072413,
+     "ratioMAD": 6.572768761592407e-06
+    },
+    "branch-misses": {
+     "qjsMedian": 4839652.5,
+     "zjsMedian": 5485508.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0944667343296683,
+      1.1293906583050501,
+      1.1390341963445352,
+      1.136626903304733,
+      1.1347371863984814,
+      1.1624801766546595,
+      1.1328477658944307,
+      1.1462447092956234
+     ],
+     "ratioMedian": 1.1356820448516072,
+     "ratioMAD": 0.004821769019742517
+    },
+    "cache-references": {
+     "qjsMedian": 13615197576.0,
+     "zjsMedian": 15588623680.0,
+     "pairedRatiosZjsOverQjs": [
+      1.145048576639758,
+      1.1444471419543325,
+      1.1431688449513793,
+      1.1447437407438612,
+      1.1449980815291823,
+      1.145508446509604,
+      1.14494848989508,
+      1.1450039384739275
+     ],
+     "ratioMedian": 1.144973285712131,
+     "ratioMAD": 0.00015241794794840224
+    },
+    "cache-misses": {
+     "qjsMedian": 6492355.0,
+     "zjsMedian": 7940775.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2356954337417483,
+      1.2213980285852821,
+      1.2292121277163919,
+      1.1369279960675247,
+      1.1872280081270559,
+      1.1523572124006598,
+      1.2164971789665469,
+      1.3085686912184207
+     ],
+     "ratioMedian": 1.2189476037759146,
+     "ratioMAD": 0.024233712807346208
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.6559474028181285,
+     "zjsMedian": 1.7652551084756851,
+     "pairedRatiosZjsOverQjs": [
+      1.059921683235116,
+      1.0703686470425848,
+      1.069051303157118,
+      1.061724012668686,
+      1.0634883828497728,
+      1.0925263566575374,
+      1.0637220991486893,
+      1.0691211622229653
+     ],
+     "ratioMedian": 1.0663867011529038,
+     "ratioMAD": 0.0034401320964060345
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.864620956790674,
+    "zjsIPC": 5.419299462008927,
+    "ipcRatioZjsOverQjs": 0.9240664489550502
+   }
+  },
+  "splay": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/splay.js",
+    "sha256": "339edcfb34d7eecbe2d8c84d9263df7dd003955e33e726bbe3ac18f5fe0ceb74",
+    "fixedWorkSha256": "aa33f72468def72fa400e7765518f573059641dcd9ccf48852ad4fb309ce9dfa"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 3883773004,
+       "cycles": 1451289767,
+       "branch-instructions": 660265689,
+       "branch-misses": 1691014,
+       "cache-references": 1508090269,
+       "cache-misses": 23562244
+      },
+      "wallSeconds": 0.4067124519497156,
+      "stdout": "Splay: 7100\nSplayLatency: 9764",
+      "scores": {
+       "Splay": 7100,
+       "SplayLatency": 9764
+      }
+     },
+     {
+      "counters": {
+       "instructions": 3878830341,
+       "cycles": 1443699681,
+       "branch-instructions": 659400260,
+       "branch-misses": 1839271,
+       "cache-references": 1507310580,
+       "cache-misses": 23394695
+      },
+      "wallSeconds": 0.40403985138982534,
+      "stdout": "Splay: 7100\nSplayLatency: 9853",
+      "scores": {
+       "Splay": 7100,
+       "SplayLatency": 9853
+      }
+     },
+     {
+      "counters": {
+       "instructions": 3875281945,
+       "cycles": 1444637920,
+       "branch-instructions": 657904015,
+       "branch-misses": 1614873,
+       "cache-references": 1503866479,
+       "cache-misses": 23689953
+      },
+      "wallSeconds": 0.4042758517898619,
+      "stdout": "Splay: 7100\nSplayLatency: 9856",
+      "scores": {
+       "Splay": 7100,
+       "SplayLatency": 9856
+      }
+     },
+     {
+      "counters": {
+       "instructions": 3876841913,
+       "cycles": 1435801869,
+       "branch-instructions": 658306167,
+       "branch-misses": 1601710,
+       "cache-references": 1505342884,
+       "cache-misses": 23886258
+      },
+      "wallSeconds": 0.4027082142420113,
+      "stdout": "Splay: 7171\nSplayLatency: 9924",
+      "scores": {
+       "Splay": 7171,
+       "SplayLatency": 9924
+      }
+     },
+     {
+      "counters": {
+       "instructions": 3875350737,
+       "cycles": 1439925039,
+       "branch-instructions": 658079704,
+       "branch-misses": 1708350,
+       "cache-references": 1505364557,
+       "cache-misses": 23598686
+      },
+      "wallSeconds": 0.40332468086853623,
+      "stdout": "Splay: 7100\nSplayLatency: 9923",
+      "scores": {
+       "Splay": 7100,
+       "SplayLatency": 9923
+      }
+     },
+     {
+      "counters": {
+       "instructions": 3877813465,
+       "cycles": 1446934040,
+       "branch-instructions": 658670760,
+       "branch-misses": 1612249,
+       "cache-references": 1505694557,
+       "cache-misses": 24929427
+      },
+      "wallSeconds": 0.4004795169457793,
+      "stdout": "Splay: 7100\nSplayLatency: 9764",
+      "scores": {
+       "Splay": 7100,
+       "SplayLatency": 9764
+      }
+     },
+     {
+      "counters": {
+       "instructions": 3878459953,
+       "cycles": 1443125452,
+       "branch-instructions": 658913296,
+       "branch-misses": 1711039,
+       "cache-references": 1508065482,
+       "cache-misses": 23782291
+      },
+      "wallSeconds": 0.4044385440647602,
+      "stdout": "Splay: 7100\nSplayLatency: 9836",
+      "scores": {
+       "Splay": 7100,
+       "SplayLatency": 9836
+      }
+     },
+     {
+      "counters": {
+       "instructions": 3875968662,
+       "cycles": 1438701989,
+       "branch-instructions": 658247448,
+       "branch-misses": 1745906,
+       "cache-references": 1506949973,
+       "cache-misses": 23706247
+      },
+      "wallSeconds": 0.4015951408073306,
+      "stdout": "Splay: 7100\nSplayLatency: 9877",
+      "scores": {
+       "Splay": 7100,
+       "SplayLatency": 9877
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 4186096643,
+       "cycles": 1688838674,
+       "branch-instructions": 824264440,
+       "branch-misses": 2162727,
+       "cache-references": 1723307741,
+       "cache-misses": 27509876
+      },
+      "wallSeconds": 0.47036784095689654,
+      "stdout": "Splay: 6830\nSplayLatency: 10144",
+      "scores": {
+       "Splay": 6830,
+       "SplayLatency": 10144
+      }
+     },
+     {
+      "counters": {
+       "instructions": 4181958340,
+       "cycles": 1677909968,
+       "branch-instructions": 822997679,
+       "branch-misses": 2162392,
+       "cache-references": 1722763326,
+       "cache-misses": 27434799
+      },
+      "wallSeconds": 0.46345838718116283,
+      "stdout": "Splay: 6895\nSplayLatency: 10138",
+      "scores": {
+       "Splay": 6895,
+       "SplayLatency": 10138
+      }
+     },
+     {
+      "counters": {
+       "instructions": 4178453539,
+       "cycles": 1678842906,
+       "branch-instructions": 821424906,
+       "branch-misses": 2155390,
+       "cache-references": 1720484409,
+       "cache-misses": 27891102
+      },
+      "wallSeconds": 0.4693883187137544,
+      "stdout": "Splay: 6895\nSplayLatency: 10142",
+      "scores": {
+       "Splay": 6895,
+       "SplayLatency": 10142
+      }
+     },
+     {
+      "counters": {
+       "instructions": 4182644690,
+       "cycles": 1678644153,
+       "branch-instructions": 823132306,
+       "branch-misses": 2147664,
+       "cache-references": 1721952139,
+       "cache-misses": 27714547
+      },
+      "wallSeconds": 0.46766898315399885,
+      "stdout": "Splay: 6830\nSplayLatency: 10135",
+      "scores": {
+       "Splay": 6830,
+       "SplayLatency": 10135
+      }
+     },
+     {
+      "counters": {
+       "instructions": 4177503736,
+       "cycles": 1681125986,
+       "branch-instructions": 821039956,
+       "branch-misses": 2160498,
+       "cache-references": 1721048755,
+       "cache-misses": 27493815
+      },
+      "wallSeconds": 0.4652481419034302,
+      "stdout": "Splay: 6895\nSplayLatency: 10141",
+      "scores": {
+       "Splay": 6895,
+       "SplayLatency": 10141
+      }
+     },
+     {
+      "counters": {
+       "instructions": 4177064569,
+       "cycles": 1672436243,
+       "branch-instructions": 820845020,
+       "branch-misses": 2127916,
+       "cache-references": 1718449770,
+       "cache-misses": 27611081
+      },
+      "wallSeconds": 0.46740602469071746,
+      "stdout": "Splay: 6895\nSplayLatency: 10155",
+      "scores": {
+       "Splay": 6895,
+       "SplayLatency": 10155
+      }
+     },
+     {
+      "counters": {
+       "instructions": 4183079466,
+       "cycles": 1683212860,
+       "branch-instructions": 823206192,
+       "branch-misses": 2148727,
+       "cache-references": 1721985992,
+       "cache-misses": 27863534
+      },
+      "wallSeconds": 0.47861033165827394,
+      "stdout": "Splay: 6895\nSplayLatency: 10117",
+      "scores": {
+       "Splay": 6895,
+       "SplayLatency": 10117
+      }
+     },
+     {
+      "counters": {
+       "instructions": 4176410875,
+       "cycles": 1673338274,
+       "branch-instructions": 820716135,
+       "branch-misses": 2163887,
+       "cache-references": 1721690276,
+       "cache-misses": 27443668
+      },
+      "wallSeconds": 0.46680815098807216,
+      "stdout": "Splay: 6895\nSplayLatency: 10146",
+      "scores": {
+       "Splay": 6895,
+       "SplayLatency": 10146
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 3877327689.0,
+     "zjsMedian": 4180205939.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0778427675069138,
+      1.078149331718863,
+      1.0782321385392772,
+      1.0788793517668513,
+      1.0779679103920032,
+      1.0771700616084172,
+      1.0785413583462107,
+      1.0775140975585111
+     ],
+     "ratioMedian": 1.0780586210554333,
+     "ratioMAD": 0.00034929541964845434
+    },
+    "cycles": {
+     "qjsMedian": 1443412566.5,
+     "zjsMedian": 1678743529.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1636812388549005,
+      1.1622292295844872,
+      1.1621201982570137,
+      1.1691335617003573,
+      1.1675093775489238,
+      1.155848294922967,
+      1.166366276519666,
+      1.1630888723265678
+     ],
+     "ratioMedian": 1.1633850555907341,
+     "ratioMAD": 0.0021230391313261654
+    },
+    "branch-instructions": {
+     "qjsMedian": 658488463.5,
+     "zjsMedian": 822211292.5,
+     "pairedRatiosZjsOverQjs": [
+      1.248382967239117,
+      1.248100325286496,
+      1.2485482490937527,
+      1.2503791507090651,
+      1.2476299618564137,
+      1.2462144516632254,
+      1.2493391725396295,
+      1.2468200788223944
+     ],
+     "ratioMedian": 1.2482416462628065,
+     "ratioMAD": 0.0008546053416078614
+    },
+    "branch-misses": {
+     "qjsMedian": 1699682.0,
+     "zjsMedian": 2157944.0,
+     "pairedRatiosZjsOverQjs": [
+      1.2789527466951782,
+      1.1756788423239424,
+      1.334711769903887,
+      1.3408569591249353,
+      1.264669417859338,
+      1.3198432748291362,
+      1.2558024685585776,
+      1.2394063597925662
+     ],
+     "ratioMedian": 1.2718110822772581,
+     "ratioMAD": 0.04021845751828501
+    },
+    "cache-references": {
+     "qjsMedian": 1506322265.0,
+     "zjsMedian": 1721821207.5,
+     "pairedRatiosZjsOverQjs": [
+      1.1427086139496865,
+      1.1429385216681753,
+      1.1440406665251563,
+      1.1438936320105526,
+      1.1432770533868761,
+      1.1413003799548171,
+      1.1418509425176273,
+      1.1424999547745438
+     ],
+     "ratioMedian": 1.142823567808931,
+     "ratioMAD": 0.00071305543462441
+    },
+    "cache-misses": {
+     "qjsMedian": 23698100.0,
+     "zjsMedian": 27560478.5,
+     "pairedRatiosZjsOverQjs": [
+      1.167540578902417,
+      1.1726931682588724,
+      1.1773388490893164,
+      1.1602716088890943,
+      1.1650570290227176,
+      1.1075698209990947,
+      1.1716084880132027,
+      1.1576555327378475
+     ],
+     "ratioMedian": 1.1662988039625672,
+     "ratioMAD": 0.006210779684889034
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.4036822661291808,
+     "zjsMedian": 0.46753750392235816,
+     "pairedRatiosZjsOverQjs": [
+      1.1565120239177016,
+      1.1470610772351992,
+      1.1610595009215074,
+      1.161309768747227,
+      1.1535325358754278,
+      1.1671159320590154,
+      1.183394458025833,
+      1.162384958268278
+     ],
+     "ratioMedian": 1.1611846348343673,
+     "ratioMAD": 0.005301954070656922
+    }
+   },
+   "derived": {
+    "qjsIPC": 2.6862227605526394,
+    "zjsIPC": 2.4900801498517406,
+    "ipcRatioZjsOverQjs": 0.9269820010532015
+   }
+  },
+  "gbemu": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/gbemu.js",
+    "sha256": "2aa896e17ae5ae324bdf65d0bf5077f5322f2f32a0cd5314191a7544c3476f86",
+    "fixedWorkSha256": "4f8c72c6222bcbd2c4d63b281e546a87b4f93ac98e2ad8a2eb09faa31267d684"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 9403056768,
+       "cycles": 1799741309,
+       "branch-instructions": 1456908133,
+       "branch-misses": 1973158,
+       "cache-references": 3444547331,
+       "cache-misses": 3084641
+      },
+      "wallSeconds": 0.4732682928442955,
+      "stdout": "Gameboy: 11868",
+      "scores": {
+       "Gameboy": 11868
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9402406302,
+       "cycles": 1793083222,
+       "branch-instructions": 1456818491,
+       "branch-misses": 1973928,
+       "cache-references": 3444199500,
+       "cache-misses": 2784078
+      },
+      "wallSeconds": 0.47054442716762424,
+      "stdout": "Gameboy: 11922",
+      "scores": {
+       "Gameboy": 11922
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9402792693,
+       "cycles": 1802334467,
+       "branch-instructions": 1456867133,
+       "branch-misses": 1976298,
+       "cache-references": 3445440505,
+       "cache-misses": 3194569
+      },
+      "wallSeconds": 0.48590145632624626,
+      "stdout": "Gameboy: 11868",
+      "scores": {
+       "Gameboy": 11868
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9402655406,
+       "cycles": 1803993183,
+       "branch-instructions": 1456866430,
+       "branch-misses": 1973058,
+       "cache-references": 3444638907,
+       "cache-misses": 2866949
+      },
+      "wallSeconds": 0.4739524768665433,
+      "stdout": "Gameboy: 11842",
+      "scores": {
+       "Gameboy": 11842
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9402401614,
+       "cycles": 1790388079,
+       "branch-instructions": 1456816402,
+       "branch-misses": 1970183,
+       "cache-references": 3444906098,
+       "cache-misses": 2770388
+      },
+      "wallSeconds": 0.4711864967830479,
+      "stdout": "Gameboy: 11949",
+      "scores": {
+       "Gameboy": 11949
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9402338250,
+       "cycles": 1791700912,
+       "branch-instructions": 1456814833,
+       "branch-misses": 1987110,
+       "cache-references": 3444908360,
+       "cache-misses": 3031651
+      },
+      "wallSeconds": 0.4713548361323774,
+      "stdout": "Gameboy: 11922",
+      "scores": {
+       "Gameboy": 11922
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9402368682,
+       "cycles": 1796355494,
+       "branch-instructions": 1456822316,
+       "branch-misses": 1970007,
+       "cache-references": 3444553256,
+       "cache-misses": 2761239
+      },
+      "wallSeconds": 0.47259885678067803,
+      "stdout": "Gameboy: 11922",
+      "scores": {
+       "Gameboy": 11922
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9402369491,
+       "cycles": 1793206856,
+       "branch-instructions": 1456820781,
+       "branch-misses": 1972751,
+       "cache-references": 3445224173,
+       "cache-misses": 2733983
+      },
+      "wallSeconds": 0.4711110442876816,
+      "stdout": "Gameboy: 11922",
+      "scores": {
+       "Gameboy": 11922
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 9668571370,
+       "cycles": 1922512146,
+       "branch-instructions": 2040790466,
+       "branch-misses": 2168095,
+       "cache-references": 4023641725,
+       "cache-misses": 3466971
+      },
+      "wallSeconds": 0.5051000360399485,
+      "stdout": "Gameboy: 11505",
+      "scores": {
+       "Gameboy": 11505
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9668958424,
+       "cycles": 1913388710,
+       "branch-instructions": 2040832023,
+       "branch-misses": 2180163,
+       "cache-references": 4025271491,
+       "cache-misses": 3512862
+      },
+      "wallSeconds": 0.5032736291177571,
+      "stdout": "Gameboy: 11505",
+      "scores": {
+       "Gameboy": 11505
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9668613331,
+       "cycles": 1912051872,
+       "branch-instructions": 2040810933,
+       "branch-misses": 2185633,
+       "cache-references": 4024113987,
+       "cache-misses": 3493023
+      },
+      "wallSeconds": 0.5024705231189728,
+      "stdout": "Gameboy: 11555",
+      "scores": {
+       "Gameboy": 11555
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9668582900,
+       "cycles": 1916593333,
+       "branch-instructions": 2040787957,
+       "branch-misses": 2176063,
+       "cache-references": 4023580493,
+       "cache-misses": 3397336
+      },
+      "wallSeconds": 0.5037559368647635,
+      "stdout": "Gameboy: 11480",
+      "scores": {
+       "Gameboy": 11480
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9668496922,
+       "cycles": 1919359381,
+       "branch-instructions": 2040769353,
+       "branch-misses": 2174415,
+       "cache-references": 4023462603,
+       "cache-misses": 3499445
+      },
+      "wallSeconds": 0.5043014939874411,
+      "stdout": "Gameboy: 11480",
+      "scores": {
+       "Gameboy": 11480
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9668542793,
+       "cycles": 1924039350,
+       "branch-instructions": 2040784035,
+       "branch-misses": 2182605,
+       "cache-references": 4023813339,
+       "cache-misses": 3475575
+      },
+      "wallSeconds": 0.5044533987529576,
+      "stdout": "Gameboy: 11505",
+      "scores": {
+       "Gameboy": 11505
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9668550839,
+       "cycles": 1926222825,
+       "branch-instructions": 2040787319,
+       "branch-misses": 2182304,
+       "cache-references": 4024164432,
+       "cache-misses": 3432599
+      },
+      "wallSeconds": 0.5060513443313539,
+      "stdout": "Gameboy: 11430",
+      "scores": {
+       "Gameboy": 11430
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9668532895,
+       "cycles": 1925087559,
+       "branch-instructions": 2040783544,
+       "branch-misses": 2181298,
+       "cache-references": 4024211397,
+       "cache-misses": 3591661
+      },
+      "wallSeconds": 0.506032319739461,
+      "stdout": "Gameboy: 11480",
+      "scores": {
+       "Gameboy": 11480
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 9402403958.0,
+     "zjsMedian": 9668561104.5,
+     "pairedRatiosZjsOverQjs": [
+      1.028237051902482,
+      1.0283493515849556,
+      1.0282703922844,
+      1.0282821695061064,
+      1.028300780898764,
+      1.02831258947741,
+      1.0283101169505917,
+      1.0283081200174884
+     ],
+     "ratioMedian": 1.0283044504581262,
+     "ratioMAD": 1.5209985651853941e-05
+    },
+    "cycles": {
+     "qjsMedian": 1794781175.0,
+     "zjsMedian": 1920935763.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0682158243443418,
+      1.067094202055949,
+      1.0608751633000868,
+      1.0624171704533543,
+      1.0720353891498402,
+      1.0738619024602025,
+      1.072294894542739,
+      1.0735446123009915
+     ],
+     "ratioMedian": 1.070125606747091,
+     "ratioMAD": 0.003225205122521224
+    },
+    "branch-instructions": {
+     "qjsMedian": 1456821548.5,
+     "zjsMedian": 2040787638.0,
+     "pairedRatiosZjsOverQjs": [
+      1.4007681196738848,
+      1.400882838602026,
+      1.400821589541618,
+      1.4008064946626575,
+      1.4008418289348723,
+      1.4008534158026382,
+      1.4008484745095022,
+      1.4008473592744557
+     ],
+     "ratioMedian": 1.4008445941046639,
+     "ratioMAD": 1.5913130510081253e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 1973108.0,
+     "zjsMedian": 2180730.5,
+     "pairedRatiosZjsOverQjs": [
+      1.098794419909607,
+      1.1044794946928156,
+      1.1059227909960947,
+      1.1028885111334792,
+      1.1036614365264545,
+      1.0983815692135814,
+      1.1077645916994203,
+      1.1057137976358902
+     ],
+     "ratioMedian": 1.104070465609635,
+     "ratioMAD": 0.0017478287063574793
+    },
+    "cache-references": {
+     "qjsMedian": 3444772502.5,
+     "zjsMedian": 4023963663.0,
+     "pairedRatiosZjsOverQjs": [
+      1.1681191571351934,
+      1.1687103174482198,
+      1.1679534100676627,
+      1.168070326565582,
+      1.1679455081042387,
+      1.1680465540743732,
+      1.1682688966966577,
+      1.168055021945302
+     ],
+     "ratioMedian": 1.168062674255442,
+     "ratioMAD": 8.287353376534856e-05
+    },
+    "cache-misses": {
+     "qjsMedian": 2825513.5,
+     "zjsMedian": 3484299.0,
+     "pairedRatiosZjsOverQjs": [
+      1.1239463522659525,
+      1.26176852803693,
+      1.093425435481281,
+      1.1850005005320987,
+      1.2631606114378202,
+      1.1464297836393438,
+      1.2431372293379892,
+      1.313710070618581
+     ],
+     "ratioMedian": 1.214068864935044,
+     "ratioMAD": 0.05836541389923822
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.4719768464565277,
+     "zjsMedian": 0.5043774463701993,
+     "pairedRatiosZjsOverQjs": [
+      1.067259403760914,
+      1.0695560292726058,
+      1.0340996442323926,
+      1.0628828025021848,
+      1.0702800216697224,
+      1.070220055218198,
+      1.0707841059509806,
+      1.0741253593504272
+     ],
+     "ratioMedian": 1.069888042245402,
+     "ratioMAD": 0.0017623510950333099
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.238746700137414,
+    "zjsIPC": 5.033255816365044,
+    "ipcRatioZjsOverQjs": 0.960774800627986
+   }
+  },
+  "crypto": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/crypto.js",
+    "sha256": "f54860a994aa6a8664b97938d5f592b048e7fbcf37f7811f734c0473bcf9b090",
+    "fixedWorkSha256": "99ee2c512b6a45eae332a2db9b9fb8ef6d6189c94a5ce713fc198646a23e1bf8"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 35924866651,
+       "cycles": 5571383720,
+       "branch-instructions": 5290446945,
+       "branch-misses": 1840527,
+       "cache-references": 12616932786,
+       "cache-misses": 980295
+      },
+      "wallSeconds": 1.4396175742149353,
+      "stdout": "Crypto: 2180",
+      "scores": {
+       "Crypto": 2180
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35924242843,
+       "cycles": 5582570274,
+       "branch-instructions": 5290344153,
+       "branch-misses": 1850316,
+       "cache-references": 12615823725,
+       "cache-misses": 900338
+      },
+      "wallSeconds": 1.4424677127972245,
+      "stdout": "Crypto: 2176",
+      "scores": {
+       "Crypto": 2176
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35922703537,
+       "cycles": 5581826326,
+       "branch-instructions": 5290109506,
+       "branch-misses": 1847116,
+       "cache-references": 12615128617,
+       "cache-misses": 813215
+      },
+      "wallSeconds": 1.4425252540968359,
+      "stdout": "Crypto: 2176",
+      "scores": {
+       "Crypto": 2176
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35922157716,
+       "cycles": 5626973004,
+       "branch-instructions": 5290028167,
+       "branch-misses": 1855036,
+       "cache-references": 12616353447,
+       "cache-misses": 843087
+      },
+      "wallSeconds": 1.4540240080095828,
+      "stdout": "Crypto: 2159",
+      "scores": {
+       "Crypto": 2159
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35923015553,
+       "cycles": 5564644952,
+       "branch-instructions": 5290166912,
+       "branch-misses": 1844914,
+       "cache-references": 12614912146,
+       "cache-misses": 916085
+      },
+      "wallSeconds": 1.436967615969479,
+      "stdout": "Crypto: 2183",
+      "scores": {
+       "Crypto": 2183
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35922956844,
+       "cycles": 5588747468,
+       "branch-instructions": 5290161773,
+       "branch-misses": 1849577,
+       "cache-references": 12615692918,
+       "cache-misses": 855799
+      },
+      "wallSeconds": 1.443954317830503,
+      "stdout": "Crypto: 2173",
+      "scores": {
+       "Crypto": 2173
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35920740269,
+       "cycles": 5582430070,
+       "branch-instructions": 5289837803,
+       "branch-misses": 1849019,
+       "cache-references": 12615006378,
+       "cache-misses": 949710
+      },
+      "wallSeconds": 1.4426490040495992,
+      "stdout": "Crypto: 2176",
+      "scores": {
+       "Crypto": 2176
+      }
+     },
+     {
+      "counters": {
+       "instructions": 35922431915,
+       "cycles": 5599331260,
+       "branch-instructions": 5290096390,
+       "branch-misses": 1841286,
+       "cache-references": 12616013208,
+       "cache-misses": 810305
+      },
+      "wallSeconds": 1.4551744987256825,
+      "stdout": "Crypto: 2170",
+      "scores": {
+       "Crypto": 2170
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 28928767765,
+       "cycles": 5414133693,
+       "branch-instructions": 5380019678,
+       "branch-misses": 2243539,
+       "cache-references": 12799690242,
+       "cache-misses": 993246
+      },
+      "wallSeconds": 1.3999715438112617,
+      "stdout": "Crypto: 2244",
+      "scores": {
+       "Crypto": 2244
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28928546148,
+       "cycles": 5318892720,
+       "branch-instructions": 5379973241,
+       "branch-misses": 2241480,
+       "cache-references": 12803537708,
+       "cache-misses": 1108613
+      },
+      "wallSeconds": 1.3751937090419233,
+      "stdout": "Crypto: 2284",
+      "scores": {
+       "Crypto": 2284
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28928928740,
+       "cycles": 5308123731,
+       "branch-instructions": 5380028050,
+       "branch-misses": 2251133,
+       "cache-references": 12802961778,
+       "cache-misses": 1045642
+      },
+      "wallSeconds": 1.372457549907267,
+      "stdout": "Crypto: 2289",
+      "scores": {
+       "Crypto": 2289
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28930398130,
+       "cycles": 5320994032,
+       "branch-instructions": 5380313070,
+       "branch-misses": 2219691,
+       "cache-references": 12802373402,
+       "cache-misses": 1263933
+      },
+      "wallSeconds": 1.375976706854999,
+      "stdout": "Crypto: 2282",
+      "scores": {
+       "Crypto": 2282
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28929734022,
+       "cycles": 5365336615,
+       "branch-instructions": 5380203676,
+       "branch-misses": 2254440,
+       "cache-references": 12800349053,
+       "cache-misses": 1031969
+      },
+      "wallSeconds": 1.3866012003272772,
+      "stdout": "Crypto: 2264",
+      "scores": {
+       "Crypto": 2264
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28930370120,
+       "cycles": 5416164971,
+       "branch-instructions": 5380309442,
+       "branch-misses": 2219893,
+       "cache-references": 12797800155,
+       "cache-misses": 1094319
+      },
+      "wallSeconds": 1.40013092989102,
+      "stdout": "Crypto: 2243",
+      "scores": {
+       "Crypto": 2243
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28929446967,
+       "cycles": 5311526569,
+       "branch-instructions": 5380152565,
+       "branch-misses": 2251258,
+       "cache-references": 12803076614,
+       "cache-misses": 1128249
+      },
+      "wallSeconds": 1.3731353650800884,
+      "stdout": "Crypto: 2287",
+      "scores": {
+       "Crypto": 2287
+      }
+     },
+     {
+      "counters": {
+       "instructions": 28928249361,
+       "cycles": 5296397526,
+       "branch-instructions": 5379949458,
+       "branch-misses": 2233685,
+       "cache-references": 12801954019,
+       "cache-misses": 961924
+      },
+      "wallSeconds": 1.3693131441250443,
+      "stdout": "Crypto: 2294",
+      "scores": {
+       "Crypto": 2294
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 35922830190.5,
+     "zjsMedian": 28929187853.5,
+     "pairedRatiosZjsOverQjs": [
+      0.8052574849068992,
+      0.8052652988241576,
+      0.8053104552724857,
+      0.8053635964388125,
+      0.8053258774814639,
+      0.805344900912077,
+      0.8053688969201572,
+      0.8052976321160633
+     ],
+     "ratioMedian": 0.8053181663769748,
+     "ratioMAD": 3.608229846990829e-05
+    },
+    "cycles": {
+     "qjsMedian": 5582500172.0,
+     "zjsMedian": 5319943376.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9717754089642923,
+      0.9527677143218349,
+      0.9509654046875123,
+      0.9456228114507584,
+      0.9641830990621664,
+      0.9691196465776686,
+      0.9514721192020235,
+      0.9458982296396587
+     ],
+     "ratioMedian": 0.9521199167619292,
+     "ratioMAD": 0.006359396216720603
+    },
+    "branch-instructions": {
+     "qjsMedian": 5290135639.5,
+     "zjsMedian": 5380090307.5,
+     "pairedRatiosZjsOverQjs": [
+      1.016931033224831,
+      1.0169420146228434,
+      1.0169974825470087,
+      1.0170669985394805,
+      1.0170196452206006,
+      1.0170406261411695,
+      1.0170732573215724,
+      1.0169851475995506
+     ],
+     "ratioMedian": 1.0170085638838047,
+     "ratioMAD": 4.524845652031928e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 1848067.5,
+     "zjsMedian": 2242509.5,
+     "pairedRatiosZjsOverQjs": [
+      1.218965546281038,
+      1.2114038899301525,
+      1.218728547638589,
+      1.1965756998786008,
+      1.2219756584859782,
+      1.200216590063566,
+      1.2175418424580817,
+      1.213111379763926
+     ],
+     "ratioMedian": 1.2153266111110037,
+     "ratioMAD": 0.0037808281754427853
+    },
+    "cache-references": {
+     "qjsMedian": 12615758321.5,
+     "zjsMedian": 12802163710.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0144850938892844,
+      1.0148792490361147,
+      1.0148895161280305,
+      1.0147443519065513,
+      1.0146998175535293,
+      1.0144349769912495,
+      1.0149084535009023,
+      1.0147384762471627
+     ],
+     "ratioMedian": 1.0147414140768571,
+     "ratioMAD": 0.00014296850521544613
+    },
+    "cache-misses": {
+     "qjsMedian": 878068.5,
+     "zjsMedian": 1069980.5,
+     "pairedRatiosZjsOverQjs": [
+      1.013211329242728,
+      1.2313297894790622,
+      1.2858124850131885,
+      1.4991726832462131,
+      1.1264991785696743,
+      1.2787103046392903,
+      1.1879931768645164,
+      1.1871134943015285
+     ],
+     "ratioMedian": 1.2096614831717893,
+     "ratioMAD": 0.07259991165445001
+    },
+    "wallSeconds": {
+     "qjsMedian": 1.4425871290732175,
+     "zjsMedian": 1.3755852079484612,
+     "pairedRatiosZjsOverQjs": [
+      0.9724607207401634,
+      0.9533618651159658,
+      0.9514270519766823,
+      0.9463232376324908,
+      0.9649495123742081,
+      0.9696504332593249,
+      0.9518152795486761,
+      0.9409958361173673
+     ],
+     "ratioMedian": 0.9525885723323209,
+     "ratioMAD": 0.00892903545739182
+    }
+   },
+   "derived": {
+    "qjsIPC": 6.434899970209979,
+    "zjsIPC": 5.4378751443124385,
+    "ipcRatioZjsOverQjs": 0.8450597786269852
+   }
+  },
+  "navier-stokes": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/navier-stokes.js",
+    "sha256": "f6788c96f00aa61f9dbdca113e1e57b08572a643b281d3a7b940f8f974179d47",
+    "fixedWorkSha256": "8f6cf45ecae6672fcee1e70a54f77b47a6a9e95532fc825909131d66e435b6fa"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 9357830217,
+       "cycles": 1640430749,
+       "branch-instructions": 1520270807,
+       "branch-misses": 176869,
+       "cache-references": 3369481866,
+       "cache-misses": 4849135
+      },
+      "wallSeconds": 0.4307091091759503,
+      "stdout": "NavierStokes: 4271",
+      "scores": {
+       "NavierStokes": 4271
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357749804,
+       "cycles": 1638265219,
+       "branch-instructions": 1520250662,
+       "branch-misses": 176505,
+       "cache-references": 3369362340,
+       "cache-misses": 4931042
+      },
+      "wallSeconds": 0.4300488349981606,
+      "stdout": "NavierStokes: 4271",
+      "scores": {
+       "NavierStokes": 4271
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357861095,
+       "cycles": 1654864005,
+       "branch-instructions": 1520268872,
+       "branch-misses": 176319,
+       "cache-references": 3369407690,
+       "cache-misses": 4871242
+      },
+      "wallSeconds": 0.4342619120143354,
+      "stdout": "NavierStokes: 4240",
+      "scores": {
+       "NavierStokes": 4240
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357658306,
+       "cycles": 1636498773,
+       "branch-instructions": 1520236968,
+       "branch-misses": 176706,
+       "cache-references": 3369174583,
+       "cache-misses": 4890429
+      },
+      "wallSeconds": 0.4293488338589668,
+      "stdout": "NavierStokes: 4281",
+      "scores": {
+       "NavierStokes": 4281
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357765365,
+       "cycles": 1650634906,
+       "branch-instructions": 1520249980,
+       "branch-misses": 178168,
+       "cache-references": 3369452260,
+       "cache-misses": 4807058
+      },
+      "wallSeconds": 0.4319678070023656,
+      "stdout": "NavierStokes: 4240",
+      "scores": {
+       "NavierStokes": 4240
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357839445,
+       "cycles": 1650226674,
+       "branch-instructions": 1520268775,
+       "branch-misses": 178452,
+       "cache-references": 3369182766,
+       "cache-misses": 4878774
+      },
+      "wallSeconds": 0.44163333997130394,
+      "stdout": "NavierStokes: 4250",
+      "scores": {
+       "NavierStokes": 4250
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357648397,
+       "cycles": 1638074823,
+       "branch-instructions": 1520232248,
+       "branch-misses": 175563,
+       "cache-references": 3368996508,
+       "cache-misses": 4888708
+      },
+      "wallSeconds": 0.4286726890131831,
+      "stdout": "NavierStokes: 4281",
+      "scores": {
+       "NavierStokes": 4281
+      }
+     },
+     {
+      "counters": {
+       "instructions": 9357698553,
+       "cycles": 1643779706,
+       "branch-instructions": 1520252298,
+       "branch-misses": 176072,
+       "cache-references": 3369229203,
+       "cache-misses": 4863547
+      },
+      "wallSeconds": 0.43142337491735816,
+      "stdout": "NavierStokes: 4271",
+      "scores": {
+       "NavierStokes": 4271
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 8474893299,
+       "cycles": 1545365644,
+       "branch-instructions": 1645188584,
+       "branch-misses": 178333,
+       "cache-references": 3693016860,
+       "cache-misses": 5140764
+      },
+      "wallSeconds": 0.4064175277017057,
+      "stdout": "NavierStokes: 4543",
+      "scores": {
+       "NavierStokes": 4543
+      }
+     },
+     {
+      "counters": {
+       "instructions": 8474993593,
+       "cycles": 1547307410,
+       "branch-instructions": 1645203070,
+       "branch-misses": 175571,
+       "cache-references": 3693065307,
+       "cache-misses": 5135955
+      },
+      "wallSeconds": 0.40691127395257354,
+      "stdout": "NavierStokes: 4531",
+      "scores": {
+       "NavierStokes": 4531
+      }
+     },
+     {
+      "counters": {
+       "instructions": 8475013717,
+       "cycles": 1548761968,
+       "branch-instructions": 1645214001,
+       "branch-misses": 178038,
+       "cache-references": 3693273555,
+       "cache-misses": 5114124
+      },
+      "wallSeconds": 0.40707159601151943,
+      "stdout": "NavierStokes: 4531",
+      "scores": {
+       "NavierStokes": 4531
+      }
+     },
+     {
+      "counters": {
+       "instructions": 8474853071,
+       "cycles": 1537518793,
+       "branch-instructions": 1645185180,
+       "branch-misses": 175640,
+       "cache-references": 3693193742,
+       "cache-misses": 5188236
+      },
+      "wallSeconds": 0.4045766578055918,
+      "stdout": "NavierStokes: 4566",
+      "scores": {
+       "NavierStokes": 4566
+      }
+     },
+     {
+      "counters": {
+       "instructions": 8474922980,
+       "cycles": 1542678698,
+       "branch-instructions": 1645195324,
+       "branch-misses": 177512,
+       "cache-references": 3693000163,
+       "cache-misses": 5159905
+      },
+      "wallSeconds": 0.40577674377709627,
+      "stdout": "NavierStokes: 4554",
+      "scores": {
+       "NavierStokes": 4554
+      }
+     },
+     {
+      "counters": {
+       "instructions": 8475025781,
+       "cycles": 1629740650,
+       "branch-instructions": 1645206182,
+       "branch-misses": 177190,
+       "cache-references": 3694580575,
+       "cache-misses": 3722974
+      },
+      "wallSeconds": 0.4282252467237413,
+      "stdout": "NavierStokes: 4312",
+      "scores": {
+       "NavierStokes": 4312
+      }
+     },
+     {
+      "counters": {
+       "instructions": 8474798541,
+       "cycles": 1549121711,
+       "branch-instructions": 1645171550,
+       "branch-misses": 179431,
+       "cache-references": 3693010005,
+       "cache-misses": 5151884
+      },
+      "wallSeconds": 0.4063500599004328,
+      "stdout": "NavierStokes: 4543",
+      "scores": {
+       "NavierStokes": 4543
+      }
+     },
+     {
+      "counters": {
+       "instructions": 8474725626,
+       "cycles": 1540242833,
+       "branch-instructions": 1645167653,
+       "branch-misses": 174993,
+       "cache-references": 3693025923,
+       "cache-misses": 5132986
+      },
+      "wallSeconds": 0.4047074131667614,
+      "stdout": "NavierStokes: 4566",
+      "scores": {
+       "NavierStokes": 4566
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 9357757584.5,
+     "zjsMedian": 8474908139.5,
+     "pairedRatiosZjsOverQjs": [
+      0.9056472603664038,
+      0.9056657605204765,
+      0.9056571401266349,
+      0.9056595992146926,
+      0.9056567085661268,
+      0.9056605246126874,
+      0.9056547309169005,
+      0.9056420847498955
+     ],
+     "ratioMedian": 0.9056569243463808,
+     "ratioMAD": 3.137567309241529e-06
+    },
+    "cycles": {
+     "qjsMedian": 1642105227.5,
+     "zjsMedian": 1546336527.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9420486935776159,
+      0.9444791918029483,
+      0.9358847393626161,
+      0.9395172293233366,
+      0.9345971616087949,
+      0.9875859333007,
+      0.9456965513717562,
+      0.9370129265971118
+     ],
+     "ratioMedian": 0.9407829614504762,
+     "ratioMAD": 0.0043341284706123195
+    },
+    "branch-instructions": {
+     "qjsMedian": 1520251480.0,
+     "zjsMedian": 1645191954.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0821681087506405,
+      1.0821919773648485,
+      1.082186204888631,
+      1.0821899576382359,
+      1.0821873676327889,
+      1.0821811307674856,
+      1.0821843518741092,
+      1.082167515986876
+     ],
+     "ratioMedian": 1.0821852783813701,
+     "ratioMAD": 4.4134353751612565e-06
+    },
+    "branch-misses": {
+     "qjsMedian": 176605.5,
+     "zjsMedian": 177351.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0082773125872821,
+      0.9947083652021189,
+      1.0097493747128783,
+      0.9939673808472831,
+      0.9963180818104261,
+      0.9929280702934122,
+      1.0220319771250206,
+      0.9938718251624336
+     ],
+     "ratioMedian": 0.9955132235062725,
+     "ratioMAD": 0.002113275778349577
+    },
+    "cache-references": {
+     "qjsMedian": 3369295771.5,
+     "zjsMedian": 3693045615.0,
+     "pairedRatiosZjsOverQjs": [
+      1.0960192121122994,
+      1.096072471386381,
+      1.0961195244971973,
+      1.096171673808451,
+      1.0960238869803722,
+      1.0965806344148918,
+      1.0961750765340954,
+      1.0961040939903073
+     ],
+     "ratioMedian": 1.0961118092437523,
+     "ratioMAD": 6.15659275209346e-05
+    },
+    "cache-misses": {
+     "qjsMedian": 4875008.0,
+     "zjsMedian": 5138359.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0601404167959854,
+      1.0415557198661054,
+      1.0498603846821817,
+      1.0608958845941736,
+      1.0734018603478468,
+      0.7630962204849006,
+      1.0538334463829706,
+      1.0553996908017955
+     ],
+     "ratioMedian": 1.0546165685923832,
+     "ratioMAD": 0.005901582102696312
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.4310662420466542,
+     "zjsMedian": 0.40638379380106926,
+     "pairedRatiosZjsOverQjs": [
+      0.9436009572197807,
+      0.9461978287984758,
+      0.9373872880614996,
+      0.9423029152525608,
+      0.939368020485087,
+      0.9696397621419753,
+      0.9479261691148609,
+      0.9380748394643328
+     ],
+     "ratioMedian": 0.9429519362361707,
+     "ratioMAD": 0.004230506261460765
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.698634550202722,
+    "zjsIPC": 5.480636324320624,
+    "ipcRatioZjsOverQjs": 0.9617455332568496
+   }
+  },
+  "code-load": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/code-load.js",
+    "sha256": "e9a0668fd13eb20d9303587f92f6d7d350125726f323a936ba2e0953a29ff430",
+    "fixedWorkSha256": "bbeff1d26f647e2c697315c9dddaf6eb036412c6ce5ac047fc1361cb773169a2"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 1185610395,
+       "cycles": 308237083,
+       "branch-instructions": 253249445,
+       "branch-misses": 3386701,
+       "cache-references": 417136740,
+       "cache-misses": 2078338
+      },
+      "wallSeconds": 0.08946794411167502,
+      "stdout": "CodeLoad: 32476",
+      "scores": {
+       "CodeLoad": 32476
+      }
+     },
+     {
+      "counters": {
+       "instructions": 1185475948,
+       "cycles": 307599009,
+       "branch-instructions": 253225924,
+       "branch-misses": 3366962,
+       "cache-references": 415718855,
+       "cache-misses": 2073529
+      },
+      "wallSeconds": 0.08905776590108871,
+      "stdout": "CodeLoad: 32476",
+      "scores": {
+       "CodeLoad": 32476
+      }
+     },
+     {
+      "counters": {
+       "instructions": 1185460166,
+       "cycles": 307809967,
+       "branch-instructions": 253220551,
+       "branch-misses": 3399867,
+       "cache-references": 416982054,
+       "cache-misses": 2077192
+      },
+      "wallSeconds": 0.08896237425506115,
+      "stdout": "CodeLoad: 31911",
+      "scores": {
+       "CodeLoad": 31911
+      }
+     },
+     {
+      "counters": {
+       "instructions": 1185464949,
+       "cycles": 307670067,
+       "branch-instructions": 253220235,
+       "branch-misses": 3371066,
+       "cache-references": 415361137,
+       "cache-misses": 2080108
+      },
+      "wallSeconds": 0.08935000794008374,
+      "stdout": "CodeLoad: 32476",
+      "scores": {
+       "CodeLoad": 32476
+      }
+     },
+     {
+      "counters": {
+       "instructions": 1185560738,
+       "cycles": 306497865,
+       "branch-instructions": 253256984,
+       "branch-misses": 3379791,
+       "cache-references": 415479385,
+       "cache-misses": 2079318
+      },
+      "wallSeconds": 0.08927887119352818,
+      "stdout": "CodeLoad: 32476",
+      "scores": {
+       "CodeLoad": 32476
+      }
+     },
+     {
+      "counters": {
+       "instructions": 1185530588,
+       "cycles": 306444383,
+       "branch-instructions": 253231980,
+       "branch-misses": 3400689,
+       "cache-references": 417192527,
+       "cache-misses": 2091060
+      },
+      "wallSeconds": 0.08852421212941408,
+      "stdout": "CodeLoad: 32249",
+      "scores": {
+       "CodeLoad": 32249
+      }
+     },
+     {
+      "counters": {
+       "instructions": 1185478710,
+       "cycles": 306184452,
+       "branch-instructions": 253224787,
+       "branch-misses": 3382735,
+       "cache-references": 416026339,
+       "cache-misses": 2074312
+      },
+      "wallSeconds": 0.08885682187974453,
+      "stdout": "CodeLoad: 32476",
+      "scores": {
+       "CodeLoad": 32476
+      }
+     },
+     {
+      "counters": {
+       "instructions": 1185516224,
+       "cycles": 306390471,
+       "branch-instructions": 253233696,
+       "branch-misses": 3380826,
+       "cache-references": 416864191,
+       "cache-misses": 2081871
+      },
+      "wallSeconds": 0.08897501416504383,
+      "stdout": "CodeLoad: 32476",
+      "scores": {
+       "CodeLoad": 32476
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 966754843,
+       "cycles": 267387515,
+       "branch-instructions": 209689413,
+       "branch-misses": 3554314,
+       "cache-references": 360020305,
+       "cache-misses": 3151069
+      },
+      "wallSeconds": 0.07979962835088372,
+      "stdout": "CodeLoad: 36742",
+      "scores": {
+       "CodeLoad": 36742
+      }
+     },
+     {
+      "counters": {
+       "instructions": 966546146,
+       "cycles": 267117795,
+       "branch-instructions": 209647271,
+       "branch-misses": 3544048,
+       "cache-references": 359909176,
+       "cache-misses": 3165749
+      },
+      "wallSeconds": 0.07867693481966853,
+      "stdout": "CodeLoad: 36919",
+      "scores": {
+       "CodeLoad": 36919
+      }
+     },
+     {
+      "counters": {
+       "instructions": 966570136,
+       "cycles": 265540354,
+       "branch-instructions": 209661036,
+       "branch-misses": 3553418,
+       "cache-references": 359722201,
+       "cache-misses": 3165964
+      },
+      "wallSeconds": 0.07889440841972828,
+      "stdout": "CodeLoad: 36919",
+      "scores": {
+       "CodeLoad": 36919
+      }
+     },
+     {
+      "counters": {
+       "instructions": 966606632,
+       "cycles": 264272912,
+       "branch-instructions": 209663457,
+       "branch-misses": 3537267,
+       "cache-references": 359877095,
+       "cache-misses": 3148099
+      },
+      "wallSeconds": 0.07882250286638737,
+      "stdout": "CodeLoad: 37650",
+      "scores": {
+       "CodeLoad": 37650
+      }
+     },
+     {
+      "counters": {
+       "instructions": 966627476,
+       "cycles": 264538579,
+       "branch-instructions": 209676065,
+       "branch-misses": 3564397,
+       "cache-references": 360043250,
+       "cache-misses": 3154520
+      },
+      "wallSeconds": 0.07868658332154155,
+      "stdout": "CodeLoad: 37650",
+      "scores": {
+       "CodeLoad": 37650
+      }
+     },
+     {
+      "counters": {
+       "instructions": 966600972,
+       "cycles": 267533313,
+       "branch-instructions": 209664702,
+       "branch-misses": 3537632,
+       "cache-references": 359877993,
+       "cache-misses": 3155843
+      },
+      "wallSeconds": 0.07947882590815425,
+      "stdout": "CodeLoad: 37188",
+      "scores": {
+       "CodeLoad": 37188
+      }
+     },
+     {
+      "counters": {
+       "instructions": 966705468,
+       "cycles": 263660402,
+       "branch-instructions": 209691722,
+       "branch-misses": 3550243,
+       "cache-references": 359918113,
+       "cache-misses": 3153396
+      },
+      "wallSeconds": 0.07849768595770001,
+      "stdout": "CodeLoad: 37188",
+      "scores": {
+       "CodeLoad": 37188
+      }
+     },
+     {
+      "counters": {
+       "instructions": 966623007,
+       "cycles": 264154239,
+       "branch-instructions": 209676432,
+       "branch-misses": 3544192,
+       "cache-references": 360005060,
+       "cache-misses": 3157993
+      },
+      "wallSeconds": 0.07854003785178065,
+      "stdout": "CodeLoad: 37188",
+      "scores": {
+       "CodeLoad": 37188
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 1185497467.0,
+     "zjsMedian": 966614819.5,
+     "pairedRatiosZjsOverQjs": [
+      0.8154068546269789,
+      0.8153232865083822,
+      0.815354377753086,
+      0.8153818742725223,
+      0.8153335759335849,
+      0.8153319549777824,
+      0.8154557815719862,
+      0.8153604205757373
+     ],
+     "ratioMedian": 0.8153573991644116,
+     "ratioMAD": 2.4959647369926508e-05
+    },
+    "cycles": {
+     "qjsMedian": 307048437.0,
+     "zjsMedian": 265039466.5,
+     "pairedRatiosZjsOverQjs": [
+      0.8674735447064946,
+      0.8683961494817429,
+      0.8626762693490039,
+      0.858949050770025,
+      0.8631008865265668,
+      0.8730240390798744,
+      0.8611162332958696,
+      0.8621490026692116
+     ],
+     "ratioMedian": 0.8628885779377853,
+     "ratioMAD": 0.0028559359048379585
+    },
+    "branch-instructions": {
+     "qjsMedian": 253228952.0,
+     "zjsMedian": 209670383.5,
+     "pairedRatiosZjsOverQjs": [
+      0.8279955480257815,
+      0.8279060361924082,
+      0.8279779629734713,
+      0.8279885570756224,
+      0.8279181947456186,
+      0.8279550710775155,
+      0.828085293245799,
+      0.8279957814144924
+     ],
+     "ratioMedian": 0.8279832600245468,
+     "ratioMAD": 2.035516848841734e-05
+    },
+    "branch-misses": {
+     "qjsMedian": 3381780.5,
+     "zjsMedian": 3547217.5,
+     "pairedRatiosZjsOverQjs": [
+      1.0494915258240984,
+      1.052595188184482,
+      1.0451638255261162,
+      1.0493022088561896,
+      1.0546205371870627,
+      1.0402691925077536,
+      1.049518510909072,
+      1.0483213273915901
+     ],
+     "ratioMedian": 1.049396867340144,
+     "ratioMAD": 0.002136930396445913
+    },
+    "cache-references": {
+     "qjsMedian": 416445265.0,
+     "zjsMedian": 359913644.5,
+     "pairedRatiosZjsOverQjs": [
+      0.8630750314633039,
+      0.8657513886398056,
+      0.8626802941500211,
+      0.8664197560688014,
+      0.866573079191402,
+      0.8626185027518481,
+      0.8651329958221707,
+      0.86360274586406
+     ],
+     "ratioMedian": 0.8643678708431154,
+     "ratioMAD": 0.0015355472448922436
+    },
+    "cache-misses": {
+     "qjsMedian": 2078828.0,
+     "zjsMedian": 3155181.5,
+     "pairedRatiosZjsOverQjs": [
+      1.516148480179836,
+      1.5267445017648655,
+      1.5241556871006627,
+      1.5134305526443819,
+      1.5170935854929357,
+      1.5092072919954473,
+      1.5202129669982143,
+      1.5169013834190495
+     ],
+     "ratioMedian": 1.5169974844559926,
+     "ratioMAD": 0.003391207176916211
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.08901639003306627,
+     "zjsMedian": 0.07875454309396446,
+     "pairedRatiosZjsOverQjs": [
+      0.8919354204817405,
+      0.8834371042616366,
+      0.8868289440379893,
+      0.8821767863663101,
+      0.8813572827435742,
+      0.8978202007826251,
+      0.8834176633498756,
+      0.8827201500197925
+     ],
+     "ratioMedian": 0.883427383805756,
+     "ratioMAD": 0.001660349250813875
+    }
+   },
+   "derived": {
+    "qjsIPC": 3.860946105385972,
+    "zjsIPC": 3.647059935128567,
+    "ipcRatioZjsOverQjs": 0.9446026532307621
+   }
+  },
+  "regexp": {
+   "source": {
+    "path": "/home/aneryu/javascript-zoo/bench/regexp.js",
+    "sha256": "e369ccb1bc95519c847c32b0cf0a66ccd82a055280dfed2b48678e1c1f8cff2f",
+    "fixedWorkSha256": "bc899b3a739f7753c01b89b647f2c8e462cba2085ed0aa16a97e429f9cecbb5e"
+   },
+   "runs": {
+    "qjs": [
+     {
+      "counters": {
+       "instructions": 12958274918,
+       "cycles": 2258765846,
+       "branch-instructions": 2632105477,
+       "branch-misses": 3702073,
+       "cache-references": 3585202756,
+       "cache-misses": 1824652
+      },
+      "wallSeconds": 0.5897434432990849,
+      "stdout": "RegExp: 810",
+      "scores": {
+       "RegExp": 810
+      }
+     },
+     {
+      "counters": {
+       "instructions": 12958401822,
+       "cycles": 2266924490,
+       "branch-instructions": 2632132261,
+       "branch-misses": 3788848,
+       "cache-references": 3583887086,
+       "cache-misses": 1892974
+      },
+      "wallSeconds": 0.5995344030670822,
+      "stdout": "RegExp: 803",
+      "scores": {
+       "RegExp": 803
+      }
+     },
+     {
+      "counters": {
+       "instructions": 12958314096,
+       "cycles": 2236016122,
+       "branch-instructions": 2632121148,
+       "branch-misses": 3726864,
+       "cache-references": 3585330371,
+       "cache-misses": 1826078
+      },
+      "wallSeconds": 0.5839557880535722,
+      "stdout": "RegExp: 813",
+      "scores": {
+       "RegExp": 813
+      }
+     },
+     {
+      "counters": {
+       "instructions": 12958351274,
+       "cycles": 2252279327,
+       "branch-instructions": 2632128586,
+       "branch-misses": 3675806,
+       "cache-references": 3583847604,
+       "cache-misses": 2054242
+      },
+      "wallSeconds": 0.5879513761028647,
+      "stdout": "RegExp: 813",
+      "scores": {
+       "RegExp": 813
+      }
+     },
+     {
+      "counters": {
+       "instructions": 12958617853,
+       "cycles": 2287224985,
+       "branch-instructions": 2632171414,
+       "branch-misses": 3683372,
+       "cache-references": 3583403747,
+       "cache-misses": 1872516
+      },
+      "wallSeconds": 0.5973575483076274,
+      "stdout": "RegExp: 794",
+      "scores": {
+       "RegExp": 794
+      }
+     },
+     {
+      "counters": {
+       "instructions": 12958569192,
+       "cycles": 2298733010,
+       "branch-instructions": 2632154860,
+       "branch-misses": 3722760,
+       "cache-references": 3581575352,
+       "cache-misses": 1854841
+      },
+      "wallSeconds": 0.6002193563617766,
+      "stdout": "RegExp: 789",
+      "scores": {
+       "RegExp": 789
+      }
+     },
+     {
+      "counters": {
+       "instructions": 12958513109,
+       "cycles": 2208974769,
+       "branch-instructions": 2632143061,
+       "branch-misses": 3699552,
+       "cache-references": 3589585839,
+       "cache-misses": 1833327
+      },
+      "wallSeconds": 0.5769743216224015,
+      "stdout": "RegExp: 828",
+      "scores": {
+       "RegExp": 828
+      }
+     },
+     {
+      "counters": {
+       "instructions": 12958557728,
+       "cycles": 2292758160,
+       "branch-instructions": 2632176855,
+       "branch-misses": 3707213,
+       "cache-references": 3582223562,
+       "cache-misses": 1701790
+      },
+      "wallSeconds": 0.5984183899126947,
+      "stdout": "RegExp: 794",
+      "scores": {
+       "RegExp": 794
+      }
+     }
+    ],
+    "zjs": [
+     {
+      "counters": {
+       "instructions": 10023193598,
+       "cycles": 2081501114,
+       "branch-instructions": 1860917805,
+       "branch-misses": 2956411,
+       "cache-references": 3542852161,
+       "cache-misses": 2735176
+      },
+      "wallSeconds": 0.5442550121806562,
+      "stdout": "RegExp: 876",
+      "scores": {
+       "RegExp": 876
+      }
+     },
+     {
+      "counters": {
+       "instructions": 10023192320,
+       "cycles": 2091054967,
+       "branch-instructions": 1860909970,
+       "branch-misses": 2876703,
+       "cache-references": 3537076184,
+       "cache-misses": 3053773
+      },
+      "wallSeconds": 0.5472345310263336,
+      "stdout": "RegExp: 872",
+      "scores": {
+       "RegExp": 872
+      }
+     },
+     {
+      "counters": {
+       "instructions": 10023161599,
+       "cycles": 2063091944,
+       "branch-instructions": 1860903532,
+       "branch-misses": 2917643,
+       "cache-references": 3541957536,
+       "cache-misses": 3391688
+      },
+      "wallSeconds": 0.5400374280288815,
+      "stdout": "RegExp: 889",
+      "scores": {
+       "RegExp": 889
+      }
+     },
+     {
+      "counters": {
+       "instructions": 10023245331,
+       "cycles": 2038267825,
+       "branch-instructions": 1860915674,
+       "branch-misses": 2941305,
+       "cache-references": 3543511885,
+       "cache-misses": 2720780
+      },
+      "wallSeconds": 0.5337547441013157,
+      "stdout": "RegExp: 895",
+      "scores": {
+       "RegExp": 895
+      }
+     },
+     {
+      "counters": {
+       "instructions": 10023182171,
+       "cycles": 2059554091,
+       "branch-instructions": 1860902273,
+       "branch-misses": 2958661,
+       "cache-references": 3541367116,
+       "cache-misses": 2868935
+      },
+      "wallSeconds": 0.5388154569081962,
+      "stdout": "RegExp: 887",
+      "scores": {
+       "RegExp": 887
+      }
+     },
+     {
+      "counters": {
+       "instructions": 10023168221,
+       "cycles": 2063849998,
+       "branch-instructions": 1860910105,
+       "branch-misses": 2898799,
+       "cache-references": 3541060935,
+       "cache-misses": 3101036
+      },
+      "wallSeconds": 0.5399201987311244,
+      "stdout": "RegExp: 887",
+      "scores": {
+       "RegExp": 887
+      }
+     },
+     {
+      "counters": {
+       "instructions": 10023373529,
+       "cycles": 2070738182,
+       "branch-instructions": 1860941664,
+       "branch-misses": 2914045,
+       "cache-references": 3542427550,
+       "cache-misses": 3011888
+      },
+      "wallSeconds": 0.5413582068867981,
+      "stdout": "RegExp: 878",
+      "scores": {
+       "RegExp": 878
+      }
+     },
+     {
+      "counters": {
+       "instructions": 10023153199,
+       "cycles": 2030696908,
+       "branch-instructions": 1860907700,
+       "branch-misses": 2914756,
+       "cache-references": 3544764239,
+       "cache-misses": 2830380
+      },
+      "wallSeconds": 0.531362225767225,
+      "stdout": "RegExp: 898",
+      "scores": {
+       "RegExp": 898
+      }
+     }
+    ]
+   },
+   "metrics": {
+    "instructions": {
+     "qjsMedian": 12958457465.5,
+     "zjsMedian": 10023187245.5,
+     "pairedRatiosZjsOverQjs": [
+      0.773497526594149,
+      0.7734898529680738,
+      0.7734927186318142,
+      0.7734969610764388,
+      0.773476175059794,
+      0.773478003048965,
+      0.7734971940599054,
+      0.7734775280849835
+     ],
+     "ratioMedian": 0.7734912857999441,
+     "ratioMAD": 6.07452708312195e-06
+    },
+    "cycles": {
+     "qjsMedian": 2262845168.0,
+     "zjsMedian": 2063470971.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9215214218357718,
+      0.92241932901788,
+      0.922664163152219,
+      0.9049800353648586,
+      0.9004597730904903,
+      0.8978206642623539,
+      0.9374204771643546,
+      0.8857004386367553
+     ],
+     "ratioMedian": 0.9132507286003152,
+     "ratioMAD": 0.011102195030864348
+    },
+    "branch-instructions": {
+     "qjsMedian": 2632137661.0,
+     "zjsMedian": 1860910037.5,
+     "pairedRatiosZjsOverQjs": [
+      0.7070073069871888,
+      0.7069971359619303,
+      0.7069976750173507,
+      0.7070002901446396,
+      0.7069836953255507,
+      0.7069911171563819,
+      0.7070062762063525,
+      0.7069842957037931
+     ],
+     "ratioMedian": 0.7069974054896404,
+     "ratioMAD": 7.57952498531278e-06
+    },
+    "branch-misses": {
+     "qjsMedian": 3704643.0,
+     "zjsMedian": 2916199.5,
+     "pairedRatiosZjsOverQjs": [
+      0.7985825779232338,
+      0.7592553198228063,
+      0.7828681164646738,
+      0.8001796068671742,
+      0.8032479478043488,
+      0.7786693206115892,
+      0.7876751022826548,
+      0.7862391505424695
+     ],
+     "ratioMedian": 0.7869571264125621,
+     "ratioMAD": 0.009956628655822308
+    },
+    "cache-references": {
+     "qjsMedian": 3583867345.0,
+     "zjsMedian": 3542192543.0,
+     "pairedRatiosZjsOverQjs": [
+      0.9881873919322626,
+      0.986938510930531,
+      0.9879026950066243,
+      0.9887451355479009,
+      0.9882690776792337,
+      0.9886881014586567,
+      0.9868624707375329,
+      0.9895429968700541
+     ],
+     "ratioMedian": 0.9882282348057481,
+     "ratioMAD": 0.0004883836975307365
+    },
+    "cache-misses": {
+     "qjsMedian": 1844084.0,
+     "zjsMedian": 2940411.5,
+     "pairedRatiosZjsOverQjs": [
+      1.4990124144220378,
+      1.613214444572403,
+      1.857362062299639,
+      1.324469074237602,
+      1.5321284304112754,
+      1.6718608225718539,
+      1.6428536753126965,
+      1.6631781829720471
+     ],
+     "ratioMedian": 1.6280340599425498,
+     "ratioMAD": 0.06986619608028921
+    },
+    "wallSeconds": {
+     "qjsMedian": 0.5935504958033562,
+     "zjsMedian": 0.539978813380003,
+     "pairedRatiosZjsOverQjs": [
+      0.9228674237326628,
+      0.9127658533468733,
+      0.9247916350464163,
+      0.9078212345368045,
+      0.9019982394710058,
+      0.89953813219861,
+      0.9382708841609209,
+      0.8879443458359414
+     ],
+     "ratioMedian": 0.9102935439418389,
+     "ratioMAD": 0.011664645767026416
+    }
+   },
+   "derived": {
+    "qjsIPC": 5.726621356490441,
+    "zjsIPC": 4.85744039357266,
+    "ipcRatioZjsOverQjs": 0.8482209825287875
+   }
+  }
+ },
+ "orderLog": [
+  {
+   "bench": "raytrace",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "raytrace",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "pdfjs",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "earley-boyer",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "typescript",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "deltablue",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "richards",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "zlib",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "box2d",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "mandreel",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "splay",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "gbemu",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "crypto",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "navier-stokes",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "code-load",
+   "sample": 7,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 0,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 1,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 2,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 3,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 4,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 5,
+   "order": "zjs->qjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 6,
+   "order": "qjs->zjs"
+  },
+  {
+   "bench": "regexp",
+   "sample": 7,
+   "order": "zjs->qjs"
+  }
+ ]
+}

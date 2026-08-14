@@ -30,7 +30,9 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const inline_calls = @import("inline_calls.zig");
+const small_inline = @import("small_inline.zig");
 const call_runtime = @import("call_runtime.zig");
+const object_ops = @import("object_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
@@ -1916,6 +1918,43 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
         const region_start = vm.stack.values + region_base;
         const func = region_start[0];
         const new_target = region_start[1];
+        const call_pc: u32 = @intCast(@intFromPtr(pc) - @intFromPtr(vm.code_base));
+        var entry_polled = false;
+        // v1.5 fused create-this. Poll first — qjs JS_CallConstructorInternal
+        // entry, quickjs.c:20817 js_poll_interrupts — then skip resolve /
+        // proto lookup / second poll (E1–E6).
+        if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+            if (site.kind == .constructor) {
+                exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+                    if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                    return coldNext(vb, vm);
+                };
+                entry_polled = true;
+                if (small_inline.tryFusedConstructor(vm.rt, site, func)) |instance| {
+                    const live_code = vm.function.byteCodeAssumeMaterialized();
+                    if (small_inline.windowFits(vm.frame, site) and site.pc_lo < live_code.len) {
+                        small_inline.probe_prep += 1;
+                        small_inline.probe_take += 1;
+                        const fused_args = (region_start + 2)[0..argc];
+                        vm.frame.pc += 2;
+                        small_inline.installInlineWindow(vm.frame, site, instance, fused_args, vm.rt);
+                        region_start[0].freeDuringActiveBytecode(vm.rt);
+                        region_start[1].freeDuringActiveBytecode(vm.rt);
+                        vm.stack.setLen(region_base);
+                        vm.code_base = live_code.ptr;
+                        vm.frame.pc = site.pc_lo;
+                        const npc = live_code.ptr + site.pc_lo;
+                        return @call(.always_tail, vm.active_dispatch_tbl[npc[0]], .{
+                            npc,
+                            vm.stack.topPtr(),
+                            vb,
+                            vm,
+                        });
+                    }
+                    instance.free(vm.rt);
+                }
+            }
+        }
         if (call_runtime.resolveSameMachineConstructor(vm.global, func, new_target)) |candidate| {
             if (candidate.resolved.fb.isDerivedClassConstructor()) {
                 return switch (pushDerivedConstructorEntry(
@@ -1935,12 +1974,14 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     .threw => .threw,
                 };
             }
-            // First JS_CallConstructorInternal poll: before instance creation,
-            // constructibility effects, and the inner bytecode-call poll.
-            exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
-                if (!constructorRegionRecover(vm, region_base, err)) return .threw;
-                return coldNext(vb, vm);
-            };
+            // qjs JS_CallConstructorInternal entry poll (quickjs.c:20817).
+            // Skip if the fused attempt already paid it.
+            if (!entry_polled) {
+                exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+                    if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                    return coldNext(vb, vm);
+                };
+            }
             const args = (region_start + 2)[0..argc];
             const prepared = call_runtime.prepareSameMachineConstructorAfterFirstPoll(
                 vm.ctx,
@@ -1964,6 +2005,49 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     return coldNext(vb, vm);
                 },
                 .instance => |instance| {
+                    small_inline.probe_prep += 1;
+                    const callee_fb = candidate.resolved.fb;
+                    if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+                        if (site.kind == .constructor and small_inline.calleeMatches(site, func) and
+                            small_inline.windowFits(vm.frame, site))
+                        {
+                            small_inline.probe_take += 1;
+                            small_inline.installInlineWindow(vm.frame, site, instance, args, vm.rt);
+                            region_start[0].freeDuringActiveBytecode(vm.rt);
+                            region_start[1].freeDuringActiveBytecode(vm.rt);
+                            vm.stack.setLen(region_base);
+                            vm.frame.pc = site.pc_lo;
+                            const npc = vm.code_base + site.pc_lo;
+                            return @call(.always_tail, vm.active_dispatch_tbl[npc[0]], .{
+                                npc,
+                                vm.stack.topPtr(),
+                                vb,
+                                vm,
+                            });
+                        }
+                    }
+                    if (object_ops.plainBytecodeFunctionObjectFromValue(func)) |callee_fn_obj| {
+                        if (small_inline.noteMonomorphic(
+                            vm.rt,
+                            @constCast(vm.function),
+                            call_pc,
+                            @constCast(callee_fb),
+                            callee_fn_obj,
+                        )) {
+                            if (object_ops.objectFromValue(vm.frame.current_function)) |caller_obj| {
+                                small_inline.specializeCallSite(
+                                    vm.rt,
+                                    caller_obj,
+                                    @constCast(vm.function),
+                                    call_pc,
+                                    @constCast(callee_fb),
+                                    callee_fn_obj,
+                                    .constructor,
+                                    argc,
+                                );
+                            }
+                        }
+                    }
                     // Parser-emitted direct construction owns two references
                     // to the same callable (`get_var; dup`). Recast that
                     // region as method-shaped setup: move the eager instance
@@ -4564,6 +4648,47 @@ pub fn op_dup(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) cal
     sp[0] = v.dup();
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
+
+/// qjs OP_insert2: `obj value -> value obj value` (quickjs.c:18058-18063).
+/// The original top slot moves to the new top and exactly one duplicate owns
+/// the new bottom copy; no value is released and the memory operand stack stays
+/// authoritative throughout the resident continuation.
+pub fn op_insert2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    sp[0] = value;
+    (sp - 1)[0] = (sp - 2)[0];
+    (sp - 2)[0] = value.dup();
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+/// qjs OP_insert3: `obj key value -> value obj key value`
+/// (quickjs.c:18064-18070). As with OP_insert2, only the copied value gains an
+/// owner; the other slots are raw moves.
+pub fn op_insert3(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    sp[0] = value;
+    (sp - 1)[0] = (sp - 2)[0];
+    (sp - 2)[0] = (sp - 3)[0];
+    (sp - 3)[0] = value.dup();
+    return cont(pc + 1, sp + 1, var_buf, vm);
+}
+
+/// qjs OP_perm3: `obj old value -> old obj value` (quickjs.c:18079-18086).
+/// This is a pure two-slot move: ownership counts and stack depth do not
+/// change.
+pub fn op_perm3(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    // Keep both 16-byte values in integer pairs. Whole-JSValue assignment makes
+    // LLVM use q registers and spill one temporary to the native stack for this
+    // swap on AArch64; expressing each slot through the established integer-pair
+    // helpers preserves the exact bits and independent SSA values. The backend
+    // may coalesce the final moves, but no native-stack temporary remains.
+    const old = loadValueAsIntPair(&(sp - 2)[0]);
+    const object = loadValueAsIntPair(&(sp - 3)[0]);
+    storeValueAsIntPair(&(sp - 2)[0], object);
+    storeValueAsIntPair(&(sp - 3)[0], old);
+    return cont(pc + 1, sp, var_buf, vm);
+}
+
 pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const tmp = (sp - 2)[0];
     (sp - 2)[0] = (sp - 1)[0];

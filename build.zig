@@ -125,23 +125,11 @@ pub fn build(b: *std.Build) void {
     const expect_config_debug = pinnedExpectedConfig(b, config_expect_override, config_settings, .Debug);
     const expect_config_fast = pinnedExpectedConfig(b, config_expect_override, config_settings, .ReleaseFast);
 
-    const zjs_dossier_simple_ctor = b.option([]const u8, "zjs_dossier_simple_ctor", "Dossier-only simple-constructor variant: a, b, or c") orelse "a";
-    if (!std.mem.eql(u8, zjs_dossier_simple_ctor, "a") and
-        !std.mem.eql(u8, zjs_dossier_simple_ctor, "b") and
-        !std.mem.eql(u8, zjs_dossier_simple_ctor, "c"))
-    {
-        std.debug.print(
-            "error: invalid -Dzjs_dossier_simple_ctor value '{s}': expected a, b, or c\n",
-            .{zjs_dossier_simple_ctor},
-        );
-        std.process.exit(1);
-    }
     // Separate options object for the dossier harnesses. Reusing engine_options
     // here would register the same generated file under two module names
     // (the harnesses already receive it transitively via internal_fast_mod).
     const zjs_dossier_layout_pad = b.option(usize, "zjs_dossier_layout_pad", "Dossier-only layout-lineage pad slot count (0 = no effect)") orelse 0;
     const dossier_options = b.addOptions();
-    dossier_options.addOption([]const u8, "zjs_dossier_simple_ctor", zjs_dossier_simple_ctor);
     dossier_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     // One options shape for every engine-bearing module; the only field that
     // varies between them is `zjs_expect_config`, because that is the one
@@ -154,7 +142,6 @@ pub fn build(b: *std.Build) void {
         .oom_coverage = zjs_oom_coverage,
         .force_gc = zjs_force_gc,
         .ownership_audit = zjs_ownership_audit,
-        .dossier_simple_ctor = zjs_dossier_simple_ctor,
         .dossier_layout_pad = zjs_dossier_layout_pad,
     };
     // Follows -Doptimize: the public engine module and the OOM corpus engine.
@@ -1423,7 +1410,6 @@ const EngineOptionInputs = struct {
     oom_coverage: bool,
     force_gc: bool,
     ownership_audit: bool,
-    dossier_simple_ctor: []const u8,
     dossier_layout_pad: usize,
 
     fn withExpect(self: EngineOptionInputs, expect_config: []const u8) EngineOptionInputs {
@@ -1442,7 +1428,6 @@ fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.Optio
     options.addOption(bool, "zjs_oom_coverage", in.oom_coverage);
     options.addOption(bool, "zjs_force_gc", in.force_gc);
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
-    options.addOption([]const u8, "zjs_dossier_simple_ctor", in.dossier_simple_ctor);
     options.addOption(usize, "zjs_dossier_layout_pad", in.dossier_layout_pad);
     return options;
 }

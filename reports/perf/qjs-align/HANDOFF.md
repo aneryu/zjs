@@ -1,24 +1,29 @@
 # 性能追平战役 — 交接
 
-最后更新 2026-08-13。**接手先读这一份，再按需展开。**
+最后更新 2026-08-14。**接手先读这一份，再按需展开。**
 
 ---
 
 ## 1. 现在在哪
 
 ```
-zoo throughput geomean   0.9137   (15 基准 × 每侧 24 samples，3 车道并行)
-总 log deficit           1.3539
-追平需相对提升            9.45%
-基线 zjs fb680e41  vs  qjs 04be2460
+zoo throughput geomean   0.9278   (15 基准 × 每侧 24 samples，3 车道并行)
+总 log deficit           1.1233
+追平需相对提升            7.78%
+基线 zjs 42b6160f / 18d66826  vs  qjs 04be2460
+产物 2026-08-13/zoo-absolute-42b6160f.json
 ```
 
-**今天净落地两刀，geomean 0.9111 → 0.9137（+0.29%）。**
+上一份绝对基线是 `0.9137`（`fb680e41` 时代，`zoo-absolute-fb680e41.json`）。
+`42b6160f` 落地后同协议重跑为 **0.9278**（相对旧基线 **+1.537 log-pp**）。
+正式 7-lineage 因果门是 +1.384 log-pp；绝对 zjs/qjs 与之同向、略高。
+NavierStokes 已翻到 **1.061**。
 
 | commit | 内容 | 实测效果 |
 |---|---|---|
 | `485a7c5a` | `fclosure` 常驻 handler + 压平 capture source 分派（qjs:17914） | **zoo 效应为零**；保留理由是忠实性（qjs 有常驻 CASE 而 zjs 两表都挂 coldStd）+ 指令 −0.371% 稳定 |
 | `fb680e41` | `build_arg_list` 的 length 快前缀（qjs:41171 / qjs:8268） | **RayTrace +2.25/+2.54/+2.04%（三 pad），geomean +0.24%**；RayTrace 0.754 → 0.783 |
+| `42b6160f` | resident `insert2`/`insert3`/`perm3` + int32 TypedArray store | 正式 7-lineage **PASS +1.384**；绝对 zoo 0.9137 → **0.9278** |
 
 ⚠️ **目前没有已验证的追平方向。** 见 §5。
 
@@ -101,8 +106,8 @@ return 区域虽在 13/15 基准上 8/8 同向，但仍是**未具名区域**且
 | DeltaBlue | 已归因 | 调用/帧/构造同边界 595.6M = 其赤字 **80.4%**；qjs 有 7.06M 次 `tail_call_method` 而 zjs **为 0** |
 | stack-cache 模拟 | **9/15 归档，机会门 PASS** | A1 消除 operand-stack loads 的 0.298–0.661，A2 0.406–0.847；**local slot traffic 不在覆盖内**；1-slot 失效率 0.502–0.782 |
 
-⚠️ **六个基准从未被归因过**：zlib / richards / mandreel / box2d / gbemu / splay，
-合计占总赤字 **39.1%**。
+⚠️ **五个仍落后且从未归因的基准**：zlib / richards / mandreel / box2d / splay，
+合计占净赤字 **34.3%**。gbemu 已被 stack3 包拉到 0.968，不再算未归因主项。
 
 ---
 
@@ -187,3 +192,70 @@ bash tools/perf/codex_run.sh reap        # 回收残留进程组
 4. **计数器构建不是 cost-neutral** —— 会触发 `get_arg0..3` size ASSERT；**只供频率**。
 5. **单 pad 显著性判定不可信**（见 §2）。
 6. **19 个候选只有 2 个落地** —— 命中率约 10%，属正常，不要因为连续否定就放宽判据。
+
+---
+
+## 9. 实现差异审计（2026-08-13/14）—— 已全量核查
+
+分支 `audit/impl-divergence-20260813`（worktree `/home/aneryu/worktree-impl-audit`），
+commit `113b6614`。产物 `docs/qjs-align/IMPL-DIVERGENCE-2026-08-13/`：
+16 份子系统报告 + README（55,623 行）+ 16 份 verify 产物（1.2 MB）+ **`VERIFIED-LEDGER.md`（2,054 行）**。
+
+**1,017 条语句级差异**，经「逐条核查 + 二审」两轮（33 agent / 820 万 token）。
+
+### 可信度
+
+| 指标 | 值 |
+|---|---|
+| CONFIRMED-EXEC 且二审 UPHELD | **≈278 条** ← **唯一可直接开工的** |
+| REFUTED + NARROWED | 199 条（69 + 130） |
+| **原审计被推翻/收窄** | **8.9%**（README §3 部分 **14.4%**） |
+| 一审被二审硬推翻 | 2.8% |
+
+⚠️ 6 条 OVERTURNED 改变了可执行性结论，其中 **3 条是一审把 README 原本正确的条目误判为 REFUTED**
+（探针顺序错 / 只跑 ReleaseFast / 用了非 ID_Start emoji）——**核查本身也会出错**。
+⇒ **每条落地前仍须自己复现。** 工具 `worktree-impl-audit/difftest.sh`。
+
+### 已由 driver 亲手复现的缺陷（7 条成功 / 9 条抽查）
+
+| # | 缺陷 | zjs | qjs |
+|---|---|---|---|
+| 1 | 正则编译器无栈溢出检查 | **exit=139 SIGSEGV，输出全空** | `SyntaxError: stack overflow` |
+| 2 | `Reflect.set(arr,"length",2,recv)` 不做 Receiver 重定向 | `arr.length=2` / `recv.length=undefined` | `arr.length=3` / `recv.length=2` |
+| 3 | 顶层 direct eval 破坏全脚本私有名解析 | `TypeError: invalid brand on object` | `9` |
+| 4 | `[[Get]]` miss 回落 `globalThis.<Ctor>.prototype` | `f.zzz===1` 而 `'zzz' in f===false` | 均 undefined/false |
+| 5 | switch 落穿在 `while` 家族尾部丢失 | `a,d` | `a,b` |
+| 6 | generator 内 `for (var yield of [1])` | 接受 | `SyntaxError` |
+
+⚠️ 第 4 条同时是正确性 bug 与纯税（qjs 该处成本为 0，zjs 每次属性读 miss 都付）。
+⚠️ 第 5 条触发条件很窄，普通 case 尾**不复现**。
+
+### ❌ 两条不复现（均在字符串/值子系统）
+
+`01·V-26`（ToNumber latin1）与 `04b·A-02`（accumulator rope 别名，试了四种写法含 64 字符 rope 与 `+=`）。
+**该子系统的行为类断言应额外存疑。**
+
+### ⛔ 三条禁止向 qjs 对齐（zjs 才是规范正确方）
+
+`README §3.5 G9` bind 的 `[[Prototype]]`；`08·#48/#50` 与 `13·K8`（node 佐证）；
+`13·F1 BigInt.asUintN` 两侧各错各的，**忠实对齐与合规范互斥，需裁决**。
+
+### 2026-08-14 grok 批次已落地（AUDIT-EXEC-PLAN-GROK）
+
+17 条 CONFIRMED-EXEC 已合入 main：`65a60344` + follow-up `192a097d`。
+计划与落地表：`2026-08-14/AUDIT-EXEC-PLAN-GROK.md`。
+
+| 项 | 结果 |
+|---|---|
+| 范围 | X-01/13 regexp；X-10/07/08/09/02 object；X-04/05/26/27/28/29 parser；X-03/38/37/12 value |
+| X-04 归因 | **不是私有名**。direct eval 的 `this` 必须发 `scope_get_var this`（qjs `26934` / `37239`）。 |
+| X-05 归因 | `v2CaseTailCanFallthrough` 改为 `isLiveCode` 入边检查；删掉 `v2SwitchBreakRefCount` 守卫。 |
+| X-10 依赖方 | 删 20 条 Get-miss 类名兜底后，rest / iterator pair / Object.keys / **tagged-template cooked+raw** 改为真实 `Array.prototype`。 |
+| test262-gate | **0/49775 errors，passed 44581**（与 `6d8295ce` 基线持平）。 |
+| zoo A/B | pads 0/3/7 × 8 samples，CPU 19，after/before。geomean 1.0018 / 0.9998 / 1.0019，中位 **+0.18%**（约 +0.17 pp）< MDE 0.278 pp。 |
+| 三大反超资产 | crypto 1.009 / code-load 0.998 / regexp 1.007（中位）。无超噪声回退。 |
+| 判读 | **性能中性，正确性通道落地**。X-10 未给出可测正效应，不登记为性能候选。 |
+
+抽查时标「不复现」的 `01·V-26` / `04b·A-02`，用台账原文脚本在本批复现并修成 IDENTICAL（X-38 / X-03）。
+X-29 接受集合已对齐；消息仍 `UnexpectedToken`（归 X-40）。`async await` 保持拒绝。
+

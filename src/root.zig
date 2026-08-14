@@ -21,6 +21,10 @@ pub const default_gc_threshold = zjs_binding.default_gc_threshold;
 /// closed on --profile-opcodes when false instead of emitting zero counts.
 pub const opcode_profile_build_enabled: bool = @import("build_options").zjs_enable_opcode_profile;
 
+pub fn dumpSmallInlineProbe() void {
+    zjs_exec.small_inline.writeProbeFile();
+}
+
 pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
     zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName);
     return zjs_binding.activateOpcodeProfile(profile);

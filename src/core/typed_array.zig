@@ -900,6 +900,38 @@ pub inline fn writeNumericElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: 
     }
 }
 
+/// Whether a concrete TypedArray kind uses an integer element representation.
+pub inline fn isIntegerNumericKind(kind: u8) bool {
+    return switch (kind) {
+        1, 2, 3, 4, 5, 6, 7 => true,
+        else => false,
+    };
+}
+
+/// Store an already-decoded int32 into one of the integer TypedArray kinds.
+/// QuickJS's JS_SetPropertyValue arms perform JS_ToInt32Free (or the clamped
+/// conversion) and then issue the concrete-width store in the same class arm.
+/// A tagged int32 needs neither observable coercion nor allocation, so callers
+/// that have already validated the typed-array payload can keep that common
+/// path out of the scratch-buffer/error-union writer below. Float and BigInt
+/// kinds return false and continue through their canonical converters.
+pub inline fn writeInt32NumericElement(kind: u8, bytes: [*]u8, integer: i32) bool {
+    const bits: u32 = @bitCast(integer);
+    switch (kind) {
+        1, 2 => bytes[0] = @truncate(bits),
+        3 => bytes[0] = if (integer <= 0)
+            0
+        else if (integer >= 255)
+            255
+        else
+            @intCast(integer),
+        4, 5 => std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little),
+        6, 7 => std.mem.writeInt(u32, bytes[0..4], bits, .little),
+        else => return false,
+    }
+    return true;
+}
+
 noinline fn writeTruncatingIntegerElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
     const bits: u32 = if (value.asInt32()) |integer|
         @bitCast(integer)

@@ -914,6 +914,13 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // the per-iteration update op of every lexical counter loop.
     inline for ([_]u8{ op.post_inc, op.post_dec }) |o| t[o] = td.op_post_inc_dec;
     t[op.dup] = td.op_dup;
+    // Pure stack transforms that cross the dynamic-exposure threshold in the
+    // frozen 12-workload census. QuickJS keeps each as a register-resident CASE
+    // with direct slot moves (and one JS_DupValue for insert2/insert3), so these
+    // do not need the publishing cold shell either.
+    t[op.insert2] = td.op_insert2;
+    t[op.insert3] = td.op_insert3;
+    t[op.perm3] = td.op_perm3;
     t[op.swap] = td.op_swap;
     // Trailing expression-statement drop (the per-iter `dup; put_loc_check; DROP`
     // tail of every `o = {…}` / `s = …` / `a = […]` loop). qjs OP_drop:17968 is a

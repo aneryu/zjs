@@ -1773,6 +1773,12 @@ fn classNeedsSlowPropertyAccess(class_id: class.ClassId, has_exotic_methods: boo
     if (has_exotic_methods) return true;
     return switch (class_id) {
         class.ids.array,
+        // Unmapped Arguments (strict / non-simple) store indices in the dense
+        // fast_array arm. qjs marks them is_exotic + fast_array so
+        // JS_GetPropertyInternal consults the exotic arm after a shape miss
+        // (quickjs.c:8296-8303). Without this, Get of args[0] skips
+        // getOwnProperty's denseArrayElement probe and returns undefined.
+        class.ids.arguments,
         class.ids.mapped_arguments,
         class.ids.module_ns,
         class.ids.proxy,
@@ -1920,6 +1926,13 @@ pub const Object = extern struct {
 
     pub fn createWithOwnPropertyCapacity(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, capacity: usize) !*Object {
         return createInternal(rt, class_id, prototype, capacity, null);
+    }
+
+    /// Grow the named-property value buffer without changing the shared empty
+    /// root shape. Constructor allocation profiles use this so later put_field
+    /// transitions stay on the qjs-mirrored hash-consed chain.
+    pub fn reserveOwnPropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
+        try self.ensurePropertyCapacity(rt, needed);
     }
 
     /// Allocate the private generator object/state used while parameter
@@ -10929,6 +10942,11 @@ pub const Object = extern struct {
                 } else if (!proto.propFlagsAt(index).writable) {
                     return error.ReadOnly;
                 }
+                // qjs JS_SetPropertyInternal retry2 (quickjs.c:9839-9853):
+                // first own hit on the proto chain stops the walk. A closer
+                // writable data property shadows a farther readonly / no-setter
+                // descriptor; continuing would incorrectly honor the far one.
+                break;
             }
             prototype = proto.getPrototype();
         }
@@ -11941,6 +11959,11 @@ pub const Object = extern struct {
             const stored_flags = next_flags.withKind(.var_ref);
             if (old_flags.bits() != stored_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
             cell.setVarRefValue(rt, next_value);
+            // qjs JS_DefineProperty VARREF + HAS_WRITABLE double-write
+            // (quickjs.c:10508-10520): shape flags AND the cell's is_const.
+            // Descriptor.fromSlot and OP_put_var both read is_const, matching
+            // commitAutoInitValue (object.zig creation path).
+            cell.varRefIsConstSlot().* = !stored_flags.writable;
             rt.shapes.updatePropertyFlags(self.shape_ref, index, stored_flags.bits());
             return;
         }
@@ -11949,6 +11972,18 @@ pub const Object = extern struct {
         errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_flags, next_slot);
         if (old_flags.bits() != next_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
         const old_slot = self.prop_values[index].slot;
+        // qjs convert-to-getset (quickjs.c:10410-10426): VARREF → GETSET
+        // calls remove_global_object_property + free_var_ref so bare-identifier
+        // readers parked on the old cell see UNINITIALIZED and re-resolve
+        // through the global object (now the accessor).
+        if (old_flags.kind == .var_ref and merged.kind == .accessor and self.isGlobal()) {
+            const cell = old_slot.var_ref;
+            const old_value = cell.varRefValueSlot().*;
+            cell.varRefValueSlot().* = JSValue.uninitialized();
+            cell.is_lexical = false;
+            cell.is_const = false;
+            old_value.free(rt);
+        }
         self.prop_values[index] = .{ .slot = next_slot };
         next_owned = false;
         rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
@@ -12760,7 +12795,7 @@ fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
     return rt.atoms.toStringValue(rt, atom_id);
 }
 
-fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
+fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*Object) !JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
     var root_values = [_]runtime_mod.ValueRootValue{
@@ -12773,7 +12808,7 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const arr = try Object.createArray(rt, null);
+    const arr = try Object.createArray(rt, prototype);
     errdefer Object.destroyFromHeader(rt, &arr.header);
     const key_value = try entriesAtomToStringValue(rt, key);
     defer key_value.free(rt);
@@ -12788,7 +12823,7 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue) !JSValue {
     return arr.value();
 }
 
-pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSValue {
+pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, prototype: ?*Object) !JSValue {
     var rooted_value = value;
     var out_value = JSValue.undefinedValue();
     var element_val = JSValue.undefinedValue();
@@ -12808,7 +12843,9 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSVal
     const owned_keys = try object.ownKeys(rt);
     defer Object.freeKeys(rt, owned_keys);
 
-    const out = try Object.createArray(rt, null);
+    // qjs js_object_keys/values/entries uses JS_NewArray (quickjs.c:5841):
+    // the result walks the realm Array.prototype, not a class-name fallback.
+    const out = try Object.createArray(rt, prototype);
     out_value = out.value();
     errdefer {
         Object.destroyFromHeader(rt, &out.header);
@@ -12823,7 +12860,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSVal
         element_val = switch (mode) {
             .keys => try entriesAtomToStringValue(rt, key),
             .values => try object.getProperty(key),
-            .entries => try entryArrayValue(rt, key, try object.getProperty(key)),
+            .entries => try entryArrayValue(rt, key, try object.getProperty(key), prototype),
         };
         defer {
             element_val.free(rt);

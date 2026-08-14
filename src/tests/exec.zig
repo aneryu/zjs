@@ -760,12 +760,9 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    // S publishes simple_field_ctor = true; the first `new` takes the writer,
-    // then `S.prototype = 42` forces both the writer's prototype gate and the
-    // direct instance route to fall back to the authoritative
-    // createConstructorInstance (Object.prototype realm default). NS is
-    // non-simple (arg mutation after the store), so its `new` must skip the
-    // writer entirely and still honor a replaced prototype object.
+    // Both S and NS run the true constructor body. Replacing S.prototype with
+    // a non-object still falls back to Object.prototype (qjs js_create_from_ctor).
+    // NS honors a replaced prototype object.
     const setup = try js.eval(
         \\function S(a) { this.a = a; }
         \\const before = new S(1);
@@ -784,6 +781,53 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const result_key = try js.runtime.internAtom("__ctor_gate_result");
+    defer js.runtime.atoms.free(result_key);
+    const result = try global.getProperty(result_key);
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+}
+
+test "constructor allocation profile reserves capacity without skipping the body" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function Vec(x, y, z) { this.x = x; this.y = y; this.z = z; }
+        \\function Quad(a, b, c, d) { this.a = a; this.b = b; this.c = c; this.d = d; }
+        \\function G() { this.initialize.apply(this, arguments); }
+        \\G.prototype.initialize = function(a, b) { this.a = a; this.b = b; };
+        \\function Mid(a) { this.a = a; throw new Error("boom"); }
+        \\function Keys(a) {
+        \\    this.seen = Object.keys(this).join(",");
+        \\    this.a = a;
+        \\    this.after = Object.keys(this).join(",");
+        \\}
+        \\function Override(a) { this.a = a; return { b: a }; }
+        \\const v1 = new Vec(1, 2, 3);
+        \\const v2 = new Vec(4, 5, 6);
+        \\const q1 = new Quad(1, 2, 3, 4);
+        \\const q2 = new Quad(5, 6, 7, 8);
+        \\const g1 = new G(7, 8);
+        \\const g2 = new G(9, 10);
+        \\let mid_ok = false;
+        \\try { new Mid(1); } catch (e) { mid_ok = e.message === "boom"; }
+        \\const k = new Keys(1);
+        \\const o = new Override(3);
+        \\class Base { constructor() { this.tag = 1; } }
+        \\class Derived extends Base { constructor() { super(); this.extra = 2; } }
+        \\const d = new Derived();
+        \\globalThis.__alloc_profile =
+        \\    (v1.x === 1 && v2.z === 6 && q1.a === 1 && q2.d === 8 &&
+        \\     g1.a === 7 && g2.b === 10 &&
+        \\     mid_ok &&
+        \\     k.seen === "" && k.after === "seen,a" &&
+        \\     o.b === 3 && o.a === undefined &&
+        \\     d.tag === 1 && d.extra === 2) ? 1 : 0;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const result_key = try js.runtime.internAtom("__alloc_profile");
     defer js.runtime.atoms.free(result_key);
     const result = try global.getProperty(result_key);
     defer result.free(js.runtime);
@@ -5568,6 +5612,91 @@ test "resident set_var_ref preserves assignment results and refcounted self-assi
     try std.testing.expect(generic_set_idx.? >= 4);
 }
 
+test "resident stack permutations preserve assignment values and ownership" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\globalThis.__residentInsert2 = function (object, value) {
+        \\  return object.field = value;
+        \\};
+        \\globalThis.__residentInsert3 = function (object, key, value) {
+        \\  return object[key] = value;
+        \\};
+        \\globalThis.__residentPerm3 = function (object) {
+        \\  return object.count++;
+        \\};
+        \\const marker = { alive: true };
+        \\const target = { count: 4 };
+        \\assert.sameValue(__residentInsert2(target, marker), marker);
+        \\assert.sameValue(target.field, marker);
+        \\assert.sameValue(__residentInsert3(target, "indexed", marker), marker);
+        \\assert.sameValue(target.indexed, marker);
+        \\target.count = 12345678901234567890n;
+        \\assert.sameValue(__residentPerm3(target), 12345678901234567890n);
+        \\assert.sameValue(target.count, 12345678901234567891n);
+        \\assert.sameValue(marker.alive, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const insert2 = try globalFunctionBytecode(&js, "__residentInsert2");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(insert2.byteCode(), op.insert2));
+    const insert3 = try globalFunctionBytecode(&js, "__residentInsert3");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(insert3.byteCode(), op.insert3));
+    const perm3 = try globalFunctionBytecode(&js, "__residentPerm3");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(perm3.byteCode(), op.perm3));
+}
+
+test "typed array int32 store fast arm preserves conversion and assignment semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\globalThis.__typedIntStore = function (array, index, value) {
+        \\  return array[index] = value;
+        \\};
+        \\const i8 = new Int8Array(1);
+        \\assert.sameValue(__typedIntStore(i8, 0, 255), 255);
+        \\assert.sameValue(i8[0], -1);
+        \\const u8 = new Uint8Array(1);
+        \\assert.sameValue(__typedIntStore(u8, 0, -1), -1);
+        \\assert.sameValue(u8[0], 255);
+        \\const u8c = new Uint8ClampedArray(2);
+        \\__typedIntStore(u8c, 0, -1);
+        \\__typedIntStore(u8c, 1, 300);
+        \\assert.sameValue(u8c[0], 0);
+        \\assert.sameValue(u8c[1], 255);
+        \\const i16 = new Int16Array(1);
+        \\__typedIntStore(i16, 0, 65535);
+        \\assert.sameValue(i16[0], -1);
+        \\const u16 = new Uint16Array(1);
+        \\__typedIntStore(u16, 0, -1);
+        \\assert.sameValue(u16[0], 65535);
+        \\const i32 = new Int32Array(1);
+        \\__typedIntStore(i32, 0, -2147483648);
+        \\assert.sameValue(i32[0], -2147483648);
+        \\const u32 = new Uint32Array(1);
+        \\__typedIntStore(u32, 0, -1);
+        \\assert.sameValue(u32[0], 4294967295);
+        \\const empty = new Uint8Array(0);
+        \\assert.sameValue(__typedIntStore(empty, 0, 7), 7);
+        \\assert.sameValue(empty[0], undefined);
+        \\const f64 = new Float64Array(1);
+        \\__typedIntStore(f64, 0, 42);
+        \\assert.sameValue(f64[0], 42);
+        \\let coercions = 0;
+        \\__typedIntStore(u8, 0, { valueOf() { coercions++; return 258; } });
+        \\assert.sameValue(u8[0], 2);
+        \\assert.sameValue(coercions, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const store = try globalFunctionBytecode(&js, "__typedIntStore");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(store.byteCode(), op.put_array_el));
+}
+
 test "checked local replacement preserves int fast moves and refcounted fallbacks" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6232,6 +6361,117 @@ test "local add_loc retains string snapshots while using a rope tail" {
         cursor = left;
     }
     try std.testing.expect(chain_depth <= 4);
+}
+
+test "add_loc string+object goes through slow add after toPrimitive (qjs OP_add_loc)" {
+    // X-03: qjs:19766-19767 requires both operands already JS_TAG_STRING
+    // before in-place concat. An object RHS must take js_add_slow so a
+    // toString that reassigns the accumulator cannot mutate a stale rope.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(f());
+        \\function plusEq(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s += o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(plusEq());
+        \\function viaValueOf(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { valueOf: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(viaValueOf());
+        \\function viaToPrim(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { [Symbol.toPrimitive]: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(viaToPrim());
+        \\function viaClosure(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  function cap(){ return s; }
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash + " cap=" + cap();
+        \\}
+        \\print(viaClosure());
+        \\function longRope(){
+        \\  var s = "";
+        \\  for (var i = 0; i < 9000; i++) s += "a";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  s = s + o;
+        \\  return "s_len=" + s.length + " s_is_ZZZ=" + (s === "ZZZ") + " stash_len=" + stash.length;
+        \\}
+        \\print(longRope());
+        \\function noTailSidecar(){
+        \\  var base = "abc";
+        \\  var t = base + "y";
+        \\  var stash = null;
+        \\  var o = { toString: function(){ stash = t; t = "ZZZ"; return "Q"; } };
+        \\  t = t + o;
+        \\  return "t=" + t + " stash=" + stash;
+        \\}
+        \\print(noTailSidecar());
+        \\function toStringNumber(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return 1; } };
+        \\  s = s + o;
+        \\  return "s=" + s + " stash=" + stash;
+        \\}
+        \\print(toStringNumber());
+        \\function notAddLoc(){
+        \\  var s = "abc";
+        \\  var stash = null;
+        \\  s = s + "d";
+        \\  var o = { toString: function(){ stash = s; s = "ZZZ"; return "Q"; } };
+        \\  var r = s + o;
+        \\  return "s=" + s + " r=" + r + " stash=" + stash;
+        \\}
+        \\print(notAddLoc());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd\n" ++
+            "s=abcdQ stash=abcd cap=abcdQ\n" ++
+            "s_len=9002 s_is_ZZZ=false stash_len=9001\n" ++
+            "t=abcyQ stash=abcy\n" ++
+            "s=abcd1 stash=abcd\n" ++
+            "s=ZZZ r=abcdQ stash=abcd\n",
+        stream.buffered(),
+    );
 }
 
 test "checked lexical string accumulation keeps rope depth bounded" {
@@ -7599,6 +7839,84 @@ test "number native builtin records cover static and prototype dispatch" {
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
+}
+
+test "class extends Number ToPrimitive matches JS_ToNumeric" {
+    // X-37: qjs js_number_constructor (qjs:44822) uses JS_ToNumeric
+    // (qjs:13030) so object arguments run valueOf/toString. The subclass
+    // super path must not skip that via toNumberValue's missing object arm.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class MyNum extends Number {}
+        \\function t(n,f){ try{ print(n+" => "+f()); }catch(e){ print(n+" => THROW "+e.name+": "+e.message); } }
+        \\t("new MyNum({valueOf:42})", ()=> new MyNum({valueOf(){return 42}}).valueOf());
+        \\t("new MyNum([5])", ()=> new MyNum([5]).valueOf());
+        \\t("new MyNum({toString:'7'})", ()=> new MyNum({toString(){return "7"}}).valueOf());
+        \\t("Reflect.construct", ()=> Reflect.construct(Number,[{valueOf(){return 42}}],MyNum).valueOf());
+        \\t("new Number(obj) plain", ()=> new Number({valueOf(){return 42}}).valueOf());
+        \\t("new MyNum(new Date(1000))", ()=> new MyNum(new Date(1000)).valueOf());
+        \\t("new MyNum(SymToPrim)", ()=> new MyNum({[Symbol.toPrimitive](){return 9}}).valueOf());
+        \\t("throwing valueOf", ()=> new MyNum({valueOf(){throw new Error("boom")}}).valueOf());
+        \\var log=[]; try{ new MyNum({valueOf(){log.push("v");return 1}}); }catch(e){}
+        \\print("sideeffect log=["+log+"]");
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "new MyNum({valueOf:42}) => 42\n" ++
+            "new MyNum([5]) => 5\n" ++
+            "new MyNum({toString:'7'}) => 7\n" ++
+            "Reflect.construct => 42\n" ++
+            "new Number(obj) plain => 42\n" ++
+            "new MyNum(new Date(1000)) => 1000\n" ++
+            "new MyNum(SymToPrim) => 9\n" ++
+            "throwing valueOf => THROW Error: boom\n" ++
+            "sideeffect log=[v]\n",
+        stream.buffered(),
+    );
+}
+
+test "Number.prototype.toString saturates out-of-i32 radix before intFromFloat" {
+    // X-12: qjs js_get_radix (qjs:44953) uses JS_ToInt32Sat (qjs:13125)
+    // before the 2..36 check. `@intFromFloat(Infinity)` panics in Debug.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\try { print((5).toString(Infinity)); } catch(e){ print("Inf:", e.name, e.message); }
+        \\try { print((5).toString(-Infinity)); } catch(e){ print("-Inf:", e.name, e.message); }
+        \\try { print((5).toString(1e30)); } catch(e){ print("1e30:", e.name, e.message); }
+        \\try { print((5).toString(-1e30)); } catch(e){ print("-1e30:", e.name, e.message); }
+        \\try { print((5).toString({valueOf:()=>Infinity})); } catch(e){ print("objInf:", e.name, e.message); }
+        \\try { print((5).toString(2**31)); } catch(e){ print("2**31:", e.name, e.message); }
+        \\try { print((5).toString(NaN)); } catch(e){ print("NaN:", e.name, e.message); }
+        \\try { print((5).toString({valueOf:()=>NaN})); } catch(e){ print("objNaN:", e.name, e.message); }
+        \\try { print((5).toString(-0)); } catch(e){ print("-0:", e.name, e.message); }
+        \\try { print((5).toString(16)); } catch(e){ print("16:", e); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "Inf: RangeError radix must be between 2 and 36\n" ++
+            "-Inf: RangeError radix must be between 2 and 36\n" ++
+            "1e30: RangeError radix must be between 2 and 36\n" ++
+            "-1e30: RangeError radix must be between 2 and 36\n" ++
+            "objInf: RangeError radix must be between 2 and 36\n" ++
+            "2**31: RangeError radix must be between 2 and 36\n" ++
+            "NaN: RangeError radix must be between 2 and 36\n" ++
+            "objNaN: RangeError radix must be between 2 and 36\n" ++
+            "-0: RangeError radix must be between 2 and 36\n" ++
+            "5\n",
+        stream.buffered(),
+    );
 }
 
 test "string static native builtin records ignore dispatch names" {
@@ -9097,6 +9415,188 @@ test "qjs alignment C3 in operator respects null prototype" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
+}
+
+test "qjs alignment X-02 Array length Set redirects when Receiver differs" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var arr=[1,2,3], recv={};
+        \\print(Reflect.set(arr,"length",2,recv));
+        \\print("arr.length="+arr.length+" recv.length="+recv.length+
+        \\      " hasOwn="+Object.prototype.hasOwnProperty.call(recv,"length"));
+        \\var arr2=[1,2,3], recv2={};
+        \\print(Reflect.set(arr2,"0",9,recv2));
+        \\print("arr2[0]="+arr2[0]+" recv2[0]="+recv2[0]+
+        \\      " hasOwn0="+Object.prototype.hasOwnProperty.call(recv2,"0"));
+        \\var arr3=[1,2,3];
+        \\print(Reflect.set(arr3,"length",1));
+        \\print("arr3.length="+arr3.length);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\true
+        \\arr.length=3 recv.length=2 hasOwn=true
+        \\true
+        \\arr2[0]=1 recv2[0]=9 hasOwn0=true
+        \\true
+        \\arr3.length=1
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-08 eval var writable false syncs VARREF is_const" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\(0,eval)("var ev = 1;");
+        \\Object.defineProperty(globalThis, "ev", {writable:false});
+        \\print("desc.writable = " + Object.getOwnPropertyDescriptor(globalThis,"ev").writable);
+        \\try { ev = 7; } catch(e){ print("assign threw " + e.name); }
+        \\print("ev = " + ev);
+        \\globalThis.gp = 5; Object.defineProperty(globalThis, "gp", {writable:false});
+        \\print("gp desc.writable = " + Object.getOwnPropertyDescriptor(globalThis,"gp").writable);
+        \\gp = 9; print("gp = " + gp);
+        \\(0,eval)("var ev2 = 1;"); Object.defineProperty(globalThis, "ev2", {enumerable:false});
+        \\print("ev2 desc.enumerable = " + Object.getOwnPropertyDescriptor(globalThis,"ev2").enumerable);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\desc.writable = false
+        \\ev = 1
+        \\gp desc.writable = false
+        \\gp = 5
+        \\ev2 desc.enumerable = false
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-09 VARREF to GETSET detaches the stale cell" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\(0,eval)("var ev = 1;");
+        \\ev = 7;
+        \\Object.defineProperty(globalThis, "ev", {get:function(){return 42;}, configurable:true});
+        \\print("bare ev = " + ev);
+        \\print("globalThis.ev = " + globalThis.ev);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\bare ev = 42
+        \\globalThis.ev = 42
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-07 integer-key Set breaks on first proto hit" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\"use strict";
+        \\function t(mk){
+        \\  var B = {}; mk(B);
+        \\  var A = Object.create(B); Object.defineProperty(A, "0", {value:2, writable:true, configurable:true});
+        \\  var o = Object.create(A);
+        \\  try { o[0] = 9; } catch(e) { return "THREW " + e.name; }
+        \\  return "OK " + JSON.stringify(Object.getOwnPropertyDescriptor(o, "0"));
+        \\}
+        \\print("far readonly data : " + t(function(B){ Object.defineProperty(B,"0",{value:1,writable:false,configurable:true}); }));
+        \\print("far no-setter acc : " + t(function(B){ Object.defineProperty(B,"0",{get:function(){return 1;},configurable:true}); }));
+        \\function tn(mk){
+        \\  var B = {}; mk(B);
+        \\  var A = Object.create(B); Object.defineProperty(A, "zk", {value:2, writable:true, configurable:true});
+        \\  var o = Object.create(A);
+        \\  try { o.zk = 9; } catch(e) { return "THREW " + e.name; }
+        \\  return "OK " + JSON.stringify(Object.getOwnPropertyDescriptor(o, "zk"));
+        \\}
+        \\print("named ctrl readonly: " + tn(function(B){ Object.defineProperty(B,"zk",{value:1,writable:false,configurable:true}); }));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\far readonly data : OK {"value":9,"writable":true,"enumerable":true,"configurable":true}
+        \\far no-setter acc : OK {"value":9,"writable":true,"enumerable":true,"configurable":true}
+        \\named ctrl readonly: OK {"value":9,"writable":true,"enumerable":true,"configurable":true}
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-10 Get miss does not fall back to globalThis constructor prototype" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function f(){}
+        \\Object.setPrototypeOf(f, null);
+        \\print("f.call:", typeof f.call, "| f.bind:", typeof f.bind, "| f.toString:", typeof f.toString);
+        \\print("'bind' in f:", ('bind' in f));
+        \\print("desc:", String(Object.getOwnPropertyDescriptor(f,'call')));
+        \\print("f.call===Function.prototype.call:", f.call === Function.prototype.call);
+        \\var a=[1,2,3];
+        \\Object.setPrototypeOf(a, null);
+        \\print("a.join:", typeof a.join, "| hasJoin:", ('join' in a));
+        \\var dv = new DataView(new ArrayBuffer(8));
+        \\Object.setPrototypeOf(dv, null);
+        \\print("dv.byteLength:", dv.byteLength);
+        \\print("s0:", new String("hi")[0]);
+        \\function g(){}
+        \\globalThis.Function = { prototype: { zzz: "F-hijack" } };
+        \\globalThis.Object   = { prototype: { qqq: "O-hijack" } };
+        \\print("g.zzz:", g.zzz, "| g.qqq:", g.qqq);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        \\f.call: undefined | f.bind: undefined | f.toString: undefined
+        \\'bind' in f: false
+        \\desc: undefined
+        \\f.call===Function.prototype.call: false
+        \\a.join: undefined | hasJoin: false
+        \\dv.byteLength: undefined
+        \\s0: h
+        \\g.zzz: undefined | g.qqq: undefined
+        \\
+    , stream.buffered());
+}
+
+test "qjs alignment X-10 tagged template objects keep Array.prototype" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function tag(strings) {
+        \\  print(typeof strings.map);
+        \\  print(Object.getPrototypeOf(strings) === Array.prototype);
+        \\}
+        \\tag`[${1}]`;
+    , &stream);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("function\ntrue\n", stream.buffered());
 }
 
 test "qjs alignment C4 Array instanceof follows prototype chain" {
@@ -11248,6 +11748,52 @@ test "RegExp exec result template preserves metadata groups and indices" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("1|a|1|ba|true\n2|a|a|1|ba|a|1|2|1|2\n", stream.buffered());
+}
+
+test "RegExp compiler stack overflow is a catchable SyntaxError" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\try { new RegExp("(?:".repeat(40000)); print("no throw"); } catch(e) { print(e.name + ":" + e.message); }
+        \\try { new RegExp("[".repeat(1000)+"a"+"]".repeat(1000),"v"); print("v-no throw"); } catch(e) { print("v:" + e.name + ":" + e.message); }
+        \\try { new RegExp("(?:".repeat(1000)+")".repeat(1000)); print("shallow-ok"); } catch(e) { print("shallow:" + e.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "SyntaxError:stack overflow\n" ++
+            "v:SyntaxError:stack overflow\n" ++
+            "shallow-ok\n",
+        stream.buffered(),
+    );
+}
+
+test "RegExp accepts literal astral group names in non-unicode mode" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var nm = String.fromCharCode(0xD801,0xDC00);
+        \\["", "u", "v"].forEach(function(fl){
+        \\  try { var r = new RegExp("(?<"+nm+">x)", fl); print("flags["+fl+"] accepted; groups:", JSON.stringify(Object.keys(r.exec("x").groups))); }
+        \\  catch(e){ print("flags["+fl+"]:", e.message); }
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "flags[] accepted; groups: [\"𐐀\"]\n" ++
+            "flags[u] accepted; groups: [\"𐐀\"]\n" ++
+            "flags[v] accepted; groups: [\"𐐀\"]\n",
+        stream.buffered(),
+    );
 }
 
 test "RegExp literals reuse parse-time bytecode and the intrinsic realm shape" {
@@ -20492,6 +21038,83 @@ test "latin1 high bytes survive raw-string byte bridges (qjs JS_ToCStringLen2 mi
     );
 }
 
+test "ToNumber latin1 high bytes are code points not UTF-8 whitespace" {
+    // X-38: latin1 0x80-0xFF are single code points. Feeding the raw bytes to
+    // a UTF-8 whitespace decoder made Number("\xe2\x80\x801") == 1 while
+    // qjs skip_spaces (qjs:11230) / lre_is_space classify by code point.
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [2048]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var s = String.fromCharCode(0xE2,0x80,0x80) + "1";
+        \\print("len="+s.length+" cc="+s.charCodeAt(0)+","+s.charCodeAt(1)+","+s.charCodeAt(2)+","+s.charCodeAt(3));
+        \\print("Number(s)="+Number(s));  print("+s="+(+s));  print("-s="+(-s));
+        \\print("parseFloat="+parseFloat(s));  print("parseInt="+parseInt(s));  print("Math.abs="+Math.abs(s));
+        \\print("eqloose="+(s==1));  print("at="+[7,8].at(s));
+        \\print("Math.max="+Math.max(s,0));  print("slice="+[1,2,3].slice(s).length);
+        \\print("s*2="+(s*2));  print("s|0="+(s|0));
+        \\var seqs = [
+        \\  [0xC2,0xA0],
+        \\  [0xE1,0x9A,0x80],
+        \\  [0xE2,0x81,0x9F],
+        \\  [0xE3,0x80,0x80],
+        \\  [0xEF,0xBB,0xBF],
+        \\  [0xE2,0x80,0x8A],
+        \\  [0xE2,0x80,0xA8]
+        \\];
+        \\seqs.forEach(function(seq, i){
+        \\  var prefix = String.fromCharCode.apply(null, seq) + "1";
+        \\  var suffix = "1" + String.fromCharCode.apply(null, seq);
+        \\  print("p"+i+" Number="+Number(prefix)+" parseFloat="+parseFloat(prefix)+" parseInt="+parseInt(prefix));
+        \\  print("s"+i+" Number="+Number(suffix)+" parseFloat="+parseFloat(suffix)+" parseInt="+parseInt(suffix));
+        \\});
+        \\var a0 = String.fromCharCode(0xA0) + "1";
+        \\print("bareA0 Number="+Number(a0)+" parseFloat="+parseFloat(a0));
+        \\print("U00A0 Number="+Number("\u00A0"+"1")+" parseFloat="+parseFloat("\u00A0"+"1"));
+        \\print("U2000 Number="+Number("\u2000"+"1")+" parseFloat="+parseFloat("\u2000"+"1"));
+        \\print("UFEFF Number="+Number("\uFEFF"+"1")+" parseFloat="+parseFloat("\uFEFF"+"1"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "len=4 cc=226,128,128,49\n" ++
+            "Number(s)=NaN\n" ++
+            "+s=NaN\n" ++
+            "-s=NaN\n" ++
+            "parseFloat=NaN\n" ++
+            "parseInt=NaN\n" ++
+            "Math.abs=NaN\n" ++
+            "eqloose=false\n" ++
+            "at=7\n" ++
+            "Math.max=NaN\n" ++
+            "slice=3\n" ++
+            "s*2=NaN\n" ++
+            "s|0=0\n" ++
+            "p0 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s0 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p1 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s1 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p2 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s2 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p3 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s3 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p4 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s4 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p5 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s5 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "p6 Number=NaN parseFloat=NaN parseInt=NaN\n" ++
+            "s6 Number=NaN parseFloat=1 parseInt=1\n" ++
+            "bareA0 Number=1 parseFloat=1\n" ++
+            "U00A0 Number=1 parseFloat=1\n" ++
+            "U2000 Number=1 parseFloat=1\n" ++
+            "UFEFF Number=1 parseFloat=1\n",
+        stream.buffered(),
+    );
+}
+
 test "JSON.rawJSON latin1 payload survives the simple stringify byte buffer" {
     // Regression: json_ops' local appendRawString clone appended raw latin1
     // bytes into the stringify buffer, breaking the final UTF-8 re-decode.
@@ -20651,4 +21274,443 @@ test "sloppy CallExpression assignment targets throw after evaluating only the c
     , .{ .filename = "<repl>" });
     defer result.free(js.runtime);
     try helpers.expectStringValueBytes(result, "true,true,true,true,true,true|6,0,0");
+}
+
+test "async context-keyword arrow binding identifier is a function" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [32]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var f = async yield => yield+1;
+        \\f(41).then(v=>print(v));
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("42\n", output.buffered());
+}
+
+test "get/set object shorthand serializes like a named property" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var get=1; print(JSON.stringify({get}));
+        \\var set=1; print(JSON.stringify({set}));
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("{\"get\":1}\n{\"set\":1}\n", output.buffered());
+}
+
+test "top-level direct eval does not break private-name eval resolution" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class C {
+        \\  #f = 1;
+        \\  get #g(){ return 2; }
+        \\  #p(){ return 3; }
+        \\  read(){ return eval("this.#f"); }
+        \\  getg(){ return eval("this.#g"); }
+        \\  callp(){ return eval("this.#p()"); }
+        \\  brand(){ return eval("#f in this"); }
+        \\  write(){ return eval("this.#f = 50, this.#f"); }
+        \\  noneval(){ return this.#f + this.#g + this.#p(); }
+        \\}
+        \\var o = new C();
+        \\function show(label, fn){
+        \\  try { print(label + ": " + fn()); }
+        \\  catch(e){ print(label + " threw: " + e.name + " | " + e.message); }
+        \\}
+        \\show("field", function(){ return o.read(); });
+        \\show("getter", function(){ return o.getg(); });
+        \\show("method", function(){ return o.callp(); });
+        \\show("brand", function(){ return o.brand(); });
+        \\show("write", function(){ return o.write(); });
+        \\show("noneval", function(){ return o.noneval(); });
+        \\eval("1");
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings(
+        "field: 1\ngetter: 2\nmethod: 3\nbrand: true\nwrite: 50\nnoneval: 55\n",
+        output.buffered(),
+    );
+}
+
+test "switch fallthrough after while-family tails reaches the next case" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function run(body){
+        \\  var r=[];
+        \\  switch(0){
+        \\    case 0: body();
+        \\    case 1: r.push("b"); break;
+        \\    default: r.push("d");
+        \\  }
+        \\  return r.join(",");
+        \\}
+        \\print(run(function(){ while(true){break;} }));
+        \\print(run(function(){ while(1)break; }));
+        \\print(run(function(){ lbl:while(true){break lbl;} }));
+        \\print(run(function(){ for(;;){break;} }));
+        \\print(run(function(){ for(;;)break; }));
+        \\print(run(function(){ do{break;}while(0); }));
+        \\print(run(function(){ { } }));
+        \\print(run(function(){ if(1){}else{} }));
+        \\print(run(function(){ for(var i of []){} }));
+        \\print(run(function(){ for(var k in {}){} }));
+        \\print(run(function(){ try{}catch(e){} }));
+        \\print(run(function(){ for(var q=0;q<1;q++){continue;} }));
+        \\function t(x){ var r=[]; switch(x){ case 0: while(true){ r.push("a"); break; } case 1: r.push("b"); break; default: r.push("d"); } return r.join(","); }
+        \\print(t(0));
+        \\switch(0){ case 0: if(false) break; print("y"); case 1: print("z"); }
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings(
+        "b\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\nb\na,b\ny\nz\n",
+        output.buffered(),
+    );
+}
+
+test "long numeric literals parse without a 128-byte cap" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111);
+        \\print(0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111);
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("1.1111111111111112e+128\n2.288265886710203e+155\n", output.buffered());
+}
+
+test "small-function-inlining: sc_Pair constructor is eligible and arguments ctor is not" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function sc_Pair(car, cdr) { this.car = car; this.cdr = cdr; }
+        \\function usesArgs() { return arguments[0]; }
+        \\function big(a,b,c,d,e) { this.a=a; this.b=b; this.c=c; this.d=d; this.e=e; }
+        \\globalThis.__p = sc_Pair;
+        \\globalThis.__a = usesArgs;
+        \\globalThis.__b = big;
+    );
+    defer result.free(js.runtime);
+
+    const global = try js.context.globalObject();
+    const pair_fn = try global.getProperty(try js.runtime.internAtom("__p"));
+    defer pair_fn.free(js.runtime);
+    const args_fn = try global.getProperty(try js.runtime.internAtom("__a"));
+    defer args_fn.free(js.runtime);
+    const big_fn = try global.getProperty(try js.runtime.internAtom("__b"));
+    defer big_fn.free(js.runtime);
+
+    const pair_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(pair_fn).?;
+    const args_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(args_fn).?;
+    const big_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(big_fn).?;
+    const pair_fb = pair_obj.u.bytecode_function.function_bytecode.?;
+    try std.testing.expect(pair_fb.smallInlineEligible());
+    try std.testing.expect(!args_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!big_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: setter throw stack is setter, ctor, caller" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\Object.defineProperty(C.prototype, "x", {
+        \\  set: function setX(v) { throw new Error("boom"); }
+        \\});
+        \\try {
+        \\  outer(99);
+        \\} catch (e) {
+        \\  var s = String(e.stack);
+        \\  print(s.indexOf("setX") >= 0 ? "setX" : "no-setX");
+        \\  print(s.indexOf("C") >= 0 ? "C" : "no-C");
+        \\  print(s.indexOf("outer") >= 0 ? "outer" : "no-outer");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("setX\nC\nouter\n", output.buffered());
+}
+
+test "small-function-inlining: redefinition takes the new function" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function m1() { return 1; }
+        \\function m2() { return 2; }
+        \\var o = { m: m1 };
+        \\function outer(obj) { return obj.m(); }
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = outer(o);
+        \\o.m = m2;
+        \\assert.sameValue(outer(o), 2);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: new C field write is visible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.x = 1; }
+        \\function outer() { return new C(); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(o.x, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: polymorphic site is not specialized" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function A(v) { this.v = v; }
+        \\function B(v) { this.v = v + 1; }
+        \\function outer(C, v) { return new C(v); }
+        \\var i, last;
+        \\for (i = 0; i < 20; i++) last = outer(i & 1 ? A : B, i);
+        \\assert.sameValue(typeof last.v, "number");
+        \\assert.sameValue(outer(A, 10).v, 10);
+        \\assert.sameValue(outer(B, 10).v, 11);
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    if (zjs.exec.small_inline.callerState(outer_fb)) |state| {
+        try std.testing.expectEqual(@as(u8, 0), state.inlined_len);
+        var i: u8 = 0;
+        var saw_never = false;
+        while (i < state.site_len) : (i += 1) {
+            if (state.sites[i].never) saw_never = true;
+        }
+        try std.testing.expect(saw_never);
+    }
+}
+
+test "small-function-inlining: R-2 getter on callee is invoked once per new" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\var n = 0;
+        \\function RealC(v) { this.x = v; }
+        \\Object.defineProperty(globalThis, "C", {
+        \\  get: function () { n += 1; return RealC; },
+        \\  configurable: true
+        \\});
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\assert.sameValue(n, 16);
+        \\assert.sameValue(outer(7).x, 7);
+        \\assert.sameValue(n, 17);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: inner throw stack and caller catch" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function inner() { throw new Error("x"); }
+        \\function outer() { return inner(); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) { try { outer(); } catch (e) {} }
+        \\try { outer(); } catch (e) {
+        \\  var s = String(e.stack);
+        \\  print(s.indexOf("inner") >= 0 ? "inner" : "no-inner");
+        \\  print(s.indexOf("outer") >= 0 ? "outer" : "no-outer");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("inner\nouter\n", output.buffered());
+}
+
+test "small-function-inlining: primitive ctor return keeps instance" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.x = 1; return 0; }
+        \\function outer() { return new C(); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(typeof o, "object");
+        \\assert.sameValue(o.x, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: Reflect.construct with foreign NewTarget is not expanded" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function NT() {}
+        \\NT.prototype = { mark: 1 };
+        \\function outer(v) { return Reflect.construct(C, [v], NT); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(i);
+        \\assert.sameValue(o.x, 15);
+        \\assert.sameValue(o.mark, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: derived class constructor is not eligible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\class B {}
+        \\class D extends B { constructor(v) { super(); this.x = v; } }
+        \\globalThis.__d = D;
+    );
+    defer result.free(js.runtime);
+    const global = try js.context.globalObject();
+    const d_fn = try global.getProperty(try js.runtime.internAtom("__d"));
+    defer d_fn.free(js.runtime);
+    const d_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(d_fn).?;
+    try std.testing.expect(!d_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: next-entry specialize is installed on the caller" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Three(a, b, c) { this.x = a; this.y = b; this.z = c; }
+        \\function batch(n) {
+        \\  var i, s = 0, p;
+        \\  for (i = 0; i < n; i++) { p = new Three(1, 2, 3); s = s + p.x; }
+        \\  return s;
+        \\}
+        \\globalThis.__batch = batch;
+        \\assert.sameValue(batch(16), 16);
+        \\assert.sameValue(batch(16), 16);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const batch_fn = try global.getProperty(try js.runtime.internAtom("__batch"));
+    defer batch_fn.free(js.runtime);
+    const batch_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(batch_fn).?;
+    const batch_fb = batch_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(batch_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+    try std.testing.expect(state.?.specialized);
+}
+
+test "small-function-inlining: sibling constructor sites both specialize" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Pair(a, b) { this.x = a; this.y = b; }
+        \\function both(a, b) {
+        \\  var p = new Pair(a, b);
+        \\  var q = new Pair(b, a);
+        \\  return p.x + q.x;
+        \\}
+        \\globalThis.__both = both;
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = both(1, 2);
+        \\assert.sameValue(last, 3);
+        \\assert.sameValue(both(4, 5), 9);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const both_fn = try global.getProperty(try js.runtime.internAtom("__both"));
+    defer both_fn.free(js.runtime);
+    const both_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(both_fn).?;
+    const both_fb = both_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(both_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 2);
+}
+
+test "small-function-inlining: proto replacement after specialize is observed" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(i);
+        \\C.prototype = { mark: 1 };
+        \\o = outer(99);
+        \\assert.sameValue(o.x, 99);
+        \\assert.sameValue(o.mark, 1);
+        \\C.foo = 1;
+        \\o = outer(7);
+        \\assert.sameValue(o.x, 7);
+        \\assert.sameValue(o.mark, 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining: call_constructor callers keep published frame geometry" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    // Deleted OSR spare was +9 locals / +4 stack on every call_constructor
+    // caller. Published geometry must match the compiler's real slots.
+    try std.testing.expectEqual(@as(u16, 0), outer_fb.var_count);
+}
+
+test "small-function-inlining: monomorphic method is expanded" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Box(v) { this.v = v; }
+        \\Box.prototype.inc = function () { return this.v + 1; };
+        \\function outer(b) { return b.inc(); }
+        \\var i, last, box = new Box(3);
+        \\for (i = 0; i < 16; i++) last = outer(box);
+        \\assert.sameValue(last, 4);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }

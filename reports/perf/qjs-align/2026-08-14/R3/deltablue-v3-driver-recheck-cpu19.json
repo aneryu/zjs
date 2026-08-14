@@ -1,0 +1,258 @@
+{
+  "label": "driver-recheck",
+  "cpu": 19,
+  "samples": 8,
+  "zjs": "/tmp/r3-bins/prod/bin/zjs",
+  "qjs": "/home/aneryu/quickjs/qjs",
+  "base": "/tmp/r3-deltablue/cases/base.js",
+  "var": "/tmp/r3-deltablue/cases/v3-tiny-combined.js",
+  "median": {
+    "zjs_base": 1243.0,
+    "zjs_var": 2319.5,
+    "qjs_base": 1426.0,
+    "qjs_var": 2638.5
+  },
+  "all": {
+    "zjs_base": [
+      1245.0,
+      1241.0,
+      1245.0,
+      1243.0,
+      1243.0,
+      1245.0,
+      1239.0,
+      1239.0
+    ],
+    "zjs_var": [
+      2312.0,
+      2325.0,
+      2325.0,
+      2323.0,
+      2316.0,
+      2323.0,
+      2310.0,
+      2308.0
+    ],
+    "qjs_base": [
+      1432.0,
+      1425.0,
+      1427.0,
+      1422.0,
+      1427.0,
+      1407.0,
+      1428.0,
+      1424.0
+    ],
+    "qjs_var": [
+      2638.0,
+      2638.0,
+      2631.0,
+      2645.0,
+      2639.0,
+      2651.0,
+      2642.0,
+      2625.0
+    ]
+  },
+  "z_gain": 0.8660498793242155,
+  "q_gain": 0.850280504908836,
+  "excess": 0.01576937441537951,
+  "excess_pp_est": 0.10407787114150478,
+  "ratio_base": 0.8716690042075736,
+  "ratio_var": 0.8790979723327649,
+  "elapsed_s": 64.18389678001404,
+  "raw": [
+    {
+      "i": 1,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1245.0
+    },
+    {
+      "i": 2,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1432.0
+    },
+    {
+      "i": 3,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2638.0
+    },
+    {
+      "i": 4,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2312.0
+    },
+    {
+      "i": 5,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2325.0
+    },
+    {
+      "i": 6,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2638.0
+    },
+    {
+      "i": 7,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1425.0
+    },
+    {
+      "i": 8,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1241.0
+    },
+    {
+      "i": 9,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1245.0
+    },
+    {
+      "i": 10,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1427.0
+    },
+    {
+      "i": 11,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2631.0
+    },
+    {
+      "i": 12,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2325.0
+    },
+    {
+      "i": 13,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2323.0
+    },
+    {
+      "i": 14,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2645.0
+    },
+    {
+      "i": 15,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1422.0
+    },
+    {
+      "i": 16,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1243.0
+    },
+    {
+      "i": 17,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1243.0
+    },
+    {
+      "i": 18,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1427.0
+    },
+    {
+      "i": 19,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2639.0
+    },
+    {
+      "i": 20,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2316.0
+    },
+    {
+      "i": 21,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2323.0
+    },
+    {
+      "i": 22,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2651.0
+    },
+    {
+      "i": 23,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1407.0
+    },
+    {
+      "i": 24,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1245.0
+    },
+    {
+      "i": 25,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1239.0
+    },
+    {
+      "i": 26,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1428.0
+    },
+    {
+      "i": 27,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2642.0
+    },
+    {
+      "i": 28,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2310.0
+    },
+    {
+      "i": 29,
+      "engine": "zjs",
+      "kind": "var",
+      "score": 2308.0
+    },
+    {
+      "i": 30,
+      "engine": "qjs",
+      "kind": "var",
+      "score": 2625.0
+    },
+    {
+      "i": 31,
+      "engine": "qjs",
+      "kind": "base",
+      "score": 1424.0
+    },
+    {
+      "i": 32,
+      "engine": "zjs",
+      "kind": "base",
+      "score": 1239.0
+    }
+  ]
+}

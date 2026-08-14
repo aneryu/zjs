@@ -985,15 +985,29 @@ fn resolveMachineBacktraceRange(
         if (bottom_exclusive) |bottom| {
             if (entry == bottom) break;
         }
-        if (remaining == 0) return exception_ops.frameBacktraceSnapshot(&entry.frame);
-        remaining -= 1;
+        if (consumeInlineThenPhysical(&entry.frame, &remaining)) |snap| return snap;
         if (entry.teardown.has_native_caller) {
             if (remaining == 0) return nativeBacktraceSnapshot(entry.native_caller);
             remaining -= 1;
         }
         cursor = entry.prev;
     }
-    if (include_l0 and remaining == 0) return exception_ops.frameBacktraceSnapshot(machine.l0.level.frame);
+    if (include_l0) {
+        if (consumeInlineThenPhysical(machine.l0.level.frame, &remaining)) |snap| return snap;
+    }
+    return null;
+}
+
+fn consumeInlineThenPhysical(frame: *const frame_mod.Frame, remaining: *usize) ?core.ActiveBacktraceSnapshot {
+    const small_inline = @import("small_inline.zig");
+    var buf: [small_inline.max_depth]small_inline.InlinedSite = undefined;
+    const extras = small_inline.logicalInlineFrames(frame.function, frame.pc -| 1, &buf);
+    for (extras) |site| {
+        if (remaining.* == 0) return small_inline.inlinedSnapshot(&site, frame.pc -| 1);
+        remaining.* -= 1;
+    }
+    if (remaining.* == 0) return exception_ops.frameBacktraceSnapshot(frame);
+    remaining.* -= 1;
     return null;
 }
 
@@ -4579,6 +4593,9 @@ pub const Machine = struct {
         std.debug.assert(dying.continuation_payload == 0);
         const rt = self.ctx.runtime;
         const fallback = dying.native_caller;
+        if (!fallback.isUndefined()) {
+            call_runtime.noteConstructorAllocation(dying.frame.function, fallback);
+        }
         // Committed charge persisted at construction; the recompute is the
         // Debug lockstep guard against any constructor missing the store.
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;

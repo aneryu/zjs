@@ -382,6 +382,7 @@ pub fn main(init: std.process.Init) !void {
     // However, if leak checking is explicitly requested, we deinit the runtime
     // and return normally so all defers (including those for source_text and options) execute,
     // allowing the GeneralPurposeAllocator to perform full validation.
+    public_api.dumpSmallInlineProbe();
     if (runtime_options.leak_check) {
         dynamic_import_state.deinit();
         runtime.deinit();

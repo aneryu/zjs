@@ -811,6 +811,12 @@ pub const JSRuntime = struct {
     /// a core -> exec import cycle. Routing reads it on every eligible native
     /// callback, so keep it adjacent to the hot execution cache line.
     active_invocation: ?*anyopaque = null,
+    /// R-1 small-function-inlining budget: published production bytecode bytes
+    /// and bytes consumed by specialized copies. Exec reads these; core only
+    /// accounts.
+    small_inline_published_bytes: usize = 0,
+    small_inline_specialized_bytes: usize = 0,
+    small_inline_destroy: ?*const fn (rt: *JSRuntime, fb: *anyopaque) void = null,
     owner_thread_id: std.Thread.Id,
     memory: memory.MemoryAccount,
     compact_state: RuntimeCompactState = .{},
@@ -1018,6 +1024,9 @@ pub const JSRuntime = struct {
         rt.auto_init_descriptors = .empty;
         rt.materialize_builtin_namespace_cb = null;
         rt.materialize_context_global_cb = null;
+        rt.small_inline_published_bytes = 0;
+        rt.small_inline_specialized_bytes = 0;
+        rt.small_inline_destroy = null;
         rt.install_standard_globals_cb = default_standard_globals_installer;
         rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.context_head = null;

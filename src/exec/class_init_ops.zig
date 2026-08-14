@@ -132,15 +132,18 @@ pub fn constructBuiltinSuperConstructor(
     if (std.mem.eql(u8, name, "String")) return try qjsStringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Number")) {
         if (args.len >= 1 and args[0].isSymbol()) return error.TypeError;
-        // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric, then a
-        // bigint result converts to float64 rather than throwing.
-        const primitive = if (args.len >= 1)
-            (if (args[0].isBigInt())
-                value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, args[0]))
-            else
-                try value_ops.toNumberValue(ctx.runtime, args[0]))
-        else
-            core.JSValue.int32(0);
+        // qjs js_number_constructor (quickjs.c:44822) uses JS_ToNumeric
+        // (qjs:13030 → JS_ToNumberHintFree TON_FLAG_NUMERIC, qjs:12946),
+        // which ToPrimitive's objects (qjs:12975-12979) before ToNumber.
+        const primitive = if (args.len >= 1) blk: {
+            if (args[0].isBigInt())
+                break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, args[0]));
+            const coerced = try coercion_ops.toPrimitiveForNumber(ctx, output, global, args[0]);
+            defer coerced.free(ctx.runtime);
+            if (coerced.isBigInt())
+                break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, coerced));
+            break :blk try value_ops.toNumberValue(ctx.runtime, coerced);
+        } else core.JSValue.int32(0);
         return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype.object(), primitive);
     }
     if (std.mem.eql(u8, name, "Boolean")) {

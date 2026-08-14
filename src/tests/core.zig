@@ -207,6 +207,48 @@ test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
     }
 }
 
+test "over-reserved property storage is freed by prop_size not prop_count" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    try first.reserveOwnPropertyCapacity(rt, 8);
+    try std.testing.expectEqual(@as(usize, 8), first.shape_ref.prop_size);
+    try std.testing.expect(first.hasPropertyStorage());
+    try first.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, name, core.JSValue.int32(1));
+    try std.testing.expectEqual(@as(u32, 1), first.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(usize, 8), first.shape_ref.prop_size);
+    first.value().free(rt);
+
+    // Shape hash may retain the resized root. The value buffer must not leak
+    // across a second reserve/destroy cycle (free size = prop_size, not 1).
+    const mid = rt.memory.allocated_bytes;
+    const second = try core.Object.create(rt, core.class.ids.object, null);
+    try second.reserveOwnPropertyCapacity(rt, 8);
+    try second.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, name, core.JSValue.int32(2));
+    try std.testing.expectEqual(@as(usize, 8), second.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(u32, 1), second.shape_ref.prop_count);
+    second.value().free(rt);
+    try std.testing.expectEqual(mid, rt.memory.allocated_bytes);
+}
+
+test "first named property allocates initial_prop_size slots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expect(!object.hasPropertyStorage());
+    const name = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    try object.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, name, core.JSValue.int32(1));
+    try std.testing.expectEqual(@as(usize, core.shape.initial_prop_size), object.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(u32, 1), object.shape_ref.prop_count);
+    object.value().free(rt);
+}
+
 test "proven object release preserves generic JSValue ownership semantics" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
