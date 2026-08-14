@@ -53,7 +53,7 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 |---|---:|---:|---:|---:|---|---|---|
 | raytrace | 0.777 | 0.2517 | 22.4% | **1.68 pp** | **R7 提纯钉死：`new Vector/Color`+`initialize.apply` 成对税 = 1.00G = 全部宏观超出**（z 构造税 1.41G vs q 0.42G = **3.39x**）；case 1.296→三刀后 1.002（三 pad 稳，driver CPU19 亲验 1.298/1.007） | 属性读 −24M、RC 销毁 −45M | **R7-R1 上限 +1.7pp**（simple new 的忠实路径成本对齐——⚠️不得重建已删 bypass，问题仍是「qjs 全体+帧 150cyc、zjs 194」）；R7-R2 apply（~20%，或被 R1 吸收） |
 | pdfjs | 0.785 | 0.2415 | 21.5% | **1.61 pp** | dispatch +150M / string+regexp +70M / call +62M | arith −31M, alloc −19M, frontend −17M, RC −15M | backtrace 发布 14.07M；rope strict-eq 9.62M |
-| earley-boyer | 0.799 | 0.2242 | 20.0% | **1.49 pp** | 闭包+var_ref +223M、GC 环收集 +193M、构造 bypass 准入税 +182M | 属性读 −216M、属性发布 −222M | fclosure 常驻 handler（已落地，zoo 效应零） |
+| earley-boyer | 0.799 | 0.2242 | 20.0% | **1.49 pp** | **R10 后诚实基线 ≈0.79**（bypass 删除 −9.08% 被 v1+v1.5 收回 ~9 成，包净损 ≤1.2%）。两桶新价：closure/var_ref +235M、GC 环 +200M——r11c 证明**两桶绑在 deriv_trees 互捕获闭包**（压扁 −631M=超额一半）| 属性读/发布依旧领先；GC 扫描节点少 35% | GC sentinel 三刀（wave-1 验收中）+ keyatom 13.5M/iterator 空扫（wave-1）+ closure 三刀（回退 13% bisect 中） |
 | typescript | 0.830 | 0.1864 | 16.6% | 1.24 pp | **r12 定稿（08-14）**：GC 实为 zjs 优势（少扫 35%、trace 单价 232≈qjs 224；R4-C 的 destroy 4.19% 是长 profile 份额误乘 d16 基数=**同窗原则违例**）；**唯一命名税=`pushExactSimpleFrame` 8.4M×17.1cyc≈144M 独占**（99.87% method sloppy；符号本体 `sub sp,#0x140`+7×stp）+ A.7#6 keyatom 空循环 ~15M | 前端/编译、GC 扫描（cycle-list 少 35%） | X-10 +1.71%；pushExact 原地瘦身（r12-KNIFE 设计中） |
 | deltablue | 0.870 | 0.1391 | 12.4% | 0.93 pp | 调用/帧/构造同边界 595.6M（占其赤字 80.4%） | 属性读 0.450–0.576x、allocator 0.787x | `tail_call_method` 缺失 7.06M 次 |
 | richards | 0.904 | 0.1009 | 9.0% | 0.67 pp | — 未归因 | — | — |
