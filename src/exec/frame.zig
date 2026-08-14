@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
@@ -695,25 +696,49 @@ pub const Frame = struct {
         table.closeAll(rt);
     }
 
+    /// qjs `get_var_ref` (quickjs.c:17021-17025): if this frame already has an
+    /// open cell for the captured slot, `ref_count++` and return it. Only the
+    /// first capture of a given local/arg walks `createOpen`.
     pub fn captureLocal(self: *Frame, rt: anytype, local_idx: usize) !*core.VarRef {
         if (local_idx >= self.locals.len or local_idx >= self.function.varDefs().len) return error.InvalidBytecode;
-        if (core.VarRef.fromValue(self.locals[local_idx]) != null) return error.InvalidBytecode;
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            if (core.VarRef.fromValue(self.locals[local_idx]) != null) return error.InvalidBytecode;
+        }
         const binding_idx = self.function.localOpenBindingIndex(local_idx) orelse return error.InvalidBytecode;
+        const index: usize = binding_idx;
+        if (index >= self.open_var_refs.len) return error.InvalidBytecode;
+        if (self.open_var_refs[index]) |cell| {
+            if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+                if (!cell.is_open or cell.pvalue != &self.locals[local_idx]) return error.InvalidBytecode;
+            }
+            return cell.retain();
+        }
         const vd = self.function.varDefs()[local_idx];
-        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
-        return table.acquire(rt, binding_idx, &self.locals[local_idx], .{
-            .is_const = vd.isConst(),
-            .is_lexical = vd.isLexical(),
-            .is_function_name = vd.varKind() == .function_name,
-        });
+        const cell = try core.VarRef.createOpen(rt, &self.locals[local_idx]);
+        cell.is_const = vd.isConst();
+        cell.is_lexical = vd.isLexical();
+        cell.is_function_name = vd.varKind() == .function_name;
+        self.open_var_refs[index] = cell;
+        return cell.retain();
     }
 
     pub fn captureArg(self: *Frame, rt: anytype, arg_idx: usize) !*core.VarRef {
         if (arg_idx >= self.args.len) return error.InvalidBytecode;
-        if (core.VarRef.fromValue(self.args[arg_idx]) != null) return error.InvalidBytecode;
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            if (core.VarRef.fromValue(self.args[arg_idx]) != null) return error.InvalidBytecode;
+        }
         const binding_idx = self.function.argOpenBindingIndex(arg_idx) orelse return error.InvalidBytecode;
-        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
-        return table.acquire(rt, binding_idx, &self.args[arg_idx], .{});
+        const index: usize = binding_idx;
+        if (index >= self.open_var_refs.len) return error.InvalidBytecode;
+        if (self.open_var_refs[index]) |cell| {
+            if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+                if (!cell.is_open or cell.pvalue != &self.args[arg_idx]) return error.InvalidBytecode;
+            }
+            return cell.retain();
+        }
+        const cell = try core.VarRef.createOpen(rt, &self.args[arg_idx]);
+        self.open_var_refs[index] = cell;
+        return cell.retain();
     }
 
     pub fn closeLocalBinding(self: *Frame, rt: anytype, local_idx: usize) !void {

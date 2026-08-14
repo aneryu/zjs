@@ -39,6 +39,7 @@ pub fn writeProbeFile() void {
     // std.c.getenv is the supported spelling (same fix as grok f32749f6).
     const raw = std.c.getenv("ZJS_INLINE_PROBE") orelse return;
     if (raw[0] == 0) return;
+
     std.debug.print("[inline-probe] prep={d} take={d} take_pct={d}\n", .{
         probe_prep,
         probe_take,
@@ -263,6 +264,7 @@ pub fn specializeCallSite(
 ) void {
     if (caller.isDirectOrIndirectEval() or caller.executionFlags().is_module) return;
     if (caller.byteCode().len > 2048) return;
+    if (argc < callee.arg_count) return;
     if (hasTrailingAfterReturn(callee.byteCode())) return;
     const base_fb = caller_obj.u.bytecode_function.function_bytecode orelse caller;
     // One clone expands every same-argc constructor site. A second clone of an
@@ -702,10 +704,15 @@ fn cloneAndExpand(
         .is_direct_or_indirect_eval = caller.isDirectOrIndirectEval(),
     });
     spec.defined_arg_count = caller.defined_arg_count;
-    // Expanded body reuses the caller's operand stack (the call it replaces
-    // already reserved func/new_target/args). Adding callee.stack_size bloated
-    // every next-entry frame of a looping caller (N3f).
-    spec.stack_size = caller.stack_size;
+    // After TAKE pops the [func, new_target, args] region, those 2+argc slots
+    // are free for the rewritten body. Only bump when the body needs more than
+    // the call already reserved (N3f: never add callee.stack_size unconditionally).
+    const region_slots: u16 = 2 + argc;
+    const extra_stack: u16 = if (callee.stack_size > region_slots)
+        callee.stack_size - region_slots
+    else
+        0;
+    spec.stack_size = caller.stack_size + extra_stack;
     spec.var_ref_count = caller.openVarRefCount();
     spec.func_name = rt.atoms.dup(caller.funcName());
 
@@ -825,10 +832,14 @@ fn cloneAndExpand(
 }
 
 pub fn windowFits(frame: *const frame_mod.Frame, site: *const InlinedSite) bool {
-    const need = @as(usize, site.arg_base) + @as(usize, site.argc);
+    const arg_slots = site.callee_fb.arg_count;
+    const need = @as(usize, site.arg_base) + @as(usize, arg_slots);
     return site.this_slot < frame.locals.len and need <= frame.locals.len;
 }
 
+/// Move `this_value` and `args[0..callee.arg_count]` into the caller's local
+/// window. Each stored value is taken by ownership (no dup). Extra entries
+/// past `callee.arg_count` stay in `args` for `releaseCallRegionAfterInline`.
 pub fn installInlineWindow(
     frame: *frame_mod.Frame,
     site: *const InlinedSite,
@@ -838,14 +849,14 @@ pub fn installInlineWindow(
 ) void {
     const locals = frame.locals;
     if (site.this_slot < locals.len) {
-        // `this_value` is the owned instance from prepare. Move it; a dup
-        // here leaked one object per inlined `new` (N3f = 5e6).
+        // Move. A dup here leaked one object per inlined `new` (N3f = 5e6).
         valueReplace(rt, &locals[site.this_slot], this_value);
     } else {
         this_value.free(rt);
     }
+    const arg_slots = site.callee_fb.arg_count;
     var i: u16 = 0;
-    while (i < site.argc) : (i += 1) {
+    while (i < arg_slots) : (i += 1) {
         const slot = site.arg_base + i;
         const v = if (i < args.len) blk: {
             const owned = args[i];
@@ -857,6 +868,39 @@ pub fn installInlineWindow(
         } else {
             v.free(rt);
         }
+    }
+}
+
+/// R-v11-a — call-region ownership after a constructor TAKE.
+///
+/// Region layout is `[func, new_target, args…]` (length = 2+argc).
+/// `installInlineWindow` has already MOVEd the instance into `this_slot`
+/// (that value is not region[0]) and MOVEd `args[0..consumed_args]`.
+///
+/// | slot | constructor |
+/// | slot0 (func) | DROP |
+/// | slot1 (new_target) | DROP |
+/// | args[0..consumed] | undefined (MOVEd into the window) |
+/// | args[consumed..] | DROP extras |
+///
+/// Move + free on the same slot is a double-free (mirror of the N3f
+/// installInlineWindow dup-and-keep leak). After this returns, the caller
+/// `setLen`s past the region; abandoned slots must not hold a live ref.
+pub fn releaseCallRegionAfterInline(
+    rt: *JSRuntime,
+    kind: Kind,
+    region: []JSValue,
+    consumed_args: u16,
+) void {
+    if (region.len < 2) return;
+    if (kind == .constructor) {
+        region[0].freeDuringActiveBytecode(rt);
+    }
+    region[1].freeDuringActiveBytecode(rt);
+    const extra_off: usize = 2 + @as(usize, consumed_args);
+    var i = extra_off;
+    while (i < region.len) : (i += 1) {
+        region[i].freeDuringActiveBytecode(rt);
     }
 }
 

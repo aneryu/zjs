@@ -1013,6 +1013,7 @@ pub const JSRuntime = struct {
         rt.memory.trigger_gc_ctx = null;
         rt.memory.setLimit(options.memory_limit);
         rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
+        rt.gc.initLists();
         rt.atoms = atom.AtomTable.init(&rt.memory);
         rt.atoms.runtime = rt;
         try rt.classes.initInPlace(&rt.memory, &rt.atoms);
@@ -2550,8 +2551,8 @@ pub const JSRuntime = struct {
         return self.gc.stats.allocation_debt;
     }
 
-    pub fn gcStats(self: JSRuntime) gc.Stats {
-        var stats = self.gc.statsSnapshot(&self);
+    pub fn gcStats(self: *const JSRuntime) gc.Stats {
+        var stats = self.gc.statsSnapshot(self);
         stats.weak_ref_count = self.weakReferenceCount();
         const finalization_jobs = self.job_queue.countKind(.finalization);
         stats.finalizer_queue_length = finalization_jobs;
@@ -2565,7 +2566,7 @@ pub const JSRuntime = struct {
         return stats;
     }
 
-    pub fn ownsObject(self: JSRuntime, object: *const Object) bool {
+    pub fn ownsObject(self: *const JSRuntime, object: *const Object) bool {
         return self.gc.containsHeader(&object.header);
     }
 
@@ -2597,7 +2598,7 @@ pub const JSRuntime = struct {
         }
     }
 
-    fn weakReferenceCount(self: JSRuntime) usize {
+    fn weakReferenceCount(self: *const JSRuntime) usize {
         var count: usize = 0;
         for (self.weak_root_slots) |slot| {
             if (slot.identity != null) count += 1;

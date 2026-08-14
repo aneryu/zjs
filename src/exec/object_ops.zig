@@ -42,7 +42,7 @@ const IntegrityLevel = call_runtime.IntegrityLevel;
 const LengthIndexAtom = array_ops.LengthIndexAtom;
 const RegExpMatch = string_ops.RegExpMatch;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
-const CellSliceRoot = array_ops.CellSliceRoot;
+
 const addCollectionEntriesFromArray = array_ops.addCollectionEntriesFromArray;
 const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
 const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
@@ -447,10 +447,9 @@ inline fn resolveNestedClosureCell(
 }
 
 /// Shared js_closure2 core (qjs:17262-17331) for nested and ordinary root
-/// functions. It allocates the final pointer array once, performs root
-/// GLOBAL_DECL pass 1 before the first cell, fills in closure order, and
-/// transfers the completed array to the already-bytecode-backed object. No
-/// function property or side adapter is published across this transaction.
+/// functions. One allocation, then fill by closure_type only. Cells are
+/// RC-live from createOpen/retain, so the per-slot `rooted_captures` rewrite
+/// (old lines 485/492/500) is not needed for GC safety.
 fn attachFunctionCaptures(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -462,17 +461,11 @@ fn attachFunctionCaptures(
     if (closure_vars.len == 0) return;
 
     const captures = try ctx.runtime.memory.alloc(*core.VarRef, closure_vars.len);
-    var captures_transferred = false;
-    errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
-    var rooted_captures: []*core.VarRef = captures[0..0];
-    var captures_root = CellSliceRoot{};
-    captures_root.init(ctx.runtime, &rooted_captures);
-    defer captures_root.deinit();
     var initialized: usize = 0;
-    errdefer if (!captures_transferred) {
+    errdefer {
         for (captures[0..initialized]) |cell| cell.freeCell(ctx.runtime);
-        rooted_captures = &.{};
-    };
+        ctx.runtime.memory.free(*core.VarRef, captures);
+    }
 
     // qjs js_closure2 has one capture source (`sf`/`cur_var_refs`) and switches
     // only on closure_type inside the loop (qjs:17297-17331). Root construction
@@ -482,14 +475,12 @@ fn attachFunctionCaptures(
         .nested_frame => |frame| for (closure_vars, 0..) |cv, idx| {
             captures[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
             initialized += 1;
-            rooted_captures = captures[0..initialized];
         },
         .root_global => {
             try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
             for (closure_vars, 0..) |cv, idx| {
                 captures[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
                 initialized += 1;
-                rooted_captures = captures[0..initialized];
             }
         },
         .custom => |resolver| {
@@ -497,12 +488,10 @@ fn attachFunctionCaptures(
             for (closure_vars, 0..) |cv, idx| {
                 captures[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
                 initialized += 1;
-                rooted_captures = captures[0..initialized];
             }
         },
     }
 
-    captures_transferred = true;
     object.setFunctionCaptures(ctx.runtime, captures);
 }
 
@@ -536,7 +525,9 @@ fn createBytecodeFunctionObjectInternal(
     if (realm != ctx or realm.global != global or ctx.global != global) return error.InvalidBytecode;
     const class_id = bytecodeFunctionClassId(fb);
     const function_prototype = try bytecodeFunctionPrototypeForRealm(ctx, realm, class_id, fb.functionKind());
-    const object = try core.Object.create(ctx.runtime, class_id, function_prototype);
+    // length + name (+ lazy prototype later). qjs NewObjectClass then
+    // js_function_set_properties (quickjs.c:17378 / 5853-5861).
+    const object = try core.Object.createWithOwnPropertyCapacity(ctx.runtime, class_id, function_prototype, 3);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     // Pool.get/fclosure hands this constructor an owned FunctionBytecode
     // value. Move that exact reference into the object; attachment performs no
@@ -547,21 +538,39 @@ fn createBytecodeFunctionObjectInternal(
     try attachFunctionCaptures(ctx, global, fb, object, capture_source);
 
     // qjs js_closure publishes ordinary function properties only after
-    // js_closure2 has attached the complete capture array. zjs propagates
-    // property OOM and tears the still-unexposed object down, rather than
-    // copying qjs's void-helper quirk.
+    // js_closure2 has attached the complete capture array (qjs:17391-17392).
     const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
         fb.func_name
+    else if (ctx.runtime.atoms.kind(name_fallback) != null)
+        name_fallback
     else
-        name_fallback;
-    try object.defineOwnProperty(ctx.runtime, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(fb.defined_arg_count), false, false, true));
-    if (ctx.runtime.atoms.kind(effective_name) != null) {
-        const name_value = try functionNameValueFromAtom(ctx.runtime, effective_name, null);
-        defer name_value.free(ctx.runtime);
-        try object.defineOwnProperty(ctx.runtime, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
-    }
+        core.atom.ids.empty_string;
+    try jsFunctionSetProperties(ctx.runtime, object, effective_name, fb.defined_arg_count);
 
     return object.value();
+}
+
+/// qjs `js_function_set_properties` (quickjs.c:5853-5861): length then name,
+/// both CONFIGURABLE only. Fresh bytecode function — assume-new, no
+/// objectHasNonEmptyName probe.
+fn jsFunctionSetProperties(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    name_atom: core.Atom,
+    length: i32,
+) HostError!void {
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.length,
+        core.Descriptor.data(core.JSValue.int32(length), false, false, true),
+    );
+    const name_value = try functionNameValueFromAtom(rt, name_atom, null);
+    defer name_value.free(rt);
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.name,
+        core.Descriptor.data(name_value, false, false, true),
+    );
 }
 
 /// qjs `js_closure` installs the generic function prototype policy. Class
