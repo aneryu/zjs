@@ -71,10 +71,12 @@ capacity-profile 单独扛不起「不下凹」验收线。见 §5 修订。
 raytrace G 形的 initialize 调用（~0.34 内层调用常数）、deltablue 71% 短 accessor 链。
 capacity-profile 降级为包内次要项（或按 R1 预检结果裁掉）。
 
-两种排程交用户选：
-- **方案甲（推荐）**：先建 small-function-inlining（申报→设计→实施），删除与它同包落地，
-  「不下凹」承诺保住；
-- **方案乙**：按原则立即删（接受 EB −9.1% 过渡性下凹），内联机制随后回收。
+**用户已裁：方案甲**（2026-08-14）——先建 small-function-inlining（申报→设计→实施），
+删除与它同包落地，「不下凹」承诺保住。~~方案乙~~。
+执行状态：grok 已在 `grok/opt-r10` 打了 delete commit `45dc3640` 并起了 capacity-profile
+初版（保留在分支、暂不交付）；裁决已经由 herdr interject 转达，下一交付物 =
+`/tmp/r10/INLINE-PROPOSAL.md`（内联判据／inline-frame 栈重建元数据／去优化协议／
+等价证明面／三靶预计覆盖，先简报后写码）。
 
 ## 4. 队列衔接
 
