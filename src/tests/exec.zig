@@ -3377,6 +3377,43 @@ fn expectSingleDerivedThisClosureCapture(function: *const bytecode.FunctionBytec
     try std.testing.expectEqual(@as(usize, 1), this_capture_count);
 }
 
+test "js_closure2 attach roots captures through the function object" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Nested functions that capture several locals. Forcing GC after each
+    // fclosure must keep the cells reachable through the function object
+    // (qjs attaches the mallocz array before the fill loop).
+    const setup = try js.eval(
+        \\function __r11_make(n) {
+        \\  var a = n, b = n + 1, c = n + 2;
+        \\  function inner() {
+        \\    function deeper() { return a + b + c; }
+        \\    return deeper;
+        \\  }
+        \\  return inner();
+        \\}
+        \\globalThis.__r11_fn = __r11_make(10);
+        \\globalThis.__r11_out = globalThis.__r11_fn();
+    );
+    setup.free(js.runtime);
+
+    const old_threshold = js.runtime.gcThreshold();
+    js.runtime.setGCThreshold(0);
+    defer js.runtime.setGCThreshold(old_threshold);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    const again = try js.eval("globalThis.__r11_out = globalThis.__r11_fn()");
+    again.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const out_key = try js.runtime.internAtom("__r11_out");
+    defer js.runtime.atoms.free(out_key);
+    const total = try global.getProperty(out_key);
+    defer total.free(js.runtime);
+    try std.testing.expect(total.asInt32() == @as(?i32, 33) or total.asNumber() == @as(?f64, 33.0));
+}
+
 test "var-ref growth promotes borrowed captures to owned cells" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

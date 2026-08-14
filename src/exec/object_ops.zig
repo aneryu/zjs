@@ -42,7 +42,7 @@ const IntegrityLevel = call_runtime.IntegrityLevel;
 const LengthIndexAtom = array_ops.LengthIndexAtom;
 const RegExpMatch = string_ops.RegExpMatch;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
-const CellSliceRoot = array_ops.CellSliceRoot;
+
 const addCollectionEntriesFromArray = array_ops.addCollectionEntriesFromArray;
 const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
 const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
@@ -447,10 +447,10 @@ inline fn resolveNestedClosureCell(
 }
 
 /// Shared js_closure2 core (qjs:17262-17331) for nested and ordinary root
-/// functions. It allocates the final pointer array once, performs root
-/// GLOBAL_DECL pass 1 before the first cell, fills in closure order, and
-/// transfers the completed array to the already-bytecode-backed object. No
-/// function property or side adapter is published across this transaction.
+/// functions. One `js_mallocz` of the capture array is attached to the
+/// already-bytecode-backed object *before* the fill loop (qjs:17276-17280),
+/// so the object is the sole GC root — no per-slot `rooted_captures` rewrite.
+/// The source tag is selected once; the loop switches only on `closure_type`.
 fn attachFunctionCaptures(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -461,18 +461,8 @@ fn attachFunctionCaptures(
     const closure_vars = fb.closureVar();
     if (closure_vars.len == 0) return;
 
-    const captures = try ctx.runtime.memory.alloc(*core.VarRef, closure_vars.len);
-    var captures_transferred = false;
-    errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
-    var rooted_captures: []*core.VarRef = captures[0..0];
-    var captures_root = CellSliceRoot{};
-    captures_root.init(ctx.runtime, &rooted_captures);
-    defer captures_root.deinit();
-    var initialized: usize = 0;
-    errdefer if (!captures_transferred) {
-        for (captures[0..initialized]) |cell| cell.freeCell(ctx.runtime);
-        rooted_captures = &.{};
-    };
+    try object.allocateNullCaptureSlots(ctx.runtime, closure_vars.len);
+    const slots = object.mutableCaptureSlots();
 
     // qjs js_closure2 has one capture source (`sf`/`cur_var_refs`) and switches
     // only on closure_type inside the loop (qjs:17297-17331). Root construction
@@ -480,30 +470,21 @@ fn attachFunctionCaptures(
     // once instead of re-testing the same union for every capture.
     switch (source) {
         .nested_frame => |frame| for (closure_vars, 0..) |cv, idx| {
-            captures[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
-            initialized += 1;
-            rooted_captures = captures[0..initialized];
+            slots[idx] = try resolveNestedClosureCell(ctx, frame, global, cv);
         },
         .root_global => {
             try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
             for (closure_vars, 0..) |cv, idx| {
-                captures[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
-                initialized += 1;
-                rooted_captures = captures[0..initialized];
+                slots[idx] = try createRootGlobalClosureCell(ctx, global, fb, cv);
             }
         },
         .custom => |resolver| {
             try vm_property_globals.validateGlobalVarDeclarations(ctx, global, fb, fb.isDirectOrIndirectEval());
             for (closure_vars, 0..) |cv, idx| {
-                captures[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
-                initialized += 1;
-                rooted_captures = captures[0..initialized];
+                slots[idx] = try resolver.resolve(resolver.context, ctx, global, fb, idx, cv);
             }
         },
     }
-
-    captures_transferred = true;
-    object.setFunctionCaptures(ctx.runtime, captures);
 }
 
 fn createBytecodeFunctionObjectInternal(
