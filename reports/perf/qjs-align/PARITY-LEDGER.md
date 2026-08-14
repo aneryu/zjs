@@ -42,12 +42,12 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 | raytrace | 0.777 | 0.2517 | 22.4% | **1.68 pp** | 调用机制合计 +515M（49.2%）、apply/arguments +249M | 属性读 −24M、RC 销毁 −45M | apply length 前缀（已落地 fb680e41） |
 | pdfjs | 0.785 | 0.2415 | 21.5% | **1.61 pp** | dispatch +150M / string+regexp +70M / call +62M | arith −31M, alloc −19M, frontend −17M, RC −15M | backtrace 发布 14.07M；rope strict-eq 9.62M |
 | earley-boyer | 0.799 | 0.2242 | 20.0% | **1.49 pp** | 闭包+var_ref +223M、GC 环收集 +193M、构造 bypass 准入税 +182M | 属性读 −216M、属性发布 −222M | fclosure 常驻 handler（已落地，zoo 效应零） |
-| typescript | 0.830 | 0.1864 | 16.6% | 1.24 pp | return teardown 10.10x +189M、slow property resolver 3.24x +180M | resident 属性读 0.770x | — |
+| typescript | 0.830 | 0.1864 | 16.6% | 1.24 pp | return teardown 10.10x +189M、slow property resolver 3.24x +180M | resident 属性读 0.770x | audit-exec G2（X-10 miss 兜底删除）实测 **+1.71%**（单基准二分 vs `6d8295ce`，非-G2 段 −0.48%） |
 | deltablue | 0.870 | 0.1391 | 12.4% | 0.93 pp | 调用/帧/构造同边界 595.6M（占其赤字 80.4%） | 属性读 0.450–0.576x、allocator 0.787x | `tail_call_method` 缺失 7.06M 次 |
 | richards | 0.904 | 0.1009 | 9.0% | 0.67 pp | — 未归因 | — | — |
 | zlib | 0.920 | 0.0835 | 7.4% | 0.56 pp | — 未归因 | — | — |
 | box2d | 0.922 | 0.0817 | 7.3% | 0.54 pp | — 未归因 | — | — |
-| mandreel | 0.941 | 0.0607 | 5.4% | 0.40 pp | — 未归因 | — | — |
+| mandreel | 0.941 | 0.0607 | 5.4% | 0.40 pp | **audit-exec G2 −1.33%**（单基准二分：G1+G4 +0.43% / G3 −0.54% / G2 −1.33%；`b9f5731e` 内部未拆，嫌疑 X-07 整数键 Set 冷路径重构 / X-10 依赖方 arguments dense-Get 与数组原型）| — | 待拆 patch 消融；方向=让忠实路径与 qjs 同价，**不得回滚语义** |
 | splay | 0.943 | 0.0582 | 5.2% | 0.39 pp | — 未归因 | — | — |
 | gbemu | 0.968 | 0.0322 | 2.9% | 0.21 pp | — 未归因 | — | — |
 | **crypto** | **1.058** | −0.0564 | −5.0% | — | — | 反超，**资产需守住** | — |

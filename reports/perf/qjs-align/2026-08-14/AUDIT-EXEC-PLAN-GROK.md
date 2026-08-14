@@ -209,3 +209,52 @@ grok --prompt-file "$d/prompt.md" --cwd "$wt" \
 | 三大反超资产（中位） | crypto **1.009** / code-load **0.998** / regexp **1.007**。无超噪声回退（regexp pad3 0.993 被 pad0/pad7 的 1.007 对冲，符号翻转 = 布局噪声）。 |
 | 其它同号移动 | typescript 三 pad 均约 +1.2%；mandreel 三 pad 均约 −1.2%。geomean 仍在 MDE 内，不触发回滚。 |
 | 判读 | **性能中性，正确性通道落地**。X-10 未给出可测正效应（+0.17 pp < 0.278 pp），不进 PARITY-LEDGER 机制候选。 |
+
+## 10. Driver 审查记录（2026-08-14，事后复核）
+
+### 10.1 正确性面：坐实
+
+- 抽验 9 条亲跑 difftest（X-01/02/03/04/05/10/29/38 + X-05 的 `if(false)break` 附带改动）：**全部已修**。
+- canonical `zig build test262-gate` 由 driver 亲跑复核：**0/49775 errors, passed 44581**，与 §6 账面一致。
+- `lint_anti_goals.sh` exit 0。
+- 残留偏离（须登记，非阻塞）：**X-01 v-mode 接受集合收窄**——`"[".repeat(1000)+"a"+"]".repeat(1000),"v"`
+  zjs 现报 `SyntaxError: stack overflow` 而 qjs accepted。检查是诚实的（修复前同深度直接 SIGSEGV），
+  暴露的真差异是 **zjs v-mode 类解析每层栈耗远大于 qjs**。进 backlog。
+
+### 10.2 性能判读订正：「中性」是错误的粗读
+
+§6 的 geomean-in-MDE 一票放行**掩盖了四个三 pad 同号、效应>样本离散的 SEMANTIC 信号**
+（lineage 判据：同号且 |中位| > 离散）：
+
+| benchmark | 三 pad | 中位 | max CV | 判 |
+|---|---|---:|---:|---|
+| typescript | +++ | **+1.23%** | 0.29% | SEMANTIC 赢 |
+| crypto | +++ | +0.93% | 0.53% | SEMANTIC 赢（资产增厚） |
+| box2d | +++ | +0.78% | 0.23% | SEMANTIC 赢 |
+| mandreel | −−− | **−1.23%** | 0.49% | **SEMANTIC 回退，验收时未归因即放行** |
+
+净 +0.18% 是**对冲结果**，不是「什么都没发生」。
+
+### 10.3 单基准 lane 二分归因（16 samples，CPU 19，vs base `6d8295ce`）
+
+| 累积段 | mandreel | typescript |
+|---|---:|---:|
+| G1+G4（`32100b5d`） | +0.43% | — |
+| +G3（`cb4d3d16`） | −0.11%（G3 段 −0.54%） | −0.48%（非-G2 合计） |
+| +G2（HEAD） | **−1.44%（G2 段 −1.33%）** | **+1.23%（G2 段 +1.71%）** |
+
+- **TS 的赢与 mandreel 的亏都在 G2**（`b9f5731e`，五条目单 commit 未拆）。
+- X-10 兜底删除拿到**实测定价 +1.71% on TS**——同时第 N 次印证合同第 9 条：
+  静态「每次 miss 都付」的税，动态上只有 TS 一个基准可测出（zoo 热循环属性读几乎全 hit）。
+- mandreel 段内嫌疑排序：X-07 整数键 Set 冷路径重构 > X-10 依赖方（arguments dense-Get、
+  rest/iterator/keys 数组换真原型）> X-02/08/09（纯冷）。**须拆 patch 消融定位**；
+  这些是正确性修复不能回滚，正确动作是「让忠实路径与 qjs 同价」——qjs 在相同语义下不亏。
+
+### 10.4 「优化效果不及预期」的裁定
+
+1. 本批在 §0 就注册为**正确性通道**，预注册判据即「geomean 在 ±MDE 内＝符合预期」——
+   期望差主要来自把本批当成了优化批次；真正的优化储备（44 条热频 zjs-only 机制、
+   tail_call 发射、readfwd 假设）全在 §8 backlog 未动。
+2. 但验收本身有一处方法论错误（10.2）：单基准同号信号被 geomean 吞掉。
+   **已修正为：打包 zoo A/B 的判读必须逐基准过 lineage 判据，不允许只看 geomean。**
+3. mandreel −1.33% 已归因到 G2 并登记 PARITY-LEDGER；后续任务=段内拆分消融 + 忠实路径成本对齐。
