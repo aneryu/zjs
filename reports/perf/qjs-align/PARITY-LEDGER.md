@@ -47,7 +47,7 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 | richards | 0.904 | 0.1009 | 9.0% | 0.67 pp | — 未归因 | — | — |
 | zlib | 0.920 | 0.0835 | 7.4% | 0.56 pp | — 未归因 | — | — |
 | box2d | 0.922 | 0.0817 | 7.3% | 0.54 pp | — 未归因 | — | — |
-| mandreel | 0.941 | 0.0607 | 5.4% | 0.40 pp | **audit-exec G2 −1.33%**（单基准二分：G1+G4 +0.43% / G3 −0.54% / G2 −1.33%；`b9f5731e` 内部未拆，嫌疑 X-07 整数键 Set 冷路径重构 / X-10 依赖方 arguments dense-Get 与数组原型）| — | 待拆 patch 消融；方向=让忠实路径与 qjs 同价，**不得回滚语义** |
+| mandreel | 0.941 | 0.0607 | 5.4% | 0.40 pp | **audit-exec G2 −1.33%**（lane 级三 pad 同号坐实）。**H1 梯子已拆完（08-14）**：条目级分解**布局主导**——X-07 孤立 +0.21% / 叠加 −0.51% 符号翻转，X-02 孤立 −0.93% / 叠加 +0.05%；无单条语义税可回滚 | — | **登记为损失收案**：回收需对 object.zig 做逐条目 3-pad lineage（~18 构建换 ≤0.09pp，ROI 不成立）；正确性修复不回滚 |
 | splay | 0.943 | 0.0582 | 5.2% | 0.39 pp | — 未归因 | — | — |
 | gbemu | 0.968 | 0.0322 | 2.9% | 0.21 pp | — 未归因 | — | — |
 | **crypto** | **1.058** | −0.0564 | −5.0% | — | — | 反超，**资产需守住** | — |
@@ -67,7 +67,7 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 | stack3 + int typed store（`42b6160f`） | 正式 7-lineage 中位 **+1.384 pp** | **PASS**，已落地；最坏 pad +1.070 |
 | native-backtrace-publication | ~+0.04 pp | CANDIDATE BLOCKED（语义资格） |
 | rope-strict-equality | ~+0.03 pp | CANDIDATE BLOCKED（上游未命名） |
-| tail_call/tail_call_method 发射 | 未定价，DeltaBlue −0.484% 方向有利 | INCONCLUSIVE（新判据下未达精度） |
+| tail_call/tail_call_method 发射 | **实测上界为负**：emission+reuse 在 deltablue **−4.46%**、richards **−4.52%**（16 samples，CV 还放大 ~9x） | **CLOSED（2026-08-14 OPT-R2 H3）**。reuse handler 有两个 T0 可观察分歧（Error.stack 丢帧、深尾递归不溢出=zjs-only TCO），语义不合格；嵌套 handler 每 tail 重进 Machine（1→3-12 inits）；忠实形态（同机 pushCall+return stub）按 qjs 收益（省一次 dispatch）至多中性。**不是追平杠杆**，分支 `grok/opt-r2-h3` 不合并留档 |
 | audit-exec 17 条正确性批次（`192a097d`，含 X-10 Get-miss 兜底删除） | 3-pad 中位 **+0.17 pp**（1.0018 / 0.9998 / 1.0019） | **NEUTRAL** — 正确性通道落地；低于 MDE 0.278 pp，**不登记为性能候选**。产物 `2026-08-14/zoo-ab-audit-exec-pack.json` |
 
 ⚠️ 前两项合计 **+0.06 pp**，远低于 0.3 pp 的登记线以上门槛，**不得单独打包**。

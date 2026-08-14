@@ -151,3 +151,43 @@ worktree 命名 `worktree-grok-h{1,2,3}-*`，分支 `grok/opt-r2-h{1,2,3}`。
 | H2 | 1–2 | **BLOCKED** | FAM `destroyFlat` 按 `len` 算释放尺寸，不能用 slab slack 原地增长。决策简报 `/tmp/h2-bins/PHASE2-DECISION.md`。候补：pointer-based free（改释放协议）或维持 rope-accumulator。 |
 | H3 | 0 | **DONE** | qjs 发射=`resolve_labels` call+return→tail_call（34941）。handler=**嵌套 `JS_CallInternal` + goto done**，不是帧复用。qjs `return inner()` 的 Error.stack **保留 outer**；`return f(n-1)`×20000 **溢出**。 |
 | H3 | 1 | **LANDED + 开放决策** | 发射已合入 `grok/opt-r2-h3` `36cf6476`。现有 reuse handler 使 Error.stack 少一帧（与 qjs 不符）。关掉 reuse 会打碎 `machine_inits==1` 测试，已 revert。driver 选：保持 reuse（更快、zjs-only）或改 handler 对齐 qjs。 |
+
+## 8. Driver 审查与裁决（2026-08-14）
+
+### H3 裁决：不保持 reuse，分支不合并（CLOSED）
+
+1. **两个 T0 可观察分歧亲验坐实**（difftest，分支尖端重建二进制）：
+   `return inner()` 抛错时 Error.stack 丢 `outer` 帧；`return f(n-1)`×20000 zjs 跑通
+   而 qjs InternalError——等于 zjs-only 真 TCO。违反「qjs 没有的机制必须删」与本计划
+   「一致而不是更好」。⚠️ `/tmp/h3-bins/tailcall` 的二进制是被 revert 的嵌套中间态
+   （md5 与尖端不同），其 IDENTICAL 结果曾误导初判——**凭据必须绑二进制指纹**。
+2. **「更快」实测为假**：emission+reuse 上界定价 deltablue **0.9554（−4.46%）**、
+   richards **0.9548（−4.52%）**（16 samples CPU19，tail 侧 CV 1.65/1.34% vs main 0.18/0.15%）。
+   连语义不合格的最快形态都是大幅负收益，方差还放大 ~9 倍（未诊断，lane 已死不追）。
+3. 嵌套 handler（`a4a301e0`，已 revert）每 tail 重进 Machine（inits 1→3-12）＝最贵 native
+   边界形态，同样否决。**忠实形态**（同机 pushCall + 共享 return stub，栈可观察面自动对齐）
+   按 qjs 真实收益（省一次 dispatch）**至多中性**——将来若做只按「对齐价值」立项，不按性能。
+4. PARITY-LEDGER 机制账本已更新为 CLOSED。deltablue 调用边界赤字须另找解释
+   （tail_call 缺失被排除出主嫌疑）。
+
+### H1 裁决：接受「无单条语义税」结论，`9737363a` 合入 main
+
+- 梯子方法学产出关键事实：G2 −1.33% 在条目级**布局主导**（X-07/X-02 孤立 vs 叠加符号翻转），
+  lane 级损失真实但不可按条目回收。收案，不再投入（回收成本 ~18 构建 3-pad lineage 换 ≤0.09pp）。
+- `9737363a`（3 实参 Reflect.set 跳过 identity）driver 亲验 IDENTICAL（3/4 实参、数组/普通对象），
+  属常量折叠级代码生成优化，合规。合并 + gate 见下。
+
+### H2 裁决：方向选「按指针/槽类推导释放尺寸」的可行性侦察，暂不写码
+
+- grok 的 BLOCKED 判断正确：`destroyFlat` 按 `len` 算释放尺寸，slab slack 原地增长会错尺寸释放。
+- **方向裁定**：qjs 的机制本质是「free 与逻辑长度解耦」（`js_malloc_usable_size` + 指针式 free）。
+  zjs 的忠实镜像 = 从指针/页元数据推导槽类、按槽类 free——这**是**对齐而非发明。
+  选项 2（String 加 capacity 字段）否决：破坏 12 字节 JSString 孪生布局。
+- 下一步（顺序硬性）：a) 计数器构建跑 pdfjs 分桶，确认 flat·rc==1 桶 ≥ 1.090M 差值的一半
+  （合同第 9 条，频次先行）；b) `memory.zig` 页元数据是否支持指针→槽类查询的只读侦察；
+  c) 两者都成立再立改造项（触碰全部字符串释放路径，届时单独过一轮 ReleaseSafe + 全量语义）。
+
+### 遗留
+
+- h3 分支保留供将来「对齐价值」参考；`machine_inits` 测试群未动。
+- mandreel −1.33% 收案；PARITY-LEDGER 行已改写。
