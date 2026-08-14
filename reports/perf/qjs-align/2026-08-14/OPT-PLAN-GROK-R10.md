@@ -53,7 +53,28 @@ R9 的帧瘦身先落地也缩小本批需要回收的量）。
 | 删+立（包） | ≥ 删前基线；EB/crypto/splay 回收 ≥ bypass-off 损失的 2/3；raytrace 方向 ≥0（G 形首次受益） |
 | gate / ReleaseSafe / lint | 全绿 |
 
-（bypass-off 定价基线：______ 待 `/tmp/bypass-ab/zoo.json` 填入。）
+**bypass-off 定价基线（2026-08-14 实测，CPU19，8 samples）**：
+geomean **0.9953**（删除总价 −0.47%）；**损失高度集中：EB −9.08%**、
+zlib −1.09%、splay −0.83%、raytrace −0.25%（确认：bypass 与 raytrace 无关）、crypto 无感。
+
+**⚠️ 回收方程改写（Phase 0 review R1 的宏观印证）**：回收负担 ≈ 单一基准 EB
+（sc_Pair 2 字段 ctor）。`initial_prop_size=4` ⇒ 容量画像对 ≤4 字段构造器回收≈0，
+只剩「存储分配熔合」一笔（~10-20cyc/次）——**对 EB −9.1% 而言杯水车薪**。
+capacity-profile 单独扛不起「不下凹」验收线。见 §5 修订。
+
+## 5. 修订（2026-08-14，bypass-off 定价后）
+
+通用替代的主力应换为 **`small-function-inlining`**（PERF-MECHANISM 第二条目，待申报）：
+字节码级小函数/构造体内联 + **inline-frame 栈重建元数据**（V8/JSC 的标准做法，
+保 Error.stack 可观察等价——内联体内的 put_field 语义原样保留含 setter 拦截，
+只消调用+帧）。一个通用机制同时覆盖：EB 的 sc_Pair 体（回收删除损失）、
+raytrace G 形的 initialize 调用（~0.34 内层调用常数）、deltablue 71% 短 accessor 链。
+capacity-profile 降级为包内次要项（或按 R1 预检结果裁掉）。
+
+两种排程交用户选：
+- **方案甲（推荐）**：先建 small-function-inlining（申报→设计→实施），删除与它同包落地，
+  「不下凹」承诺保住；
+- **方案乙**：按原则立即删（接受 EB −9.1% 过渡性下凹），内联机制随后回收。
 
 ## 4. 队列衔接
 
