@@ -137,3 +137,16 @@ R9（真帧瘦身+apply 段）→ **R10（本批）** → R11 EB 命名桶 → R
 布局工程批（SEQUENCED-LAST）。
 `grok/opt-r6-k` 已拒收留档；DECISION-BRIEF-path-A-B 由通用性原则收编
 （后续 B 类候选按 PERF-MECHANISM-LEDGER 四条件逐个申报）。
+
+## 并行舰队（用户指示「尽可能并行、多做尝试」，2026-08-14）
+
+| pane | lane | 任务 | worktree / CPU |
+|---|---|---|---|
+| w1:pQ | R11 预研 | EB 命名桶自顶向下重定价（closure +223M / GC 环收集 +193M，新基线） | r10 / 7 |
+| w1:pS | v11 | call_method 内联（deltablue；先设计后写码，附录 A 栈溢先修设计） | grok-v11 / 5 |
+| w1:pT | r12 | TS 预研（RC destroy/trace + pushExactSimpleFrame 频次×单价 + qjs 参照） | grok-r12 / 6 |
+| w1:pV | v2 | apply/arguments-aware 内联申报草案（raytrace G 形 0.34 段，只设计） | grok-v2 / 8 |
+| w1:pW | r11c | EB 新基线 R7 提纯（自底向上，与 pQ 互补） | grok-r11c / 15 |
+
+公共契约 /tmp/lanes/COMMON.md（回传协议/一改动一 commit/CPU 纪律/机制红线）。
+driver 在 CPU 19 跑 R10 定损 3-pad（在途）。布局批维持 PAUSED 等用户。
