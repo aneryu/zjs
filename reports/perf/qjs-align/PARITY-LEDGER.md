@@ -42,10 +42,10 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 | raytrace | 0.777 | 0.2517 | 22.4% | **1.68 pp** | 调用机制合计 +515M（49.2%）、apply/arguments +249M | 属性读 −24M、RC 销毁 −45M | apply length 前缀（已落地 fb680e41） |
 | pdfjs | 0.785 | 0.2415 | 21.5% | **1.61 pp** | dispatch +150M / string+regexp +70M / call +62M | arith −31M, alloc −19M, frontend −17M, RC −15M | backtrace 发布 14.07M；rope strict-eq 9.62M |
 | earley-boyer | 0.799 | 0.2242 | 20.0% | **1.49 pp** | 闭包+var_ref +223M、GC 环收集 +193M、构造 bypass 准入税 +182M | 属性读 −216M、属性发布 −222M | fclosure 常驻 handler（已落地，zoo 效应零） |
-| typescript | 0.830 | 0.1864 | 16.6% | 1.24 pp | return teardown 10.10x +189M、slow property resolver 3.24x +180M | resident 属性读 0.770x | audit-exec G2（X-10 miss 兜底删除）实测 **+1.71%**（单基准二分 vs `6d8295ce`，非-G2 段 −0.48%） |
+| typescript | 0.830 | 0.1864 | 16.6% | 1.24 pp | **R4 订正：内层循环税 1.215x 平台（5 轮无漂移，GC 21=21）**；「fixed-work 1.03-1.08x」是前端摊销稀释（zjs 前端快）。净 +132M（782M 是 dec6961d 旧账）；other 顶符号=RC destroy/trace + `pushExactSimpleFrame`；property 两侧 37%=37%（X-10 后 +180M 不复存在） | 前端/编译（折差 +17% 全是它） | audit-exec X-10 实测 +1.71%（`6d8295ce` 二分） |
 | deltablue | 0.870 | 0.1391 | 12.4% | 0.93 pp | 调用/帧/构造同边界 595.6M（占其赤字 80.4%） | 属性读 0.450–0.576x、allocator 0.787x | `tail_call_method` 缺失 7.06M 次 |
 | richards | 0.904 | 0.1009 | 9.0% | 0.67 pp | — 未归因 | — | — |
-| zlib | 0.920 | 0.0835 | 7.4% | 0.56 pp | — 未归因 | — | — |
+| zlib | 0.920 | 0.0835 | 7.4% | 0.56 pp | **R4-U 命名：dispatch+call = 净超出的 111%**（其余桶是 zjs 优势回贴）→ 已升级为命名主攻面，待 per-opcode 分解 | 非 dispatch 桶全部反超 | — |
 | box2d | 0.922 | 0.0817 | 7.3% | 0.54 pp | — 未归因 | — | — |
 | mandreel | 0.941 | 0.0607 | 5.4% | 0.40 pp | **audit-exec G2 −1.33%**（lane 级三 pad 同号坐实）。**H1 梯子已拆完（08-14）**：条目级分解**布局主导**——X-07 孤立 +0.21% / 叠加 −0.51% 符号翻转，X-02 孤立 −0.93% / 叠加 +0.05%；无单条语义税可回滚 | — | **登记为损失收案**：回收需对 object.zig 做逐条目 3-pad lineage（~18 构建换 ≤0.09pp，ROI 不成立）；正确性修复不回滚 |
 | splay | 0.943 | 0.0582 | 5.2% | 0.39 pp | — 未归因 | — | — |
@@ -99,7 +99,15 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 **0 条通过「路径 A 可修、三 pad ≥0.15pp」**——pdfjs/TS/EB 热函数两侧同价；
 deltablue 短 accessor 链（71% opcode）拿掉后两侧同 +85%，追平空间仅 ~0.1pp
 （driver CPU 19 复测 +1.58%≈+0.104pp）。**路径 A 在 JS/胶水层扫空，残差=引擎级弥散单位成本。**
-产物 `2026-08-14/R3/`；裁决材料 `2026-08-14/DECISION-BRIEF-path-A-B.md` —— **已 DEFERRED**：
-用户质疑「残差不可解释」成立，账面存在四块未闭合缺口（**TS 时间盒折差 10.16% 从未追查
-（潜在 ≈+0.7pp，当前最大单块）**、pdfjs 60% 未命名、TS 782M 残差、五基准从未归因）。
-**闭合先于裁决** ⇒ `2026-08-14/OPT-PLAN-GROK-R4.md`（守恒闭合战役，判据=Σ命名桶=总超出±10%）。
+产物 `2026-08-14/R3/`。用户质疑「残差不可解释」后 A/B 曾 DEFERRED，
+**R4 守恒闭合战役已把四块缺口全部关掉**（`2026-08-14/R4/`）：
+- G1 TS 折差 = **前端摊销记账口径**（PMU 含 2.5MB 编译、分数只量内层；driver CPU19 亲验
+  5 轮曲线平台 1.195-1.215x，GC 21=21，堆老化死）——「修 GC 回 0.7pp」不存在，
+  **真内层税 1.215x 归单位成本账**；§4.2 容量→堆膨胀假设在 TS 上证伪；
+- G2 pdfjs：7 桶 +215M vs PMU +216M = **0.5% 闭合**，无 ≥10% 单机制，dispatch 最大桶；
+- G3 TS 782M 是旧账，现净 +132M 已点名（RC destroy/trace + pushExactSimpleFrame）；
+- G4 五基准已分桶：**zlib 升级**（dispatch+call=111%），richards/box2d/gbemu 无 ≥50% 单桶，
+  splay 的 alloc 是 zjs 优势勿砍、时间盒反帮 zjs −8.85%。
+**解释台账已守恒闭合：赤字=分布式 dispatch/call 单位成本，无隐藏单点。**
+裁决材料 `DECISION-BRIEF-path-A-B.md` **携 R4 四表重呈（RE-SUBMITTED）**；
+裁决前唯一剩余路径 A 探针 = zlib per-opcode 分解（≤0.56pp，可选）。
