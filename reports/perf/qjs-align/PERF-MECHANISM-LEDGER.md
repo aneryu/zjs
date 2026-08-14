@@ -76,8 +76,9 @@
 关键义务:  D8 native apply 幽灵帧——两侧 Error.stack 都有 `at apply (native)`，
            省 apply 必须在栈重建里补该帧（InlinedSite 扩展，实现规格前置中）。
            S7 mapped 活槽转发（形参写后 apply 看到当前槽，亲验）。
-条件:      L2 受 K=40 闸——qjs 侧 Vector/Color initialize 42B>40；zjs 长度测量中，
-           K→48 裁决待数据。K 不扩则只剩 L1（D11 量级 ~+0.34pp）。
+条件:      **K=48 已裁（2026-08-14）**——zjs 侧 Vector/Color.initialize 实测 42B；
+           +224 新准入（+8.5%），每 caller 上限+全局预算兜底；K 改后 v1/v1.5 回归冒烟必跑。
+           D8 幽灵帧规格已批（附录 B：L1 复用 Entry.native_caller，L2 apply_forwarded 旗）。
 预计:      L1+L2 诚实中位 ~+0.5pp（2.53M×~150cyc≈0.38G，raytrace 0.777→0.82-0.90）。
 状态:      APPROVED-DESIGN；实施排队（EB 双刀+v11 之后）；前置=K 数据+D8 规格
 ```
