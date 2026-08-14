@@ -1,9 +1,13 @@
 # 决策简报：路径 A / 路径 B 架构边界裁决（2026-08-14）
 
-> **状态：PARKED（用户方向指示，2026-08-14）。** 用户裁定终局目标=zoo 每项 ≥1.0，
-> 路线=先做更深的 quickjs.c 代码对照分析（`OPT-PLAN-GROK-R5.md`：逐 opcode 机器码
-> 指令预算对照——27% 每-opcode 指令超出从未被系统分解，也从未被封板）。
-> R5 的 ARCHITECTURAL 残差枚举完成后，本简报才有资格带着指令级证据重启。
+> **状态：RESOLVED-BY-PRINCIPLE（2026-08-14 终态）。** 本简报的「整体 A/B 之争」
+> 被**通用性原则**（PARITY-LEDGER 宪法）收编：形态特判禁止（含存量
+> classifySimpleFieldConstructor，R10 删除）；通用机制（分配画像、解释器 IC 类）
+> 按 `PERF-MECHANISM-LEDGER.md` 四条件**逐机制**申报准入。
+> 不再存在「一次性选 A 或 B」的裁决点。deltablue accessor 内联等原 B 类候选
+> 将来按该账本逐个裁。
+>
+> ~~**状态：PARKED（用户方向指示，2026-08-14）。**~~
 >
 > ~~**状态：RE-SUBMITTED（R4 之后携新证据重呈）。**~~
 > 曾因用户质疑「残差不可解释」DEFERRED——质疑成立，R4 守恒闭合战役据此执行并**全部关掉四块缺口**：

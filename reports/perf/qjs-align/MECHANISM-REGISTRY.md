@@ -101,10 +101,11 @@ pdfjs 一整轮 3.83M 次 concat 分桶 = **lhs 共享（rc>1）65.5% / lhs=rope
            R8-C1（扩大 bypass 让 G 打上）——⛔ 与 08-11「必须删不开例外」冲突，
            且 bypass 本体从未按裁定删除（call_runtime.zig:2288 仍在）= 在案治理矛盾；
            或 faithful 攻坚（R9 计划 §0 选项 c）：真帧 N0 +92 与 apply 段逐指令对齐 qjs
-状态:      **用户已裁决（2026-08-14）三阶段路线**：Phase 1 faithful 攻坚（R9-N/G，
-           判据 N3g→≤1.05）→ Phase 2 comptime 开关重估 bypass，增益≤噪声则
-           **执行 08-11 删除、治理矛盾零代价闭合** → Phase 3（仅打不穿时）
-           扩大方案与路径 B 一起作政策裁决。R9-V 先跑 bypass-off 基线刷新定价
+状态:      **终态路线（2026-08-14 通用性原则裁定后）**：R9 faithful 攻坚
+           （N3g→≤1.05）→ **R10「删特化上通用」单批**：删 classifySimpleFieldConstructor
+           全套（落实 08-11）+ 立 constructor-allocation-profile
+           （PERF-MECHANISM-LEDGER 首条目），包级 zoo 不下凹验收。
+           原 Phase 3「扩大 bypass」永久作废（形态特判禁止）
 ```
 
 ## `apply-arguments-residual`（R7-R2，2026-08-14 登记）
