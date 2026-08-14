@@ -1166,15 +1166,22 @@ fn cloneAndExpand(
     return spec;
 }
 
+/// R-v11-a consumes `callee.arg_count` (extras stay in the region and are
+/// DROPped). L1 apply-forward rewrites to a live-argv `call_method` whose
+/// argc is the *site* argc (I6); those slots must be MOVEd into the window.
+pub fn consumedArgSlots(site: *const InlinedSite) u16 {
+    return if (site.apply_forwarded) site.argc else site.callee_fb.arg_count;
+}
+
 pub fn windowFits(frame: *const frame_mod.Frame, site: *const InlinedSite) bool {
-    const arg_slots = site.callee_fb.arg_count;
+    const arg_slots = consumedArgSlots(site);
     const need = @as(usize, site.arg_base) + @as(usize, arg_slots);
     return site.this_slot < frame.locals.len and need <= frame.locals.len;
 }
 
-/// Move `this_value` and `args[0..callee.arg_count]` into the caller's local
+/// Move `this_value` and `args[0..consumedArgSlots]` into the caller's local
 /// window. Each stored value is taken by ownership (no dup). Extra entries
-/// past `callee.arg_count` stay in `args` for `releaseCallRegionAfterInline`.
+/// past the consumed count stay in `args` for `releaseCallRegionAfterInline`.
 pub fn installInlineWindow(
     frame: *frame_mod.Frame,
     site: *const InlinedSite,
@@ -1189,7 +1196,7 @@ pub fn installInlineWindow(
     } else {
         this_value.free(rt);
     }
-    const arg_slots = site.callee_fb.arg_count;
+    const arg_slots = consumedArgSlots(site);
     var i: u16 = 0;
     while (i < arg_slots) : (i += 1) {
         const slot = site.arg_base + i;

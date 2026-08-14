@@ -1975,7 +1975,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                             vm.rt,
                             .constructor,
                             region_start[0..total],
-                            site.callee_fb.arg_count,
+                            small_inline.consumedArgSlots(site),
                         );
                         vm.stack.setLen(region_base);
                         vm.code_base = live_code.ptr;
@@ -2055,7 +2055,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                                 vm.rt,
                                 .constructor,
                                 region_start[0..total],
-                                site.callee_fb.arg_count,
+                                small_inline.consumedArgSlots(site),
                             );
                             vm.stack.setLen(region_base);
                             vm.frame.pc = site.pc_lo;
