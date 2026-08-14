@@ -96,8 +96,14 @@ tail_call 发射（−4.5% 上界，08-14）／rope 表示层（H2 收案）。
   写 OPT-R4 修复批计划 + 把「路径 A 剩余空间」证据打包提交用户做 A/B 裁决。
 - 预计耗时：每 lane 1–1.5 天（普查半天、消融一天）；四 lane 并行。
 
-## 5. 结果表（执行后填写）
+## 5. 结果表（2026-08-14 执行完毕；driver 抽验两条 CPU 19 复测通过）
 
 | lane | phase | 状态 | 头部发现 |
 |---|---|---|---|
-| （待执行） | | | |
+| R3-P pdfjs | 3 | **JS 级干净** | apply/transform.apply/isSeparator ≤+0.038pp；60% 残差不在 JS 函数 |
+| R3-T typescript | 3 | **JS 级干净** | Verify sink 两侧同价（各 +4.4%）；teardown 可指向、IMPL-TEARDOWN 禁区维持 |
+| R3-E earley-boyer | 3 | **JS 级干净** | 真内联 ≤+0.026pp（driver 复测 +0.029pp）；IIFE +0.174pp 假阳性已作废；ctor/GC 锚在 `new sc_Pair` |
+| R3-D deltablue | 3 | **形状已命名/未过门槛** | 短 accessor 链占 71% opcode；三 pad 零翻转但最坏 <0.15pp（driver CPU 19 复测 +0.104pp）；共同成本 +85% ⇒ 内联=超 qjs 不是追平 |
+
+**总判：0 条通过「路径 A 可修、三 pad ≥0.15pp」。** 详见 `R3/SUMMARY.md`；
+后续裁决材料 `DECISION-BRIEF-path-A-B.md`。
