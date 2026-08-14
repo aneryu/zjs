@@ -21931,6 +21931,24 @@ test "small-function-inlining L1: apply-arguments ctor specializes" {
     try std.testing.expect(state.?.inlined[0].apply_forwarded);
 }
 
+test "small-function-inlining L1: next-entry take does not leak initialize return" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function K() { this.initialize.apply(this, arguments); }
+        \\K.prototype.initialize = function (a, b) { this.a = a; this.b = b; };
+        \\function batch(n) {
+        \\  var i, s = 0, p;
+        \\  for (i = 0; i < n; i++) { p = new K(1, 2); s = s + p.a; }
+        \\  return s;
+        \\}
+        \\assert.sameValue(batch(16), 16);
+        \\assert.sameValue(batch(64), 64);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "small-function-inlining L1: forwarded argc is the site argc" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

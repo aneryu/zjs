@@ -675,6 +675,10 @@ fn rewriteBody(
                 out.forward_call_rel = @intCast(out.len);
                 out.method_atom = p.method_atom;
                 if (!emitCallMethod(&out, site_argc)) return null;
+                // call_method leaves initialize's return; the ctor result is
+                // `this`. Drop the unused value so it cannot pile up across
+                // next-entry takes.
+                if (!emitByte(&out, op.drop)) return null;
                 recordMap(&out, map_from, src_pc);
                 emitted = si + 1;
                 continue;
