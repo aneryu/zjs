@@ -105,7 +105,9 @@ driver 早前 24 cyc 估算因窗口取 4.5G 而错）；v1+v1.5 合法收回 ~2
 **通用性原则（体必须跑）下结构性不可回收，2/3 门参照系定错**（护的是非法机制的分数）。
 战略要点：**bypass-on 的 EB 也只有 0.798——EB ≥1.0 的路从来不经过 bypass**，
 在 R4 命名桶（closure/var_ref +223M、GC 环收集 +193M）。三选项升用户（见 driver 汇报）。
-附加调查已派：特化 caller 失去 leaf/exact CallFacts 的代价定价（≥50M 则设计保 leaf 承载）。
+附加调查已收（`LEAF-TAX.md`）：特化 caller 失 leaf 资格的税 = 822k 次 × 18.6 cyc =
+**15.3M cyc（EB 窗口 0.06%）< 50M 门槛** ⇒ 不设计窗口承载、不做 v1.6；
+v1.5 vs v1 的 +130M 差主要是 pad/熔合/帧几何（单 pad 噪声域），不是这笔。
 
 **R-5 第二轮结果（@991e649f）——机制接通但结构性不足，driver 判 v1.5 立项**：
 OSR 已删（泄漏消失）、真泄漏顺手修掉（installInlineWindow dup 不放原件，修前 N3f 1.24）、
