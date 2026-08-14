@@ -7527,7 +7527,6 @@ pub const Object = extern struct {
 
     const DecrefVisitor = struct {
         registry: *gc.Registry,
-        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7574,14 +7573,13 @@ pub const Object = extern struct {
             // child whose trial refcount reaches zero to tmp_obj_list.
             if (h.meta().rc == 0 and h.meta().flags.mark) {
                 self.registry.detachCycleCandidate(h);
-                self.garbage.append(h);
+                gc.listAddTail(&self.registry.tmp_obj_list, h);
             }
         }
     };
 
     const ScanIncrefVisitor = struct {
         registry: *gc.Registry,
-        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: ScanIncrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7618,19 +7616,21 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
-            const was_zero = h.meta().rc == 0;
+            // qjs gc_scan_incref_child (quickjs.c:6719-6728):
+            //   rc++; if (rc == 1) { list_del; list_add_tail(gc_obj); mark = 0; }
+            // qjs only feeds this to cycle-list members (JS_MarkValue skips
+            // JS_TAG_BIG_INT). zjs visitValue uses refCountHeader(), so a heap
+            // BigInt is trial-decref'd and can come back rc 0→1 while never
+            // having been linked. Membership is the cyclic list itself (the
+            // former in_cycle_list bit): unlinked nodes have prev == null.
+            // list_del on those is SEGV — test262
+            // built-ins/Array/fromAsync/asyncitems-arraylike-promise.js.
             h.meta().rc += 1;
-            // mark implies membership in the cycle-candidate set; the kind
-            // recheck was redundant with the same invariant used by QuickJS's
-            // gc_scan_incref_child.
-            if (was_zero and h.meta().flags.mark) {
-                self.garbage.remove(h);
-                h.meta().flags.mark = false;
-                // Moving a newly revived zero-ref node to the main-list tail
-                // makes the enclosing list walk visit its children later,
-                // exactly like QuickJS gc_scan_incref_child.
-                self.registry.restoreCycleCandidate(h);
-            }
+            if (h.meta().rc != 1) return;
+            if (h.prev == null) return;
+            gc.listDel(h);
+            self.registry.restoreCycleCandidate(h);
+            h.meta().flags.mark = false;
         }
     };
 
@@ -7805,7 +7805,7 @@ pub const Object = extern struct {
         // changed. Everything below is therefore a committed, no-error path.
         try gcRemoveWeakObjects(rt);
 
-        var garbage: gc.HeaderList = .{};
+        gc.listInit(&rt.gc.tmp_obj_list);
 
         // Phase 1: gc_decref
         {
@@ -7813,7 +7813,6 @@ pub const Object = extern struct {
             while (gc_iter.next()) |h| {
                 traceChildren(rt, h, DecrefVisitor{
                     .registry = &rt.gc,
-                    .garbage = &garbage,
                 });
                 // Match qjs gc_decref: mark the current node after visiting
                 // its children, then move it immediately if its trial count
@@ -7821,7 +7820,7 @@ pub const Object = extern struct {
                 h.meta().flags.mark = true;
                 if (h.meta().rc == 0) {
                     rt.gc.detachCycleCandidate(h);
-                    garbage.append(h);
+                    gc.listAddTail(&rt.gc.tmp_obj_list, h);
                 }
             }
         }
@@ -7829,15 +7828,15 @@ pub const Object = extern struct {
         // Phase 2: gc_scan
         {
             // Walk the live list dynamically: reviving a trial-zero child moves
-            // it from `garbage` to the registry tail, so it is visited without
+            // it from tmp_obj_list to the registry tail, so it is visited without
             // recursion or an auxiliary worklist.
-            var cursor = rt.gc.gc_object_head;
+            var cursor = rt.gc.gc_obj_list.next;
             while (cursor) |h| {
+                if (h == &rt.gc.gc_obj_list) break;
                 std.debug.assert(h.meta().rc > 0);
                 h.meta().flags.mark = false;
                 traceChildren(rt, h, ScanIncrefVisitor{
                     .registry = &rt.gc,
-                    .garbage = &garbage,
                 });
                 cursor = h.next;
             }
@@ -7845,102 +7844,92 @@ pub const Object = extern struct {
 
         // Phase 3: restore refcounts of the detached dead-cycle partition.
         {
-            var cursor = garbage.head;
-            while (cursor) |h| : (cursor = h.next) {
+            var cursor = rt.gc.tmp_obj_list.next;
+            while (cursor) |h| {
+                if (h == &rt.gc.tmp_obj_list) break;
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
+                cursor = h.next;
             }
         }
 
         sweepCycleGarbageWeakCollectionEntries(rt);
 
-        // No fallible operation is allowed after this point. Split the detached
-        // partition by teardown order, reusing the same header links for each
-        // staging list and later for Registry's Pass-B deferred list. Count the
-        // collected value-bearing nodes while consuming that list instead of
-        // making a separate full pass; QuickJS likewise consumes tmp_obj_list
-        // directly in gc_free_cycles.
-        var garbage_count: usize = 0;
-        var garbage_objects: gc.HeaderList = .{};
-        var garbage_bytecodes: gc.HeaderList = .{};
-        var garbage_var_refs: gc.HeaderList = .{};
-        var garbage_shapes: gc.HeaderList = .{};
-        var garbage_contexts: gc.HeaderList = .{};
-        var garbage_modules: gc.HeaderList = .{};
-        while (garbage.popFront()) |h| {
-            switch (h.meta().flags.kind) {
-                .object => {
-                    garbage_count += 1;
-                    garbage_objects.append(h);
-                },
-                .function_bytecode => garbage_bytecodes.append(h),
-                .var_ref => {
-                    garbage_count += 1;
-                    garbage_var_refs.append(h);
-                },
-                .shape => {
-                    garbage_count += 1;
-                    garbage_shapes.append(h);
-                },
-                .realm_context => {
-                    garbage_count += 1;
-                    garbage_contexts.append(h);
-                },
-                .module => {
-                    garbage_count += 1;
-                    garbage_modules.append(h);
-                },
-                else => unreachable,
-            }
-        }
-
+        // Consume tmp_obj_list like qjs gc_free_cycles (quickjs.c:6756-6793):
+        // no 6-way staging lists. Explicit free_gc_object set is OBJECT /
+        // FUNCTION_BYTECODE / MODULE (zjs has no JS_GC_OBJ_TYPE_ASYNC_FUNCTION).
+        // Objects still run first so FB capture-count metadata outlives
+        // closures (qjs free_object reads b->var_ref_count). Default kinds
+        // (var_ref / shape / realm_context) stay on tmp until the four-kind
+        // pass finishes, then get resource teardown — owners skip them via
+        // cycle_visited, so they cannot rely on ownership the way qjs does.
         const old_phase = rt.gc.phase;
         rt.gc.phase = .remove_cycles;
         defer {
             rt.gc.phase = old_phase;
         }
 
-        // STEP 3 (qjs faithful): no edge-nulling pre-pass. qjs has none — its
-        // cascade defense is the REMOVE_CYCLES gate in __JS_FreeValueRT
-        // (quickjs.c:6476), which we mirror in `gc.releaseAndDestroy`. With that
-        // gate, a garbage->garbage reference released during the destroy pass is a
-        // pure decref (no recursive free), and the restored refcounts (Phase 3b /
-        // gc_scan_incref_child2) net to zero. Weak-collection entries are handled
-        // by `sweepCycleGarbageWeakCollectionEntries` above; internal bytecode
-        // cpool edges are released by the gated fb teardown.
-
-        const freed = garbage_count;
-
-        // Resource teardown has a real ownership order even though every struct
-        // survives until Pass B. A bytecode function object derives the length
-        // of its `u.func.var_refs` allocation from its owning FB, exactly like
-        // qjs `free_object`; therefore every Object must consume that metadata
-        // before FunctionBytecode.deinit clears `closure_var_count`. The old mixed
-        // gc-list order could deinit an FB first and leak the capture-pointer
-        // allocation when the closure followed. VarRef structs also stay valid
-        // until their object owners have released the capture edges.
-        while (garbage_objects.popFront()) |h| {
-            destroyFromHeader(rt, h);
+        var garbage_count: usize = 0;
+        // One walk per kind (O(n)), not one walk per node (O(n²)).
+        var cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .object) {
+                gc.listDel(h);
+                garbage_count += 1;
+                destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_contexts.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            context_mod.JSContext.destroyFromHeader(rt, h);
+        cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .realm_context) {
+                gc.listDel(h);
+                garbage_count += 1;
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                context_mod.JSContext.destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_modules.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            module_mod.ModuleRecord.destroyFromHeader(rt, h);
+        cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .module) {
+                gc.listDel(h);
+                garbage_count += 1;
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                module_mod.ModuleRecord.destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_bytecodes.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            function_bytecode_mod.destroyFromHeader(rt, h);
+        cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .function_bytecode) {
+                gc.listDel(h);
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                function_bytecode_mod.destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_var_refs.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            var_ref_mod.VarRef.destroyFromHeader(rt, h);
-        }
-
-        while (garbage_shapes.popFront()) |h| {
-            if (h.meta().flags.finalizing) continue;
-            rt.shapes.destroyFromHeader(h);
+        while (gc.listFirst(&rt.gc.tmp_obj_list)) |h| {
+            gc.listDel(h);
+            switch (h.meta().flags.kind) {
+                .var_ref => {
+                    garbage_count += 1;
+                    rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                    var_ref_mod.VarRef.destroyFromHeader(rt, h);
+                },
+                .shape => {
+                    garbage_count += 1;
+                    if (!h.meta().flags.finalizing) rt.shapes.destroyFromHeader(h);
+                },
+                else => unreachable,
+            }
         }
 
         // Pass B: now every garbage object's resources are gone AND every shape
@@ -7951,22 +7940,20 @@ pub const Object = extern struct {
         // freed object memory.
         if (!rt.hasPendingDeferredClassPayloadFinalizers()) drainCycleDeferredFrees(rt);
 
-        return freed;
+        return garbage_count;
     }
 
-    /// Free the struct memory of every cycle-deferred GC object (objects /
-    /// var_refs / function-bytecodes whose resources were torn down during the
-    /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
+    /// Pass B: qjs gc_free_cycles second walk (quickjs.c:6797-6810) frees
+    /// OBJECT / FUNCTION_BYTECODE / MODULE structs (and ASYNC, which zjs does
+    /// not have as a GC kind). The object arm keeps a husk when rc or weakrefs
+    /// remain. var_ref / realm_context are zjs leftovers whose owners skipped
+    /// them via cycle_visited; they still have to be reclaimed here.
     pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
         while (rt.gc.popCycleDeferredFree()) |h| {
             switch (h.meta().flags.kind) {
                 .object => {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     if (rt.gc.phase == .remove_cycles and (h.meta().rc != 0 or obj.weakref_count != 0)) {
-                        // qjs keeps a cycle-freed object's stripped struct while
-                        // either strong teardown edges or weak identities still
-                        // point at it. It is no longer a GC-list member; the last
-                        // weak release reclaims an rc-zero husk.
                         h.meta().flags.mark = false;
                         h.meta().flags.cycle_visited = false;
                         h.meta().flags.finalizing = false;
@@ -7974,10 +7961,10 @@ pub const Object = extern struct {
                     }
                     freeCycleDeferredStruct(rt, obj);
                 },
-                .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
                 .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
-                .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
                 .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
+                .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
+                .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
                 else => {},
             }
         }
