@@ -70,6 +70,25 @@ pdfjs 一整轮 3.83M 次 concat 分桶 = **lhs 共享（rc>1）65.5% / lhs=rope
 
 ---
 
+## `leaf-call-frame-zero`（R5-C 登记，2026-08-14）
+
+```
+来源:      R5-C 反汇编对照——qjs CASE(OP_call*) 在 bl JS_CallInternal 之前零额外帧
+           （label_OP_call0 0x254ec，qjs:18175-18192）；zjs op_call* 无条件开 96B+0x220 帧
+性质:      FAITHFUL（对齐 qjs 的帧形状）
+候选形态:  op_call*_leaf / op_call_method_leaf 克隆：只 resolve + enterEntry + br
+状态:      REGISTERED，单条 <0.3pp，进 R6 组包 + 三 pad
+```
+
+## `get-array-el-frame-zero`（R5-P 登记，2026-08-14）
+
+```
+来源:      R5-P——get_array_el 快数组臂因 bl destroyZeroRef 无条件开 0x50 帧
+候选形态:  outline 零 RC 路径，热臂 frame-zero
+性质:      FAITHFUL（qjs 快臂无帧）
+状态:      REGISTERED，单条 <0.3pp，进 R6 组包 + 三 pad
+```
+
 ## 组包规则（当前：`candidate-package` NOT AUTHORIZED）
 
 上述两项合计 23.689M ≈ **+0.06 pp**，仅为 MDE 的约五分之一。

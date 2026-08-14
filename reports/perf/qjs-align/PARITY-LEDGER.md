@@ -48,7 +48,7 @@ geomean 0.9278     总 log deficit 1.1233     追平需相对提升 7.78%
 | typescript | 0.830 | 0.1864 | 16.6% | 1.24 pp | **R4 订正：内层循环税 1.215x 平台（5 轮无漂移，GC 21=21）**；「fixed-work 1.03-1.08x」是前端摊销稀释（zjs 前端快）。净 +132M（782M 是 dec6961d 旧账）；other 顶符号=RC destroy/trace + `pushExactSimpleFrame`；property 两侧 37%=37%（X-10 后 +180M 不复存在） | 前端/编译（折差 +17% 全是它） | audit-exec X-10 实测 +1.71%（`6d8295ce` 二分） |
 | deltablue | 0.870 | 0.1391 | 12.4% | 0.93 pp | 调用/帧/构造同边界 595.6M（占其赤字 80.4%） | 属性读 0.450–0.576x、allocator 0.787x | `tail_call_method` 缺失 7.06M 次 |
 | richards | 0.904 | 0.1009 | 9.0% | 0.67 pp | — 未归因 | — | — |
-| zlib | 0.920 | 0.0835 | 7.4% | 0.56 pp | **R4-U 命名：dispatch+call = 净超出的 111%**（其余桶是 zjs 优势回贴）→ 已升级为命名主攻面，待 per-opcode 分解 | 非 dispatch 桶全部反超 | — |
+| zlib | 0.920 | 0.0835 | 7.4% | 0.56 pp | **R5 改写：R4-U 的「dispatch+call=111%」是桶伪影**（handler 全住 tailcall_dispatch.zig，正常 opcode 工作被计入 dispatch 桶）。真相（driver CPU19 亲验）：**insn z/q=0.933（zjs 更少）、IPC 比 0.870、brmiss 1.241**——差距=分派结构的前端微架构（256-way 间接 br 的 I-cache/BTB），不是指令数 | 热体全线更短（get_loc0 12 vs 18、int add/or/sar 都更短） | 前端微架构税（R6 诊断中） |
 | box2d | 0.922 | 0.0817 | 7.3% | 0.54 pp | — 未归因 | — | — |
 | mandreel | 0.941 | 0.0607 | 5.4% | 0.40 pp | **audit-exec G2 −1.33%**（lane 级三 pad 同号坐实）。**H1 梯子已拆完（08-14）**：条目级分解**布局主导**——X-07 孤立 +0.21% / 叠加 −0.51% 符号翻转，X-02 孤立 −0.93% / 叠加 +0.05%；无单条语义税可回滚 | — | **登记为损失收案**：回收需对 object.zig 做逐条目 3-pad lineage（~18 构建换 ≤0.09pp，ROI 不成立）；正确性修复不回滚 |
 | splay | 0.943 | 0.0582 | 5.2% | 0.39 pp | — 未归因 | — | — |
