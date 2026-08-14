@@ -1967,10 +1967,10 @@ pub const Machine = struct {
         return self.pushExactSimpleFrameSlow(strict_this, snapshot_args, method_receiver, global, target, source);
     }
 
-    /// Shared straight-line body of `pushExactSimpleFrame`. `inline` is the
-    /// point: the sloppy-exact instantiation expands directly inside the
-    /// fixed-arity call opcode handlers while the noinline owner above keeps
-    /// the single cold symbol for every other caller.
+    /// Shared straight-line body of the exact-simple Slow constructor.
+    /// `inline` keeps Slow a thin noinline wrapper around this body; the
+    /// hot probe above is the outlined leaf. Fixed-arity call handlers
+    /// `bl` that leaf instead of expanding this body (r12-KNIFE §c).
     inline fn pushExactSimpleFrameImpl(
         self: *Machine,
         comptime strict_this: bool,
@@ -2971,14 +2971,13 @@ pub const Machine = struct {
     }
 
     /// Push a plain inline call whose raw source is `[callable, args...]`.
-    /// Exact sloppy/strict frames enter the deep constructor; all remaining
-    /// plain shapes retain the authoritative generic setup implementation.
-    /// `inline_exact` (fixed-arity hot call handlers only) expands the
-    /// sloppy-exact constructor body in place of its out-of-line symbol; the
-    /// strict and generic arms always keep their cold calls.
+    /// Exact sloppy/strict frames enter the outlined exact-simple constructor
+    /// (`pushExactSimpleOrSlow`); all remaining plain shapes retain the
+    /// authoritative generic setup. The retired `inline_exact` expansion of
+    /// `Impl` into `op_call1..3` is withdrawn: those handlers `bl` the same
+    /// slim leaf as every other exact-simple caller (r12-KNIFE §c).
     pub inline fn pushPlainCall(
         self: *Machine,
-        comptime inline_exact: bool,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         target: *const InlineTarget,
@@ -2994,9 +2993,6 @@ pub const Machine = struct {
         }
         const source = ArgsSource.initStack(region_start, argc, false);
         if (isSimpleInlineFrame(target, source)) {
-            if (inline_exact) {
-                return self.pushExactSimpleFrameImpl(false, false, false, global, target, source);
-            }
             return self.pushExactSimpleOrSlow(false, false, false, global, target, source);
         }
         if (isStrictSimpleInlineFrame(false, target, source)) {
@@ -3274,7 +3270,7 @@ pub const Machine = struct {
         layout: RegionLayout,
     ) HostError!*Entry {
         return switch (layout) {
-            .plain => self.pushPlainCall(false, global, caller_stack, target, region_start, argc),
+            .plain => self.pushPlainCall(global, caller_stack, target, region_start, argc),
             .method => self.pushMethodCall(global, caller_stack, target, region_start, argc),
         };
     }
