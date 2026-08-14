@@ -21604,6 +21604,31 @@ test "small-function-inlining: derived class constructor is not eligible" {
     try std.testing.expect(!d_obj.u.bytecode_function.function_bytecode.?.smallInlineEligible());
 }
 
+test "small-function-inlining: same-invocation main loop specializes" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function main(n) {
+        \\  function Three(a, b, c) { this.x = a; this.y = b; this.z = c; }
+        \\  var i, s = 0, p;
+        \\  for (i = 0; i < n; i++) { p = new Three(1, 2, 3); s = s + p.x; }
+        \\  return s;
+        \\}
+        \\globalThis.__main = main;
+        \\assert.sameValue(main(16), 16);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const main_fn = try global.getProperty(try js.runtime.internAtom("__main"));
+    defer main_fn.free(js.runtime);
+    const main_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(main_fn).?;
+    const main_fb = main_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(main_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+}
+
 test "small-function-inlining: monomorphic method is expanded" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
