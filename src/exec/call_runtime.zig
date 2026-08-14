@@ -2200,12 +2200,28 @@ pub const SameMachineConstructorTarget = struct {
     new_target_is_func: bool,
 };
 
+/// Own `.prototype` data slot without materializing auto_init or taking the
+/// outline `getOwnConstructorPrototypeObject` (9% of N0). First construct of
+/// a function still falls through to the full helper to publish the lazy slot.
+fn ownConstructorPrototypeData(function_object: *core.Object) ?*core.Object {
+    if (function_object.hasExoticMethods()) return null;
+    const index = function_object.findProperty(core.atom.ids.prototype) orelse return null;
+    const flags = function_object.propFlagsAt(index);
+    if (flags.deleted or flags.kind != .data) return null;
+    const stored = function_object.asDataAt(index) orelse return null;
+    return object_ops.objectFromValue(stored);
+}
+
 pub fn resolveSameMachineConstructor(
     global: *core.Object,
     func: core.JSValue,
     new_target: core.JSValue,
 ) ?SameMachineConstructorTarget {
-    if (!new_target.sameValue(func)) return null;
+    // Direct `new F(...)` emits `dup`, so new_target and func are the same
+    // object. Admission only needs identity. Generic SameValue (NaN/±0/string)
+    // is an outline bl and was 4% of N0 — qjs never re-compares here
+    // (quickjs.c:20839-20856 holds new_target in a register).
+    if (!new_target.same(func)) return null;
     const resolved = inline_calls.resolveInlineDirectConstructorFunction(global, func) orelse return null;
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
@@ -2230,7 +2246,7 @@ pub fn resolveSameMachineSpreadConstructor(
     if (!resolved.fb.hasPrototype()) return null;
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
-    const new_target_is_func = new_target.sameValue(func);
+    const new_target_is_func = new_target.same(func);
     if (!new_target_is_func) {
         // `callableObjectFromValue` is the native/bound-call adapter and
         // deliberately excludes the bytecode-function class. A super-call's
@@ -2311,7 +2327,9 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
             // `F.prototype = 42` — keeps the authoritative
             // createConstructorInstance fallback, mirroring qjs
             // js_create_from_ctor's non-object-prototype arm.
-            if (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
+            if (ownConstructorPrototypeData(target.function_object) orelse
+                (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null)) |prototype|
+            {
                 const created = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
                 break :instance created.value();
             }
