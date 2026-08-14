@@ -2200,6 +2200,18 @@ pub const SameMachineConstructorTarget = struct {
     new_target_is_func: bool,
 };
 
+/// Own `.prototype` data slot without materializing auto_init or taking the
+/// outline `getOwnConstructorPrototypeObject` (9% of N0). First construct of
+/// a function still falls through to the full helper to publish the lazy slot.
+fn ownConstructorPrototypeData(function_object: *core.Object) ?*core.Object {
+    if (function_object.hasExoticMethods()) return null;
+    const index = function_object.findProperty(core.atom.ids.prototype) orelse return null;
+    const flags = function_object.propFlagsAt(index);
+    if (flags.deleted or flags.kind != .data) return null;
+    const stored = function_object.asDataAt(index) orelse return null;
+    return object_ops.objectFromValue(stored);
+}
+
 pub fn resolveSameMachineConstructor(
     global: *core.Object,
     func: core.JSValue,
@@ -2315,7 +2327,9 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
             // `F.prototype = 42` — keeps the authoritative
             // createConstructorInstance fallback, mirroring qjs
             // js_create_from_ctor's non-object-prototype arm.
-            if (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
+            if (ownConstructorPrototypeData(target.function_object) orelse
+                (target.function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null)) |prototype|
+            {
                 const created = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
                 break :instance created.value();
             }
