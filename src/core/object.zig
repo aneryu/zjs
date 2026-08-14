@@ -6522,7 +6522,8 @@ pub const Object = extern struct {
     /// qjs `js_closure2` (quickjs.c:17276-17280): `js_mallocz` the capture
     /// array and attach it to the function object *before* the fill loop so
     /// the object is the sole GC root. Null slots are skipped by mark/destroy.
-    pub fn allocateNullCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+    /// Inline: qjs does this mallocz inside js_closure2, not as a sibling call.
+    pub inline fn allocateNullCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
         const storage = &self.u.bytecode_function;
         const fb = storage.function_bytecode orelse return error.InvalidBytecode;
@@ -6543,7 +6544,7 @@ pub const Object = extern struct {
     }
 
     /// Mutable view of the attached capture array during js_closure2 fill.
-    pub fn mutableCaptureSlots(self: *Object) []?*var_ref_mod.VarRef {
+    pub inline fn mutableCaptureSlots(self: *Object) []?*var_ref_mod.VarRef {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         return self.u.bytecode_function.captureSlots();
     }
