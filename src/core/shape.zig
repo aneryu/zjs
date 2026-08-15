@@ -294,8 +294,9 @@ pub const Registry = struct {
             .prop_size = initial_prop_size,
             .hash = initialHash(proto),
         };
+        // qjs js_new_shape_nohash (quickjs.c:5228) only zeros the hash table.
+        // Unused prop slots are written on append; walking uses prop_count.
         @memset(shape.hashBuckets(), no_property_index);
-        @memset(shape.props(), .{});
         try self.link(shape, true);
         errdefer self.unlink(shape);
         // `fam_bytes` was sized from the same capacity fields just stored, so
@@ -323,7 +324,6 @@ pub const Registry = struct {
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
             .hash = initialHash(proto),
         };
-        @memset(shape.props(), .{});
         if (shape.hashBuckets().len != 0) {
             @memset(shape.hashBuckets(), no_property_index);
         }
