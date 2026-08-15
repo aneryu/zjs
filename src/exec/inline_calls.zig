@@ -1413,10 +1413,10 @@ pub const Machine = struct {
             try setupBorrowedIteratorEntry(self.ctx, entry, target);
         } else if (setup_path == .moved_method) {
             if (methodSimpleInlineMode(target, source)) |mode| switch (mode) {
-                .moved_exact => try setupSimpleInlineEntry(false, false, false, true, true, self.ctx, global, entry, target, source),
-                .moved_padded => try setupSimpleInlineEntry(false, false, true, true, true, self.ctx, global, entry, target, source),
-                .moved_snapshot_exact => try setupSimpleInlineEntry(false, true, false, true, true, self.ctx, global, entry, target, source),
-                .moved_snapshot_padded => try setupSimpleInlineEntry(false, true, true, true, true, self.ctx, global, entry, target, source),
+                .moved_exact => try setupSimpleInlineEntryDispatch(false, false, false, true, true, self.ctx, global, entry, target, source),
+                .moved_padded => try setupSimpleInlineEntryDispatch(false, false, true, true, true, self.ctx, global, entry, target, source),
+                .moved_snapshot_exact => try setupSimpleInlineEntryDispatch(false, true, false, true, true, self.ctx, global, entry, target, source),
+                .moved_snapshot_padded => try setupSimpleInlineEntryDispatch(false, true, true, true, true, self.ctx, global, entry, target, source),
                 .stack_exact, .stack_padded, .stack_snapshot_exact, .stack_snapshot_padded => unreachable,
             } else {
                 try setupInlineEntry(self.ctx, global, entry, target, source);
@@ -1424,9 +1424,9 @@ pub const Machine = struct {
         } else if (setup_path == .generic_after_exact_plain) {
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         } else if (isSimpleInlineFrame(target, source)) {
-            try setupSimpleInlineEntry(false, false, false, false, false, self.ctx, global, entry, target, source);
+            try setupSimpleInlineEntryDispatch(false, false, false, false, false, self.ctx, global, entry, target, source);
         } else if (isStrictSimpleInlineFrame(false, target, source)) {
-            try setupSimpleInlineEntry(true, false, false, false, false, self.ctx, global, entry, target, source);
+            try setupSimpleInlineEntryDispatch(true, false, false, false, false, self.ctx, global, entry, target, source);
         } else {
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         }
@@ -1566,24 +1566,183 @@ pub const Machine = struct {
     /// frame.
     noinline fn setupFallbackInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         if (methodSimpleInlineMode(target, source)) |mode| switch (mode) {
-            .stack_exact => return setupSimpleInlineEntry(false, false, false, true, false, ctx, global, entry, target, source),
-            .stack_padded => return setupSimpleInlineEntry(false, false, true, true, false, ctx, global, entry, target, source),
-            .stack_snapshot_exact => return setupSimpleInlineEntry(false, true, false, true, false, ctx, global, entry, target, source),
-            .stack_snapshot_padded => return setupSimpleInlineEntry(false, true, true, true, false, ctx, global, entry, target, source),
-            .moved_exact => return setupSimpleInlineEntry(false, false, false, true, true, ctx, global, entry, target, source),
-            .moved_padded => return setupSimpleInlineEntry(false, false, true, true, true, ctx, global, entry, target, source),
-            .moved_snapshot_exact => return setupSimpleInlineEntry(false, true, false, true, true, ctx, global, entry, target, source),
-            .moved_snapshot_padded => return setupSimpleInlineEntry(false, true, true, true, true, ctx, global, entry, target, source),
+            .stack_exact => return setupSimpleInlineEntryDispatch(false, false, false, true, false, ctx, global, entry, target, source),
+            .stack_padded => return setupSimpleInlineEntryDispatch(false, false, true, true, false, ctx, global, entry, target, source),
+            .stack_snapshot_exact => return setupSimpleInlineEntryDispatch(false, true, false, true, false, ctx, global, entry, target, source),
+            .stack_snapshot_padded => return setupSimpleInlineEntryDispatch(false, true, true, true, false, ctx, global, entry, target, source),
+            .moved_exact => return setupSimpleInlineEntryDispatch(false, false, false, true, true, ctx, global, entry, target, source),
+            .moved_padded => return setupSimpleInlineEntryDispatch(false, false, true, true, true, ctx, global, entry, target, source),
+            .moved_snapshot_exact => return setupSimpleInlineEntryDispatch(false, true, false, true, true, ctx, global, entry, target, source),
+            .moved_snapshot_padded => return setupSimpleInlineEntryDispatch(false, true, true, true, true, ctx, global, entry, target, source),
         };
         if (paddedSimpleInlineMode(target, source)) |mode| switch (mode) {
-            .sloppy => return setupSimpleInlineEntry(false, false, true, false, false, ctx, global, entry, target, source),
-            .strict => return setupSimpleInlineEntry(true, false, true, false, false, ctx, global, entry, target, source),
-            .strict_snapshot => return setupSimpleInlineEntry(true, true, true, false, false, ctx, global, entry, target, source),
+            .sloppy => return setupSimpleInlineEntryDispatch(false, false, true, false, false, ctx, global, entry, target, source),
+            .strict => return setupSimpleInlineEntryDispatch(true, false, true, false, false, ctx, global, entry, target, source),
+            .strict_snapshot => return setupSimpleInlineEntryDispatch(true, true, true, false, false, ctx, global, entry, target, source),
         };
         if (isStrictSimpleInlineFrame(true, target, source)) {
-            return setupSimpleInlineEntry(true, true, false, false, false, ctx, global, entry, target, source);
+            return setupSimpleInlineEntryDispatch(true, true, false, false, false, ctx, global, entry, target, source);
         }
         return setupInlineEntry(ctx, global, entry, target, source);
+    }
+
+    inline fn simpleInlineSlabTotal(
+        function: *const bytecode.FunctionBytecode,
+        actual_arg_count: usize,
+        comptime pad_args: bool,
+        comptime move_args: bool,
+        comptime snapshot_args: bool,
+    ) usize {
+        const frame_arg_count: usize = if (pad_args) @intCast(function.arg_count) else actual_arg_count;
+        const arg_storage_count: usize = if (pad_args or move_args) frame_arg_count else 0;
+        const snapshot_count: usize = if (snapshot_args) actual_arg_count else 0;
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
+        const open_slots = if (open_var_ref_count == 0)
+            0
+        else
+            (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+        return arg_storage_count + var_count + stack_count + open_slots + snapshot_count;
+    }
+
+    /// ERRORUNION-DIET W3: warm arm of simple-frame setup. Caller has already
+    /// succeeded `carveActiveMarked`; this body cannot fail and is `void` so
+    /// the call site pays no error-union check. `noinline` is load-bearing
+    /// for the same reason as `setupSimpleInlineEntry` — do not fold into
+    /// `pushExactSimpleFrame` / `pushConstructorCall` / `pushFrame`.
+    noinline fn setupSimpleInlineEntryWarm(
+        comptime strict_this: bool,
+        comptime pad_args: bool,
+        comptime method_receiver: bool,
+        comptime move_args: bool,
+        comptime constructor_this: bool,
+        ctx: *core.JSContext,
+        global: *core.Object,
+        entry: *Entry,
+        target: *const InlineTarget,
+        source: ArgsSource,
+        carve: core.VmStackArena.ActiveCarve,
+    ) void {
+        const rt = ctx.runtime;
+        const function = target.fb;
+        entry.catch_target = null;
+        entry.teardown = .{ .simple = true };
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+
+        comptime std.debug.assert(!move_args or method_receiver);
+        comptime std.debug.assert(!constructor_this or (method_receiver and !move_args and !strict_this));
+        std.debug.assert(source.metadata.moved == move_args);
+        std.debug.assert(source.metadata.has_receiver == method_receiver);
+        const receiver_count: usize = @intFromBool(method_receiver);
+        const actual_arg_count = source.argCount();
+        const frame_arg_count: usize = if (pad_args) @intCast(function.arg_count) else actual_arg_count;
+        const arg_storage_count: usize = if (pad_args or move_args) frame_arg_count else 0;
+        if (pad_args) {
+            std.debug.assert(actual_arg_count < frame_arg_count);
+        } else {
+            std.debug.assert(actual_arg_count >= @as(usize, @intCast(function.arg_count)));
+        }
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
+        const open_slots = if (open_var_ref_count == 0)
+            0
+        else
+            (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+
+        entry.arena_mark = carve.mark;
+        const slab_values = carve.window;
+        const arg_storage = slab_values[0..arg_storage_count];
+        const locals = slab_values[arg_storage_count..][0..var_count];
+        const stack_window = slab_values[arg_storage_count + var_count ..][0..stack_count];
+        const open_var_refs: []?*core.VarRef = if (open_slots == 0)
+            &.{}
+        else
+            std.mem.bytesAsSlice(?*core.VarRef, std.mem.sliceAsBytes(slab_values[arg_storage_count + var_count + stack_count ..][0..open_slots]))[0..open_var_ref_count];
+
+        @memset(locals, core.JSValue.undefinedValue());
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
+
+        const values = source.slice();
+        const receiver_slot: ?*core.JSValue = if (method_receiver) &values[0] else null;
+        const callable_slot = &values[receiver_count];
+        const args = values[receiver_count + 1 ..][0..actual_arg_count];
+        const frame_args = if (pad_args or move_args) arg_storage else args;
+        if (pad_args or move_args) {
+            @memcpy(frame_args[0..actual_arg_count], args);
+            @memset(args, core.JSValue.undefinedValue());
+            if (pad_args) @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
+        }
+
+        const captures = target.captureSlice();
+        entry.frame = .{
+            .function = function,
+            .this_value = if (method_receiver)
+                takeSourceSlot(receiver_slot.?)
+            else if (strict_this)
+                core.JSValue.undefinedValue()
+            else
+                global.value(),
+            .current_function = takeSourceSlot(callable_slot),
+            .actual_arg_count = @intCast(actual_arg_count),
+            .locals = locals,
+            .args = frame_args,
+            .var_refs = captures,
+            .open_var_refs = open_var_refs,
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = if (method_receiver and !constructor_this) .owned else .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = .borrowed,
+            },
+            .cold = null,
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+    }
+
+    /// Warm-first dispatch. Inlined so a `carveActiveMarked` hit is a `void`
+    /// `bl` (no error-union check). Snapshot shapes and arena misses keep the
+    /// existing `!void` function as the OOM channel.
+    inline fn setupSimpleInlineEntryDispatch(
+        comptime strict_this: bool,
+        comptime snapshot_args: bool,
+        comptime pad_args: bool,
+        comptime method_receiver: bool,
+        comptime move_args: bool,
+        ctx: *core.JSContext,
+        global: *core.Object,
+        entry: *Entry,
+        target: *const InlineTarget,
+        source: ArgsSource,
+    ) HostError!void {
+        if (comptime !snapshot_args) {
+            const total = simpleInlineSlabTotal(target.fb, source.argCount(), pad_args, move_args, false);
+            if (ctx.runtime.vm_stack.carveActiveMarked(total)) |carve| {
+                setupSimpleInlineEntryWarm(strict_this, pad_args, method_receiver, move_args, false, ctx, global, entry, target, source, carve);
+                return;
+            }
+        }
+        return setupSimpleInlineEntry(strict_this, snapshot_args, pad_args, method_receiver, move_args, ctx, global, entry, target, source);
+    }
+
+    inline fn setupSimpleConstructorEntryDispatch(
+        comptime snapshot_args: bool,
+        comptime pad_args: bool,
+        ctx: *core.JSContext,
+        global: *core.Object,
+        entry: *Entry,
+        target: *const InlineTarget,
+        source: ArgsSource,
+    ) HostError!void {
+        if (comptime !snapshot_args) {
+            const total = simpleInlineSlabTotal(target.fb, source.argCount(), pad_args, false, false);
+            if (ctx.runtime.vm_stack.carveActiveMarked(total)) |carve| {
+                setupSimpleInlineEntryWarm(false, pad_args, true, false, true, ctx, global, entry, target, source, carve);
+                return;
+            }
+        }
+        return setupSimpleConstructorEntry(snapshot_args, pad_args, ctx, global, entry, target, source);
     }
 
     /// Straight-line frame setup for the plain/method simple-inline shapes —
@@ -2040,15 +2199,7 @@ pub const Machine = struct {
         };
         entry.return_action = .next;
         entry.continuation_payload = 0;
-        if (snapshot_args and method_receiver) {
-            // Snapshot construction owns a cold FrameCold allocation. Reuse
-            // its existing isolated implementation here; inlining that body
-            // duplicates roughly a kilobyte of cold/error machinery merely to
-            // remove one call instruction from this less common method shape.
-            try setupSimpleInlineEntry(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
-        } else {
-            try setupSimpleInlineEntryImpl(strict_this, snapshot_args, false, method_receiver, false, false, self.ctx, global, entry, target, source);
-        }
+        try setupSimpleInlineEntryDispatch(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
         entry.prev = self.top;
         self.top = entry;
@@ -3205,10 +3356,10 @@ pub const Machine = struct {
         // aborted in ReleaseSafe inside `popConstructorReturn`.
         if (methodSimpleInlineMode(target, source)) |mode| {
             switch (mode) {
-                .stack_exact => try setupSimpleConstructorEntry(false, false, self.ctx, global, entry, target, source),
-                .stack_padded => try setupSimpleConstructorEntry(false, true, self.ctx, global, entry, target, source),
-                .stack_snapshot_exact => try setupSimpleConstructorEntry(true, false, self.ctx, global, entry, target, source),
-                .stack_snapshot_padded => try setupSimpleConstructorEntry(true, true, self.ctx, global, entry, target, source),
+                .stack_exact => try setupSimpleConstructorEntryDispatch(false, false, self.ctx, global, entry, target, source),
+                .stack_padded => try setupSimpleConstructorEntryDispatch(false, true, self.ctx, global, entry, target, source),
+                .stack_snapshot_exact => try setupSimpleConstructorEntryDispatch(true, false, self.ctx, global, entry, target, source),
+                .stack_snapshot_padded => try setupSimpleConstructorEntryDispatch(true, true, self.ctx, global, entry, target, source),
                 // `source` is built by initStack above: `moved` is statically
                 // false, so the temporary-region variants cannot be selected.
                 .moved_exact, .moved_padded, .moved_snapshot_exact, .moved_snapshot_padded => unreachable,
