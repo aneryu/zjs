@@ -3223,6 +3223,22 @@ fn op_get_field_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
 }
 
+/// `get_loc0` then musttail `op_get_field` at the following `get_field` (B
+/// stays in the stream). Direct tail, not table dispatch — B still sees its
+/// own opcode for throw/pc/cold.
+pub fn op_get_loc0_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    sp[0] = value_slot.loadOwned(&var_buf[0]);
+    return @call(.always_tail, op_get_field, .{ pc + 1, sp + 1, var_buf, vm });
+}
+
+/// All-cold / L0-stop: do `get_loc0` only, then `coldNext` onto the surviving
+/// `get_field` so stop-before-pc between the two ops is preserved.
+pub fn op_get_loc0_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc0) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
 fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
@@ -4950,6 +4966,45 @@ pub fn op_if_false(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+/// `lt` then musttail `op_if_false8` at the following `if_false8`. Poll is
+/// therefore the same function as the unfused `if_false8` (qjs CASE poll).
+pub fn op_cmp_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    if ((sp - 2)[0].asInt32()) |a| {
+        if ((sp - 1)[0].asInt32()) |b| {
+            (sp - 2)[0] = JSValue.boolean(a < b);
+            return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
+        }
+    }
+    if ((sp - 2)[0].asNumber()) |fa| {
+        if ((sp - 1)[0].asNumber()) |fb| {
+            (sp - 2)[0] = JSValue.boolean(fa < fb);
+            return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
+        }
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+/// Slow `lt` then musttail `op_if_false8`. Indirect from the hot fused
+/// handler via `cold_table` so the int32 arm stays a leaf (opCompareCold).
+pub fn op_cmp_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) {
+        vm.publish(pc, sp);
+        _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.lt, vm.output, vm.global) catch |e| return vm.fail(e);
+        return coldNext(var_buf, vm);
+    }
+    const lhs = (sp - 2)[0];
+    const rhs = (sp - 1)[0];
+    vm.syncPc(pc, 1);
+    const result = arith_vm.compareAt(op.lt, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
+        vm.publish(pc, sp - 2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    };
+    (sp - 2)[0] = result;
+    return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
+}
+
 // qjs CASE(OP_is_null) (quickjs.c:20625-20630) compares the resident top-slot
 // tag with JS_TAG_NULL: a match overwrites the slot with true via set_true
 // (20648-20650), while every non-null value reaches free_and_set_false, whose
@@ -5049,6 +5104,40 @@ pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         var_buf[idx].setInt32AssumeInt(iv - 1);
     }
     return cont(pc + 2, sp, var_buf, vm);
+}
+
+/// `put_loc8` then musttail the surviving `get_loc8` (B stays in the stream).
+/// Last-ref overwrite tails to cold. Non-last / immediate stores here and
+/// never call destroy, so LLVM cannot plant a frame on this leaf once it
+/// inlines tiny `get_loc8`.
+pub fn op_put_loc8_get_loc8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    const idx: u16 = pc[1];
+    const old = var_buf[idx];
+    if (old.requiresRefCount()) {
+        if (old.refCountHeader()) |header| {
+            if (header.metaConst().rc == 1)
+                return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
+            var_buf[idx] = (sp - 1)[0];
+            header.meta().rc -= 1;
+        } else if (old.stringHeader()) |header| {
+            if (header.rc == 1)
+                return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
+            var_buf[idx] = (sp - 1)[0];
+            header.rc -= 1;
+        } else {
+            return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
+        }
+    } else {
+        var_buf[idx] = (sp - 1)[0];
+    }
+    return @call(.always_tail, opLoc(.get, .byte), .{ pc + 2, sp - 1, var_buf, vm });
+}
+
+/// All-cold / L0-stop: do `put_loc8` only, then `coldNext` onto `get_loc8`.
+pub fn op_put_loc8_get_loc8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.put_loc8) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
 }
 
 /// Dedicated cold handler for OP_inc_loc/OP_dec_loc's non-int32 operand (float /

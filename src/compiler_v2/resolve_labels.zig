@@ -482,6 +482,9 @@ const Resolver = struct {
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
     last_attached_source: ?SourcePoint = null,
+    last_op: ?u8 = null,
+    last_pc: u32 = 0,
+    last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
         if (self.output_atoms_owned) {
@@ -693,6 +696,28 @@ const Resolver = struct {
         try self.ensureOutput(1);
         self.output[self.output_len] = value;
         self.output_len += 1;
+    }
+
+    inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
+        self.last_pc = pc;
+        self.last_op = opc;
+    }
+
+    noinline fn maybeFusePrev(self: *Resolver, b: u8) void {
+        const a = self.last_op orelse return;
+        const a_sz: u32 = if (a == op.put_loc8) 2 else 1;
+        if (self.output_len != self.last_pc + a_sz) return;
+        if (self.output_len == self.last_bound_output) return;
+        const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
+            op.get_loc0_field
+        else if (a == op.lt and b == op.if_false8)
+            op.cmp_if_false8
+        else if (a == op.put_loc8 and b == op.get_loc8)
+            op.put_loc8_get_loc8
+        else
+            null;
+        if (fused) |fused_op|
+            self.output[self.last_pc] = fused_op;
     }
 
     inline fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
@@ -1126,6 +1151,7 @@ const Resolver = struct {
                 return error.InvalidBytecode;
             }
             self.addr[entry.label_index] = self.output_len;
+            self.last_bound_output = self.output_len;
             const slot = &self.product.label_slots[entry.label_index];
             var reloc_index = slot.first_reloc;
             var walked: u32 = 0;
@@ -1568,7 +1594,15 @@ const Resolver = struct {
     ) Error!void {
         if (layout == .short) {
             if (shortSlotOp(op_id, idx)) |short_op| {
+                const pc = self.output_len;
+                if (comptime layout == .short) {
+                    if (short_op == op.get_loc8) self.maybeFusePrev(op.get_loc8);
+                }
                 try self.appendByte(short_op);
+                if (comptime layout == .short) {
+                    if (short_op == op.get_loc0 or short_op == op.put_loc8)
+                        self.noteFusionA(short_op, pc);
+                }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
                     short_op == op.set_loc8)
                 {
@@ -1718,6 +1752,7 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
+                if (short_op == op.if_false8) self.maybeFusePrev(op.if_false8);
                 try self.appendByte(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
@@ -1744,6 +1779,7 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
+                if (short_op == op.if_false8) self.maybeFusePrev(op.if_false8);
                 try self.appendByte(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
@@ -1826,7 +1862,15 @@ const Resolver = struct {
                 try readU16(self.code, position),
             );
         } else {
+            const first = self.code[position];
+            if (comptime layout == .short) {
+                if (first == op.get_field) self.maybeFusePrev(op.get_field);
+            }
+            const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
+            if (comptime layout == .short) {
+                if (first == op.lt) self.noteFusionA(op.lt, pc);
+            }
         }
         try self.consumeInstructionAtom(position, instruction, true);
     }
@@ -2783,6 +2827,14 @@ const Resolver = struct {
             if (source_start > self.output_len or destination_start > source_start)
                 return error.InvalidBytecode;
             self.output[jump.pos - 1] = new_op;
+            // Jump shortening is when `if_false8` first exists. Fold lt→
+            // cmp_if_false8 here instead of rescanning the whole stream.
+            if (new_op == op.if_false8 and jump.pos >= 2) {
+                const a_pc = jump.pos - 2;
+                if (self.output[a_pc] == op.lt and
+                    !self.isLabelAddress(jump.pos - 1))
+                    self.output[a_pc] = op.cmp_if_false8;
+            }
             const tail_len: usize = @intCast(self.output_len - source_start);
             std.mem.copyForwards(
                 u8,
@@ -3104,6 +3156,13 @@ const Resolver = struct {
             source_events_between_identities,
         );
         cfg.recordFinalBoundaryHops(live_group_count);
+    }
+
+    fn isLabelAddress(self: *const Resolver, pc: u32) bool {
+        for (self.addr) |addr| {
+            if (addr == pc) return true;
+        }
+        return false;
     }
 
     fn validateFinalSources(self: *const Resolver) Error!void {

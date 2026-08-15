@@ -399,11 +399,11 @@ const ApplyForwardPlan = struct {
 
 fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
     return switch (opc) {
-        op.get_loc0, op.put_loc0 => 0,
+        op.get_loc0, op.put_loc0, op.get_loc0_field => 0,
         op.get_loc1, op.put_loc1 => 1,
         op.get_loc2, op.put_loc2 => 2,
         op.get_loc3, op.put_loc3 => 3,
-        op.get_loc8, op.put_loc8 => src[pc + 1],
+        op.get_loc8, op.put_loc8, op.put_loc8_get_loc8 => src[pc + 1],
         op.get_loc, op.put_loc => std.mem.readInt(u16, src[pc + 1 ..][0..2], .little),
         else => null,
     };
@@ -411,14 +411,14 @@ fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
 
 fn isPutLoc(opc: u8) bool {
     return switch (opc) {
-        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc => true,
+        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc, op.put_loc8_get_loc8 => true,
         else => false,
     };
 }
 
 fn isGetLoc(opc: u8) bool {
     return switch (opc) {
-        op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.get_loc8, op.get_loc => true,
+        op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.get_loc8, op.get_loc, op.get_loc0_field => true,
         else => false,
     };
 }
@@ -797,6 +797,9 @@ fn rewriteBody(
                 const idx: u16 = @intCast(opc - op.get_loc0);
                 if (!emitLocOp(&out, true, var_base + idx)) return null;
             },
+            op.get_loc0_field => {
+                if (!emitLocOp(&out, true, var_base + 0)) return null;
+            },
             op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => {
                 const idx: u16 = @intCast(opc - op.put_loc0);
                 if (!emitLocOp(&out, false, var_base + idx)) return null;
@@ -804,7 +807,7 @@ fn rewriteBody(
             op.get_loc8 => {
                 if (!emitLocOp(&out, true, var_base + src[src_pc + 1])) return null;
             },
-            op.put_loc8 => {
+            op.put_loc8, op.put_loc8_get_loc8 => {
                 if (!emitLocOp(&out, false, var_base + src[src_pc + 1])) return null;
             },
             op.get_loc => {
