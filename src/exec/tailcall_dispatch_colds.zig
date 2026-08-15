@@ -945,6 +945,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_field_field2] = td.op_get_field_field2;
     t[op.get_var_field] = td.op_get_var_field;
     t[op.get_field2_call_method] = td.op_get_field2_call_method;
+    t[op.using] = td.op_using;
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element

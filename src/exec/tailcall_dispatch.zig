@@ -236,6 +236,13 @@ const op_handler_section = switch (builtin.target.ofmt) {
     .macho => "__TEXT,__text",
     else => ".text",
 };
+/// Wave-22: new handlers append here so LLVM cannot interleave them into
+/// the established island (ld script KEEP(.op_handlers) then KEEP(.op_handlers.*)).
+const op_handler_section_tail = switch (builtin.target.ofmt) {
+    .elf => ".text.zjs.op_handlers.tail",
+    .macho => "__TEXT,__text",
+    else => ".text",
+};
 
 const PropertyTailSlot = enum(usize) {
     get_field_primitive,
@@ -3240,70 +3247,6 @@ pub fn op_get_loc2_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return coldNext(var_buf, vm);
 }
 
-/// `get_field` then `b` `op_get_field2` (7a378c71 share). Leftover B stays.
-pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
-    if (!receiver.isObject())
-        return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
-    const rt = vm.ctx.runtime;
-    var absent = false;
-    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
-        const value = loadValueAsIntPair(slot);
-        _ = value.dup();
-        storeValueAsIntPair(&(sp - 1)[0], value);
-        if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
-            vm.property_holder = class_vm.objectFromValue(receiver) orelse unreachable;
-            return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
-        }
-        return @call(.always_tail, op_get_field2, .{ pc + 5, sp, var_buf, vm });
-    }
-    if (absent) return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
-    if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
-        if (vm_property_field.typedArrayReceiverForFastPath(receiver)) |object| {
-            vm.property_holder = object;
-            return @call(.always_tail, propertyTailHandler(vm, .get_field_typed_property), .{ pc, sp, var_buf, vm });
-        }
-    }
-    return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
-}
-
-pub fn op_get_field_field2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    _ = vm_property_field.field(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, op.get_field_field2) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
-}
-
-/// `get_var` then `b` `op_get_field`. Leftover B stays.
-pub fn op_get_var_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    const idx = readInt(u16, pc + 1);
-    std.debug.assert(idx < vm.frame.var_refs.len);
-    const cell = vm.var_refs_base[idx];
-    const v = cell.pvalue.*;
-    if (v.isUninitialized())
-        return @call(.always_tail, op_get_var_field_cold, .{ pc, sp, var_buf, vm });
-    sp[0] = v.dup();
-    return @call(.always_tail, op_get_field, .{ pc + 3, sp + 1, var_buf, vm });
-}
-
-pub fn op_get_var_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    _ = vm_property_globals.getVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, op.get_var) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
-}
-
-/// `get_loc2` then `b` `op_get_field2`. Same shape as `get_loc2_field`.
-pub fn op_get_loc2_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    sp[0] = value_slot.loadOwned(&var_buf[2]);
-    return @call(.always_tail, op_get_field2, .{ pc + 1, sp + 1, var_buf, vm });
-}
-
-pub fn op_get_loc2_field2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc2) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
-}
-
 /// get_field2, then `b` into `op_call_method` (7a378c71: share the
 /// empty-leaf / exact-args / simple_inline / pushExactSimple /
 /// nativeMethodFastDispatch chain; leftover B is still `call_method`).
@@ -5954,6 +5897,123 @@ pub fn run(vm: *Vm) HostError!JSValue {
             .native_returned => return vm.return_value,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// L-1 island tail (wave-22 rework). New handlers MUST live in
+// `.text.zjs.op_handlers.tail` so they cannot slide the established
+// island. Source order inside the main section is not LLVM-stable.
+// ---------------------------------------------------------------------------
+
+/// Fast `op.using` (244): type-test subs `b` into the tail leaves below;
+/// ERM subs stay on the existing cold using shell.
+pub fn op_using(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const sub = pc[1];
+    if (sub == bytecode.opcode.using_sub.is_undefined)
+        return @call(.always_tail, op_using_is_undefined, .{ pc, sp, var_buf, vm });
+    if (sub == bytecode.opcode.using_sub.typeof_is_undefined)
+        return @call(.always_tail, op_using_typeof_is_undefined, .{ pc, sp, var_buf, vm });
+    if (sub == bytecode.opcode.using_sub.typeof_is_function)
+        return @call(.always_tail, op_using_typeof_is_function, .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+pub fn op_using_is_undefined(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    if (value.isUndefined()) {
+        (sp - 1)[0] = JSValue.boolean(true);
+        return cont(pc + 2, sp, var_buf, vm);
+    }
+    (sp - 1)[0] = JSValue.boolean(false);
+    if (value.requiresRefCount()) {
+        vm.stack.setTopPtr(sp);
+        value.freeDuringActiveBytecode(vm.ctx.runtime);
+    }
+    return cont(pc + 2, sp, var_buf, vm);
+}
+
+pub fn op_using_typeof_is_undefined(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    const yes = value.isUndefined() or value_ops.isHTMLDDA(value);
+    (sp - 1)[0] = JSValue.boolean(yes);
+    if (value.requiresRefCount()) {
+        vm.stack.setTopPtr(sp);
+        value.freeDuringActiveBytecode(vm.ctx.runtime);
+    }
+    return cont(pc + 2, sp, var_buf, vm);
+}
+
+pub fn op_using_typeof_is_function(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    // publish leaves frame.pc on the sub byte; skip it so coldNext
+    // resumes at the following opcode (same as using_ops.execVm).
+    vm.publish(pc, sp);
+    vm.frame.pc += 1;
+    value_vm.typeOfIsFunction(vm.ctx.runtime, vm.stack) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `get_field` then `b` `op_get_field2` (7a378c71 share). Leftover B stays.
+pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (!receiver.isObject())
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
+    const rt = vm.ctx.runtime;
+    var absent = false;
+    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
+        const value = loadValueAsIntPair(slot);
+        _ = value.dup();
+        storeValueAsIntPair(&(sp - 1)[0], value);
+        if (receiver.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+            vm.property_holder = class_vm.objectFromValue(receiver) orelse unreachable;
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
+        }
+        return @call(.always_tail, op_get_field2, .{ pc + 5, sp, var_buf, vm });
+    }
+    if (absent) return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
+    if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
+        if (vm_property_field.typedArrayReceiverForFastPath(receiver)) |object| {
+            vm.property_holder = object;
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_typed_property), .{ pc, sp, var_buf, vm });
+        }
+    }
+    return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+}
+
+pub fn op_get_field_field2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    _ = vm_property_field.field(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, op.get_field_field2) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `get_var` then `b` `op_get_field`. Leftover B stays.
+pub fn op_get_var_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const idx = readInt(u16, pc + 1);
+    std.debug.assert(idx < vm.frame.var_refs.len);
+    const cell = vm.var_refs_base[idx];
+    const v = cell.pvalue.*;
+    if (v.isUninitialized())
+        return @call(.always_tail, op_get_var_field_cold, .{ pc, sp, var_buf, vm });
+    sp[0] = v.dup();
+    return @call(.always_tail, op_get_field, .{ pc + 3, sp + 1, var_buf, vm });
+}
+
+pub fn op_get_var_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    _ = vm_property_globals.getVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, op.get_var) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `get_loc2` then `b` `op_get_field2`. Same shape as `get_loc2_field`.
+pub fn op_get_loc2_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = value_slot.loadOwned(&var_buf[2]);
+    return @call(.always_tail, op_get_field2, .{ pc + 1, sp + 1, var_buf, vm });
+}
+
+pub fn op_get_loc2_field2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc2) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
 }
 
 comptime {
