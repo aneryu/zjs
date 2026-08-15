@@ -3026,6 +3026,8 @@ test "compiler_v2.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.cmp_if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.push_this_put_loc0));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.put_loc0_get_loc0));
 }
 
 fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
@@ -3128,6 +3130,22 @@ test "compiler_v2.fuse: cmp_if_false8 emit and execute" {
         "(function () { var n = 0; for (var i = 0; i < 4; i++) n = n + 1; return n; })();",
         4,
         &.{ qop.cmp_if_false8, qop.if_false8 },
+    );
+}
+
+test "compiler_v2.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function () {
+        \\    function C() { this.x = 1; }
+        \\    C.prototype.m = function () {
+        \\        var t = this;
+        \\        return t.x;
+        \\    };
+        \\    return new C().m();
+        \\})();
+    ,
+        1,
+        &.{ qop.push_this_put_loc0, qop.put_loc0_get_loc0 },
     );
 }
 

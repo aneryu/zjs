@@ -356,6 +356,12 @@ pub const opcode = struct {
         /// Emit-time fusion: `put_loc8` + `get_loc8`. Size/stack match
         /// `put_loc8`; the following `get_loc8` stays in the stream.
         pub const put_loc8_get_loc8: u8 = 251;
+        /// Emit-time fusion: `push_this` + `put_loc0`. Size/stack match
+        /// `push_this`; the following `put_loc0` stays in the stream.
+        pub const push_this_put_loc0: u8 = 252;
+        /// Emit-time fusion: `put_loc0` + `get_loc0`. Size/stack match
+        /// `put_loc0`; the following `get_loc0` stays in the stream.
+        pub const put_loc0_get_loc0: u8 = 253;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -386,7 +392,7 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 252;
+        pub const op_count: u16 = 254;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -395,7 +401,7 @@ pub const opcode = struct {
         pub const op_temp_count: u8 = 19;
     };
 
-    pub const op_info_len: usize = 271;
+    pub const op_info_len: usize = 273;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -671,6 +677,8 @@ pub const opcode = struct {
         .{ .name = "get_loc0_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [268] id 249
         .{ .name = "cmp_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [269] id 250
         .{ .name = "put_loc8_get_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [270] id 251
+        .{ .name = "push_this_put_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [271] id 252
+        .{ .name = "put_loc0_get_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [272] id 253
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's

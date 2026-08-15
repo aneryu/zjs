@@ -714,6 +714,10 @@ const Resolver = struct {
             op.cmp_if_false8
         else if (a == op.put_loc8 and b == op.get_loc8)
             op.put_loc8_get_loc8
+        else if (a == op.push_this and b == op.put_loc0)
+            op.push_this_put_loc0
+        else if (a == op.put_loc0 and b == op.get_loc0)
+            op.put_loc0_get_loc0
         else
             null;
         if (fused) |fused_op|
@@ -1596,11 +1600,14 @@ const Resolver = struct {
             if (shortSlotOp(op_id, idx)) |short_op| {
                 const pc = self.output_len;
                 if (comptime layout == .short) {
-                    if (short_op == op.get_loc8) self.maybeFusePrev(op.get_loc8);
+                    if (short_op == op.get_loc8 or short_op == op.put_loc0 or
+                        short_op == op.get_loc0)
+                        self.maybeFusePrev(short_op);
                 }
                 try self.appendByte(short_op);
                 if (comptime layout == .short) {
-                    if (short_op == op.get_loc0 or short_op == op.put_loc8)
+                    if (short_op == op.get_loc0 or short_op == op.put_loc8 or
+                        short_op == op.put_loc0)
                         self.noteFusionA(short_op, pc);
                 }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
@@ -1675,7 +1682,9 @@ const Resolver = struct {
                 try self.appendByte(op.set_loc_uninitialized);
                 try self.appendU16(idx);
             } else {
+                const pc = self.output_len;
                 try self.appendByte(op.push_this);
+                if (comptime layout == .short) self.noteFusionA(op.push_this, pc);
                 try self.putShortCode(layout, op.put_loc, idx);
             }
         }
@@ -1869,7 +1878,7 @@ const Resolver = struct {
             const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
             if (comptime layout == .short) {
-                if (first == op.lt) self.noteFusionA(op.lt, pc);
+                if (first == op.lt or first == op.push_this) self.noteFusionA(first, pc);
             }
         }
         try self.consumeInstructionAtom(position, instruction, true);
@@ -4536,7 +4545,7 @@ test "compiler_v2.resolve_labels: strict this and arguments prologue is exact" {
     try std.testing.expectEqualSlices(
         u8,
         &.{
-            op.push_this,
+            op.push_this_put_loc0,
             op.put_loc0,
             op.special_object,
             opcode.special_object_subtype.arguments,
