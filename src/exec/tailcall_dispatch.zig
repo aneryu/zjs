@@ -595,10 +595,10 @@ const ApplyForwardEntryResult = union(enum) {
     threw,
 };
 
-/// Fat apply-forward setup. Outlined so `op_call_method` does not grow a
-/// 0x4a0 frame around `pushMethodCall` / `attachApplyForwardNativeCaller`.
-/// `enterEntry` / `coldNext` stay in `op_call_method` because
-/// `@call(.always_tail)` requires the handler signature.
+/// Fat apply-forward setup. Outlined so neither `op_call_method` nor the
+/// dedicated apply-fwd handler grows a 0x4a0 frame around `pushMethodCall`
+/// / `attachApplyForwardNativeCaller`. `enterEntry` / `coldNext` stay in
+/// the Handler because `@call(.always_tail)` requires that signature.
 noinline fn pushApplyForwardEntry(
     vm: *Vm,
     target: *const inline_calls.InlineTarget,
@@ -615,18 +615,25 @@ noinline fn pushApplyForwardEntry(
     return .{ .entry = entry };
 }
 
-/// Cold apply-forward enter. Same Handler type as `op_call_method` (not
-/// `noinline` — that attribute is part of the Zig fn type and breaks
-/// `@call(.always_tail)`). Fat setup lives in `pushApplyForwardEntry`.
+/// Dedicated `op.call_method_apply_fwd` handler. Same Handler type as
+/// `op_call_method` (not `noinline` — that attribute is part of the Zig fn
+/// type and breaks `@call(.always_tail)`). Fat setup lives in
+/// `pushApplyForwardEntry`. Stays out of the hot handler section: this
+/// opcode only runs on a specialized G-ctor initialize site.
 fn applyForwardCallMethod(
     pc: [*]const u8,
     sp: [*]JSValue,
     vb: [*]JSValue,
     vm: *Vm,
 ) callconv(.c) Outcome {
-    _ = sp;
+    vm.syncPc(pc, 1);
     const argc = readInt(u16, pc + 1);
-    const region_start = vm.stack.topPtr();
+    const total = @as(usize, argc) + 2;
+    const live_bytes = @intFromPtr(sp) - @intFromPtr(vm.stack.values);
+    if (live_bytes < total * @sizeOf(JSValue)) return .threw;
+    const region_start = sp - total;
+    vm.frame.pc += 2;
+    vm.stack.setTopPtr(region_start);
     const receiver = region_start[0];
     const method = region_start[1];
     const method_obj = class_vm.objectFromValue(method) orelse return .threw;
@@ -1659,7 +1666,6 @@ fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linksectio
 // unrelated source/layout changes cannot move its prologue across a cache line.
 fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     vm.syncPc(pc, 1); // frame.pc now at the 2-byte argc operand
-    const call_pc: u32 = @intCast(@intFromPtr(pc) - @intFromPtr(vm.code_base));
     const argc = readInt(u16, pc + 1);
     // Inline the bytecode-method resolution (recv.method() where method is a plain
     // bytecode function — OOP recursion, chained calls) instead of paying
@@ -1686,17 +1692,6 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     vm.frame.pc += 2;
                     vm.stack.setTopPtr(region_start);
                     const execution = resolved.call_facts.execution;
-                    // L1 apply-forward: live-argv call_method of initialize.
-                    // Skip leaf arms (they overlay resume on native_caller) and
-                    // attach Function.prototype.apply as D8-L1 native_caller.
-                    // Bit test stays here (one load of call_facts_mirror @ 0x14).
-                    // The site walk is noinline — do not `bl` it on every method.
-                    if (vm.function.call_facts_mirror.execution.apply_forward_inlined) {
-                        @branchHint(.unlikely);
-                        if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
-                            return @call(.always_tail, applyForwardCallMethod, .{ pc, sp, vb, vm });
-                        }
-                    }
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
                     // pushFrame/fallback/setup constructor chain. The receiver rides
@@ -5283,6 +5278,7 @@ const specials: colds.SpecialHandlers = .{
     .op_call2 = op_call2,
     .op_call3 = op_call3,
     .op_call_method = op_call_method,
+    .op_call_method_apply_fwd = applyForwardCallMethod,
     .op_apply = op_apply,
     .op_call_constructor = op_call_constructor,
     .op_for_of_next = op_for_of_next,

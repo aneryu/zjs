@@ -343,6 +343,10 @@ pub const opcode = struct {
         pub const using_add_resource: u8 = 245;
         pub const using_dispose_stack: u8 = 246;
         pub const using_dispose_stack_for_throw: u8 = 247;
+        /// zjs-only: L1 rewritten `this.m.apply(this, arguments)` site.
+        /// Same encoding as `call_method` (u16 argc). Never emitted by the
+        /// parser; specialized copies only.
+        pub const call_method_apply_fwd: u8 = 248;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -373,7 +377,7 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 248;
+        pub const op_count: u16 = 249;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -382,7 +386,7 @@ pub const opcode = struct {
         pub const op_temp_count: u8 = 19;
     };
 
-    pub const op_info_len: usize = 267;
+    pub const op_info_len: usize = 268;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -654,6 +658,7 @@ pub const opcode = struct {
         .{ .name = "using_add_resource", .size = 2, .n_pop = 2, .n_push = 0, .fmt = .u8 }, // [264] id 245
         .{ .name = "using_dispose_stack", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [265] id 246
         .{ .name = "using_dispose_stack_for_throw", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [266] id 247
+        .{ .name = "call_method_apply_fwd", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [267] id 248
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's
@@ -1615,9 +1620,9 @@ pub const function_bytecode = struct {
         /// Geometry-only small-function body-expansion candidate. Not the
         /// existing same-machine `simple_inline_eligible` Entry path.
         small_inline_eligible: bool = false,
-        /// This image contains a rewritten L1 apply-forward `call_method`.
-        /// Hot `op_call_method` consults this bit before any CallerState walk
-        /// so non-apply call sites pay zero L1 marginal cost.
+        /// This image contains a rewritten L1 apply-forward site
+        /// (`op.call_method_apply_fwd`). Consulted by constructor TAKE and
+        /// D8-L1 native_caller attach — not by vanilla `op_call_method`.
         apply_forward_inlined: bool = false,
     };
 

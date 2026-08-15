@@ -147,6 +147,7 @@ pub const SpecialHandlers = struct {
     op_call2: Handler,
     op_call3: Handler,
     op_call_method: Handler,
+    op_call_method_apply_fwd: Handler,
     op_apply: Handler,
     op_call_constructor: Handler,
     op_for_of_next: Handler,
@@ -802,6 +803,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.call2] = s.op_call2;
     t[op.call3] = s.op_call3;
     t[op.call_method] = s.op_call_method;
+    t[op.call_method_apply_fwd] = s.op_call_method_apply_fwd;
     t[op.tail_call] = s.op_tail_call;
     t[op.tail_call_method] = s.op_tail_call_method;
     t[op.eval] = s.op_eval;
