@@ -8828,8 +8828,11 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
     } else {
         // QJS resets malloc_gc_threshold immediately after its pre-object GC,
         // after its Shape is owned but before the triggering JSObject body is
-        // charged.
-        const boundary_bytes = rt.memory.allocated_bytes - survivor.allocationSize(rt);
+        // charged. The body is a slab class (usable+MALLOC_OVERHEAD), not the
+        // request length (quickjs.c:2168/1795).
+        const object_request = survivor.allocationSize(rt);
+        const object_charge = core.memory.MemoryAccount.accountedSizeForRequest(object_request, .@"8");
+        const boundary_bytes = rt.memory.allocated_bytes - object_charge;
         const expected = boundary_bytes + (boundary_bytes >> 1);
         try std.testing.expectEqual(expected, rt.gcThreshold());
     }
@@ -10616,7 +10619,10 @@ test "heap multiplication costs one allocation and one block" {
 
     const payload = @sizeOf(core.bigint.BigInt) + 4 * @sizeOf(bigint.Limb);
     try std.testing.expectEqual(@as(usize, 88), payload);
-    try std.testing.expectEqual(bytes_before + payload, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(
+        bytes_before + core.memory.MemoryAccount.accountedSizeForRequest(payload, .@"8"),
+        rt.memory.allocated_bytes,
+    );
     // 88 bytes plus an 8-byte block header lands in the 96-byte slab class; the
     // two-allocation shape used the 64- and 40-byte blocks, 104 bytes of block
     // for the same 88 bytes of payload.
