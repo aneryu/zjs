@@ -3936,6 +3936,24 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+/// Hot `OP_get_array_el2` — qjs `GET_ARRAY_EL_INLINE(..., keep=1)`
+/// (quickjs.c:19438-19439). Same dense predicate as `op_get_array_el`; the
+/// result replaces the key and the receiver stays (`[obj, key] → [obj, value]`)
+/// so `obj[i](...)` can `call_method`. Own-int / typed / atom-key stay on the
+/// cold `h_get_array_element` shell: those helpers are non-leaf (`bl`) and
+/// would tax the dense hit with a shared prologue. qjs CASE only inlines the
+/// ARRAY+INT+in-bounds arm; everything else is `JS_GetPropertyValue`.
+pub fn op_get_array_el2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    const key = (sp - 1)[0];
+    const obj = (sp - 2)[0];
+    if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
+        // key is TAG_INT (fastDenseArrayElementValue requires asInt32); no free.
+        (sp - 1)[0] = value;
+        return cont(pc + 1, sp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 // Hot inline get_length — qjs reads a primitive string's `.length` inline
 // (`OP_get_field` length fast leg: `JS_VALUE_GET_STRING(sp[-1])->len`) instead of
 // routing through the general property machinery. A string operand (flat or rope —

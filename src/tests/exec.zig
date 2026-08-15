@@ -12836,6 +12836,24 @@ test "Engine eval preserves local numeric add host output semantics" {
     try std.testing.expectEqualStrings("3\n2147483648\ncustom:3\n", stream.buffered());
 }
 
+test "get_array_el2 dense indexed call keeps the receiver" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\var seen;
+        \\function rec(x) { seen = this; return x + 1; }
+        \\var a = [rec, rec];
+        \\function idxcall(arr, i, x) { return arr[i](x); }
+        \\assert.sameValue(idxcall(a, 0, 41), 42);
+        \\assert.sameValue(seen, a);
+        \\assert.sameValue(idxcall(a, 1, 1), 2);
+        \\assert.sameValue(seen, a);
+        \\assert.sameValue(a[0](8), 9);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "int32 add sub mul overflow stays a number on the generic binary" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
