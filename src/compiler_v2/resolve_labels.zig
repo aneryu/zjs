@@ -482,6 +482,9 @@ const Resolver = struct {
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
     last_attached_source: ?SourcePoint = null,
+    last_op: ?u8 = null,
+    last_pc: u32 = 0,
+    last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
         if (self.output_atoms_owned) {
@@ -693,6 +696,39 @@ const Resolver = struct {
         try self.ensureOutput(1);
         self.output[self.output_len] = value;
         self.output_len += 1;
+    }
+
+    inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
+        self.last_pc = pc;
+        self.last_op = opc;
+    }
+
+    noinline fn maybeFusePrev(self: *Resolver, b: u8) void {
+        const a = self.last_op orelse return;
+        const a_sz: u32 = opcode.sizeOf(a);
+        if (a_sz == 0) return;
+        if (self.output_len != self.last_pc + a_sz) return;
+        if (self.output_len == self.last_bound_output) return;
+        const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
+            op.get_loc0_field
+        else if (a == op.lt and b == op.if_false8)
+            op.cmp_if_false8
+        else if (a == op.put_loc8 and b == op.get_loc8)
+            op.put_loc8_get_loc8
+        else if (a == op.push_this and b == op.put_loc0)
+            op.push_this_put_loc0
+        else if (a == op.put_loc0 and b == op.get_loc0)
+            op.put_loc0_get_loc0
+        else if (a == op.get_field2 and b == op.call_method)
+            op.get_field2_call_method
+        else if (a == op.get_loc2 and b == op.get_field)
+            op.get_loc2_field
+        else if (a == op.eq and b == op.if_false8)
+            op.eq_if_false8
+        else
+            null;
+        if (fused) |fused_op|
+            self.output[self.last_pc] = fused_op;
     }
 
     inline fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
@@ -962,6 +998,25 @@ const Resolver = struct {
         };
     }
 
+    /// qjs `code_match(&cc, pos_next, OP_return, -1)` (34947): skip `line_num`
+    /// then require a `return`. A live label between call and return blocks
+    /// the fold (same as `hasBindInRange` on other S4 peeks).
+    fn matchReturnAfter(self: *const Resolver, start: u32) Error!?u32 {
+        var position = start;
+        while (position < self.product.code_len) {
+            const instruction = try decodeInstruction(self.code, position);
+            if (instruction.op_id == op.line_num) {
+                position += instruction.size;
+                continue;
+            }
+            if (instruction.op_id != op.@"return") return null;
+            const end = position + instruction.size;
+            if (self.hasBindInRange(start, end)) return null;
+            return end;
+        }
+        return null;
+    }
+
     /// qjs:33881 code_match, with source markers already out of band. A bind
     /// at any byte boundary in the candidate range rejects the match exactly
     /// as an OP_label byte would have rejected QuickJS's sequential matcher.
@@ -1126,6 +1181,7 @@ const Resolver = struct {
                 return error.InvalidBytecode;
             }
             self.addr[entry.label_index] = self.output_len;
+            self.last_bound_output = self.output_len;
             const slot = &self.product.label_slots[entry.label_index];
             var reloc_index = slot.first_reloc;
             var walked: u32 = 0;
@@ -1568,7 +1624,18 @@ const Resolver = struct {
     ) Error!void {
         if (layout == .short) {
             if (shortSlotOp(op_id, idx)) |short_op| {
+                const pc = self.output_len;
+                if (comptime layout == .short) {
+                    if (short_op == op.get_loc8 or short_op == op.put_loc0 or
+                        short_op == op.get_loc0 or short_op == op.get_loc2)
+                        self.maybeFusePrev(short_op);
+                }
                 try self.appendByte(short_op);
+                if (comptime layout == .short) {
+                    if (short_op == op.get_loc0 or short_op == op.put_loc8 or
+                        short_op == op.put_loc0 or short_op == op.get_loc2)
+                        self.noteFusionA(short_op, pc);
+                }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
                     short_op == op.set_loc8)
                 {
@@ -1641,7 +1708,9 @@ const Resolver = struct {
                 try self.appendByte(op.set_loc_uninitialized);
                 try self.appendU16(idx);
             } else {
+                const pc = self.output_len;
                 try self.appendByte(op.push_this);
+                if (comptime layout == .short) self.noteFusionA(op.push_this, pc);
                 try self.putShortCode(layout, op.put_loc, idx);
             }
         }
@@ -1718,6 +1787,7 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
+                if (short_op == op.if_false8) self.maybeFusePrev(op.if_false8);
                 try self.appendByte(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
@@ -1744,6 +1814,7 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
+                if (short_op == op.if_false8) self.maybeFusePrev(op.if_false8);
                 try self.appendByte(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
@@ -1826,7 +1897,18 @@ const Resolver = struct {
                 try readU16(self.code, position),
             );
         } else {
+            const first = self.code[position];
+            if (comptime layout == .short) {
+                if (first == op.get_field or first == op.call_method)
+                    self.maybeFusePrev(first);
+            }
+            const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
+            if (comptime layout == .short) {
+                if (first == op.lt or first == op.push_this or
+                    first == op.get_field2 or first == op.eq)
+                    self.noteFusionA(first, pc);
+            }
         }
         try self.consumeInstructionAtom(position, instruction, true);
     }
@@ -1954,10 +2036,46 @@ const Resolver = struct {
             var position_next = position + instruction.size;
 
             switch (instruction.op_id) {
-                // qjs:34941-34959 deliberately diverges: zjs emits tail_call
-                // directly and legacy resolve_labels never folds call+return.
-                // Ordinary call still takes the default call0..3 selector.
-                op.call, op.call_method => try self.copyDefault(layout, position, instruction),
+                // qjs:34941-34957: `call`/`call_method` immediately followed by
+                // `return` (line_num skipped, same as code_match) becomes
+                // `tail_call`/`tail_call_method` via put_short_code(op+1, argc).
+                // Unconditional — the match sits outside `if (OPTIMIZE)`.
+                // try/finally already rewrite return to gosub+return, so they
+                // do not match. return_undef / return_async do not match.
+                //
+                // Why this used to be locked off: 6e83f394 removed parser TCO
+                // (`rewriteTrailingCallAsTailCall`) and F5 pinned emission to 0
+                // so the QJS-aligned baseline would not emit tail_call into the
+                // then-reuse handler (zjs-only TCO). S4 then skipped this fold
+                // with a stale "zjs emits tail_call directly" comment. H3
+                // (36cf6476) reopened emission; reuse dropped Error.stack and
+                // skipped overflow (−4.46% DB); allow_inline=false (a4a301e0)
+                // broke machine_inits==1. The surviving shape is same-Machine
+                // pushCall plus the leftover return as the shared return stub
+                // (H3 CLOSED "忠实形态"). Do not flip reuse back on.
+                op.call, op.call_method => {
+                    if (try self.matchReturnAfter(position_next)) |_| {
+                        try self.attachSource();
+                        const tail_op: u8 = if (instruction.op_id == op.call)
+                            op.tail_call
+                        else
+                            op.tail_call_method;
+                        try self.putShortCode(
+                            layout,
+                            tail_op,
+                            try readU16(self.code, position),
+                        );
+                        try self.consumeInstructionAtom(position, instruction, true);
+                        // Keep the following `return` (do not skipDeadCode it).
+                        // zjs inline frames resume the caller at the next pc;
+                        // leaving `return` is the H3 shared return stub
+                        // (`goto done` without an EOF fetch). qjs fuses the
+                        // return into the opcode because JS_CallInternal +
+                        // `goto done` never resumes.
+                    } else {
+                        try self.copyDefault(layout, position, instruction);
+                    }
+                },
 
                 // The Builder-native path has no preceding legacy
                 // resolve_bytecode walk, so this is the complete terminal set
@@ -2783,6 +2901,17 @@ const Resolver = struct {
             if (source_start > self.output_len or destination_start > source_start)
                 return error.InvalidBytecode;
             self.output[jump.pos - 1] = new_op;
+            // Jump shortening is when `if_false8` first exists. Fold lt→
+            // cmp_if_false8 here instead of rescanning the whole stream.
+            if (new_op == op.if_false8 and jump.pos >= 2) {
+                const a_pc = jump.pos - 2;
+                if (!self.isLabelAddress(jump.pos - 1)) {
+                    if (self.output[a_pc] == op.lt)
+                        self.output[a_pc] = op.cmp_if_false8
+                    else if (self.output[a_pc] == op.eq)
+                        self.output[a_pc] = op.eq_if_false8;
+                }
+            }
             const tail_len: usize = @intCast(self.output_len - source_start);
             std.mem.copyForwards(
                 u8,
@@ -3104,6 +3233,13 @@ const Resolver = struct {
             source_events_between_identities,
         );
         cfg.recordFinalBoundaryHops(live_group_count);
+    }
+
+    fn isLabelAddress(self: *const Resolver, pc: u32) bool {
+        for (self.addr) |addr| {
+            if (addr == pc) return true;
+        }
+        return false;
     }
 
     fn validateFinalSources(self: *const Resolver) Error!void {
@@ -4477,7 +4613,7 @@ test "compiler_v2.resolve_labels: strict this and arguments prologue is exact" {
     try std.testing.expectEqualSlices(
         u8,
         &.{
-            op.push_this,
+            op.push_this_put_loc0,
             op.put_loc0,
             op.special_object,
             opcode.special_object_subtype.arguments,

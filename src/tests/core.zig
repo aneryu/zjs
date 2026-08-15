@@ -4351,11 +4351,11 @@ test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
     defer for (atoms) |a| rt.atoms.free(a);
 
     var shape = try rt.shapes.create(null);
-    // Six properties exceed the initial capacity (4), forcing at least one FAM
+    // Six properties exceed the initial capacity (2), forcing at least one FAM
     // relocation (the shape pointer moves; addProperty threads &shape back).
     for (atoms) |a| try rt.shapes.addProperty(&shape, a, flags);
     try std.testing.expectEqual(@as(u32, 6), shape.prop_count);
-    try std.testing.expect(shape.prop_size >= 6); // grew past the initial capacity of 4
+    try std.testing.expect(shape.prop_size >= 6); // grew past the initial capacity of 2
 
     // Snapshot a two-property baseline (mirrors the shared-test-engine reset
     // that restores the post-install global layout, dropping user-added props).
@@ -4531,7 +4531,8 @@ test "unique transition shape appends in place across FAM relocation" {
 
     const initial_shape = object.shape_ref;
     const initial_hashed_count = rt.shapes.shape_hash_count;
-    for (atoms[0..4], 0..) |name, index| {
+    const in_place = core.shape.initial_prop_size;
+    for (atoms[0..in_place], 0..) |name, index| {
         try object.defineOwnProperty(
             rt,
             name,
@@ -4541,18 +4542,18 @@ test "unique transition shape appends in place across FAM relocation" {
     }
     try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
 
-    // The fifth append grows the inline FAM, so the allocation moves while the
+    // The next append grows the inline FAM, so the allocation moves while the
     // logical shape ownership and hashed/live registry counts stay unchanged.
     const before_relocation = object.shape_ref;
     try object.defineOwnProperty(
         rt,
-        atoms[4],
-        core.Descriptor.data(core.JSValue.int32(4), true, true, true),
+        atoms[in_place],
+        core.Descriptor.data(core.JSValue.int32(@intCast(in_place)), true, true, true),
     );
     try std.testing.expect(before_relocation != object.shape_ref);
     try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(@as(u32, atoms.len), object.shape_ref.prop_count);
-    for (atoms, 0..) |name, index| {
+    try std.testing.expectEqual(@as(u32, in_place + 1), object.shape_ref.prop_count);
+    for (atoms[0 .. in_place + 1], 0..) |name, index| {
         try std.testing.expectEqual(@as(?i32, @intCast(index)), (try object.getProperty(name)).asInt32());
         try std.testing.expect(object.shape_ref.firstPropertyIndex(name) != core.shape.no_property_index);
     }

@@ -287,7 +287,7 @@ pub noinline fn field(
             errdefer value.free(ctx.runtime);
             stack.pushOwnedAssumeCapacity(value);
         },
-        op.get_field2 => {
+        op.get_field2, op.get_field2_call_method => {
             const obj = try stackValueFromTop(stack, 0);
             defer obj.free(ctx.runtime);
             if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
@@ -341,11 +341,16 @@ pub noinline fn field(
             // (debugAssertNonPrivateFieldOperandAtom), so no private probe.
             if (object_ops.objectFromValueTrustedExpression(obj)) |receiver| {
                 debugAssertNonPrivateFieldOperandAtom(ctx.runtime, atom_id);
-                // Owned contract: value is consumed on success AND on the
-                // (OOM-only) error path — flag before, clear on a decline.
-                value_consumed = true;
-                if (try receiver.setOrDefineOwnDataPropertyForPutFieldOwned(ctx.runtime, atom_id, value)) return .done;
-                value_consumed = false;
+                // Owned contract: `.done` consumes `value`; `.slow` (decline
+                // or rolled-back OOM) leaves it with the defer. The resolver
+                // below is still `!T` and consumes on its own OOM.
+                switch (receiver.setOrDefineOwnDataPropertyForPutFieldOwned(ctx.runtime, atom_id, value)) {
+                    .done => {
+                        value_consumed = true;
+                        return .done;
+                    },
+                    .slow => {},
+                }
             }
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);

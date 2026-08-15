@@ -131,6 +131,54 @@ test "eval lazily materializes a bare core context global before root closure co
     try std.testing.expect(ctx.global != null);
 }
 
+test "fused cmp_if_false8 interrupt poll stays uncatchable in a for loop" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\globalThis.__fuse_n = 0;
+        \\globalThis.__fuse_spin = function () {
+        \\    for (var i = 0; i < 1000000000; i++) {
+        \\        __fuse_n = i;
+        \\    }
+        \\    return 1;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const spin_key = try js.runtime.internAtom("__fuse_spin");
+    defer js.runtime.atoms.free(spin_key);
+    const n_key = try js.runtime.internAtom("__fuse_n");
+    defer js.runtime.atoms.free(n_key);
+    const spin = try global.getProperty(spin_key);
+    defer spin.free(js.runtime);
+
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+    js.context.interrupt_counter = 8;
+
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            spin,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expect(js.context.exceptionIsUncatchable());
+    const exception = js.context.takeException();
+    exception.free(js.runtime);
+    try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
 test "interrupt budget survives Machine replacement and bypasses catch markers" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -3375,6 +3423,95 @@ fn expectSingleDerivedThisClosureCapture(function: *const bytecode.FunctionBytec
         try std.testing.expectEqual(@as(u16, @intCast(this_idx)), capture.var_idx);
     }
     try std.testing.expectEqual(@as(usize, 1), this_capture_count);
+}
+
+test "js_function_set_properties publishes configurable length then name" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function namedPair(a, b) { return a; }
+        \\var dlen = Object.getOwnPropertyDescriptor(namedPair, "length");
+        \\var dname = Object.getOwnPropertyDescriptor(namedPair, "name");
+        \\globalThis.__r11_name_ok = (dlen.value === 2 && dlen.writable === false && dlen.enumerable === false && dlen.configurable === true
+        \\  && dname.value === "namedPair" && dname.writable === false && dname.enumerable === false && dname.configurable === true) ? 1 : 0;
+    );
+    setup.free(js.runtime);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__r11_name_ok");
+    defer js.runtime.atoms.free(key);
+    const result = try global.getProperty(key);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.asInt32() == @as(?i32, 1) or result.asNumber() == @as(?f64, 1.0));
+}
+
+test "get_var_ref reuses the open cell on a second capture of the same local" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("r11-reuse-open-cell");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    function.var_count = 1;
+    function.open_var_ref_count = 1;
+    function.vardefs = try rt.memory.alloc(bytecode.function_bytecode.BytecodeVarDef, 1);
+    function.vardefs[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{
+        .var_name = core.atom.null_atom,
+        .is_captured = true,
+        .var_ref_idx = 0,
+    });
+
+    var locals = [_]core.JSValue{core.JSValue.int32(7)};
+    var open_refs = [_]?*core.VarRef{null};
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
+    defer frame.deinit(&rt.memory, rt);
+    frame.locals = &locals;
+    frame.open_var_refs = &open_refs;
+    frame.ownership.storage = .borrowed;
+
+    const first = try frame.captureLocal(rt, 0);
+    const second = try frame.captureLocal(rt, 0);
+    defer first.freeCell(rt);
+    defer second.freeCell(rt);
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(first, open_refs[0].?);
+}
+
+test "js_closure2 attach roots captures through the function object" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function __r11_make(n) {
+        \\  var a = n, b = n + 1, c = n + 2;
+        \\  function inner() {
+        \\    function deeper() { return a + b + c; }
+        \\    return deeper;
+        \\  }
+        \\  return inner();
+        \\}
+        \\globalThis.__r11_fn = __r11_make(10);
+        \\globalThis.__r11_out = globalThis.__r11_fn();
+    );
+    setup.free(js.runtime);
+
+    const old_threshold = js.runtime.gcThreshold();
+    js.runtime.setGCThreshold(0);
+    defer js.runtime.setGCThreshold(old_threshold);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    const again = try js.eval("globalThis.__r11_out = globalThis.__r11_fn()");
+    again.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const out_key = try js.runtime.internAtom("__r11_out");
+    defer js.runtime.atoms.free(out_key);
+    const total = try global.getProperty(out_key);
+    defer total.free(js.runtime);
+    try std.testing.expect(total.asInt32() == @as(?i32, 33) or total.asNumber() == @as(?f64, 33.0));
 }
 
 test "var-ref growth promotes borrowed captures to owned cells" {
@@ -7208,6 +7345,59 @@ test "parked generator open cell death path reclaims cell and generator together
     }
 }
 
+test "cycle drain frees leftover-rc rings under repeated forceGC" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const body =
+        \\(function () {
+        \\  const rings = [];
+        \\  for (let i = 0; i < 32; i++) {
+        \\    let a = { n: i };
+        \\    let b = { peer: a };
+        \\    a.peer = b;
+        \\    a.self = function () { return a; };
+        \\    rings.push(a.self());
+        \\  }
+        \\  return rings.length;
+        \\})();
+    ;
+
+    const warm = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+    warm.free(js.runtime);
+    _ = try js.runtime.forceGC(null);
+    const cell_steady = js.runtime.gc.liveCountKind(.var_ref);
+    const object_steady = js.runtime.gc.liveCountKind(.object);
+    const fb_steady = js.runtime.gc.liveCountKind(.function_bytecode);
+
+    var round: usize = 0;
+    while (round < 8) : (round += 1) {
+        const result = try js.evalWithOptions(body, .{ .filename = "<repl>" });
+        defer result.free(js.runtime);
+        try std.testing.expectEqual(@as(?i32, 32), result.asInt32());
+        _ = try js.runtime.forceGC(null);
+        try std.testing.expectEqual(cell_steady, js.runtime.gc.liveCountKind(.var_ref));
+        try std.testing.expectEqual(object_steady, js.runtime.gc.liveCountKind(.object));
+        try std.testing.expectEqual(fb_steady, js.runtime.gc.liveCountKind(.function_bytecode));
+    }
+}
+
+test "cycle scan restores a heap BigInt without list_del on an unlinked header" {
+    // Heap BigInt is a refCountHeader() target but not a cycle-list member.
+    // gc_scan_incref_child must restore its trial rc and must not list_del a
+    // null prev (the in_cycle_list replacement). Short 1n is not enough —
+    // only a heap bigint exercises the header.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\var live = { x: 0x10000000000000000n };
+        \\$262.gc();
+        \\assert.sameValue(live.x === 0x10000000000000000n, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "generator continuation keeps its FunctionBytecode alive after every source binding is dropped" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -10117,6 +10307,78 @@ test "pc2line stack locations match QuickJS return and throw matrix" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "X-89 tail_call keeps caller on Error.stack like QuickJS" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\function outer() { return inner(); }
+        \\function inner() { throw new Error("x"); }
+        \\var captured;
+        \\try { outer(); } catch (error) { captured = error.stack; }
+        \\assert.sameValue(captured.indexOf("at inner") >= 0, true);
+        \\assert.sameValue(captured.indexOf("at outer") >= 0, true);
+        \\function methOuter() { return o.m(); }
+        \\var o = { m: function m() { throw new Error("m"); } };
+        \\try { methOuter(); } catch (error) { captured = error.stack; }
+        \\assert.sameValue(captured.indexOf("at m") >= 0, true);
+        \\assert.sameValue(captured.indexOf("at methOuter") >= 0, true);
+    , .{ .filename = "x89-stack.js" });
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "X-89 tail_call recursion still overflows like QuickJS" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function f(n) { if (n <= 0) return 0; return f(n - 1); }
+        \\var threw = false;
+        \\try { f(20000); } catch (e) {
+        \\  threw = e instanceof InternalError && String(e.message).indexOf("stack overflow") >= 0;
+        \\}
+        \\assert.sameValue(threw, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "X-89 frame disasm: return call and method emit tail opcodes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function tailPlain(x) { return g(x); }
+        \\function tailMethod(o, x) { return o.m(x); }
+        \\function noFold(p) { return p ? f() : g(); }
+    );
+    defer result.free(js.runtime);
+
+    var buf: [2048]u8 = undefined;
+
+    const plain = try globalFunctionBytecode(js, "tailPlain");
+    var plain_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&plain_w, plain, &js.runtime.atoms, .{});
+    const plain_dump = plain_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, plain_dump, ": tail_call ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_dump, "tail_call_method") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_dump, ": return\n") != null);
+
+    const method = try globalFunctionBytecode(js, "tailMethod");
+    var method_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&method_w, method, &js.runtime.atoms, .{});
+    const method_dump = method_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, method_dump, ": tail_call_method ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, method_dump, ": return\n") != null);
+
+    const no_fold = try globalFunctionBytecode(js, "noFold");
+    var no_fold_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&no_fold_w, no_fold, &js.runtime.atoms, .{});
+    const no_fold_dump = no_fold_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, no_fold_dump, "tail_call") == null);
+}
+
 test "pc2line malformed transition reports zero location instead of header fallback" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -11758,7 +12020,8 @@ test "RegExp compiler stack overflow is a catchable SyntaxError" {
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
         \\try { new RegExp("(?:".repeat(40000)); print("no throw"); } catch(e) { print(e.name + ":" + e.message); }
-        \\try { new RegExp("[".repeat(1000)+"a"+"]".repeat(1000),"v"); print("v-no throw"); } catch(e) { print("v:" + e.name + ":" + e.message); }
+        \\try { new RegExp("[".repeat(4000)+"a"+"]".repeat(4000),"v"); print("v-no throw"); } catch(e) { print("v:" + e.name + ":" + e.message); }
+        \\try { new RegExp("[".repeat(200)+"a"+"]".repeat(200),"v"); print("v-shallow-ok"); } catch(e) { print("v-shallow:" + e.name); }
         \\try { new RegExp("(?:".repeat(1000)+")".repeat(1000)); print("shallow-ok"); } catch(e) { print("shallow:" + e.name); }
     , &stream);
     defer result.free(js.runtime);
@@ -11767,6 +12030,7 @@ test "RegExp compiler stack overflow is a catchable SyntaxError" {
     try std.testing.expectEqualStrings(
         "SyntaxError:stack overflow\n" ++
             "v:SyntaxError:stack overflow\n" ++
+            "v-shallow-ok\n" ++
             "shallow-ok\n",
         stream.buffered(),
     );
@@ -12611,10 +12875,7 @@ test "using early exit before await using keeps sync disposal synchronous" {
     try std.testing.expectEqualStrings("dispose true\n", stream.buffered());
 
     const plain = try globalFunctionBytecode(js, "plainBlockForUsingOpcodeCheck");
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_create_stack));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_add_resource));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_dispose_stack));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_dispose_stack_for_throw));
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using));
 
     var disassembly_buffer: [2048]u8 = undefined;
     var disassembly = std.Io.Writer.fixed(&disassembly_buffer);
@@ -12644,6 +12905,41 @@ test "Engine eval preserves local numeric add host output semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3\n2147483648\ncustom:3\n", stream.buffered());
+}
+
+test "get_array_el2 dense indexed call keeps the receiver" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\var seen;
+        \\function rec(x) { seen = this; return x + 1; }
+        \\var a = [rec, rec];
+        \\function idxcall(arr, i, x) { return arr[i](x); }
+        \\assert.sameValue(idxcall(a, 0, 41), 42);
+        \\assert.sameValue(seen, a);
+        \\assert.sameValue(idxcall(a, 1, 1), 2);
+        \\assert.sameValue(seen, a);
+        \\assert.sameValue(a[0](8), 9);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+test "int32 add sub mul overflow stays a number on the generic binary" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function add1(a, b) { return a + b; }
+        \\function sub1(a, b) { return a - b; }
+        \\function mul1(a, b) { return a * b; }
+        \\assert.sameValue(add1(2147483647, 1), 2147483648);
+        \\assert.sameValue(add1(-2147483648, -1), -2147483649);
+        \\assert.sameValue(sub1(-2147483648, 1), -2147483649);
+        \\assert.sameValue(mul1(1 << 30, 4), 4294967296);
+        \\assert.sameValue(1 / mul1(-1, 0), -Infinity);
+        \\assert.sameValue(add1(1, 2), 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine eval preserves collection read host output semantics" {
@@ -14450,13 +14746,16 @@ test "zero-arg leaf leftover bodies are refused publication and balance rc" {
         return error.InvalidFunctionBytecode;
     try std.testing.expect(!resolved_drop.fb.simpleInlineEmptyLeaf());
     try std.testing.expect(!resolved_drop.fb.rawThisInlineEmptyLeaf());
+    try std.testing.expect(!resolved_drop.fb.smallInlineEligible());
     const resolved_switch = inline_calls.resolveInlineFunction(global, switch_fn) orelse
         return error.InvalidFunctionBytecode;
     try std.testing.expect(!resolved_switch.fb.simpleInlineEmptyLeaf());
     try std.testing.expect(!resolved_switch.fb.rawThisInlineEmptyLeaf());
+    try std.testing.expect(!resolved_switch.fb.smallInlineEligible());
     const resolved_branchy = inline_calls.resolveInlineFunction(global, branchy_fn) orelse
         return error.InvalidFunctionBytecode;
     try std.testing.expect(resolved_branchy.fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(resolved_branchy.fb.smallInlineEligible());
 
     _ = rt.runObjectCycleRemoval();
     const baseline_objects = rt.gc.liveCount();
@@ -16536,12 +16835,12 @@ test "ordinary arrow and method recursion exhaust the logical stack budget" {
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    // The baseline source compiler deliberately emits ordinary call + return,
-    // not parser-produced tail-call opcodes.  Like QuickJS without the
-    // tail-call-optimization feature, sufficiently deep recursion must consume
-    // the logical stack budget and surface the catchable stack-overflow error.
-    // Exercise arrows, mutual methods, and a self method, then prove that the
-    // same runtime remains usable after each caught overflow.
+    // X-89 emits tail_call* for `return f()` / `return this.m()` (qjs:34941)
+    // but does not reuse the caller frame. Like QuickJS JS_CallInternal +
+    // goto done, sufficiently deep recursion must still consume the logical
+    // stack budget and surface the catchable stack-overflow error. Exercise
+    // arrows, mutual methods, and a self method, then prove that the same
+    // runtime remains usable after each caught overflow.
     const result = try js.evalWithOutput(
         \\function expectStackOverflow(run) {
         \\  try {
@@ -21631,6 +21930,42 @@ test "small-function-inlining: next-entry specialize is installed on the caller"
     try std.testing.expect(state.?.specialized);
 }
 
+test "small-function-inlining: spec copy keeps simple_inline bits after extra TAKE locals" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C(v) { this.x = v; }
+        \\function outer(v) { return new C(v); }
+        \\globalThis.__outer = outer;
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = outer(i);
+        \\assert.sameValue(last.x, 15);
+        \\assert.sameValue(outer(7).x, 7);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(outer_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+    // Extra TAKE window: not a Fast leaf (var_count==0), but still the
+    // qjs:17828 simple-inline shape (simple_inline_base holds).
+    try std.testing.expect(outer_fb.var_count > 0);
+    try std.testing.expect(outer_fb.simpleInlineEligible());
+    try std.testing.expect(!outer_fb.strictSimpleInlineEligible());
+    try std.testing.expect(!outer_fb.strictSimpleSnapshotInlineEligible());
+    try std.testing.expect(!outer_fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(!outer_fb.rawThisInlineEmptyLeaf());
+    try std.testing.expect(!outer_fb.simpleInlineExactArgsLeaf());
+    try std.testing.expect(!outer_fb.rawThisInlineExactArgsLeaf());
+    try std.testing.expectEqual(.none, outer_fb.exactArgsLeafKind());
+    try std.testing.expectEqual(.none, outer_fb.captureLeafKind());
+}
+
 test "small-function-inlining: sibling constructor sites both specialize" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -21700,6 +22035,87 @@ test "small-function-inlining: call_constructor callers keep published frame geo
     try std.testing.expectEqual(@as(u16, 0), outer_fb.var_count);
 }
 
+test "small-function-inlining: leftover-operand bodies are not small-inline eligible" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function leftoverDrop() { ({ z: 1 }); }
+        \\function leftoverSwitch() { switch ({ x: 7 }) { default: return 5; } }
+        \\function leftoverCtor() { ({ z: 1 }); }
+        \\function balancedInc() { return this.v + 1; }
+        \\globalThis.__drop = leftoverDrop;
+        \\globalThis.__sw = leftoverSwitch;
+        \\globalThis.__ctor = leftoverCtor;
+        \\globalThis.__inc = balancedInc;
+    );
+    defer result.free(js.runtime);
+    const global = try js.context.globalObject();
+    const drop_fn = try global.getProperty(try js.runtime.internAtom("__drop"));
+    defer drop_fn.free(js.runtime);
+    const sw_fn = try global.getProperty(try js.runtime.internAtom("__sw"));
+    defer sw_fn.free(js.runtime);
+    const ctor_fn = try global.getProperty(try js.runtime.internAtom("__ctor"));
+    defer ctor_fn.free(js.runtime);
+    const inc_fn = try global.getProperty(try js.runtime.internAtom("__inc"));
+    defer inc_fn.free(js.runtime);
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(drop_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(sw_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(ctor_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    try std.testing.expect(zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(inc_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+}
+
+test "small-function-inlining: leftover ctor is not specialized and does not overflow" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { ({ z: 1 }); }
+        \\function outer() { return new C(); }
+        \\var i, last;
+        \\for (i = 0; i < 256; i++) last = outer();
+        \\assert.sameValue(typeof last, "object");
+        \\globalThis.__C = C;
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const c_fn = try global.getProperty(try js.runtime.internAtom("__C"));
+    defer c_fn.free(js.runtime);
+    try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(c_fn).?.u.bytecode_function.function_bytecode.?.smallInlineEligible());
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    if (zjs.exec.small_inline.callerState(outer_fb)) |state| {
+        try std.testing.expectEqual(@as(u8, 0), state.inlined_len);
+    }
+}
+
+test "small-function-inlining: extra ctor args do not overwrite callee fields" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function Pair(a, b) { this.x = a; this.y = b; }
+        \\function outer() { return new Pair(1, 2, { leak: 1 }); }
+        \\var i, last;
+        \\for (i = 0; i < 16; i++) last = outer();
+        \\assert.sameValue(last.x, 1);
+        \\assert.sameValue(last.y, 2);
+        \\assert.sameValue(last.leak, undefined);
+        \\globalThis.__outer = outer;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(outer_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+}
+
 test "small-function-inlining: monomorphic method is expanded" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -21710,6 +22126,138 @@ test "small-function-inlining: monomorphic method is expanded" {
         \\var i, last, box = new Box(3);
         \\for (i = 0; i < 16; i++) last = outer(box);
         \\assert.sameValue(last, 4);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining L1: apply-arguments ctor specializes" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function K() { this.initialize.apply(this, arguments); }
+        \\K.prototype.initialize = function (a, b) { this.a = a; this.b = b; };
+        \\function outer(a, b) { return new K(a, b); }
+        \\globalThis.__outer = outer;
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer(1, 2);
+        \\assert.sameValue(o.a, 1);
+        \\assert.sameValue(o.b, 2);
+        \\assert.sameValue(outer(7, 8).a, 7);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    const global = try js.context.globalObject();
+    const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
+    defer outer_fn.free(js.runtime);
+    const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
+    const outer_fb = outer_obj.u.bytecode_function.function_bytecode.?;
+    const state = zjs.exec.small_inline.callerState(outer_fb);
+    try std.testing.expect(state != null);
+    try std.testing.expect(state.?.inlined_len >= 1);
+    try std.testing.expect(state.?.apply_forward[0].call_pc != std.math.maxInt(u32));
+    try std.testing.expect(outer_fb.applyForwardInlined());
+}
+
+test "small-function-inlining L1: next-entry take does not leak initialize return" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function K() { this.initialize.apply(this, arguments); }
+        \\K.prototype.initialize = function (a, b) { this.a = a; this.b = b; };
+        \\function batch(n) {
+        \\  var i, s = 0, p;
+        \\  for (i = 0; i < n; i++) { p = new K(1, 2); s = s + p.a; }
+        \\  return s;
+        \\}
+        \\assert.sameValue(batch(16), 16);
+        \\assert.sameValue(batch(64), 64);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining L1: forwarded argc is the site argc" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function K() { this.initialize.apply(this, arguments); }
+        \\K.prototype.initialize = function () { this.n = arguments.length; };
+        \\function outer() { return new K(1, 2, 3); }
+        \\var i, o;
+        \\for (i = 0; i < 16; i++) o = outer();
+        \\assert.sameValue(o.n, 3);
+        \\assert.sameValue(outer().n, 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining L1: Error.stack is initialize, apply native, ctor" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var output_buffer: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function C() { this.initialize.apply(this, arguments); }
+        \\C.prototype.initialize = function init(a) { this.a = a; throw new Error("boom"); };
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) { try { outer(i); } catch (e) {} }
+        \\try { outer(99); } catch (e) {
+        \\  var s = String(e.stack);
+        \\  var iInit = s.indexOf("init");
+        \\  var iApply = s.indexOf("apply (native)");
+        \\  var iC = s.indexOf("\n    at C");
+        \\  print(iInit >= 0 && iApply > iInit && iC > iApply ? "order" : "bad");
+        \\  print(s.indexOf("apply (native)", iApply + 1) == -1 ? "once" : "dup");
+        \\}
+    , &output);
+    defer result.free(js.runtime);
+    try std.testing.expectEqualStrings("order\nonce\n", output.buffered());
+}
+
+test "small-function-inlining L1: own apply misses take" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.initialize.apply(this, arguments); }
+        \\C.prototype.initialize = function (a) { this.a = a; this.via = "init"; };
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\C.prototype.initialize.apply = function (thisArg, args) {
+        \\  thisArg.a = args[0];
+        \\  thisArg.via = "own";
+        \\};
+        \\assert.sameValue(outer(99).via, "own");
+        \\assert.sameValue(outer(99).a, 99);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "small-function-inlining L1: replaced Function.prototype.apply misses take" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function C() { this.initialize.apply(this, arguments); }
+        \\C.prototype.initialize = function (a) { this.a = a; };
+        \\function outer(v) { return new C(v); }
+        \\var i;
+        \\for (i = 0; i < 16; i++) outer(i);
+        \\var saved = Function.prototype.apply;
+        \\var seen = 0;
+        \\Function.prototype.apply = function (thisArg, args) {
+        \\  seen += 1;
+        \\  return saved.call(this, thisArg, args);
+        \\};
+        \\try {
+        \\  assert.sameValue(outer(7).a, 7);
+        \\  assert.sameValue(seen, 1);
+        \\} finally {
+        \\  Function.prototype.apply = saved;
+        \\}
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());

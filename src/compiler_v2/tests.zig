@@ -3013,6 +3013,27 @@ test "compiler_v2.s3: parsed empty finally removes gosub" {
     try std.testing.expectEqual(@as(u32, 3), product.jump_size);
 }
 
+test "compiler_v2.fuse: legacy opcode sizes stay put" {
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0));
+    try std.testing.expectEqual(@as(u8, 5), opcode.sizeOf(qop.get_field));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.lt));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.if_false8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.inc_loc));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.goto8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.get_loc8));
+    try std.testing.expectEqual(@as(u8, 3), opcode.sizeOf(qop.call_method_apply_fwd));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0_field));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.cmp_if_false8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.push_this_put_loc0));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.put_loc0_get_loc0));
+    try std.testing.expectEqual(@as(u8, 5), opcode.sizeOf(qop.get_field2_call_method));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc2_field));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.eq_if_false8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.using));
+}
+
 fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
     var h: V2Exec = undefined;
     try h.init(src);
@@ -3020,6 +3041,153 @@ fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
     const result = try v2CompileAndRun(&h);
     defer result.free(h.rt);
     try std.testing.expectEqual(expected, result.asInt32().?);
+}
+
+fn countInstalledOpcode(fb: *const bytecode_mod.FunctionBytecode, want: u8) !usize {
+    const code = fb.byteCode();
+    var pc: usize = 0;
+    var n: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size: usize = opcode.sizeOf(op_id);
+        if (size == 0 or size > code.len - pc) return error.InvalidBytecode;
+        if (op_id == want) n += 1;
+        pc += size;
+    }
+    for (fb.cpoolSlice()) |constant| {
+        if (!constant.isFunctionBytecode()) continue;
+        const header = constant.objectHeader() orelse continue;
+        const child: *const bytecode_mod.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+        n += try countInstalledOpcode(child, want);
+    }
+    return n;
+}
+
+fn v2CompileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
+    var h: V2Exec = undefined;
+    try h.init(src);
+    defer h.deinit();
+    try h.state.enableReturnCompletion();
+    try P.parseProgramStatements(
+        &h.state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try h.state.finalizeEvalReturn();
+
+    const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+        &h.state.function_def,
+        .{ .realm = h.ctx },
+    );
+    const fb = &fb_slice[0];
+    var fb_value = core.JSValue.functionBytecode(&fb.header);
+    var fb_value_owned = true;
+    errdefer if (fb_value_owned) fb_value.free(h.rt);
+    for (want) |op_id| {
+        try std.testing.expect((try countInstalledOpcode(fb, op_id)) >= 1);
+    }
+
+    const global = try zjs_vm.contextGlobal(h.ctx);
+    fb_value_owned = false;
+    const root_fn = try object_ops.createRootBytecodeFunctionObject(
+        h.ctx,
+        global,
+        fb_value,
+        .root_global,
+    );
+    defer root_fn.free(h.rt);
+    const root_object = object_ops.objectFromValue(root_fn) orelse
+        return error.InvalidBytecode;
+    var stack = stack_mod.Stack.init(&h.rt.memory, h.ctx.stackLimit());
+    defer stack.deinit(h.rt);
+    try stack.reserveAdditional(fb.stack_size);
+    const result = try zjs_vm.runWithCallEnv(.{
+        .ctx = h.ctx,
+        .stack = &stack,
+        .function = fb,
+        .initial_this_value = if (fb.runtimeStrictMode())
+            core.JSValue.undefinedValue()
+        else
+            root_object.bytecodeFunctionRealmGlobalPtr().?.value(),
+        .var_refs = root_object.functionCaptures(),
+        .global = root_object.bytecodeFunctionRealmGlobalPtr() orelse
+            return error.InvalidBytecode,
+        .strict_unresolved_get_var = fb.isStrictMode(),
+        .current_function_value = root_fn,
+        .direct_eval_vars_reach_global = true,
+        .global_declarations_prevalidated = true,
+    });
+    defer result.free(h.rt);
+    try std.testing.expectEqual(expected, result.asInt32().?);
+}
+
+test "compiler_v2.fuse: get_loc0_field is emitted and executes" {
+    try v2CompileRunAndCount(
+        "(function () { var o = { x: 7 }; var t = 1; return o.x + t; })();",
+        8,
+        &.{ qop.get_loc0_field, qop.get_field },
+    );
+}
+
+test "compiler_v2.fuse: cmp_if_false8 emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var n = 0; for (var i = 0; i < 4; i++) n = n + 1; return n; })();",
+        4,
+        &.{ qop.cmp_if_false8, qop.if_false8 },
+    );
+}
+
+test "compiler_v2.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function () {
+        \\    function C() { this.x = 1; }
+        \\    C.prototype.m = function () {
+        \\        var t = this;
+        \\        return t.x;
+        \\    };
+        \\    return new C().m();
+        \\})();
+    ,
+        1,
+        &.{ qop.push_this_put_loc0, qop.put_loc0_get_loc0 },
+    );
+}
+
+test "compiler_v2.fuse: get_field2_call_method emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var o = { m: function () { return 7; } }; var r = o.m(); return r; })();",
+        7,
+        &.{ qop.get_field2_call_method, qop.call_method },
+    );
+}
+
+test "compiler_v2.fuse: get_loc2_field emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var a = 1, b = 2, o = { x: 6 }; var t = a + b; return o.x + t; })();",
+        9,
+        &.{ qop.get_loc2_field, qop.get_field },
+    );
+}
+
+test "compiler_v2.fuse: eq_if_false8 emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var x = 1; if (x == 1) return 4; return 0; })();",
+        4,
+        &.{ qop.eq_if_false8, qop.if_false8 },
+    );
+}
+
+test "compiler_v2.fuse: put_loc8_get_loc8 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function (x) {
+        \\    var a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
+        \\    e = x;
+        \\    return f + e;
+        \\})(42);
+    ,
+        42,
+        &.{ qop.put_loc8_get_loc8, qop.get_loc8 },
+    );
 }
 
 test "compiler_v2.s4: arithmetic executes installed FunctionBytecode" {

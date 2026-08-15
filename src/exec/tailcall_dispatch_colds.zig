@@ -147,6 +147,7 @@ pub const SpecialHandlers = struct {
     op_call2: Handler,
     op_call3: Handler,
     op_call_method: Handler,
+    op_call_method_apply_fwd: Handler,
     op_apply: Handler,
     op_call_constructor: Handler,
     op_for_of_next: Handler,
@@ -527,24 +528,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             try literal_vm.specialObject(vm.ctx, vm.stack, vm.function, vm.frame, vm.global);
         }
     }.b);
-    t[op.using_create_stack] = h(struct {
+    t[op.using] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try using_ops.createStackVm(vm.ctx, vm.global, vm.stack, vm.frame, vm.catch_target, vm.output);
-        }
-    }.b);
-    t[op.using_add_resource] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try using_ops.addResourceVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
-    t[op.using_dispose_stack] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try using_ops.disposeStackVm(vm.ctx, vm.output, vm.global, vm.stack, vm.frame, vm.catch_target, .normal);
-        }
-    }.b);
-    t[op.using_dispose_stack_for_throw] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try using_ops.disposeStackVm(vm.ctx, vm.output, vm.global, vm.stack, vm.frame, vm.catch_target, .throw);
+            _ = try using_ops.execVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
     t[op.rest] = h(struct {
@@ -802,6 +788,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.call2] = s.op_call2;
     t[op.call3] = s.op_call3;
     t[op.call_method] = s.op_call_method;
+    t[op.call_method_apply_fwd] = s.op_call_method_apply_fwd;
     t[op.tail_call] = s.op_tail_call;
     t[op.tail_call_method] = s.op_tail_call_method;
     t[op.eval] = s.op_eval;
@@ -820,6 +807,14 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     //     handlers fall back THROUGH (indirect `cold_table[pc[0]]` tail call → the
     //     compiler can't devirtualize+inline it, so the fast handler stays a
     //     frameless leaf instead of carrying the cold 128B frame on its hot path). ---
+    t[op.get_loc0_field] = td.op_get_loc0_field_cold;
+    t[op.get_loc2_field] = td.op_get_loc2_field_cold;
+    t[op.get_field2_call_method] = td.op_get_field2_call_method_cold;
+    t[op.cmp_if_false8] = td.op_cmp_if_false8_cold;
+    t[op.eq_if_false8] = td.op_eq_if_false8_cold;
+    t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8_cold;
+    t[op.push_this_put_loc0] = td.op_push_this_put_loc0_cold;
+    t[op.put_loc0_get_loc0] = td.op_put_loc0_get_loc0_cold;
     if (!fast) return t;
     t[op.undefined] = td.op_undefined_fast;
     t[op.null] = td.op_null_fast;
@@ -929,6 +924,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.drop] = td.op_drop_fast; // catch-marker (finally/catch epilogue) → cold s.op_drop
     t[op.goto8] = td.op_goto8;
     t[op.if_false8] = td.op_if_false8;
+    t[op.cmp_if_false8] = td.op_cmp_if_false8;
+    t[op.eq_if_false8] = td.op_eq_if_false8;
     t[op.if_true8] = td.op_if_true8;
     // Long-form conditional branch (qjs CASE(OP_if_false):18859 — same immediate/
     // object fast legs as the short form, 4-byte label); float/string/HTMLDDA and
@@ -946,11 +943,18 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // through JS_FreeValue's inline tag guard before overwriting with false.
     t[op.is_null] = td.op_is_null;
     t[op.inc_loc] = td.op_update_loc;
+    t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8;
+    t[op.push_this_put_loc0] = td.op_push_this_put_loc0;
+    t[op.put_loc0_get_loc0] = td.op_put_loc0_get_loc0;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
+    t[op.get_loc0_field] = td.op_get_loc0_field;
+    t[op.get_loc2_field] = td.op_get_loc2_field;
+    t[op.get_field2_call_method] = td.op_get_field2_call_method;
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element
+    t[op.get_array_el2] = td.op_get_array_el2; // keep-receiver twin; miss → cold h_get_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_put_array_element
     t[op.get_length] = td.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
     // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)

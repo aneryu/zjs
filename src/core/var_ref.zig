@@ -64,6 +64,29 @@ pub const VarRef = struct {
         return self;
     }
 
+    /// qjs `free_var_ref` (quickjs.c:6164-6183): null-safe rc--, and at zero
+    /// unlink + free the owned value + `js_free_rt`. Callers that already
+    /// wrap a cell as `JSValue.object` still reach `destroyFromHeader` through
+    /// `gc.destroyVarRefNow`; this typed entry is the function-finalizer loop
+    /// shape (`js_bytecode_function_finalizer` qjs:6253-6256).
+    ///
+    /// Phase gates stay those of `JSValue.object(&header).free` +
+    /// `gc.destroyZeroRef` for `kind == var_ref`: deinit skips before rc--
+    /// (runtime teardown parks cells on `held_var_refs`); finalizing /
+    /// remove_cycles skip the synchronous tail so the cycle batch remains the
+    /// sole destroy point. RC teardown itself is unchanged.
+    pub fn freeVarRef(rt: anytype, var_ref: ?*VarRef) void {
+        const cell = var_ref orelse return;
+        if (rt.gc.phase == .deinit) return;
+        std.debug.assert(cell.header.meta().rc > 0);
+        cell.header.meta().rc -= 1;
+        if (cell.header.meta().rc != 0) return;
+        if (cell.header.meta().flags.finalizing) return;
+        if (rt.gc.phase == .remove_cycles) return;
+        rt.gc.unlinkObjectWithBytes(&cell.header, comptime @sizeOf(VarRef));
+        destroyFromHeader(rt, &cell.header);
+    }
+
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
         // Closed cells own their binding value. Open cells own only the parked
@@ -121,11 +144,11 @@ pub const VarRef = struct {
         return self.dupCell();
     }
 
-    /// Slot-typed release — qjs `free_var_ref` (quickjs.c:16199): rc--,
-    /// destroy at 0. Routed through `valueRef().free(rt)` so the deinit-phase
-    /// and cycle-removal gates of the JSValue path apply unchanged.
+    /// Slot-typed release — qjs `free_var_ref` (quickjs.c:6164-6183): rc--,
+    /// destroy at 0. Typed so the function-finalizer loop does not wrap each
+    /// cell as `JSValue.object` and bounce through the generic free path.
     pub inline fn freeCell(self: *VarRef, rt: anytype) void {
-        self.valueRef().free(rt);
+        freeVarRef(rt, self);
     }
 
     /// Typed release Interface used by binding-identity owners.

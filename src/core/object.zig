@@ -193,12 +193,14 @@ fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
 /// Release the nullable module/ordinary closure slots and their single backing
 /// allocation.  Module creation deliberately leaves MODULE_IMPORT entries
 /// null until indexed linking; ordinary published functions are sealed.
+///
+/// qjs `js_bytecode_function_finalizer` (quickjs.c:6253-6256) is one loop of
+/// `free_var_ref` then `js_free_rt` of the pointer array. Keep that shape:
+/// null slots are skipped inside `free_var_ref`, not by a second helper.
 fn destroyOptionalVarRefCellSlice(rt: *JSRuntime, slot: *[]?*var_ref_mod.VarRef) void {
     const cells = slot.*;
     slot.* = &.{};
-    for (cells) |maybe_cell| {
-        if (maybe_cell) |cell| cell.freeCell(rt);
-    }
+    for (cells) |cell| var_ref_mod.VarRef.freeVarRef(rt, cell);
     if (cells.len != 0) rt.memory.free(?*var_ref_mod.VarRef, cells);
 }
 
@@ -2963,11 +2965,13 @@ pub const Object = extern struct {
     }
 
     pub fn cachedIteratorNext(self: *const Object, rt: *JSRuntime) ?JSValue {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         const slot = self.cachedIteratorNextSlotIfPresent(rt) orelse return null;
         return slot.*;
     }
 
     pub fn clearCachedIteratorNext(self: *Object, rt: *JSRuntime) void {
+        if (rt.cached_iterator_next_entries.len == 0) return;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
         const old_cached = rt.cached_iterator_next_entries[index].value;
         rt.cached_iterator_next_entries[index].value = null;
@@ -2976,17 +2980,20 @@ pub const Object = extern struct {
     }
 
     fn clearCachedIteratorNextWithoutFree(rt: *JSRuntime, self: *Object) void {
+        if (rt.cached_iterator_next_entries.len == 0) return;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
         rt.cached_iterator_next_entries[index].value = null;
         removeCachedIteratorNextEntryAt(rt, index);
     }
 
     fn cachedIteratorNextSlotIfPresent(self: *const Object, rt: *JSRuntime) ?*?JSValue {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return null;
         return &rt.cached_iterator_next_entries[index].value;
     }
 
     fn cachedIteratorNextEntryIndex(rt: *const JSRuntime, self: *const Object) ?usize {
+        if (rt.cached_iterator_next_entries.len == 0) return null;
         for (rt.cached_iterator_next_entries, 0..) |entry, index| {
             if (entry.object == self) return index;
         }
@@ -3395,7 +3402,7 @@ pub const Object = extern struct {
 
     /// Pass-B drain of a cycle-deferred object: its resources were freed by the
     /// resource pass; only the struct memory remains. Mirrors qjs Pass B
-    /// (quickjs.c:6797). Pass B filters retained weak husks before calling this.
+    /// (quickjs.c:6797). Pass B keeps only live-weakref husks before calling this.
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
@@ -6512,10 +6519,11 @@ pub const Object = extern struct {
         return self.u.bytecode_function.captureSlots();
     }
 
-    /// Allocate the one and only module capture array with every slot null.
-    /// The attached FB fixes its exact length; a mismatch or second allocation
-    /// is invalid bytecode and leaves the function untouched.
-    pub fn allocateNullModuleCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+    /// qjs `js_closure2` (quickjs.c:17276-17280): `js_mallocz` the capture
+    /// array and attach it to the function object *before* the fill loop so
+    /// the object is the sole GC root. Null slots are skipped by mark/destroy.
+    /// Inline: qjs does this mallocz inside js_closure2, not as a sibling call.
+    pub inline fn allocateNullCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
         const storage = &self.u.bytecode_function;
         const fb = storage.function_bytecode orelse return error.InvalidBytecode;
@@ -6526,6 +6534,19 @@ pub const Object = extern struct {
         const slots = try rt.memory.alloc(?*var_ref_mod.VarRef, count);
         @memset(slots, null);
         storage.var_refs = slots.ptr;
+    }
+
+    /// Allocate the one and only module capture array with every slot null.
+    /// The attached FB fixes its exact length; a mismatch or second allocation
+    /// is invalid bytecode and leaves the function untouched.
+    pub fn allocateNullModuleCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+        return allocateNullCaptureSlots(self, rt, count);
+    }
+
+    /// Mutable view of the attached capture array during js_closure2 fill.
+    pub inline fn mutableCaptureSlots(self: *Object) []?*var_ref_mod.VarRef {
+        std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
+        return self.u.bytecode_function.captureSlots();
     }
 
     /// Replace one module capture slot, transferring the caller's owned cell
@@ -7522,7 +7543,6 @@ pub const Object = extern struct {
 
     const DecrefVisitor = struct {
         registry: *gc.Registry,
-        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7549,11 +7569,6 @@ pub const Object = extern struct {
             self.visitHeader(&record.header);
         }
 
-        pub fn visitSymbol(self: DecrefVisitor, symbol: *u32) void {
-            _ = self;
-            _ = symbol;
-        }
-
         pub fn visitWeakCollectionEntry(self: DecrefVisitor, entry: *WeakCollectionEntry) void {
             _ = self;
             _ = entry;
@@ -7574,14 +7589,13 @@ pub const Object = extern struct {
             // child whose trial refcount reaches zero to tmp_obj_list.
             if (h.meta().rc == 0 and h.meta().flags.mark) {
                 self.registry.detachCycleCandidate(h);
-                self.garbage.append(h);
+                gc.listAddTail(&self.registry.tmp_obj_list, h);
             }
         }
     };
 
     const ScanIncrefVisitor = struct {
         registry: *gc.Registry,
-        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: ScanIncrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -7608,11 +7622,6 @@ pub const Object = extern struct {
             self.visitHeader(&record.header);
         }
 
-        pub fn visitSymbol(self: ScanIncrefVisitor, symbol: *u32) void {
-            _ = self;
-            _ = symbol;
-        }
-
         pub fn visitWeakCollectionEntry(self: ScanIncrefVisitor, entry: *WeakCollectionEntry) void {
             _ = self;
             _ = entry;
@@ -7623,19 +7632,21 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
-            const was_zero = h.meta().rc == 0;
+            // qjs gc_scan_incref_child (quickjs.c:6719-6728):
+            //   rc++; if (rc == 1) { list_del; list_add_tail(gc_obj); mark = 0; }
+            // qjs only feeds this to cycle-list members (JS_MarkValue skips
+            // JS_TAG_BIG_INT). zjs visitValue uses refCountHeader(), so a heap
+            // BigInt is trial-decref'd and can come back rc 0→1 while never
+            // having been linked. Membership is the cyclic list itself (the
+            // former in_cycle_list bit): unlinked nodes have prev == null.
+            // list_del on those is SEGV — test262
+            // built-ins/Array/fromAsync/asyncitems-arraylike-promise.js.
             h.meta().rc += 1;
-            // mark implies membership in the cycle-candidate set; the kind
-            // recheck was redundant with the same invariant used by QuickJS's
-            // gc_scan_incref_child.
-            if (was_zero and h.meta().flags.mark) {
-                self.garbage.remove(h);
-                h.meta().flags.mark = false;
-                // Moving a newly revived zero-ref node to the main-list tail
-                // makes the enclosing list walk visit its children later,
-                // exactly like QuickJS gc_scan_incref_child.
-                self.registry.restoreCycleCandidate(h);
-            }
+            if (h.meta().rc != 1) return;
+            if (h.prev == null) return;
+            gc.listDel(h);
+            self.registry.restoreCycleCandidate(h);
+            h.meta().flags.mark = false;
         }
     };
 
@@ -7665,11 +7676,6 @@ pub const Object = extern struct {
 
         pub fn visitModule(self: ScanRestoreVisitor, record: *module_mod.ModuleRecord) void {
             self.visitHeader(&record.header);
-        }
-
-        pub fn visitSymbol(self: ScanRestoreVisitor, symbol: *u32) void {
-            _ = self;
-            _ = symbol;
         }
 
         pub fn visitWeakCollectionEntry(self: ScanRestoreVisitor, entry: *WeakCollectionEntry) void {
@@ -7815,7 +7821,7 @@ pub const Object = extern struct {
         // changed. Everything below is therefore a committed, no-error path.
         try gcRemoveWeakObjects(rt);
 
-        var garbage: gc.HeaderList = .{};
+        gc.listInit(&rt.gc.tmp_obj_list);
 
         // Phase 1: gc_decref
         {
@@ -7823,7 +7829,6 @@ pub const Object = extern struct {
             while (gc_iter.next()) |h| {
                 traceChildren(rt, h, DecrefVisitor{
                     .registry = &rt.gc,
-                    .garbage = &garbage,
                 });
                 // Match qjs gc_decref: mark the current node after visiting
                 // its children, then move it immediately if its trial count
@@ -7831,7 +7836,7 @@ pub const Object = extern struct {
                 h.meta().flags.mark = true;
                 if (h.meta().rc == 0) {
                     rt.gc.detachCycleCandidate(h);
-                    garbage.append(h);
+                    gc.listAddTail(&rt.gc.tmp_obj_list, h);
                 }
             }
         }
@@ -7839,15 +7844,15 @@ pub const Object = extern struct {
         // Phase 2: gc_scan
         {
             // Walk the live list dynamically: reviving a trial-zero child moves
-            // it from `garbage` to the registry tail, so it is visited without
+            // it from tmp_obj_list to the registry tail, so it is visited without
             // recursion or an auxiliary worklist.
-            var cursor = rt.gc.gc_object_head;
+            var cursor = rt.gc.gc_obj_list.next;
             while (cursor) |h| {
+                if (h == &rt.gc.gc_obj_list) break;
                 std.debug.assert(h.meta().rc > 0);
                 h.meta().flags.mark = false;
                 traceChildren(rt, h, ScanIncrefVisitor{
                     .registry = &rt.gc,
-                    .garbage = &garbage,
                 });
                 cursor = h.next;
             }
@@ -7855,102 +7860,92 @@ pub const Object = extern struct {
 
         // Phase 3: restore refcounts of the detached dead-cycle partition.
         {
-            var cursor = garbage.head;
-            while (cursor) |h| : (cursor = h.next) {
+            var cursor = rt.gc.tmp_obj_list.next;
+            while (cursor) |h| {
+                if (h == &rt.gc.tmp_obj_list) break;
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
+                cursor = h.next;
             }
         }
 
         sweepCycleGarbageWeakCollectionEntries(rt);
 
-        // No fallible operation is allowed after this point. Split the detached
-        // partition by teardown order, reusing the same header links for each
-        // staging list and later for Registry's Pass-B deferred list. Count the
-        // collected value-bearing nodes while consuming that list instead of
-        // making a separate full pass; QuickJS likewise consumes tmp_obj_list
-        // directly in gc_free_cycles.
-        var garbage_count: usize = 0;
-        var garbage_objects: gc.HeaderList = .{};
-        var garbage_bytecodes: gc.HeaderList = .{};
-        var garbage_var_refs: gc.HeaderList = .{};
-        var garbage_shapes: gc.HeaderList = .{};
-        var garbage_contexts: gc.HeaderList = .{};
-        var garbage_modules: gc.HeaderList = .{};
-        while (garbage.popFront()) |h| {
-            switch (h.meta().flags.kind) {
-                .object => {
-                    garbage_count += 1;
-                    garbage_objects.append(h);
-                },
-                .function_bytecode => garbage_bytecodes.append(h),
-                .var_ref => {
-                    garbage_count += 1;
-                    garbage_var_refs.append(h);
-                },
-                .shape => {
-                    garbage_count += 1;
-                    garbage_shapes.append(h);
-                },
-                .realm_context => {
-                    garbage_count += 1;
-                    garbage_contexts.append(h);
-                },
-                .module => {
-                    garbage_count += 1;
-                    garbage_modules.append(h);
-                },
-                else => unreachable,
-            }
-        }
-
+        // Consume tmp_obj_list like qjs gc_free_cycles (quickjs.c:6756-6793):
+        // no 6-way staging lists. Explicit free_gc_object set is OBJECT /
+        // FUNCTION_BYTECODE / MODULE (zjs has no JS_GC_OBJ_TYPE_ASYNC_FUNCTION).
+        // Objects still run first so FB capture-count metadata outlives
+        // closures (qjs free_object reads b->var_ref_count). Default kinds
+        // (var_ref / shape / realm_context) stay on tmp until the four-kind
+        // pass finishes, then get resource teardown — owners skip them via
+        // cycle_visited, so they cannot rely on ownership the way qjs does.
         const old_phase = rt.gc.phase;
         rt.gc.phase = .remove_cycles;
         defer {
             rt.gc.phase = old_phase;
         }
 
-        // STEP 3 (qjs faithful): no edge-nulling pre-pass. qjs has none — its
-        // cascade defense is the REMOVE_CYCLES gate in __JS_FreeValueRT
-        // (quickjs.c:6476), which we mirror in `gc.releaseAndDestroy`. With that
-        // gate, a garbage->garbage reference released during the destroy pass is a
-        // pure decref (no recursive free), and the restored refcounts (Phase 3b /
-        // gc_scan_incref_child2) net to zero. Weak-collection entries are handled
-        // by `sweepCycleGarbageWeakCollectionEntries` above; internal bytecode
-        // cpool edges are released by the gated fb teardown.
-
-        const freed = garbage_count;
-
-        // Resource teardown has a real ownership order even though every struct
-        // survives until Pass B. A bytecode function object derives the length
-        // of its `u.func.var_refs` allocation from its owning FB, exactly like
-        // qjs `free_object`; therefore every Object must consume that metadata
-        // before FunctionBytecode.deinit clears `closure_var_count`. The old mixed
-        // gc-list order could deinit an FB first and leak the capture-pointer
-        // allocation when the closure followed. VarRef structs also stay valid
-        // until their object owners have released the capture edges.
-        while (garbage_objects.popFront()) |h| {
-            destroyFromHeader(rt, h);
+        var garbage_count: usize = 0;
+        // One walk per kind (O(n)), not one walk per node (O(n²)).
+        var cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .object) {
+                gc.listDel(h);
+                garbage_count += 1;
+                destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_contexts.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            context_mod.JSContext.destroyFromHeader(rt, h);
+        cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .realm_context) {
+                gc.listDel(h);
+                garbage_count += 1;
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                context_mod.JSContext.destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_modules.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            module_mod.ModuleRecord.destroyFromHeader(rt, h);
+        cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .module) {
+                gc.listDel(h);
+                garbage_count += 1;
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                module_mod.ModuleRecord.destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_bytecodes.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            function_bytecode_mod.destroyFromHeader(rt, h);
+        cursor = rt.gc.tmp_obj_list.next;
+        while (cursor) |h| {
+            if (h == &rt.gc.tmp_obj_list) break;
+            const next = h.next;
+            if (h.meta().flags.kind == .function_bytecode) {
+                gc.listDel(h);
+                rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                function_bytecode_mod.destroyFromHeader(rt, h);
+            }
+            cursor = next;
         }
-        while (garbage_var_refs.popFront()) |h| {
-            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-            var_ref_mod.VarRef.destroyFromHeader(rt, h);
-        }
-
-        while (garbage_shapes.popFront()) |h| {
-            if (h.meta().flags.finalizing) continue;
-            rt.shapes.destroyFromHeader(h);
+        while (gc.listFirst(&rt.gc.tmp_obj_list)) |h| {
+            gc.listDel(h);
+            switch (h.meta().flags.kind) {
+                .var_ref => {
+                    garbage_count += 1;
+                    rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+                    var_ref_mod.VarRef.destroyFromHeader(rt, h);
+                },
+                .shape => {
+                    garbage_count += 1;
+                    if (!h.meta().flags.finalizing) rt.shapes.destroyFromHeader(h);
+                },
+                else => unreachable,
+            }
         }
 
         // Pass B: now every garbage object's resources are gone AND every shape
@@ -7961,35 +7956,42 @@ pub const Object = extern struct {
         // freed object memory.
         if (!rt.hasPendingDeferredClassPayloadFinalizers()) drainCycleDeferredFrees(rt);
 
-        return freed;
+        return garbage_count;
     }
 
-    /// Free the struct memory of every cycle-deferred GC object (objects /
-    /// var_refs / function-bytecodes whose resources were torn down during the
-    /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
+    /// Pass B: qjs `gc_free_cycles` second walk (quickjs.c:6797-6810).
+    /// One `list_for_each_safe`, in-place free, no pop/continue revisit.
+    /// Keep only a JS object with remaining weakrefs (qjs:6803-6806). Leftover
+    /// rc after the resource pass is intra-cycle and is freed here so the next
+    /// GC does not walk the husk again. Still only the four qjs kinds (OBJECT /
+    /// FUNCTION_BYTECODE / MODULE; zjs has no ASYNC) plus var_ref / realm_context
+    /// leftovers whose owners skipped them via cycle_visited. Does not delete
+    /// `cycle_visited`, does not touch RC teardown or ScanIncref.
     pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
-        while (rt.gc.popCycleDeferredFree()) |h| {
+        const parked = &rt.gc.cycle_deferred_frees;
+        var cursor = gc.listFirst(&parked.sentinel);
+        while (cursor) |h| {
+            const next = parked.nextAfter(h);
+            parked.remove(h);
             switch (h.meta().flags.kind) {
                 .object => {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    if (rt.gc.phase == .remove_cycles and (h.meta().rc != 0 or obj.weakref_count != 0)) {
-                        // qjs keeps a cycle-freed object's stripped struct while
-                        // either strong teardown edges or weak identities still
-                        // point at it. It is no longer a GC-list member; the last
-                        // weak release reclaims an rc-zero husk.
+                    // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
+                    if (rt.gc.phase == .remove_cycles and obj.weakref_count != 0) {
                         h.meta().flags.mark = false;
                         h.meta().flags.cycle_visited = false;
                         h.meta().flags.finalizing = false;
-                        continue;
+                    } else {
+                        freeCycleDeferredStruct(rt, obj);
                     }
-                    freeCycleDeferredStruct(rt, obj);
                 },
-                .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
                 .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
-                .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
                 .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
+                .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
+                .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
                 else => {},
             }
+            cursor = next;
         }
     }
 
@@ -8101,10 +8103,11 @@ pub const Object = extern struct {
     };
 
     fn markClassPayload(self: *Object, rt: *JSRuntime, visitor: *class.PayloadVisitor) bool {
-        // Arrays keep `array_values` (not a payload) in the union; short-circuit
-        // so markPayload never reinterprets that pointer (array classes register
-        // no payload_mark today, but keep the union access discriminant-correct).
-        if (self.isArray() or self.u.payload == null) return false;
+        // Arrays keep `array_values` (not a payload) in the union; bytecode
+        // functions keep `u.func` (qjs JSObject.u.func). Neither is a host
+        // payload pointer — do not pun the union into markPayload.
+        if (self.isArray() or class.isBytecodeFunctionClass(self.class_id) or self.u.payload == null)
+            return false;
         return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.u.payload, visitor);
     }
 
@@ -8225,19 +8228,6 @@ pub const Object = extern struct {
                 if (opt_val.*) |*stored| try callVisitValue(vis, stored);
             }
 
-            inline fn callVisitSymbol(vis: anytype, sym_ptr: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitSymbol")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitSymbol)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitSymbol(sym_ptr);
-                    } else {
-                        vis.visitSymbol(sym_ptr);
-                    }
-                }
-            }
-
             inline fn callVisitWeakCollectionEntry(vis: anytype, entry: anytype) !void {
                 const VisType = @TypeOf(vis);
                 const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
@@ -8280,20 +8270,14 @@ pub const Object = extern struct {
             // qjs js_global_object_mark (quickjs.c:17062-17067).
             try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
         }
-        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
-            try Helper.traceOptValue(visitor, slot);
+        if (rt.cached_iterator_next_entries.len != 0) {
+            if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
+                try Helper.traceOptValue(visitor, slot);
+            }
         }
-        // Property key atoms (including symbol keys) live in the shape;
-        // visit them from there. Visitors only read symbol atoms (set
-        // insertion / no-op), so revisiting a shared shape from several
-        // objects is safe.
-        for (self.shape_ref.props()[0..self.shape_ref.prop_count]) |*prop| {
-            // `atom_id` is a packed-struct field (bit offset 32); visitors only
-            // read symbol atoms (set insertion / no-op, never mutate a shared
-            // shape's key), so pass a byte-aligned local copy.
-            var key_atom = prop.atom_id;
-            try Helper.callVisitSymbol(visitor, &key_atom);
-        }
+        // qjs:6568 / qjs:6582 mark_children OBJECT arm marks the shape header
+        // then property values. Key atoms (prs->atom) are not GC edges — they
+        // live on the atom RC table, held by the shape.
         // Only entries with a matching shape property record carry a derivable
         // kind. A property mid-`appendPreparedPropertyEntry` can have an entry
         // pushed before the shape transition completes (the shape-storage alloc
@@ -8366,8 +8350,13 @@ pub const Object = extern struct {
             try Helper.traceOptValue(visitor, &payload.data);
         }
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            // Save the slice before a clearing visitor can rewrite the FB edge;
-            // the capture count is immutable FB metadata.
+            // qjs js_bytecode_function_mark (quickjs.c:6262-6287), the class
+            // gc_mark installed for JS_CLASS_BYTECODE_FUNCTION (1984) and
+            // invoked from mark_children when class_id != JS_CLASS_OBJECT
+            // (6605-6610). Edges: home_object, var_refs[0..closure_var_count],
+            // function_bytecode header. Then stop — do not fall into host
+            // markClassPayload (that path is JSClass.gc_mark for exotic
+            // host classes, not u.func).
             const captures = self.u.bytecode_function.captureSlots();
             for (captures) |maybe_cell| {
                 const cell = maybe_cell orelse continue;
@@ -8389,6 +8378,24 @@ pub const Object = extern struct {
             } else {
                 self.u.bytecode_function.home_or_aux = if (home_object) |home| @ptrCast(home) else null;
             }
+            // zjs-only aux (source / realm_global / promise slots). Absent in
+            // qjs 6262; keep so rare cycle edges stay live. Then return: the
+            // class mark is done.
+            if (self.functionRarePayload()) |rare| {
+                try Helper.traceOptValue(visitor, &rare.source);
+                try Helper.traceOptValue(visitor, &rare.realm_global);
+                try Helper.traceOptValue(visitor, &rare.proxy_revoke_target);
+                try Helper.traceOptValue(visitor, &rare.promise_capability_slot);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_target);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_state);
+                try Helper.traceOptValue(visitor, &rare.promise_combinator_state);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_payload);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_callback);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_constructor);
+                try Helper.traceOptValue(visitor, &rare.async_dispose_stack);
+                try Helper.traceOptValue(visitor, &rare.async_function_continuation);
+            }
+            return;
         }
         if (self.functionRarePayload()) |rare| {
             try Helper.traceOptValue(visitor, &rare.source);
@@ -8536,11 +8543,6 @@ pub const Object = extern struct {
                 try collectValueObject(cv.rt, cv.visited, val_ptr.*);
             }
 
-            pub fn visitSymbol(cv: *@This(), sym_ptr: *atom.Atom) !void {
-                _ = cv;
-                _ = sym_ptr;
-            }
-
             pub fn visitWeakCollectionEntry(cv: *@This(), entry: *WeakCollectionEntry) !void {
                 try collectValueObject(cv.rt, cv.visited, entry.value);
             }
@@ -8628,11 +8630,6 @@ pub const Object = extern struct {
 
             pub fn visitValue(av: *@This(), val_ptr: *JSValue) !void {
                 try accumulateValueIncoming(val_ptr.*, av.visited, av.incoming, av.internal_bytecodes, av.processed_bytecodes);
-            }
-
-            pub fn visitSymbol(av: *@This(), sym_ptr: *atom.Atom) !void {
-                _ = av;
-                _ = sym_ptr;
             }
 
             pub fn visitWeakCollectionEntry(av: *@This(), entry: *WeakCollectionEntry) !void {
@@ -11145,6 +11142,12 @@ pub const Object = extern struct {
         return true;
     }
 
+    /// Result of `setOrDefineOwnDataPropertyForPutFieldOwned`. Not an error
+    /// union: `.slow` is a decline (no mutation, caller keeps `new_value`).
+    /// Auto-init clone / new-property append OOM also returns `.slow` so the
+    /// still-`!T` `setValueProperty` resolver stays the OOM channel.
+    pub const PutFieldFast = enum { done, slow };
+
     /// qjs JS_SetPropertyInternal's single-walk core (quickjs.c:9706-9890) for
     /// the put_field cold shell: ONE trusted own probe that classifies the hit
     /// (plain writable data / var_ref / auto_init handled here; accessor and
@@ -11157,12 +11160,12 @@ pub const Object = extern struct {
     /// setValuePropertyWithThrow -> setOwnWritableDataProperty ->
     /// defineNewOwnDataPropertyForSimpleSet).
     ///
-    /// Returns true when the write was fully performed; false defers to the
-    /// full setValueProperty resolver with NO state mutated. OWNED value
-    /// contract (qjs consumes `val` the same way): `new_value` is consumed
-    /// when `true` is returned AND on the error path (the append's errdefer
-    /// destroys the prepared slot); a `false` return leaves ownership with
-    /// the caller.
+    /// Returns `.done` when the write was fully performed; `.slow` defers to
+    /// the full setValueProperty resolver with NO state mutated. OWNED value
+    /// contract: `new_value` is consumed on `.done` and left with the caller
+    /// on `.slow`. Allocation failure on the auto_init / append legs rolls
+    /// the object back and returns `.slow` (no consume) so the resolver can
+    /// still surface `error.OutOfMemory`.
     ///
     /// Deliberate defers that pin the resolver's semantic order:
     /// - with-environment receivers: the strict-miss ReferenceError door in
@@ -11178,18 +11181,18 @@ pub const Object = extern struct {
     /// - the extensible check sits AFTER the prototype walk (qjs order,
     ///   quickjs.c:9862-9865): a non-extensible receiver whose chain holds a
     ///   setter must reach that setter, never a synthesized failure.
-    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
+    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) PutFieldFast {
         // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
         // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
         // classes, whose set semantics (length, canonical numeric indices,
         // binding mirrors, traps) all live in the resolver.
-        if (self.needsSlowPropertyAccess()) return false;
-        if (self.proxyTarget() != null) return false;
-        if (self.flags.is_with_environment) return false;
+        if (self.needsSlowPropertyAccess()) return .slow;
+        if (self.proxyTarget() != null) return .slow;
+        if (self.flags.is_with_environment) return .slow;
 
         if (self.findPropertyProbeTrusted(atom_id)) |lookup| {
             const entry_flags = property.Flags.fromBits(lookup.prop.flags);
-            if (entry_flags.deleted or !entry_flags.writable) return false;
+            if (entry_flags.deleted or !entry_flags.writable) return .slow;
             const entry = &self.prop_values[lookup.index];
             switch (entry_flags.kind) {
                 // qjs's single-mask fast case (quickjs.c:9708-9713): swap the
@@ -11198,14 +11201,14 @@ pub const Object = extern struct {
                     const old_slot = entry.slot;
                     entry.slot = .{ .data = new_value };
                     destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
-                    return true;
+                    return .done;
                 },
                 // JS_PROP_VARREF: set_value through the cell
                 // (quickjs.c:9720-9726); module_ns cells were excluded by the
                 // class gate and const cells carry writable == false.
                 .var_ref => {
                     entry.slot.var_ref.setVarRefValue(rt, new_value);
-                    return true;
+                    return .done;
                 },
                 // Data-destined AUTOINIT (quickjs.c:9727-9733 instantiates and
                 // retries; the retry lands in the fast case): discard the lazy
@@ -11214,16 +11217,15 @@ pub const Object = extern struct {
                 // isAccessorOrAccessorPlaceholderAt); non-writable placeholders
                 // were deferred above.
                 .auto_init => {
-                    self.ensureUniqueShapeForMutation(rt) catch |err| {
-                        // Owned contract: errors consume new_value.
-                        new_value.free(rt);
-                        return err;
-                    };
+                    // Shape-clone OOM: leave new_value with the caller and
+                    // decline so setValueProperty (still `!T`) is the OOM
+                    // channel. The object is unchanged.
+                    self.ensureUniqueShapeForMutation(rt) catch return .slow;
                     self.setEntryKindAndSlot(rt, atom_id, lookup.index, entry_flags.withKind(.data), .{ .data = new_value });
                     self.pruneBorrowedReferenceHolderIfEmpty(rt);
-                    return true;
+                    return .done;
                 },
-                .accessor => return false,
+                .accessor => return .slow,
             }
         }
 
@@ -11234,10 +11236,10 @@ pub const Object = extern struct {
         // runs for dense-storage-capable classes alone, mirroring qjs's
         // fast_array-arm-only __JS_AtomIsTaggedInt (quickjs.c:9868-9877)
         // against the probe-free ordinary add (quickjs.c:9884-9890).
-        if (atom.isTaggedInt(atom_id)) return false;
+        if (atom.isTaggedInt(atom_id)) return .slow;
         if (classOwnsIndexedElementStorage(self.class_id) and
-            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
-        if (self.isGlobal()) return false;
+            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
+        if (self.isGlobal()) return .slow;
 
         // qjs's prototype walk (quickjs.c:9739-9854): the FIRST holder of the
         // key decides — setter/auto_init/read-only entries defer to the
@@ -11246,35 +11248,38 @@ pub const Object = extern struct {
         // trap/canonical-index semantics in the resolver.
         var prototype = self.getPrototype();
         while (prototype) |proto| {
-            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
-            if (isTypedArrayObjectForSetFastPath(proto)) return false;
+            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return .slow;
+            if (isTypedArrayObjectForSetFastPath(proto)) return .slow;
             if (proto.findPropertyProbeTrusted(atom_id)) |proto_lookup| {
                 const proto_flags = property.Flags.fromBits(proto_lookup.prop.flags);
-                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return false;
+                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return .slow;
                 break;
             }
             prototype = proto.getPrototype();
         }
 
         // Extensibility AFTER the walk (quickjs.c:9862-9865, see doc note).
-        if (!self.flags.extensible) return false;
+        if (!self.flags.extensible) return .slow;
 
-        // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890). The
-        // prepared slot takes the caller's ref; on append failure the errdefer
-        // inside destroys it (owned contract).
-        // Both callers decode `atom_id` from the active immutable bytecode's
-        // OP_put_field operand, whose FunctionBytecode owns the atom across
-        // this allocation/GC window. qjs add_property relies on that same
-        // operand root and retains only the Shape's reference.
-        try self.appendPreparedPropertyEntryImpl(
+        // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890).
+        // `slot_borrowed_until_commit`: on append OOM the staged value is
+        // un-staged without destroy, so `.slow` can leave ownership with the
+        // caller and the resolver remains the OOM channel. Success MOVEs the
+        // caller's ref into the committed slot (same consume-on-success
+        // contract as the previous owned-slot append). Both callers decode
+        // `atom_id` from the active immutable bytecode's OP_put_field
+        // operand, whose FunctionBytecode owns the atom across this
+        // allocation/GC window. qjs add_property relies on that same operand
+        // root and retains only the Shape's reference.
+        self.appendPreparedPropertyEntryImpl(
             true,
-            false,
+            true,
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
             .{ .data = new_value },
-        );
-        return true;
+        ) catch return .slow;
+        return .done;
     }
 
     fn defineModuleNamespaceProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !bool {
