@@ -3438,7 +3438,7 @@ test "F4: returned interpolated template carries QuickJS tail-call source proven
 
     const child = findFunctionConstantNamed(&parsed, env.rt, "escapeKey") orelse
         return error.TestExpectedEqual;
-    const call_pc = firstSemanticOpcodeOffset(child.byteCode(), op.call_method) orelse
+    const call_pc = firstSemanticOpcodeOffset(child.byteCode(), op.tail_call_method) orelse
         return error.TestExpectedEqual;
     const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
         child.pc2lineBuf(),
@@ -3650,8 +3650,7 @@ test "F5: return comma and conditional expressions follow terminal goto folding"
         var fn_bc = try parseFunctionBodyStatement(&env, case.source);
         defer fn_bc.deinit(env.rt);
         try std.testing.expectEqual(case.return_count, countOpcode(fn_bc.code, op.@"return"));
-        try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
-        try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call_method));
+        // comma/conditional returns are not `call; return` so qjs:34947 does not fold.
     }
 }
 
@@ -3661,23 +3660,25 @@ test "F5: return conditional expression folds the then goto to a plain return" {
     var fn_bc = try parseFunctionBodyStatement(&env, "return p ? f() : g();");
     defer fn_bc.deinit(env.rt);
 
+    // Shared `return` after both arms: qjs:34947 does not look through goto,
+    // and a live label on the join return blocks the else-arm fold.
     try std.testing.expectEqual(@as(usize, 2), countCalls(fn_bc.code));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
     try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.@"return"));
 }
 
-test "F5: return call remains plain call plus return" {
+test "F5: return call folds to tail_call plus return" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseFunctionBodyStatement(&env, "return f(\"\");");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 1), countCalls(fn_bc.code));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.tail_call));
+    try std.testing.expectEqual(@as(usize, 0), countCalls(fn_bc.code));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
 }
 
-test "F5: return method call remains call_method plus return" {
+test "F5: return method call folds to tail_call_method plus return" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseFunctionBodyStatement(&env, "return obj.method(\"\");");
@@ -3687,14 +3688,15 @@ test "F5: return method call remains call_method plus return" {
         op.get_var,
         op.get_field2,
         op.push_empty_string,
-        op.call_method,
+        op.tail_call_method,
         op.@"return",
     });
     const call_pc = engine.bytecode.opcode.sizeOf(op.get_var) +
         engine.bytecode.opcode.sizeOf(op.get_field2) +
         engine.bytecode.opcode.sizeOf(op.push_empty_string);
     try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, call_pc));
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call_method));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.tail_call_method));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.call_method));
 }
 
 test "F5: throw statement" {

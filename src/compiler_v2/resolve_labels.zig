@@ -991,6 +991,25 @@ const Resolver = struct {
         };
     }
 
+    /// qjs `code_match(&cc, pos_next, OP_return, -1)` (34947): skip `line_num`
+    /// then require a `return`. A live label between call and return blocks
+    /// the fold (same as `hasBindInRange` on other S4 peeks).
+    fn matchReturnAfter(self: *const Resolver, start: u32) Error!?u32 {
+        var position = start;
+        while (position < self.product.code_len) {
+            const instruction = try decodeInstruction(self.code, position);
+            if (instruction.op_id == op.line_num) {
+                position += instruction.size;
+                continue;
+            }
+            if (instruction.op_id != op.@"return") return null;
+            const end = position + instruction.size;
+            if (self.hasBindInRange(start, end)) return null;
+            return end;
+        }
+        return null;
+    }
+
     /// qjs:33881 code_match, with source markers already out of band. A bind
     /// at any byte boundary in the candidate range rejects the match exactly
     /// as an OP_label byte would have rejected QuickJS's sequential matcher.
@@ -2007,10 +2026,46 @@ const Resolver = struct {
             var position_next = position + instruction.size;
 
             switch (instruction.op_id) {
-                // qjs:34941-34959 deliberately diverges: zjs emits tail_call
-                // directly and legacy resolve_labels never folds call+return.
-                // Ordinary call still takes the default call0..3 selector.
-                op.call, op.call_method => try self.copyDefault(layout, position, instruction),
+                // qjs:34941-34957: `call`/`call_method` immediately followed by
+                // `return` (line_num skipped, same as code_match) becomes
+                // `tail_call`/`tail_call_method` via put_short_code(op+1, argc).
+                // Unconditional — the match sits outside `if (OPTIMIZE)`.
+                // try/finally already rewrite return to gosub+return, so they
+                // do not match. return_undef / return_async do not match.
+                //
+                // Why this used to be locked off: 6e83f394 removed parser TCO
+                // (`rewriteTrailingCallAsTailCall`) and F5 pinned emission to 0
+                // so the QJS-aligned baseline would not emit tail_call into the
+                // then-reuse handler (zjs-only TCO). S4 then skipped this fold
+                // with a stale "zjs emits tail_call directly" comment. H3
+                // (36cf6476) reopened emission; reuse dropped Error.stack and
+                // skipped overflow (−4.46% DB); allow_inline=false (a4a301e0)
+                // broke machine_inits==1. The surviving shape is same-Machine
+                // pushCall plus the leftover return as the shared return stub
+                // (H3 CLOSED "忠实形态"). Do not flip reuse back on.
+                op.call, op.call_method => {
+                    if (try self.matchReturnAfter(position_next)) |_| {
+                        try self.attachSource();
+                        const tail_op: u8 = if (instruction.op_id == op.call)
+                            op.tail_call
+                        else
+                            op.tail_call_method;
+                        try self.putShortCode(
+                            layout,
+                            tail_op,
+                            try readU16(self.code, position),
+                        );
+                        try self.consumeInstructionAtom(position, instruction, true);
+                        // Keep the following `return` (do not skipDeadCode it).
+                        // zjs inline frames resume the caller at the next pc;
+                        // leaving `return` is the H3 shared return stub
+                        // (`goto done` without an EOF fetch). qjs fuses the
+                        // return into the opcode because JS_CallInternal +
+                        // `goto done` never resumes.
+                    } else {
+                        try self.copyDefault(layout, position, instruction);
+                    }
+                },
 
                 // The Builder-native path has no preceding legacy
                 // resolve_bytecode walk, so this is the complete terminal set

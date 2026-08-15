@@ -2267,34 +2267,15 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) link
     _ = iter_vm.forOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target) catch |err| return vm.fail(err);
     return coldNext(vb, vm);
 }
-fn op_tail_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    switch (call_vm.tailCall(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, vm.machine.depth > 0, &vm.tail_request) catch |e| return vm.fail(e)) {
-        .handled => return coldNext(vb, vm),
-        .return_value => |value| {
-            vm.return_value = value;
-            return .returned;
-        },
-        .tail_inline => {
-            vm.tail_is_reuse = true;
-            return .tail;
-        },
-    }
-}
-fn op_tail_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    switch (call_vm.tailCallMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, vm.machine.depth > 0, &vm.tail_request) catch |e| return vm.fail(e)) {
-        .handled => return coldNext(vb, vm),
-        .return_value => |value| {
-            vm.return_value = value;
-            return .returned;
-        },
-        .tail_inline => {
-            vm.tail_is_reuse = true;
-            return .tail;
-        },
-    }
-}
+// X-89 rework: the source fold emits tail_call* + leftover `return`
+// (H3 忠实形态). The leftover return is `goto done`; the call itself
+// must take the same admission as op_call* — empty-leaf / exact-args
+// leaf / simple_inline / pushExactSimple / nativeMethodFastDispatch.
+// A separate generic tailCall* path sent those 7M DB method tails down
+// execCall and was the REJECTED-REWORK slowdown. Sharing the function
+// keeps one I-cache copy. Do not restore a handler that skips this chain.
+const op_tail_call = op_call;
+const op_tail_call_method = op_call_method;
 fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
     switch (eval_module_vm.directEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, directEvalVarsReachGlobal(vm), vm.machine.depth > 0) catch |e| return vm.fail(e)) {
