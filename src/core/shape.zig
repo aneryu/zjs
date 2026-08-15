@@ -284,8 +284,8 @@ pub const Registry = struct {
         // Single GC allocation = struct + inline FAM (qjs js_new_shape).
         // createWithFam initializes metadata once; the constructor initializes
         // the intrusive links before registration below.
-        const fam_bytes = famRegionBytes(initial_prop_size, initial_hash_size);
-        const shape = try self.memory.createWithFam(Shape, fam_bytes);
+        const fam_bytes = comptime famRegionBytes(initial_prop_size, initial_hash_size);
+        const shape = try self.memory.createWithFamComptime(Shape, fam_bytes);
         errdefer self.memory.destroyWithFam(Shape, shape, fam_bytes);
         shape.* = .{
             .header = .{},

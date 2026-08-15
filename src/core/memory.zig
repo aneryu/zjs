@@ -973,6 +973,28 @@ pub const MemoryAccount = struct {
         return self.createWithFamInternal(T, fam_bytes, true);
     }
 
+    /// Initial-shape path: `fam_bytes` is a comptime constant so the slab
+    /// class is folded (qjs `js_new_shape2.constprop` folds `get_shape_size`).
+    pub inline fn createWithFamComptime(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize) !*T {
+        comptime std.debug.assert(isGcObject(T));
+        const payload_bytes: usize = @sizeOf(T) + fam_bytes;
+        const alignment = comptime gcAlignment(T);
+        if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
+        if (comptime SmallObjectSlab.classIndex(payload_bytes, alignment)) |slab_class| {
+            if (self.small_slab_enabled) {
+                try self.checkAllocation(payload_bytes);
+                if (comptime allocation_gc_trigger_enabled) self.triggerGCBeforeAllocation(payload_bytes);
+                const raw = self.slabPopHot(slab_class, false) orelse
+                    return self.createWithFamInternalSlow(T, fam_bytes, true);
+                initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), slab_class);
+                self.allocated_bytes +%= payload_bytes;
+                self.noteAllocDiagnostics(true, 1, payload_bytes, @intFromPtr(raw));
+                return @ptrCast(@alignCast(raw));
+            }
+        }
+        return self.createWithFamInternalSlow(T, fam_bytes, true);
+    }
+
     pub inline fn createWithFamNoTrigger(self: *MemoryAccount, comptime T: type, fam_bytes: usize) !*T {
         return self.createWithFamInternal(T, fam_bytes, false);
     }
