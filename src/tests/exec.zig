@@ -12020,7 +12020,8 @@ test "RegExp compiler stack overflow is a catchable SyntaxError" {
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
         \\try { new RegExp("(?:".repeat(40000)); print("no throw"); } catch(e) { print(e.name + ":" + e.message); }
-        \\try { new RegExp("[".repeat(1000)+"a"+"]".repeat(1000),"v"); print("v-no throw"); } catch(e) { print("v:" + e.name + ":" + e.message); }
+        \\try { new RegExp("[".repeat(4000)+"a"+"]".repeat(4000),"v"); print("v-no throw"); } catch(e) { print("v:" + e.name + ":" + e.message); }
+        \\try { new RegExp("[".repeat(200)+"a"+"]".repeat(200),"v"); print("v-shallow-ok"); } catch(e) { print("v-shallow:" + e.name); }
         \\try { new RegExp("(?:".repeat(1000)+")".repeat(1000)); print("shallow-ok"); } catch(e) { print("shallow:" + e.name); }
     , &stream);
     defer result.free(js.runtime);
@@ -12029,6 +12030,7 @@ test "RegExp compiler stack overflow is a catchable SyntaxError" {
     try std.testing.expectEqualStrings(
         "SyntaxError:stack overflow\n" ++
             "v:SyntaxError:stack overflow\n" ++
+            "v-shallow-ok\n" ++
             "shallow-ok\n",
         stream.buffered(),
     );
