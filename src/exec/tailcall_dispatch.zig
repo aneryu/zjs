@@ -589,18 +589,54 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
-/// L1 apply-forward twin of pushAndEnter: generic/simple method entry plus
-/// D8-L1 `native_caller` = realm Function.prototype.apply. Leaf arms overlay
-/// resume words on that slot, so they are not used here.
-inline fn pushAndEnterApplyForward(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16) Outcome {
+const ApplyForwardEntryResult = union(enum) {
+    entry: *inline_calls.Entry,
+    handled,
+    threw,
+};
+
+/// Fat apply-forward setup. Outlined so `op_call_method` does not grow a
+/// 0x4a0 frame around `pushMethodCall` / `attachApplyForwardNativeCaller`.
+/// `enterEntry` / `coldNext` stay in `op_call_method` because
+/// `@call(.always_tail)` requires the handler signature.
+noinline fn pushApplyForwardEntry(
+    vm: *Vm,
+    target: *const inline_calls.InlineTarget,
+    region_start: [*]JSValue,
+    argc: u16,
+) ApplyForwardEntryResult {
     const source_count = @as(usize, argc) + 2;
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
-        return coldNext(vb, vm);
+        return .handled;
     };
     attachApplyForwardNativeCaller(vm, entry);
-    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+    return .{ .entry = entry };
+}
+
+/// Cold apply-forward enter. Same Handler type as `op_call_method` (not
+/// `noinline` — that attribute is part of the Zig fn type and breaks
+/// `@call(.always_tail)`). Fat setup lives in `pushApplyForwardEntry`.
+fn applyForwardCallMethod(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    vb: [*]JSValue,
+    vm: *Vm,
+) callconv(.c) Outcome {
+    _ = sp;
+    const argc = readInt(u16, pc + 1);
+    const region_start = vm.stack.topPtr();
+    const receiver = region_start[0];
+    const method = region_start[1];
+    const method_obj = class_vm.objectFromValue(method) orelse return .threw;
+    const resolved = inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj) orelse return .threw;
+    const target = resolved.bind(receiver, method);
+    return switch (pushApplyForwardEntry(vm, &target, region_start, argc)) {
+        .entry => |entry| enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr),
+        .handled => coldNext(vb, vm),
+        .threw => .threw,
+    };
 }
 
 /// Warm OP_call0 / OP_call_method(argc=0) entry after receiver-independent
@@ -1653,10 +1689,13 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     // L1 apply-forward: live-argv call_method of initialize.
                     // Skip leaf arms (they overlay resume on native_caller) and
                     // attach Function.prototype.apply as D8-L1 native_caller.
-                    if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
+                    // Bit test stays here (one load of call_facts_mirror @ 0x14).
+                    // The site walk is noinline — do not `bl` it on every method.
+                    if (vm.function.call_facts_mirror.execution.apply_forward_inlined) {
                         @branchHint(.unlikely);
-                        const target = resolved.bind(receiver, method);
-                        return pushAndEnterApplyForward(vb, vm, &target, region_start, argc);
+                        if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
+                            return @call(.always_tail, applyForwardCallMethod, .{ pc, sp, vb, vm });
+                        }
                     }
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
@@ -4398,6 +4437,7 @@ inline fn transformInternalCallResult(
 ) JSValue {
     comptime std.debug.assert(return_action == .next or return_action == .to_boolean);
     if (comptime return_action == .to_boolean) {
+        if (result.isBool()) return result;
         const boolean = JSValue.boolean(coercion_ops.valueTruthy(result));
         result.free(rt);
         return boolean;
@@ -4424,6 +4464,11 @@ noinline fn recoverOwnedInternalCallRegion(
 /// standard owned method region `[receiver, callable, args...]`. Keeping the
 /// wide call environment and error union inside this outlined implementation
 /// preserves the compact single-enum ABI used by resident opcode handlers.
+///
+/// exec_direct hit (EB: Function[@@hasInstance]) goes through the existing
+/// thin terminal and must not share a frame with the env-path cold arm —
+/// that union is how constitution grew FastDispatch 0x1c0→0x1d0. The miss
+/// arm stays the original `callResolvedNativeMethod` body, outlined.
 noinline fn dispatchInternalNativeMethod(
     comptime return_action: inline_calls.ReturnAction,
     comptime argc: u16,
@@ -4444,6 +4489,43 @@ noinline fn dispatchInternalNativeMethod(
     exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
         return recoverOwnedInternalCallRegion(vm, region_base, err);
     };
+    if (record.exec_direct) |direct_ptr| {
+        const native_result = call_vm.callResolvedExecDirect(
+            vm.ctx,
+            vm.output,
+            vm.global,
+            method_object,
+            receiver,
+            direct_ptr,
+            args,
+            record.length,
+            vm.function,
+            vm.frame,
+        ) catch |err| {
+            return recoverOwnedInternalCallRegion(vm, region_base, err);
+        };
+        const result = transformInternalCallResult(return_action, vm.rt, native_result);
+        call_runtime.popOwnedStackRegion(vm.rt, stack, region_base);
+        stack.pushOwnedAssumeCapacity(result);
+        return .completed;
+    }
+    return dispatchInternalNativeMethodSlow(return_action, argc, vm, method_object, record, region_base, receiver, args);
+}
+
+/// Unchanged miss/cold arm: records without exec_direct keep the original
+/// `callResolvedNativeMethod` + ToBoolean wrapper. `noinline` is load-bearing
+/// so NativeCallEnvironment stores cannot enlarge the exec_direct shell.
+noinline fn dispatchInternalNativeMethodSlow(
+    comptime return_action: inline_calls.ReturnAction,
+    comptime argc: u16,
+    vm: *Vm,
+    method_object: *core.Object,
+    record: *const core.host_function.InternalRecord,
+    region_base: usize,
+    receiver: JSValue,
+    args: []const JSValue,
+) InternalMethodDispatch {
+    _ = argc;
     const native_result = call_vm.callResolvedNativeMethod(
         vm.ctx,
         vm.output,
@@ -4458,8 +4540,8 @@ noinline fn dispatchInternalNativeMethod(
         return recoverOwnedInternalCallRegion(vm, region_base, err);
     };
     const result = transformInternalCallResult(return_action, vm.rt, native_result);
-    call_runtime.popOwnedStackRegion(vm.rt, stack, region_base);
-    stack.pushOwnedAssumeCapacity(result);
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+    vm.stack.pushOwnedAssumeCapacity(result);
     return .completed;
 }
 

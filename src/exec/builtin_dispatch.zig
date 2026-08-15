@@ -435,6 +435,29 @@ inline fn callInternalRecordDirectWithEnvironment(
     };
 }
 
+/// Thin exec_direct terminal for an already-resolved C_FUNCTION object.
+/// This function must not mention `NativeCallEnvironment`: a caller that
+/// only takes this path keeps the pre-constitution frame (the 0x1c0
+/// lesson — constitution inlined the env stores and grew FastDispatch
+/// 0x1c0→0x1d0). Preflight + realm switch + native backtrace sf match
+/// `js_call_c_function` (quickjs.c:17575-17590 / 17580 / 17586).
+pub fn callResolvedExecDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func_obj: *core.Object,
+    this_value: core.JSValue,
+    direct_ptr: *const anyopaque,
+    args: []const core.JSValue,
+    formal_length: usize,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
+    try preflightCFunctionCall(ctx, global, func_obj, formal_length);
+    const view = try finalCallEnvironment(ctx, global, empty_realm_globals[0..], func_obj);
+    return callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
+}
+
 /// Direct-ABI record terminal: same native backtrace frame and error
 /// materialization boundary as the environment path, minus the environment
 /// itself. The handler receives the final realm authority pair by parameter.
