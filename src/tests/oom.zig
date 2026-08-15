@@ -1186,10 +1186,12 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         fixture_options.byte_code.len,
     );
     // Above the slab ceiling in both JSValue representations, so the exact
-    // MemoryAccount charge is the one main allocation plus its GC prefix.
+    // MemoryAccount charge is the one main allocation plus its GC prefix
+    // (standalone: request size, no extra MALLOC_OVERHEAD).
     try std.testing.expect(layout.mainPayloadBytes() > 512);
     try std.testing.expect(layout.total_size > 512);
-    const accounted_bytes = layout.total_size + core.gc.metadata_prefix_size;
+    const request_bytes = layout.total_size + core.gc.metadata_prefix_size;
+    const accounted_bytes = core.memory.MemoryAccount.accountedMallocSize(request_bytes, null);
 
     const baseline_bytes = rt.memory.allocated_bytes;
     const baseline_allocations = rt.memory.allocation_count;
@@ -1200,7 +1202,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     // All inline tables and exact code belong to the same createWithFam call.
     // Leave that full charge one byte short: no partial shell/table owner may
     // become visible in either accounting or the GC registry.
-    rt.setMemoryLimit(baseline_bytes + accounted_bytes - 1);
+    rt.setMemoryLimit(baseline_bytes + request_bytes - 1);
     if (zjs.bytecode.FunctionBytecode.createFixture(rt, fixture_options)) |unexpected| {
         rt.setMemoryLimit(null);
         unexpected.destroyUnpublishedFixture(rt);
