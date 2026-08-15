@@ -4437,6 +4437,7 @@ inline fn transformInternalCallResult(
 ) JSValue {
     comptime std.debug.assert(return_action == .next or return_action == .to_boolean);
     if (comptime return_action == .to_boolean) {
+        if (result.isBool()) return result;
         const boolean = JSValue.boolean(coercion_ops.valueTruthy(result));
         result.free(rt);
         return boolean;
@@ -4463,6 +4464,11 @@ noinline fn recoverOwnedInternalCallRegion(
 /// standard owned method region `[receiver, callable, args...]`. Keeping the
 /// wide call environment and error union inside this outlined implementation
 /// preserves the compact single-enum ABI used by resident opcode handlers.
+///
+/// exec_direct hit (EB: Function[@@hasInstance]) goes through the existing
+/// thin terminal and must not share a frame with the env-path cold arm —
+/// that union is how constitution grew FastDispatch 0x1c0→0x1d0. The miss
+/// arm stays the original `callResolvedNativeMethod` body, outlined.
 noinline fn dispatchInternalNativeMethod(
     comptime return_action: inline_calls.ReturnAction,
     comptime argc: u16,
@@ -4483,6 +4489,43 @@ noinline fn dispatchInternalNativeMethod(
     exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
         return recoverOwnedInternalCallRegion(vm, region_base, err);
     };
+    if (record.exec_direct) |direct_ptr| {
+        const native_result = call_vm.callResolvedExecDirect(
+            vm.ctx,
+            vm.output,
+            vm.global,
+            method_object,
+            receiver,
+            direct_ptr,
+            args,
+            record.length,
+            vm.function,
+            vm.frame,
+        ) catch |err| {
+            return recoverOwnedInternalCallRegion(vm, region_base, err);
+        };
+        const result = transformInternalCallResult(return_action, vm.rt, native_result);
+        call_runtime.popOwnedStackRegion(vm.rt, stack, region_base);
+        stack.pushOwnedAssumeCapacity(result);
+        return .completed;
+    }
+    return dispatchInternalNativeMethodSlow(return_action, argc, vm, method_object, record, region_base, receiver, args);
+}
+
+/// Unchanged miss/cold arm: records without exec_direct keep the original
+/// `callResolvedNativeMethod` + ToBoolean wrapper. `noinline` is load-bearing
+/// so NativeCallEnvironment stores cannot enlarge the exec_direct shell.
+noinline fn dispatchInternalNativeMethodSlow(
+    comptime return_action: inline_calls.ReturnAction,
+    comptime argc: u16,
+    vm: *Vm,
+    method_object: *core.Object,
+    record: *const core.host_function.InternalRecord,
+    region_base: usize,
+    receiver: JSValue,
+    args: []const JSValue,
+) InternalMethodDispatch {
+    _ = argc;
     const native_result = call_vm.callResolvedNativeMethod(
         vm.ctx,
         vm.output,
@@ -4497,8 +4540,8 @@ noinline fn dispatchInternalNativeMethod(
         return recoverOwnedInternalCallRegion(vm, region_base, err);
     };
     const result = transformInternalCallResult(return_action, vm.rt, native_result);
-    call_runtime.popOwnedStackRegion(vm.rt, stack, region_base);
-    stack.pushOwnedAssumeCapacity(result);
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+    vm.stack.pushOwnedAssumeCapacity(result);
     return .completed;
 }
 

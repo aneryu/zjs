@@ -647,6 +647,35 @@ pub inline fn callResolvedNativeMethod(
     );
 }
 
+/// Exec_direct hit twin of `callResolvedNativeMethod`. Stays off the
+/// NativeCallEnvironment / typed-cproto tail so the internal-method seam
+/// does not inherit the 0x1c0→0x1d0 frame tax.
+pub inline fn callResolvedExecDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    method_obj: *core.Object,
+    receiver: core.JSValue,
+    direct_ptr: *const anyopaque,
+    args: []const core.JSValue,
+    formal_length: usize,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    return builtin_dispatch.callResolvedExecDirect(
+        ctx,
+        output,
+        global,
+        method_obj,
+        receiver,
+        direct_ptr,
+        args,
+        formal_length,
+        caller_function,
+        caller_frame,
+    );
+}
+
 /// Outlined native c_function fast dispatch for `op_call_method`. Mirrors
 /// `callMethod`'s native leg exactly (pollInterrupt → fastNativeMethodCall →
 /// popOwnedStackRegion → dropUnusedCallResult → push) but skips callMethod's
