@@ -16927,7 +16927,7 @@ pub const parser_core = struct {
         switch (depth) {
             0 => {},
             1 => try Emitter.op(s, opcode.op.rot3r),
-            2 => try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.swap2),
+            2 => try Emitter.op(s, opcode.op.swap2),
             3 => {
                 try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
                 try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);

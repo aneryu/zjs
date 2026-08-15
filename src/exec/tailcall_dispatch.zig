@@ -5619,7 +5619,7 @@ const cold_built = colds.buildTable(specials, false);
 const cold_table: [256]Handler = cold_built.table;
 /// Wave-22: exported so the three type-test coldStd leaves stay in the
 /// island at their v2.1 source order (240/242/243 slots are fusion now).
-export const zjs_w22_island_keep: [8]Handler = cold_built.keep;
+export const zjs_w22_island_keep: [7]Handler = cold_built.keep;
 // O1 exact-args leaf cold constructors. Defined AFTER the handler cluster
 // so their machine code lands past the established opcode bodies: inserting
 // them mid-cluster shifted every subsequent handler address and reproducibly
@@ -6034,41 +6034,6 @@ pub fn op_push_0_or_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
     return coldNext(var_buf, vm);
 }
 
-/// `get_array_el` then musttail `push_0`. Leftover B stays.
-pub fn op_get_array_el_push_0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    const key = (sp - 1)[0];
-    const obj = (sp - 2)[0];
-    const rt = vm.ctx.runtime;
-    if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
-        obj.freeDuringActiveBytecode(rt);
-        key.freeDuringActiveBytecode(rt);
-        (sp - 2)[0] = value;
-        return tailPush0(pc, sp - 1, var_buf, vm);
-    }
-    if (key.isInt() and obj.isObject()) {
-        if (vm_property_field.fastArrayOwnIntElementValue(obj, key)) |value| {
-            obj.freeDuringActiveBytecode(rt);
-            (sp - 2)[0] = value;
-            return tailPush0(pc, sp - 1, var_buf, vm);
-        }
-        if (vm_property_field.fastTypedArrayElementValue(obj, key)) |value| {
-            obj.freeDuringActiveBytecode(rt);
-            (sp - 2)[0] = value;
-            return tailPush0(pc, sp - 1, var_buf, vm);
-        }
-    }
-    if (key.isString() or key.isSymbol()) {
-        return @call(.always_tail, propertyTailHandler(vm, .get_array_el_atom_key), .{ pc, sp, var_buf, vm });
-    }
-    return @call(.always_tail, op_get_array_el_push_0_cold, .{ pc, sp, var_buf, vm });
-}
-
-pub fn op_get_array_el_push_0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
-    vm.publish(pc, sp);
-    _ = vm_property_field.getArrayElement(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, op.get_array_el) catch |e| return vm.fail(e);
-    return coldNext(var_buf, vm);
-}
-
 /// `sar` then musttail `get_array_el`. Leftover B stays.
 pub fn op_sar_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
@@ -6083,9 +6048,13 @@ pub fn op_sar_get_array_el_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
     return coldNext(var_buf, vm);
 }
 
-/// `push_2` then musttail `sar`. Leftover B stays.
+/// `push_2` then musttail leftover `sar`. If leftover was re-fused to
+/// `sar_get_array_el`, enter that handler — never original `sar` with a
+/// fused `pc[0]` (B-miss would `cold_table[fused]` and re-pay A).
 pub fn op_push_2_sar(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     sp[0] = JSValue.int32(2);
+    if (pc[1] == op.sar_get_array_el)
+        return @call(.always_tail, op_sar_get_array_el, .{ pc + 1, sp + 1, var_buf, vm });
     return @call(.always_tail, opBinary(.sar), .{ pc + 1, sp + 1, var_buf, vm });
 }
 
@@ -6097,13 +6066,8 @@ pub fn op_push_2_sar_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     return coldNext(var_buf, vm);
 }
 
-/// `get_loc8` then musttail `push_2`. Leftover B stays.
-inline fn tailPush0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
-    if (pc[1] == op.push_0_or)
-        return @call(.always_tail, op_push_0_or, .{ pc + 1, sp, var_buf, vm });
-    return @call(.always_tail, op_push_small, .{ pc + 1, sp, var_buf, vm });
-}
-
+/// `get_loc8` then musttail leftover `push_2`. Re-fused leftover enters
+/// `push_2_sar` so a later `sar` miss never sees a fused `pc[0]`.
 inline fn tailPush2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
     if (pc[2] == op.push_2_sar)
         return @call(.always_tail, op_push_2_sar, .{ pc + 2, sp, var_buf, vm });

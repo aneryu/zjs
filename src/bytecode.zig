@@ -126,8 +126,7 @@ pub const opcode = struct {
         /// Fusion v4 (using-prefix reclaim). `sar` + leftover `get_array_el`.
         pub const sar_get_array_el: u8 = 26;
         pub const swap: u8 = 27;
-        /// Fusion v4 (using-prefix reclaim of zoo-cold `swap2`). `get_array_el` + leftover `push_0`.
-        pub const get_array_el_push_0: u8 = 28;
+        pub const swap2: u8 = 28;
         pub const rot3l: u8 = 29;
         pub const rot3r: u8 = 30;
         pub const rot4l: u8 = 31;
@@ -428,12 +427,11 @@ pub const opcode = struct {
         pub const is_undefined: u8 = 3;
         pub const typeof_is_undefined: u8 = 4;
         pub const typeof_is_function: u8 = 5;
-        /// Reclaimed zoo-cold shorts (were ids 23/32/26/19/28) for fusion v4.
+        /// Reclaimed zoo-cold shorts (were ids 23/32/26/19) for fusion v4.
         pub const insert4: u8 = 6;
         pub const rot5l: u8 = 7;
         pub const perm5: u8 = 8;
         pub const dup2: u8 = 9;
-        pub const swap2: u8 = 10;
         pub const add_base: u8 = 16;
 
         pub fn add(hint: u8) u8 {
@@ -458,7 +456,6 @@ pub const opcode = struct {
                 insert4 => 4,
                 rot5l, perm5 => 5,
                 dup2 => 2,
-                swap2 => 4,
                 else => 0,
             };
         }
@@ -471,7 +468,7 @@ pub const opcode = struct {
                 dispose_throw => 1,
                 is_undefined, typeof_is_undefined, typeof_is_function => 1,
                 insert4, rot5l, perm5 => 5,
-                dup2, swap2 => 4,
+                dup2 => 4,
                 else => 0,
             };
         }
@@ -510,7 +507,7 @@ pub const opcode = struct {
         .{ .name = "perm4", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [25] id 25
         .{ .name = "sar_get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [26] id 26
         .{ .name = "swap", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [27] id 27
-        .{ .name = "get_array_el_push_0", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [28] id 28
+        .{ .name = "swap2", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [28] id 28
         .{ .name = "rot3l", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [29] id 29
         .{ .name = "rot3r", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [30] id 30
         .{ .name = "rot4l", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [31] id 31

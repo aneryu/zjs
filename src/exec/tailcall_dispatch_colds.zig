@@ -167,14 +167,14 @@ pub const SpecialHandlers = struct {
 pub const BuiltTable = struct {
     table: [256]Handler,
     /// Geometry keep: reclaimed-slot coldStd leaves. Live so LLVM cannot DCE them.
-    keep: [8]Handler,
+    keep: [7]Handler,
 };
 
 pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     var t: [256]Handler = [_]Handler{s.op_invalid} ** 256;
-    var keep: [8]Handler = .{
+    var keep: [7]Handler = .{
         s.op_invalid, s.op_invalid, s.op_invalid, s.op_invalid,
-        s.op_invalid, s.op_invalid, s.op_invalid, s.op_invalid,
+        s.op_invalid, s.op_invalid, s.op_invalid,
     };
 
     // --- pushes ---
@@ -674,7 +674,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try value_vm.perm5(vm.ctx, vm.stack);
         }
     }.b);
-    keep[7] = h(struct {
+    t[op.swap2] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.swap2(vm.ctx, vm.stack);
         }
@@ -836,7 +836,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.push_this_put_loc0] = td.op_push_this_put_loc0_cold;
     t[op.put_loc0_get_loc0] = td.op_put_loc0_get_loc0_cold;
     t[op.push_0_or] = td.op_push_0_or_cold;
-    t[op.get_array_el_push_0] = td.op_get_array_el_push_0_cold;
     t[op.sar_get_array_el] = td.op_sar_get_array_el_cold;
     t[op.push_2_sar] = td.op_push_2_sar_cold;
     t[op.get_loc8_push_2] = td.op_get_loc8_push_2_cold;
@@ -980,7 +979,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element
     t[op.push_0_or] = td.op_push_0_or;
-    t[op.get_array_el_push_0] = td.op_get_array_el_push_0;
     t[op.sar_get_array_el] = td.op_sar_get_array_el;
     t[op.push_2_sar] = td.op_push_2_sar;
     t[op.get_loc8_push_2] = td.op_get_loc8_push_2;

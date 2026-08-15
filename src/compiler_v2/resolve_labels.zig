@@ -704,6 +704,46 @@ const Resolver = struct {
         self.output_len += 1;
     }
 
+    /// Isolation mask for fusion-v4 pairs (v2.1 matrix). Default = remaining four.
+    /// `ZJS_FUSE_V4=none` / `all` / comma list: `push_0_or,sar_get_array_el,
+    /// push_2_sar,get_loc8_push_2`. Diagnostic only. `get_array_el_push_0` dropped
+    /// (cloned `get_array_el` shrank the island by 84B).
+    const v4_push_0_or: u8 = 1 << 0;
+    const v4_sar_get_array_el: u8 = 1 << 2;
+    const v4_push_2_sar: u8 = 1 << 3;
+    const v4_get_loc8_push_2: u8 = 1 << 4;
+    const v4_all: u8 = v4_push_0_or | v4_sar_get_array_el | v4_push_2_sar | v4_get_loc8_push_2;
+
+    var v4_bits_ready: bool = false;
+    var v4_bits: u8 = v4_all;
+
+    fn v4Mask() u8 {
+        if (v4_bits_ready) return v4_bits;
+        v4_bits_ready = true;
+        v4_bits = loadV4Mask();
+        return v4_bits;
+    }
+
+    fn loadV4Mask() u8 {
+        const raw = std.c.getenv("ZJS_FUSE_V4") orelse return v4_all;
+        const s = std.mem.span(raw);
+        if (s.len == 0 or std.mem.eql(u8, s, "all")) return v4_all;
+        if (std.mem.eql(u8, s, "none")) return 0;
+        var bits: u8 = 0;
+        var it = std.mem.splitScalar(u8, s, ',');
+        while (it.next()) |name| {
+            if (std.mem.eql(u8, name, "push_0_or")) bits |= v4_push_0_or;
+            if (std.mem.eql(u8, name, "sar_get_array_el")) bits |= v4_sar_get_array_el;
+            if (std.mem.eql(u8, name, "push_2_sar")) bits |= v4_push_2_sar;
+            if (std.mem.eql(u8, name, "get_loc8_push_2")) bits |= v4_get_loc8_push_2;
+        }
+        return bits;
+    }
+
+    inline fn v4On(bit: u8) bool {
+        return (v4Mask() & bit) != 0;
+    }
+
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
         // Record the one (or two) legal B for this A. Callers stay a single
@@ -770,34 +810,40 @@ const Resolver = struct {
                 self.fuse_op = op.get_var_field;
                 self.fuse_b2 = 0;
             },
-            op.push_0 => {
+            op.push_0 => if (v4On(v4_push_0_or)) {
                 self.last_sz = 1;
                 self.fuse_b = op.@"or";
                 self.fuse_op = op.push_0_or;
                 self.fuse_b2 = 0;
-            },
-            op.get_array_el => {
-                self.last_sz = 1;
-                self.fuse_b = op.push_0;
-                self.fuse_op = op.get_array_el_push_0;
+            } else {
+                self.fuse_b = 0;
                 self.fuse_b2 = 0;
             },
-            op.sar => {
+            op.sar => if (v4On(v4_sar_get_array_el)) {
                 self.last_sz = 1;
                 self.fuse_b = op.get_array_el;
                 self.fuse_op = op.sar_get_array_el;
                 self.fuse_b2 = 0;
+            } else {
+                self.fuse_b = 0;
+                self.fuse_b2 = 0;
             },
-            op.push_2 => {
+            op.push_2 => if (v4On(v4_push_2_sar)) {
                 self.last_sz = 1;
                 self.fuse_b = op.sar;
                 self.fuse_op = op.push_2_sar;
                 self.fuse_b2 = 0;
+            } else {
+                self.fuse_b = 0;
+                self.fuse_b2 = 0;
             },
-            op.get_loc8 => {
+            op.get_loc8 => if (v4On(v4_get_loc8_push_2)) {
                 self.last_sz = 2;
                 self.fuse_b = op.push_2;
                 self.fuse_op = op.get_loc8_push_2;
+                self.fuse_b2 = 0;
+            } else {
+                self.fuse_b = 0;
                 self.fuse_b2 = 0;
             },
             else => {

@@ -107,10 +107,6 @@ pub noinline fn execVm(
             try value_vm.dup2(ctx, stack);
             return .done;
         },
-        bytecode.opcode.using_sub.swap2 => {
-            try value_vm.swap2(ctx, stack);
-            return .done;
-        },
         else => error.InvalidBytecode,
     };
 }

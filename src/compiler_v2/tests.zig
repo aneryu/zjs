@@ -3201,14 +3201,6 @@ test "compiler_v2.fuse: push_0_or emit and execute" {
     );
 }
 
-test "compiler_v2.fuse: get_array_el_push_0 emit and execute" {
-    try v2CompileRunAndCount(
-        "(function () { var a = [7]; return a[0] | 0; })();",
-        7,
-        &.{qop.get_array_el_push_0},
-    );
-}
-
 test "compiler_v2.fuse: sar_get_array_el emit and execute" {
     try v2CompileRunAndCount(
         "(function () { var a = [9, 8, 7]; return a[4 >> 1]; })();",
