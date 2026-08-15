@@ -2451,9 +2451,10 @@ inline fn decodeLocalOperand(opc: u8, operand: [*]const u8) LocalOperand {
 /// → int op (+overflow check) → 16-byte scalar store into sp[-2] → tail dispatch.
 ///
 /// Guard misses take an indirect resident-handler hop so LLVM cannot inline
-/// slow freight back into the integer handler. Int overflow on add/sub/mul,
-/// mul's -0, mod's slow cases, and unresolved operand shapes still use
-/// `cold_table[pc[0]]`. qjs OP_add's direct float leg remains in the arithmetic
+/// slow freight back into the integer handler. Add/sub/mul int overflow and
+/// mul's -0 stay on this arm (qjs in-CASE `__JS_NewFloat64`). Mod's slow
+/// cases and unresolved operand shapes still use `cold_table[pc[0]]`.
+/// qjs OP_add's direct float leg remains in the arithmetic
 /// handler; its direct string-string leg tails through `resident_tail_tbl`,
 /// while object/BigInt/coercion cases stay in the same authoritative cold
 /// handler. The indirect boundary matters because string concat's call and
@@ -2475,34 +2476,41 @@ pub fn opBinary(comptime kind: BinOp) Handler {
             // register (the old fused handler's ldr q0/str q0 round-trip).
             switch (kind) {
                 // qjs OP_add int leg (19701-19709): `r = (int64_t)v1 + v2; if
-                // ((int)r != r)` — the int64-widen + truncation check, NOT
-                // @addWithOverflow (whose result tuple makes LLVM materialize
-                // the overflow flag into a stack byte — a dead cset+strb and a
-                // 16B frame; same finding as vm_arith.fastInt32Add). The
-                // overflow (double) result comes from the cold side instead of
-                // an in-line scvtf so the hot line stays integer-register only.
+                // ((int)r != r)` then `__JS_NewFloat64((double)r)` still inside
+                // the CASE — not js_add_slow. Same int64-widen check as
+                // vm_arith.fastInt32Add / op_add_loc; overflow stays on this
+                // arm (qjs 19704-19708).
                 .add => {
                     const r: i64 = @as(i64, a) + b;
                     const r32: i32 = @truncate(r);
-                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    (sp - 2)[0].setInt32AssumeInt(r32);
+                    if (r32 != r) {
+                        (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
+                    } else {
+                        (sp - 2)[0].setInt32AssumeInt(r32);
+                    }
                 },
-                // qjs OP_sub int leg (19797-19805), same int64-widen form.
+                // qjs OP_sub int leg (19797-19805), same in-CASE float store.
                 .sub => {
                     const r: i64 = @as(i64, a) - b;
                     const r32: i32 = @truncate(r);
-                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    (sp - 2)[0].setInt32AssumeInt(r32);
+                    if (r32 != r) {
+                        (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
+                    } else {
+                        (sp - 2)[0].setInt32AssumeInt(r32);
+                    }
                 },
-                // qjs OP_mul int leg (19836-19852): 64-bit product truncation
-                // check, then the `r == 0 && (v1|v2) < 0` -0 test — both special
-                // cases route cold (fastInt32Mul reproduces qjs's mul_fp_res).
+                // qjs OP_mul int leg (19836-19852): overflow and -0 both go to
+                // mul_fp_res inside the CASE (`__JS_NewFloat64`), not slow.
                 .mul => {
                     const r: i64 = @as(i64, a) * b;
                     const r32: i32 = @truncate(r);
-                    if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    if (r == 0 and (a | b) < 0) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    (sp - 2)[0].setInt32AssumeInt(r32);
+                    if (r32 != r) {
+                        (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
+                    } else if (r == 0 and (a | b) < 0) {
+                        (sp - 2)[0] = JSValue.float64(-0.0);
+                    } else {
+                        (sp - 2)[0].setInt32AssumeInt(r32);
+                    }
                 },
                 // qjs OP_div int leg (19884-19889): always the double quotient,
                 // through the canonicalizing JS_NewFloat64 (= numberToValue).
@@ -3434,6 +3442,10 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 /// `set_value(ctx, &p->u.array.u.values[idx], sp[-1])` (quickjs.c:19552-19581)
 /// -- and its shared interpreter frame pays no per-op prologue.
 ///
+/// The no-grow append arm is the same CASE (quickjs.c:19616-19636): `idx ==
+/// count && fast_array && can_extend && new_len <= size`. Realloc stays in
+/// the cold twin. Typed-array / non-Array receivers never enter this block.
+///
 /// Everything that needs an operand ADDRESS lives in the cold twin below. The
 /// slow legs hand `&value` to setValuePropertyWithThrow / the typed-array
 /// writer, and LLVM hoists that frame materialization above every branch, so
@@ -3465,6 +3477,30 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                                 return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
                             }
                             return cont(pc + 1, sp - 3, var_buf, vm);
+                        }
+                        // qjs OP_put_array_el append (quickjs.c:19616-19636):
+                        // idx == count, fast_array, can_extend, new_len <= size.
+                        // Growing `.length` needs the length slot writable;
+                        // filling a hole at `count` while `count < length` does not.
+                        if (array_object.flags.fast_array and index == array_object.u.array.count) {
+                            const new_count = index +% 1;
+                            if (new_count > index and
+                                new_count <= array_object.u.array.capacity and
+                                array_object.canExtendFastArray() and
+                                (new_count <= array_object.u.array.length or
+                                    array_object.flags.length_writable))
+                            {
+                                const slot = array_object.fastArraySlotAssumeCapacity(index);
+                                storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                                array_object.u.array.count = new_count;
+                                if (new_count > array_object.u.array.length)
+                                    array_object.u.array.length = new_count;
+                                array_object.flags.may_have_indexed_properties = true;
+                                if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(vm.ctx.runtime)) {
+                                    return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                                }
+                                return cont(pc + 1, sp - 3, var_buf, vm);
+                            }
                         }
                     }
                 }
@@ -3924,6 +3960,24 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     }
     if (key.isString() or key.isSymbol()) {
         return @call(.always_tail, propertyTailHandler(vm, .get_array_el_atom_key), .{ pc, sp, var_buf, vm });
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+/// Hot `OP_get_array_el2` — qjs `GET_ARRAY_EL_INLINE(..., keep=1)`
+/// (quickjs.c:19438-19439). Same dense predicate as `op_get_array_el`; the
+/// result replaces the key and the receiver stays (`[obj, key] → [obj, value]`)
+/// so `obj[i](...)` can `call_method`. Own-int / typed / atom-key stay on the
+/// cold `h_get_array_element` shell: those helpers are non-leaf (`bl`) and
+/// would tax the dense hit with a shared prologue. qjs CASE only inlines the
+/// ARRAY+INT+in-bounds arm; everything else is `JS_GetPropertyValue`.
+pub fn op_get_array_el2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    const key = (sp - 1)[0];
+    const obj = (sp - 2)[0];
+    if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
+        // key is TAG_INT (fastDenseArrayElementValue requires asInt32); no free.
+        (sp - 1)[0] = value;
+        return cont(pc + 1, sp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
