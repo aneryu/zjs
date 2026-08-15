@@ -3240,17 +3240,31 @@ pub fn op_get_loc2_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return coldNext(var_buf, vm);
 }
 
-/// X-89 v2 (7a378c71): share the existing handler, do not clone a half.
-/// 245 is `get_field2` (A); leftover B is `call_method` and already
-/// `op_call_method` / `op_tail_call_method`. `cont` from the shared
-/// get_field2 body lands on that one admission.
-pub const op_get_field2_call_method = op_get_field2;
+/// get_field2, then `b` into `op_call_method` (7a378c71: share the
+/// empty-leaf / exact-args / simple_inline / pushExactSimple /
+/// nativeMethodFastDispatch chain; leftover B is still `call_method`).
+pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (!receiver.isObject())
+        return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
+    var absent = false;
+    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
+        const value = loadValueAsIntPair(slot);
+        _ = value.dup();
+        storeValueAsIntPair(&sp[0], value);
+        return @call(.always_tail, op_call_method, .{ pc + 5, sp + 1, var_buf, vm });
+    }
+    if (absent) {
+        sp[0] = JSValue.undefinedValue();
+        return @call(.always_tail, op_call_method, .{ pc + 5, sp + 1, var_buf, vm });
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
 
 pub fn op_get_field2_call_method_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
     _ = vm_property_field.field(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, op.get_field2_call_method) catch |e| return vm.fail(e);
-    // Register sp is stale after the Stack helper; leftover B is the
-    // one-copy admission (dispatch_table[call_method] == op_call_method).
     return coldNext(var_buf, vm);
 }
 
