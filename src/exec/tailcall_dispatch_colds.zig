@@ -963,6 +963,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element
+    t[op.get_array_el2] = td.op_get_array_el2; // keep-receiver twin; miss → cold h_get_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_put_array_element
     t[op.get_length] = td.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
     // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)
