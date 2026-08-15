@@ -353,9 +353,9 @@ pub const opcode = struct {
         /// Emit-time fusion: `lt` + `if_false8`. Size/stack match `lt`;
         /// the following `if_false8` stays in the stream (poll lives there).
         pub const cmp_if_false8: u8 = 250;
-        /// Emit-time fusion: `inc_loc` + `goto8`. Size/stack match `inc_loc`;
-        /// the following `goto8` stays in the stream (poll lives there).
-        pub const inc_loc_goto8: u8 = 251;
+        /// Emit-time fusion: `put_loc8` + `get_loc8`. Size/stack match
+        /// `put_loc8`; the following `get_loc8` stays in the stream.
+        pub const put_loc8_get_loc8: u8 = 251;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -670,7 +670,7 @@ pub const opcode = struct {
         .{ .name = "call_method_apply_fwd", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [267] id 248
         .{ .name = "get_loc0_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [268] id 249
         .{ .name = "cmp_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [269] id 250
-        .{ .name = "inc_loc_goto8", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [270] id 251
+        .{ .name = "put_loc8_get_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [270] id 251
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's

@@ -5118,32 +5118,38 @@ pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     return cont(pc + 2, sp, var_buf, vm);
 }
 
-/// `inc_loc` then musttail `op_goto8` at the following `goto8`. Poll stays
-/// inside `op_goto8` (qjs CASE(OP_goto8)).
-pub fn op_inc_loc_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+/// `put_loc8` then musttail the surviving `get_loc8` (B stays in the stream).
+/// Last-ref overwrite tails to cold. Non-last / immediate stores here and
+/// never call destroy, so LLVM cannot plant a frame on this leaf once it
+/// inlines tiny `get_loc8`.
+pub fn op_put_loc8_get_loc8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const idx: u16 = pc[1];
-    const old_v = var_buf[idx];
-    const iv = old_v.asInt32() orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (iv == std.math.maxInt(i32)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    var_buf[idx].setInt32AssumeInt(iv + 1);
-    return @call(.always_tail, op_goto8, .{ pc + 2, sp, var_buf, vm });
+    const old = var_buf[idx];
+    if (old.requiresRefCount()) {
+        if (old.refCountHeader()) |header| {
+            if (header.metaConst().rc == 1)
+                return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
+            var_buf[idx] = (sp - 1)[0];
+            header.meta().rc -= 1;
+        } else if (old.stringHeader()) |header| {
+            if (header.rc == 1)
+                return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
+            var_buf[idx] = (sp - 1)[0];
+            header.rc -= 1;
+        } else {
+            return @call(.always_tail, op_put_loc8_get_loc8_cold, .{ pc, sp, var_buf, vm });
+        }
+    } else {
+        var_buf[idx] = (sp - 1)[0];
+    }
+    return @call(.always_tail, opLoc(.get, .byte), .{ pc + 2, sp - 1, var_buf, vm });
 }
 
-pub fn op_inc_loc_goto8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) {
-        vm.publish(pc, sp);
-        _ = arith_vm.updateLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, op.inc_loc, vm.output) catch |e| return vm.fail(e);
-        return coldNext(var_buf, vm);
-    }
-    const idx: u16 = pc[1];
-    vm.syncPc(pc, 2);
-    arith_vm.updateLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], op.inc_loc) catch |err| {
-        vm.publish(pc + 1, sp);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
-    };
-    return @call(.always_tail, op_goto8, .{ pc + 2, sp, var_buf, vm });
+/// All-cold / L0-stop: do `put_loc8` only, then `coldNext` onto `get_loc8`.
+pub fn op_put_loc8_get_loc8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.put_loc8) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
 }
 
 /// Dedicated cold handler for OP_inc_loc/OP_dec_loc's non-int32 operand (float /

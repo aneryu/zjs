@@ -3123,8 +3123,8 @@ const Resolver = struct {
                 op.get_loc0_field
             else if (a == op.lt and b == op.if_false8)
                 op.cmp_if_false8
-            else if (a == op.inc_loc and b == op.goto8)
-                op.inc_loc_goto8
+            else if (a == op.put_loc8 and b == op.get_loc8)
+                op.put_loc8_get_loc8
             else
                 null;
             if (fused) |fused_op| {

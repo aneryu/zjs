@@ -3020,10 +3020,12 @@ test "compiler_v2.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.inc_loc));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.goto8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.get_loc8));
     try std.testing.expectEqual(@as(u8, 3), opcode.sizeOf(qop.call_method_apply_fwd));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.cmp_if_false8));
-    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.inc_loc_goto8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));
 }
 
 fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
@@ -3072,13 +3074,15 @@ fn v2CompileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void 
         .{ .realm = h.ctx },
     );
     const fb = &fb_slice[0];
-    {}
+    var fb_value = core.JSValue.functionBytecode(&fb.header);
+    var fb_value_owned = true;
+    errdefer if (fb_value_owned) fb_value.free(h.rt);
     for (want) |op_id| {
         try std.testing.expect((try countInstalledOpcode(fb, op_id)) >= 1);
     }
 
-    const fb_value = core.JSValue.functionBytecode(&fb.header);
     const global = try zjs_vm.contextGlobal(h.ctx);
+    fb_value_owned = false;
     const root_fn = try object_ops.createRootBytecodeFunctionObject(
         h.ctx,
         global,
@@ -3119,11 +3123,24 @@ test "compiler_v2.fuse: get_loc0_field is emitted and executes" {
     );
 }
 
-test "compiler_v2.fuse: cmp_if_false8 and inc_loc_goto8 emit and execute" {
+test "compiler_v2.fuse: cmp_if_false8 emit and execute" {
     try v2CompileRunAndCount(
         "(function () { var n = 0; for (var i = 0; i < 4; i++) n = n + 1; return n; })();",
         4,
-        &.{ qop.cmp_if_false8, qop.if_false8, qop.inc_loc_goto8, qop.goto8 },
+        &.{ qop.cmp_if_false8, qop.if_false8 },
+    );
+}
+
+test "compiler_v2.fuse: put_loc8_get_loc8 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function (x) {
+        \\    var a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
+        \\    e = x;
+        \\    return f + e;
+        \\})(42);
+    ,
+        42,
+        &.{ qop.put_loc8_get_loc8, qop.get_loc8 },
     );
 }
 

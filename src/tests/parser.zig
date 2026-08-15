@@ -1288,7 +1288,9 @@ fn semanticOpcodeForTest(op_id: u8) u8 {
         op.fclosure8 => op.fclosure,
         op.push_empty_string => op.push_atom_value,
         op.get_loc8 => op.get_loc,
-        op.put_loc8 => op.put_loc,
+        op.put_loc8, op.put_loc8_get_loc8 => op.put_loc,
+        op.get_loc0_field => op.get_loc,
+        op.cmp_if_false8 => op.lt,
         op.set_loc8 => op.set_loc,
         op.get_length => op.get_field,
         op.if_false8 => op.if_false,
@@ -3036,10 +3038,7 @@ test "F4: final bytecode applies QuickJS discarded lvalue and loop update peepho
     const child = findFunctionConstantNamed(&fn_bc, env.rt, "f") orelse return error.TestExpectedEqual;
     const code = child.byteCode();
     try std.testing.expectEqual(@as(usize, 1), countOpcode(code, op.get_length));
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        countOpcode(code, op.inc_loc) + countOpcode(code, op.inc_loc_goto8),
-    );
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(code, op.inc_loc));
     try std.testing.expectEqual(@as(usize, 2), countOpcode(code, op.put_field));
     try std.testing.expectEqual(@as(usize, 2), countOpcode(code, op.put_array_el));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.insert2));
@@ -10578,6 +10577,7 @@ test "final bytecode authorizes plain var-ref stores before execution" {
         const local_writes =
             countOpcode(code, op.put_loc) +
             countOpcode(code, op.put_loc8) +
+            countOpcode(code, op.put_loc8_get_loc8) +
             countOpcode(code, op.put_loc0) +
             countOpcode(code, op.put_loc1) +
             countOpcode(code, op.put_loc2) +
