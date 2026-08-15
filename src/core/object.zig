@@ -8103,10 +8103,11 @@ pub const Object = extern struct {
     };
 
     fn markClassPayload(self: *Object, rt: *JSRuntime, visitor: *class.PayloadVisitor) bool {
-        // Arrays keep `array_values` (not a payload) in the union; short-circuit
-        // so markPayload never reinterprets that pointer (array classes register
-        // no payload_mark today, but keep the union access discriminant-correct).
-        if (self.isArray() or self.u.payload == null) return false;
+        // Arrays keep `array_values` (not a payload) in the union; bytecode
+        // functions keep `u.func` (qjs JSObject.u.func). Neither is a host
+        // payload pointer — do not pun the union into markPayload.
+        if (self.isArray() or class.isBytecodeFunctionClass(self.class_id) or self.u.payload == null)
+            return false;
         return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.u.payload, visitor);
     }
 
@@ -8349,8 +8350,13 @@ pub const Object = extern struct {
             try Helper.traceOptValue(visitor, &payload.data);
         }
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            // Save the slice before a clearing visitor can rewrite the FB edge;
-            // the capture count is immutable FB metadata.
+            // qjs js_bytecode_function_mark (quickjs.c:6262-6287), the class
+            // gc_mark installed for JS_CLASS_BYTECODE_FUNCTION (1984) and
+            // invoked from mark_children when class_id != JS_CLASS_OBJECT
+            // (6605-6610). Edges: home_object, var_refs[0..closure_var_count],
+            // function_bytecode header. Then stop — do not fall into host
+            // markClassPayload (that path is JSClass.gc_mark for exotic
+            // host classes, not u.func).
             const captures = self.u.bytecode_function.captureSlots();
             for (captures) |maybe_cell| {
                 const cell = maybe_cell orelse continue;
@@ -8372,6 +8378,24 @@ pub const Object = extern struct {
             } else {
                 self.u.bytecode_function.home_or_aux = if (home_object) |home| @ptrCast(home) else null;
             }
+            // zjs-only aux (source / realm_global / promise slots). Absent in
+            // qjs 6262; keep so rare cycle edges stay live. Then return: the
+            // class mark is done.
+            if (self.functionRarePayload()) |rare| {
+                try Helper.traceOptValue(visitor, &rare.source);
+                try Helper.traceOptValue(visitor, &rare.realm_global);
+                try Helper.traceOptValue(visitor, &rare.proxy_revoke_target);
+                try Helper.traceOptValue(visitor, &rare.promise_capability_slot);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_target);
+                try Helper.traceOptValue(visitor, &rare.promise_resolving_state);
+                try Helper.traceOptValue(visitor, &rare.promise_combinator_state);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_payload);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_callback);
+                try Helper.traceOptValue(visitor, &rare.promise_finally_constructor);
+                try Helper.traceOptValue(visitor, &rare.async_dispose_stack);
+                try Helper.traceOptValue(visitor, &rare.async_function_continuation);
+            }
+            return;
         }
         if (self.functionRarePayload()) |rare| {
             try Helper.traceOptValue(visitor, &rare.source);

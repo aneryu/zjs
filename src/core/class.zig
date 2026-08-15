@@ -384,13 +384,19 @@ pub const Table = struct {
         if (!self.isOwnerThread()) return error.WrongRuntimeThread;
     }
 
-    /// noinline: the cached-gettid TLS probe inside `getCurrentId` is
-    /// speculatable, so when this inlines into a caller that only asserts on a
-    /// dynamic-id arm (releaseObjectDefinition), LLVM hoists the probe above
-    /// the standard-id early-out — putting 6 dead instructions on every
-    /// object-destroy tail. All callers are mutation/registration paths where
-    /// one call is noise.
-    pub noinline fn assertOwnerThread(self: *const Table) void {
+    /// ReleaseFast compiles this to a no-op: the body is an explicit `@panic`,
+    /// not `std.debug.assert`, so it used to survive `-Dzjs_ownership_audit=off`
+    /// production builds (that flag only gates atom-slot quarantine). The
+    /// gettid TLS probe then showed up on every GC `markPayload` and on
+    /// mutation tails. ReleaseSafe/Debug keep the panic. `noinline` on the
+    /// checked arm still stops LLVM hoisting gettid above a standard-id
+    /// early-out (releaseObjectDefinition).
+    pub inline fn assertOwnerThread(self: *const Table) void {
+        if (comptime !std.debug.runtime_safety) return;
+        assertOwnerThreadChecked(self);
+    }
+
+    noinline fn assertOwnerThreadChecked(self: *const Table) void {
         if (!self.isOwnerThread()) @panic("class table mutation from non-owner Runtime thread");
     }
 
