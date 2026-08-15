@@ -1654,6 +1654,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     // Skip leaf arms (they overlay resume on native_caller) and
                     // attach Function.prototype.apply as D8-L1 native_caller.
                     if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
+                        @branchHint(.unlikely);
                         const target = resolved.bind(receiver, method);
                         return pushAndEnterApplyForward(vb, vm, &target, region_start, argc);
                     }
@@ -1971,7 +1972,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
         // proto lookup / second poll (E1–E6).
         if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
             if (site.kind == .constructor and
-                small_inline.applyForwardTakeOk(vm.rt, vm.global, site, func))
+                small_inline.applyForwardTakeOk(vm.rt, vm.global, vm.function, site, func))
             {
                 exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
                     if (!constructorRegionRecover(vm, region_base, err)) return .threw;
@@ -1980,16 +1981,16 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                 entry_polled = true;
                 if (small_inline.tryFusedConstructor(vm.rt, site, func)) |instance| {
                     const live_code = vm.function.byteCodeAssumeMaterialized();
-                    if (small_inline.windowFits(vm.frame, site) and site.pc_lo < live_code.len) {
+                    if (small_inline.windowFits(vm.frame, vm.function, site) and site.pc_lo < live_code.len) {
                         small_inline.probe_prep += 1;
                         small_inline.probe_take += 1;
                         const fused_args = (region_start + 2)[0..argc];
                         vm.frame.pc += 2;
-                        small_inline.installInlineWindow(vm.frame, site, instance, fused_args, vm.rt);
+                        small_inline.installInlineWindow(vm.frame, vm.function, site, instance, fused_args, vm.rt);
                         small_inline.releaseCtorTakeRegion(
                             vm.rt,
                             region_start[0..total],
-                            small_inline.consumedArgSlots(site),
+                            small_inline.consumedArgSlots(vm.function, site),
                         );
                         vm.stack.setLen(region_base);
                         vm.code_base = live_code.ptr;
@@ -2056,19 +2057,19 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     return coldNext(vb, vm);
                 },
                 .instance => |instance| {
-                    small_inline.probe_prep += 1;
                     const callee_fb = candidate.resolved.fb;
                     if (small_inline.findInlinedSite(vm.function, call_pc)) |site| {
+                        small_inline.probe_prep += 1;
                         if (site.kind == .constructor and small_inline.calleeMatches(site, func) and
-                            small_inline.windowFits(vm.frame, site) and
-                            small_inline.applyForwardTakeOk(vm.rt, vm.global, site, func))
+                            small_inline.windowFits(vm.frame, vm.function, site) and
+                            small_inline.applyForwardTakeOk(vm.rt, vm.global, vm.function, site, func))
                         {
                             small_inline.probe_take += 1;
-                            small_inline.installInlineWindow(vm.frame, site, instance, args, vm.rt);
+                            small_inline.installInlineWindow(vm.frame, vm.function, site, instance, args, vm.rt);
                             small_inline.releaseCtorTakeRegion(
                                 vm.rt,
                                 region_start[0..total],
-                                small_inline.consumedArgSlots(site),
+                                small_inline.consumedArgSlots(vm.function, site),
                             );
                             vm.stack.setLen(region_base);
                             vm.frame.pc = site.pc_lo;
