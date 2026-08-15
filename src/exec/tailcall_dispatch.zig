@@ -5619,7 +5619,7 @@ const cold_built = colds.buildTable(specials, false);
 const cold_table: [256]Handler = cold_built.table;
 /// Wave-22: exported so the three type-test coldStd leaves stay in the
 /// island at their v2.1 source order (240/242/243 slots are fusion now).
-export const zjs_w22_island_keep: [3]Handler = cold_built.keep;
+export const zjs_w22_island_keep: [7]Handler = cold_built.keep;
 // O1 exact-args leaf cold constructors. Defined AFTER the handler cluster
 // so their machine code lands past the established opcode bodies: inserting
 // them mid-cluster shifted every subsequent handler address and reproducibly
@@ -6017,6 +6017,71 @@ pub fn op_get_loc2_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
 pub fn op_get_loc2_field2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
     vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc2) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `push_0` then musttail `or`. Leftover B stays.
+pub fn op_push_0_or(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = JSValue.int32(0);
+    return @call(.always_tail, opBinary(.bor), .{ pc + 1, sp + 1, var_buf, vm });
+}
+
+pub fn op_push_0_or_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    sp[0] = JSValue.int32(0);
+    vm.stack.setTopPtr(sp + 1);
+    vm.frame.pc += 1;
+    return coldNext(var_buf, vm);
+}
+
+/// `sar` then musttail `get_array_el`. Leftover B stays.
+pub fn op_sar_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
+        return @call(.always_tail, op_sar_get_array_el_cold, .{ pc, sp, var_buf, vm });
+    (sp - 2)[0].setInt32AssumeInt(ints.lhs >> @intCast(ints.rhs & 31));
+    return @call(.always_tail, op_get_array_el, .{ pc + 1, sp - 1, var_buf, vm });
+}
+
+pub fn op_sar_get_array_el_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.sar, vm.output, vm.global) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `push_2` then musttail leftover `sar`. If leftover was re-fused to
+/// `sar_get_array_el`, enter that handler — never original `sar` with a
+/// fused `pc[0]` (B-miss would `cold_table[fused]` and re-pay A).
+pub fn op_push_2_sar(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = JSValue.int32(2);
+    if (pc[1] == op.sar_get_array_el)
+        return @call(.always_tail, op_sar_get_array_el, .{ pc + 1, sp + 1, var_buf, vm });
+    return @call(.always_tail, opBinary(.sar), .{ pc + 1, sp + 1, var_buf, vm });
+}
+
+pub fn op_push_2_sar_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    sp[0] = JSValue.int32(2);
+    vm.stack.setTopPtr(sp + 1);
+    vm.frame.pc += 1;
+    return coldNext(var_buf, vm);
+}
+
+/// `get_loc8` then musttail leftover `push_2`. Re-fused leftover enters
+/// `push_2_sar` so a later `sar` miss never sees a fused `pc[0]`.
+inline fn tailPush2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
+    if (pc[2] == op.push_2_sar)
+        return @call(.always_tail, op_push_2_sar, .{ pc + 2, sp, var_buf, vm });
+    return @call(.always_tail, op_push_small, .{ pc + 2, sp, var_buf, vm });
+}
+
+pub fn op_get_loc8_push_2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = value_slot.loadOwned(&var_buf[pc[1]]);
+    return tailPush2(pc, sp + 1, var_buf, vm);
+}
+
+pub fn op_get_loc8_push_2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc8) catch |e| return vm.fail(e);
     return coldNext(var_buf, vm);
 }
 

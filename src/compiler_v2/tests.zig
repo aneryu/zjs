@@ -3193,6 +3193,43 @@ test "compiler_v2.fuse: get_loc2_field2 emit and execute" {
     );
 }
 
+test "compiler_v2.fuse: push_0_or emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { return (1 | 0) + (2 | 0); })();",
+        3,
+        &.{qop.push_0_or},
+    );
+}
+
+test "compiler_v2.fuse: sar_get_array_el emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var a = [9, 8, 7]; return a[4 >> 1]; })();",
+        7,
+        &.{qop.sar_get_array_el},
+    );
+}
+
+test "compiler_v2.fuse: push_2_sar emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { return 8 >> 2; })();",
+        2,
+        &.{qop.push_2_sar},
+    );
+}
+
+test "compiler_v2.fuse: get_loc8_push_2 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function () {
+        \\    var a=0,b=0,c=0,d=0,e=8;
+        \\    var keep = a + b + c + d;
+        \\    return (e >> 2) + keep * 0;
+        \\})();
+    ,
+        2,
+        &.{qop.get_loc8_push_2},
+    );
+}
+
 test "compiler_v2.fuse: eq_if_false8 emit and execute" {
     try v2CompileRunAndCount(
         "(function () { var x = 1; if (x == 1) return 4; return 0; })();",

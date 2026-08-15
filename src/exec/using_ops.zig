@@ -91,6 +91,22 @@ pub noinline fn execVm(
             try value_vm.typeOfIsFunction(ctx.runtime, stack);
             return .done;
         },
+        bytecode.opcode.using_sub.insert4 => {
+            try value_vm.insert4(ctx, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.rot5l => {
+            try value_vm.rot5l(ctx, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.perm5 => {
+            try value_vm.perm5(ctx, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.dup2 => {
+            try value_vm.dup2(ctx, stack);
+            return .done;
+        },
         else => error.InvalidBytecode,
     };
 }

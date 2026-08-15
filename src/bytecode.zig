@@ -114,20 +114,24 @@ pub const opcode = struct {
         pub const nip1: u8 = 16;
         pub const dup: u8 = 17;
         pub const dup1: u8 = 18;
-        pub const dup2: u8 = 19;
+        /// Fusion v4 (using-prefix reclaim of zoo-cold `dup2`). `push_0` + leftover `or`.
+        pub const push_0_or: u8 = 19;
         pub const dup3: u8 = 20;
         pub const insert2: u8 = 21;
         pub const insert3: u8 = 22;
-        pub const insert4: u8 = 23;
+        /// Fusion v4 (using-prefix reclaim). `push_2` + leftover `sar`.
+        pub const push_2_sar: u8 = 23;
         pub const perm3: u8 = 24;
         pub const perm4: u8 = 25;
-        pub const perm5: u8 = 26;
+        /// Fusion v4 (using-prefix reclaim). `sar` + leftover `get_array_el`.
+        pub const sar_get_array_el: u8 = 26;
         pub const swap: u8 = 27;
         pub const swap2: u8 = 28;
         pub const rot3l: u8 = 29;
         pub const rot3r: u8 = 30;
         pub const rot4l: u8 = 31;
-        pub const rot5l: u8 = 32;
+        /// Fusion v4 (using-prefix reclaim). `get_loc8` + leftover `push_2`.
+        pub const get_loc8_push_2: u8 = 32;
         pub const call_constructor: u8 = 33;
         pub const call: u8 = 34;
         pub const tail_call: u8 = 35;
@@ -423,6 +427,11 @@ pub const opcode = struct {
         pub const is_undefined: u8 = 3;
         pub const typeof_is_undefined: u8 = 4;
         pub const typeof_is_function: u8 = 5;
+        /// Reclaimed zoo-cold shorts (were ids 23/32/26/19) for fusion v4.
+        pub const insert4: u8 = 6;
+        pub const rot5l: u8 = 7;
+        pub const perm5: u8 = 8;
+        pub const dup2: u8 = 9;
         pub const add_base: u8 = 16;
 
         pub fn add(hint: u8) u8 {
@@ -444,6 +453,9 @@ pub const opcode = struct {
                 dispose => 1,
                 dispose_throw => 2,
                 is_undefined, typeof_is_undefined, typeof_is_function => 1,
+                insert4 => 4,
+                rot5l, perm5 => 5,
+                dup2 => 2,
                 else => 0,
             };
         }
@@ -455,6 +467,8 @@ pub const opcode = struct {
                 dispose => 1,
                 dispose_throw => 1,
                 is_undefined, typeof_is_undefined, typeof_is_function => 1,
+                insert4, rot5l, perm5 => 5,
+                dup2 => 4,
                 else => 0,
             };
         }
@@ -484,20 +498,20 @@ pub const opcode = struct {
         .{ .name = "nip1", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [16] id 16
         .{ .name = "dup", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [17] id 17
         .{ .name = "dup1", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [18] id 18
-        .{ .name = "dup2", .size = 1, .n_pop = 2, .n_push = 4, .fmt = .none }, // [19] id 19
+        .{ .name = "push_0_or", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [19] id 19
         .{ .name = "dup3", .size = 1, .n_pop = 3, .n_push = 6, .fmt = .none }, // [20] id 20
         .{ .name = "insert2", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [21] id 21
         .{ .name = "insert3", .size = 1, .n_pop = 3, .n_push = 4, .fmt = .none }, // [22] id 22
-        .{ .name = "insert4", .size = 1, .n_pop = 4, .n_push = 5, .fmt = .none }, // [23] id 23
+        .{ .name = "push_2_sar", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [23] id 23
         .{ .name = "perm3", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [24] id 24
         .{ .name = "perm4", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [25] id 25
-        .{ .name = "perm5", .size = 1, .n_pop = 5, .n_push = 5, .fmt = .none }, // [26] id 26
+        .{ .name = "sar_get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [26] id 26
         .{ .name = "swap", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [27] id 27
         .{ .name = "swap2", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [28] id 28
         .{ .name = "rot3l", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [29] id 29
         .{ .name = "rot3r", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [30] id 30
         .{ .name = "rot4l", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [31] id 31
-        .{ .name = "rot5l", .size = 1, .n_pop = 5, .n_push = 5, .fmt = .none }, // [32] id 32
+        .{ .name = "get_loc8_push_2", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [32] id 32
         .{ .name = "call_constructor", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [33] id 33
         .{ .name = "call", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .npop }, // [34] id 34
         .{ .name = "tail_call", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .npop }, // [35] id 35
