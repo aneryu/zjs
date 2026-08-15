@@ -347,6 +347,15 @@ pub const opcode = struct {
         /// Same encoding as `call_method` (u16 argc). Never emitted by the
         /// parser; specialized copies only.
         pub const call_method_apply_fwd: u8 = 248;
+        /// Emit-time fusion: `get_loc0` + `get_field`. Size/stack match
+        /// `get_loc0`; the following `get_field` stays in the stream.
+        pub const get_loc0_field: u8 = 249;
+        /// Emit-time fusion: `lt` + `if_false8`. Size/stack match `lt`;
+        /// the following `if_false8` stays in the stream (poll lives there).
+        pub const cmp_if_false8: u8 = 250;
+        /// Emit-time fusion: `inc_loc` + `goto8`. Size/stack match `inc_loc`;
+        /// the following `goto8` stays in the stream (poll lives there).
+        pub const inc_loc_goto8: u8 = 251;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -377,7 +386,7 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 249;
+        pub const op_count: u16 = 252;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -386,7 +395,7 @@ pub const opcode = struct {
         pub const op_temp_count: u8 = 19;
     };
 
-    pub const op_info_len: usize = 268;
+    pub const op_info_len: usize = 271;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -659,6 +668,9 @@ pub const opcode = struct {
         .{ .name = "using_dispose_stack", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [265] id 246
         .{ .name = "using_dispose_stack_for_throw", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [266] id 247
         .{ .name = "call_method_apply_fwd", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [267] id 248
+        .{ .name = "get_loc0_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [268] id 249
+        .{ .name = "cmp_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [269] id 250
+        .{ .name = "inc_loc_goto8", .size = 2, .n_pop = 0, .n_push = 0, .fmt = .loc8 }, // [270] id 251
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's

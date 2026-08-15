@@ -131,6 +131,54 @@ test "eval lazily materializes a bare core context global before root closure co
     try std.testing.expect(ctx.global != null);
 }
 
+test "fused cmp_if_false8 interrupt poll stays uncatchable in a for loop" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\globalThis.__fuse_n = 0;
+        \\globalThis.__fuse_spin = function () {
+        \\    for (var i = 0; i < 1000000000; i++) {
+        \\        __fuse_n = i;
+        \\    }
+        \\    return 1;
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const spin_key = try js.runtime.internAtom("__fuse_spin");
+    defer js.runtime.atoms.free(spin_key);
+    const n_key = try js.runtime.internAtom("__fuse_n");
+    defer js.runtime.atoms.free(n_key);
+    const spin = try global.getProperty(spin_key);
+    defer spin.free(js.runtime);
+
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+    js.context.interrupt_counter = 8;
+
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            spin,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expect(js.context.exceptionIsUncatchable());
+    const exception = js.context.takeException();
+    exception.free(js.runtime);
+    try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
 test "interrupt budget survives Machine replacement and bypasses catch markers" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

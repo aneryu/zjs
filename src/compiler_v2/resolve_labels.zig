@@ -3106,6 +3106,43 @@ const Resolver = struct {
         cfg.recordFinalBoundaryHops(live_group_count);
     }
 
+    /// Size-preserving emit-time fusion. Rewrites A in place when the next
+    /// instruction is the partner and is not a jump target. `noinline` keeps
+    /// this off the packed-finalizer inliner (QCP-1B).
+    noinline fn fuseShortPairs(self: *Resolver) void {
+        const code = self.output[0..self.output_len];
+        var position: u32 = 0;
+        while (position < self.output_len) {
+            const a = code[position];
+            const info = opcode.finalCompactInfo(a) orelse break;
+            if (info.size == 0 or info.size > self.output_len - position) break;
+            const b_pos = position + info.size;
+            if (b_pos >= self.output_len) break;
+            const b = code[b_pos];
+            const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
+                op.get_loc0_field
+            else if (a == op.lt and b == op.if_false8)
+                op.cmp_if_false8
+            else if (a == op.inc_loc and b == op.goto8)
+                op.inc_loc_goto8
+            else
+                null;
+            if (fused) |fused_op| {
+                if (!self.isLabelAddress(b_pos)) {
+                    self.output[position] = fused_op;
+                }
+            }
+            position = b_pos;
+        }
+    }
+
+    fn isLabelAddress(self: *const Resolver, pc: u32) bool {
+        for (self.addr) |addr| {
+            if (addr == pc) return true;
+        }
+        return false;
+    }
+
     fn validateFinalSources(self: *const Resolver) Error!void {
         var previous_pc: u32 = 0;
         for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
@@ -3229,6 +3266,10 @@ fn runImpl(
         defer stability.deinit(resolver.memory);
         try resolver.relaxJumps();
         resolver.reportAnchorCoincidence(&stability);
+        // After shorts exist (`get_loc0`, `if_false8`, `goto8`). Size-preserving
+        // rewrite of A only; B stays so exception pc / poll stay on B.
+        // Independent stage: do not fold into packed finalize (QCP-1B).
+        resolver.fuseShortPairs();
     }
     if (comptime cfg.audit_oracles) try resolver.auditFinalBoundaryIdentity();
     if (comptime packed_finalize_validates_code) {
