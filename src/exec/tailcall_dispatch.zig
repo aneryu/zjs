@@ -3228,6 +3228,46 @@ pub fn op_get_loc0_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return coldNext(var_buf, vm);
 }
 
+/// `get_loc2` then musttail `op_get_field`. Same contract as `get_loc0_field`.
+pub fn op_get_loc2_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    sp[0] = value_slot.loadOwned(&var_buf[2]);
+    return @call(.always_tail, op_get_field, .{ pc + 1, sp + 1, var_buf, vm });
+}
+
+pub fn op_get_loc2_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc2) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// get_field2, then `b` into `op_call_method` (7a378c71: share the
+/// empty-leaf / exact-args / simple_inline / pushExactSimple /
+/// nativeMethodFastDispatch chain; leftover B is still `call_method`).
+pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (!receiver.isObject())
+        return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
+    var absent = false;
+    if (vm_property_field.qjsGetFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
+        const value = loadValueAsIntPair(slot);
+        _ = value.dup();
+        storeValueAsIntPair(&sp[0], value);
+        return @call(.always_tail, op_call_method, .{ pc + 5, sp + 1, var_buf, vm });
+    }
+    if (absent) {
+        sp[0] = JSValue.undefinedValue();
+        return @call(.always_tail, op_call_method, .{ pc + 5, sp + 1, var_buf, vm });
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+pub fn op_get_field2_call_method_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    _ = vm_property_field.field(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, op.get_field2_call_method) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
 fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
@@ -5017,6 +5057,41 @@ pub fn op_cmp_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
         }
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+/// `eq` then musttail `op_if_false8`. Int32 hit stays on this leaf and
+/// `b`s into the one `op_if_false8` (poll lives there). Every other
+/// shape shares `opCompare(eq)` — the same nine-arm body unfused `eq`
+/// uses — which `cont`s onto leftover B. Sending those shapes through
+/// `eq_if_false8_cold`/`compareAt` was the wave-21 richards +579M tax
+/// (misattributed to 245). 246 is not in this repair.
+pub fn op_eq_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    if ((sp - 2)[0].asInt32()) |a| {
+        if ((sp - 1)[0].asInt32()) |b| {
+            (sp - 2)[0] = JSValue.boolean(a == b);
+            return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
+        }
+    }
+    return @call(.always_tail, opCompare(op.eq), .{ pc, sp, var_buf, vm });
+}
+
+pub fn op_eq_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) {
+        vm.publish(pc, sp);
+        _ = arith_vm.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, op.eq, vm.output, vm.global) catch |e| return vm.fail(e);
+        return coldNext(var_buf, vm);
+    }
+    const lhs = (sp - 2)[0];
+    const rhs = (sp - 1)[0];
+    vm.syncPc(pc, 1);
+    const result = arith_vm.compareAt(op.eq, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
+        vm.publish(pc, sp - 2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    };
+    (sp - 2)[0] = result;
+    return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
 }
 
 /// Slow `lt` then musttail `op_if_false8`. Indirect from the hot fused

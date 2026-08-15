@@ -339,10 +339,19 @@ pub const opcode = struct {
         pub const is_null: u8 = 241;
         pub const typeof_is_undefined: u8 = 242;
         pub const typeof_is_function: u8 = 243;
-        pub const using_create_stack: u8 = 244;
-        pub const using_add_resource: u8 = 245;
-        pub const using_dispose_stack: u8 = 246;
-        pub const using_dispose_stack_for_throw: u8 = 247;
+        /// zjs-only ERM prefix. Operand is `using_sub` (create/dispose/
+        /// dispose_throw, or `add_base+hint`). Frees 245–247 for fusion v2.
+        pub const using: u8 = 244;
+        /// Emit-time fusion: `get_field2` + `call_method`. Size/stack match
+        /// `get_field2`; the following `call_method` stays in the stream (poll
+        /// lives in `op_call_method`).
+        pub const get_field2_call_method: u8 = 245;
+        /// Emit-time fusion: `get_loc2` + `get_field`. Size/stack match
+        /// `get_loc2`; the following `get_field` stays in the stream.
+        pub const get_loc2_field: u8 = 246;
+        /// Emit-time fusion: `eq` + `if_false8`. Size/stack match `eq`;
+        /// the following `if_false8` stays in the stream (poll lives there).
+        pub const eq_if_false8: u8 = 247;
         /// zjs-only: L1 rewritten `this.m.apply(this, arguments)` site.
         /// Same encoding as `call_method` (u16 argc). Never emitted by the
         /// parser; specialized copies only.
@@ -399,6 +408,46 @@ pub const opcode = struct {
         pub const op_temp_end: u8 = 197;
         /// Number of temp opcodes (= short-entry shift in `opcode_info`).
         pub const op_temp_count: u8 = 19;
+    };
+
+    /// Operand of `op.using` (244). `add_base + DisposalHint` is add_resource.
+    pub const using_sub = struct {
+        pub const create: u8 = 0;
+        pub const dispose: u8 = 1;
+        pub const dispose_throw: u8 = 2;
+        pub const add_base: u8 = 16;
+
+        pub fn add(hint: u8) u8 {
+            return add_base + hint;
+        }
+
+        pub fn isAdd(sub: u8) bool {
+            return sub >= add_base;
+        }
+
+        pub fn addHint(sub: u8) u8 {
+            return sub - add_base;
+        }
+
+        pub fn stackPop(sub: u8) u8 {
+            if (isAdd(sub)) return 2;
+            return switch (sub) {
+                create => 0,
+                dispose => 1,
+                dispose_throw => 2,
+                else => 0,
+            };
+        }
+
+        pub fn stackPush(sub: u8) u8 {
+            if (isAdd(sub)) return 0;
+            return switch (sub) {
+                create => 1,
+                dispose => 1,
+                dispose_throw => 1,
+                else => 0,
+            };
+        }
     };
 
     pub const op_info_len: usize = 273;
@@ -669,10 +718,10 @@ pub const opcode = struct {
         .{ .name = "is_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [260] id 241 (short, shifted)
         .{ .name = "typeof_is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [261] id 242 (short, shifted)
         .{ .name = "typeof_is_function", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [262] id 243 (short, shifted)
-        .{ .name = "using_create_stack", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [263] id 244
-        .{ .name = "using_add_resource", .size = 2, .n_pop = 2, .n_push = 0, .fmt = .u8 }, // [264] id 245
-        .{ .name = "using_dispose_stack", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [265] id 246
-        .{ .name = "using_dispose_stack_for_throw", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [266] id 247
+        .{ .name = "using", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .u8 }, // [263] id 244
+        .{ .name = "get_field2_call_method", .size = 5, .n_pop = 1, .n_push = 2, .fmt = .atom }, // [264] id 245
+        .{ .name = "get_loc2_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [265] id 246
+        .{ .name = "eq_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [266] id 247
         .{ .name = "call_method_apply_fwd", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [267] id 248
         .{ .name = "get_loc0_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [268] id 249
         .{ .name = "cmp_if_false8", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [269] id 250
@@ -7771,6 +7820,7 @@ pub const pipeline_stack_size = struct {
 
             // Compute n_pop, accounting for npop/npop_u16/npopx variable forms.
             var n_pop: u32 = meta.n_pop;
+            var n_push: u32 = meta.n_push;
             switch (meta.fmt) {
                 .npop, .npop_u16 => {
                     if (pos + 1 + 2 > bytecode.len) return error.BytecodeOverflow;
@@ -7782,11 +7832,17 @@ pub const pipeline_stack_size = struct {
                 },
                 else => {},
             }
+            if (op == opcode.op.using) {
+                if (pos + 2 > bytecode.len) return error.BytecodeOverflow;
+                const sub = bytecode[pos + 1];
+                n_pop = opcode.using_sub.stackPop(sub);
+                n_push = opcode.using_sub.stackPush(sub);
+            }
 
             if (stack_len < n_pop) {
                 return error.StackUnderflow;
             }
-            const new_stack_i32: i32 = @as(i32, stack_len) - @as(i32, @intCast(n_pop)) + @as(i32, meta.n_push);
+            const new_stack_i32: i32 = @as(i32, stack_len) - @as(i32, @intCast(n_pop)) + @as(i32, @intCast(n_push));
             if (new_stack_i32 < 0) return error.StackUnderflow;
             if (new_stack_i32 > JS_STACK_SIZE_MAX) return error.StackOverflow;
             stack_len = @intCast(new_stack_i32);

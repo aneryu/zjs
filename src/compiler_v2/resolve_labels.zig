@@ -705,7 +705,8 @@ const Resolver = struct {
 
     noinline fn maybeFusePrev(self: *Resolver, b: u8) void {
         const a = self.last_op orelse return;
-        const a_sz: u32 = if (a == op.put_loc8) 2 else 1;
+        const a_sz: u32 = opcode.sizeOf(a);
+        if (a_sz == 0) return;
         if (self.output_len != self.last_pc + a_sz) return;
         if (self.output_len == self.last_bound_output) return;
         const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
@@ -718,6 +719,12 @@ const Resolver = struct {
             op.push_this_put_loc0
         else if (a == op.put_loc0 and b == op.get_loc0)
             op.put_loc0_get_loc0
+        else if (a == op.get_field2 and b == op.call_method)
+            op.get_field2_call_method
+        else if (a == op.get_loc2 and b == op.get_field)
+            op.get_loc2_field
+        else if (a == op.eq and b == op.if_false8)
+            op.eq_if_false8
         else
             null;
         if (fused) |fused_op|
@@ -1620,13 +1627,13 @@ const Resolver = struct {
                 const pc = self.output_len;
                 if (comptime layout == .short) {
                     if (short_op == op.get_loc8 or short_op == op.put_loc0 or
-                        short_op == op.get_loc0)
+                        short_op == op.get_loc0 or short_op == op.get_loc2)
                         self.maybeFusePrev(short_op);
                 }
                 try self.appendByte(short_op);
                 if (comptime layout == .short) {
                     if (short_op == op.get_loc0 or short_op == op.put_loc8 or
-                        short_op == op.put_loc0)
+                        short_op == op.put_loc0 or short_op == op.get_loc2)
                         self.noteFusionA(short_op, pc);
                 }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
@@ -1892,12 +1899,15 @@ const Resolver = struct {
         } else {
             const first = self.code[position];
             if (comptime layout == .short) {
-                if (first == op.get_field) self.maybeFusePrev(op.get_field);
+                if (first == op.get_field or first == op.call_method)
+                    self.maybeFusePrev(first);
             }
             const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
             if (comptime layout == .short) {
-                if (first == op.lt or first == op.push_this) self.noteFusionA(first, pc);
+                if (first == op.lt or first == op.push_this or
+                    first == op.get_field2 or first == op.eq)
+                    self.noteFusionA(first, pc);
             }
         }
         try self.consumeInstructionAtom(position, instruction, true);
@@ -2895,9 +2905,12 @@ const Resolver = struct {
             // cmp_if_false8 here instead of rescanning the whole stream.
             if (new_op == op.if_false8 and jump.pos >= 2) {
                 const a_pc = jump.pos - 2;
-                if (self.output[a_pc] == op.lt and
-                    !self.isLabelAddress(jump.pos - 1))
-                    self.output[a_pc] = op.cmp_if_false8;
+                if (!self.isLabelAddress(jump.pos - 1)) {
+                    if (self.output[a_pc] == op.lt)
+                        self.output[a_pc] = op.cmp_if_false8
+                    else if (self.output[a_pc] == op.eq)
+                        self.output[a_pc] = op.eq_if_false8;
+                }
             }
             const tail_len: usize = @intCast(self.output_len - source_start);
             std.mem.copyForwards(

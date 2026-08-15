@@ -401,7 +401,7 @@ fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
     return switch (opc) {
         op.get_loc0, op.put_loc0, op.get_loc0_field, op.put_loc0_get_loc0 => 0,
         op.get_loc1, op.put_loc1 => 1,
-        op.get_loc2, op.put_loc2 => 2,
+        op.get_loc2, op.put_loc2, op.get_loc2_field => 2,
         op.get_loc3, op.put_loc3 => 3,
         op.get_loc8, op.put_loc8, op.put_loc8_get_loc8 => src[pc + 1],
         op.get_loc, op.put_loc => std.mem.readInt(u16, src[pc + 1 ..][0..2], .little),
@@ -418,7 +418,7 @@ fn isPutLoc(opc: u8) bool {
 
 fn isGetLoc(opc: u8) bool {
     return switch (opc) {
-        op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.get_loc8, op.get_loc, op.get_loc0_field => true,
+        op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.get_loc8, op.get_loc, op.get_loc0_field, op.get_loc2_field => true,
         else => false,
     };
 }
@@ -515,9 +515,11 @@ fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
                 }
             }
         }
-        if (opc == op.get_field or opc == op.get_field2) {
+        if (opc == op.get_field or opc == op.get_field2 or opc == op.get_field2_call_method) {
             const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (atom_id == core.atom.ids.apply and opc == op.get_field2) {
+            if (atom_id == core.atom.ids.apply and
+                (opc == op.get_field2 or opc == op.get_field2_call_method))
+            {
                 if (apply_get_pc != null) return null;
                 apply_get_pc = pc;
                 if (prev_op != op.get_field) return null;
@@ -800,6 +802,9 @@ fn rewriteBody(
             },
             op.get_loc0_field => {
                 if (!emitLocOp(&out, true, var_base + 0)) return null;
+            },
+            op.get_loc2_field => {
+                if (!emitLocOp(&out, true, var_base + 2)) return null;
             },
             op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc0_get_loc0 => {
                 const idx: u16 = if (opc == op.put_loc0_get_loc0) 0 else @intCast(opc - op.put_loc0);

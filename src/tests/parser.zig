@@ -1289,9 +1289,11 @@ fn semanticOpcodeForTest(op_id: u8) u8 {
         op.push_empty_string => op.push_atom_value,
         op.get_loc8 => op.get_loc,
         op.put_loc8, op.put_loc8_get_loc8, op.put_loc0_get_loc0 => op.put_loc,
-        op.get_loc0_field => op.get_loc,
+        op.get_loc0_field, op.get_loc2_field => op.get_loc,
         op.push_this_put_loc0 => op.push_this,
         op.cmp_if_false8 => op.lt,
+        op.eq_if_false8 => op.eq,
+        op.get_field2_call_method => op.get_field2,
         op.set_loc8 => op.set_loc,
         op.get_length => op.get_field,
         op.if_false8 => op.if_false,
@@ -2814,7 +2816,7 @@ test "F4: length call consumer preserves get_field2 and its atom operand" {
     var fn_bc = try parseExpr(&env, "a.length()");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.call_method });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2_call_method, op.call_method });
     try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 4));
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 8));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
@@ -3197,7 +3199,7 @@ test "F4: optional length call consumer preserves get_field2 and its atom operan
         op.drop,
         op.undefined,
         op.return_undef,
-        op.get_field2,
+        op.get_field2_call_method,
         op.call_method,
     });
     try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
