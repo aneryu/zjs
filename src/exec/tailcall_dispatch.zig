@@ -3240,26 +3240,11 @@ pub fn op_get_loc2_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return coldNext(var_buf, vm);
 }
 
-/// Thin `get_field2` hit, then `b` into the X-89 one-copy admission
-/// (`op_tail_call_method == op_call_method`, 7a378c71). Wave-21 cloned
-/// the call half into this leaf (`var absent` + a same-TU musttail that
-/// LLVM inlined) and richards methods left the empty-leaf / exact-args /
-/// simple_inline / nativeMethodFastDispatch chain — insn +579M / +2.84%.
-/// Poll stays inside `op_call_method`. Primitive / miss / exotic finish
-/// get_field2 in cold and `coldNext` onto leftover B (same function).
-/// 246/247 are not in this repair.
-pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    const receiver = (sp - 1)[0];
-    if (!receiver.isObject())
-        return @call(.always_tail, op_get_field2_call_method_cold, .{ pc, sp, var_buf, vm });
-    const atom_id = readInt(u32, pc + 1);
-    const slot = vm_property_field.qjsGetFieldFastSlot(vm.ctx.runtime, receiver, atom_id) orelse
-        return @call(.always_tail, op_get_field2_call_method_cold, .{ pc, sp, var_buf, vm });
-    const value = loadValueAsIntPair(slot);
-    _ = value.dup();
-    storeValueAsIntPair(&sp[0], value);
-    return @call(.always_tail, op_tail_call_method, .{ pc + 5, sp + 1, var_buf, vm });
-}
+/// X-89 v2 (7a378c71): share the existing handler, do not clone a half.
+/// 245 is `get_field2` (A); leftover B is `call_method` and already
+/// `op_call_method` / `op_tail_call_method`. `cont` from the shared
+/// get_field2 body lands on that one admission.
+pub const op_get_field2_call_method = op_get_field2;
 
 pub fn op_get_field2_call_method_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
@@ -5060,7 +5045,12 @@ pub fn op_cmp_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
-/// `eq` then musttail `op_if_false8`. Poll stays in `op_if_false8`.
+/// `eq` then musttail `op_if_false8`. Int32 hit stays on this leaf and
+/// `b`s into the one `op_if_false8` (poll lives there). Every other
+/// shape shares `opCompare(eq)` — the same nine-arm body unfused `eq`
+/// uses — which `cont`s onto leftover B. Sending those shapes through
+/// `eq_if_false8_cold`/`compareAt` was the wave-21 richards +579M tax
+/// (misattributed to 245). 246 is not in this repair.
 pub fn op_eq_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     if ((sp - 2)[0].asInt32()) |a| {
         if ((sp - 1)[0].asInt32()) |b| {
@@ -5068,7 +5058,7 @@ pub fn op_eq_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
             return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
         }
     }
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, opCompare(op.eq), .{ pc, sp, var_buf, vm });
 }
 
 pub fn op_eq_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
