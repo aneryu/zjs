@@ -3169,6 +3169,30 @@ test "compiler_v2.fuse: get_loc2_field emit and execute" {
     );
 }
 
+test "compiler_v2.fuse: get_field_field2 emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var o = { a: { m: function () { return 3; } } }; return o.a.m(); })();",
+        3,
+        &.{qop.get_field_field2},
+    );
+}
+
+test "compiler_v2.fuse: get_var_field emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { return Object.prototype ? 1 : 0; })();",
+        1,
+        &.{qop.get_var_field},
+    );
+}
+
+test "compiler_v2.fuse: get_loc2_field2 emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var a = 1, b = 2, o = { m: function () { return 8; } }; var t = a + b; return o.m() + t; })();",
+        11,
+        &.{qop.get_loc2_field2},
+    );
+}
+
 test "compiler_v2.fuse: eq_if_false8 emit and execute" {
     try v2CompileRunAndCount(
         "(function () { var x = 1; if (x == 1) return 4; return 0; })();",

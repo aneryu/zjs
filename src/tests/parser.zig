@@ -1939,7 +1939,7 @@ test "F4: null comparison lowering keeps strict folds and loose equality distinc
 
     var strict_undefined = try parseExpr(&env, "value === void 0");
     defer strict_undefined.deinit(env.rt);
-    try expectOpcodeSequence(strict_undefined.code, &.{ op.get_var, op.is_undefined });
+    try expectOpcodeSequence(strict_undefined.code, &.{ op.get_var, op.using });
 
     var strict_neq_condition = try parseStatement(&env, "if (value !== null) result;");
     defer strict_neq_condition.deinit(env.rt);
@@ -2059,20 +2059,20 @@ test "F4: typeof comparisons select final short tests at the condition boundary"
 
     var equality = try parseExpr(&env, "typeof x === \"undefined\"");
     defer equality.deinit(env.rt);
-    try expectOpcodeSequence(equality.code, &.{ op.get_var_undef, op.typeof_is_undefined });
+    try expectOpcodeSequence(equality.code, &.{ op.get_var_undef, op.using });
 
     var inequality_condition = try parseStatement(&env, "if (typeof x !== \"function\") result;");
     defer inequality_condition.deinit(env.rt);
     try expectOpcodeSequence(inequality_condition.code, &.{
         op.get_var_undef,
-        op.typeof_is_function,
+        op.using,
         op.if_true8,
         op.get_var,
         op.drop,
     });
     const branch_pc =
         engine.bytecode.opcode.sizeOf(op.get_var_undef) +
-        engine.bytecode.opcode.sizeOf(op.typeof_is_function);
+        engine.bytecode.opcode.sizeOf(op.using);
     try std.testing.expectEqual(inequality_condition.code.len, readRelTarget32(inequality_condition.code, branch_pc));
 }
 
@@ -2404,7 +2404,7 @@ test "F4: member access a.b emits get_var + get_field" {
     var fn_bc = try parseExpr(&env, "a.b");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var_field, op.get_field });
 }
 
 test "F4: index access a[i] emits get_var ; get_var ; get_array_el" {
@@ -2923,7 +2923,7 @@ test "F4: delete a.b.length rewrites optimized length load" {
     var fn_bc = try parseExpr(&env, "delete a.b.length");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field, op.push_atom_value, op.delete });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var_field, op.get_field, op.push_atom_value, op.delete });
 }
 
 test "F4: delete a[i] emits get_var a ; get_var i ; delete" {
@@ -3123,7 +3123,7 @@ test "F4: multi-level delete a.b.c rewrites only the last get_field" {
     var fn_bc = try parseExpr(&env, "delete a.b.c");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field, op.push_atom_value, op.delete });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var_field, op.get_field, op.push_atom_value, op.delete });
 }
 
 test "F4: multi-level delete a.b[i] truncates the trailing get_array_el" {
@@ -3132,7 +3132,7 @@ test "F4: multi-level delete a.b[i] truncates the trailing get_array_el" {
     var fn_bc = try parseExpr(&env, "delete a.b[i]");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field, op.get_var, op.delete });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var_field, op.get_field, op.get_var, op.delete });
 }
 
 test "F4: delete on a postfix update result evaluates and returns true" {

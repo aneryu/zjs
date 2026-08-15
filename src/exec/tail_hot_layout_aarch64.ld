@@ -1,7 +1,10 @@
 /*
  * L-1 structural cluster: every dispatch Handler lives in
- * `.text.zjs.op_handlers`. Source order (object-file emission) is the
- * order. Pull the section out of `.text` as one page-aligned island so
+ * `.text.zjs.op_handlers`. Source order is the order inside that
+ * subsection. New handlers MUST use `.text.zjs.op_handlers.tail`
+ * (KEEP'd after the main island) so they cannot slide established
+ * offsets (wave-22 / R6-K). Pull the section out of `.text` as one
+ * page-aligned island so
  * get_arg0..3 are no longer pinned a megabyte away from the loc/arith
  * bodies (R6-F: that pin alone made the zlib 27-op set span 269 pages).
  *
