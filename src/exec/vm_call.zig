@@ -588,8 +588,10 @@ pub noinline fn tailCall(
     const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
     // Inline is allowed so JS→JS tails stay on the same Machine (qjs nested
-    // JS_CallInternal). The dispatch `.tail` arm must pushCall, not
-    // tailCallReuse: reuse would drop the caller from Error.stack.
+    // JS_CallInternal). a4a301e0 forced allow_inline=false and broke
+    // machine_inits==1 (forEach/JSON reviver `return helper()`). The
+    // dispatch `.tail` arm must still pushCall, not tailCallReuse: reuse
+    // is the H3 TCO pit (Error.stack drops outer, 20000-deep does not overflow).
     switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline, req_out)) {
         .done => {},
         .continue_loop => return .handled,
@@ -851,8 +853,9 @@ pub noinline fn tailCallMethod(
 ) !TailCallMethodResult {
     const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
-    // Same as tailCall: allow inline so JS→JS tails stay on one Machine, but
-    // the dispatch arm must pushCall (not reuse) so Error.stack keeps outer.
+    // Same as tailCall: allow inline so JS→JS tails stay on one Machine
+    // (a4a301e0's allow_inline=false broke machine_inits). Dispatch must
+    // pushCall, not reuse (H3 TCO pit).
     if (allow_inline) {
         const total = @as(usize, argc) + 2;
         if (stack.len() >= total) {

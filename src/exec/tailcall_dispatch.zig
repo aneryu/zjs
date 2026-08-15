@@ -2276,8 +2276,10 @@ fn op_tail_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linkse
             return .returned;
         },
         .tail_inline => {
-            // qjs:18195 `goto done` after nested CallInternal — keep the
-            // caller Entry (pushCall) so Error.stack still names it.
+            // qjs:18195 `goto done` after nested CallInternal. H3 CLOSED:
+            // tailCallReuse drops the caller (Error.stack / no overflow);
+            // allow_inline=false respawns a Machine (machine_inits 1→N).
+            // Same-Machine pushCall keeps the caller Entry.
             vm.tail_is_reuse = false;
             return .tail;
         },

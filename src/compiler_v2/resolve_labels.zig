@@ -2031,7 +2031,18 @@ const Resolver = struct {
                 // `tail_call`/`tail_call_method` via put_short_code(op+1, argc).
                 // Unconditional — the match sits outside `if (OPTIMIZE)`.
                 // try/finally already rewrite return to gosub+return, so they
-                // do not match. return_async (generator/async) does not match.
+                // do not match. return_undef / return_async do not match.
+                //
+                // Why this used to be locked off: 6e83f394 removed parser TCO
+                // (`rewriteTrailingCallAsTailCall`) and F5 pinned emission to 0
+                // so the QJS-aligned baseline would not emit tail_call into the
+                // then-reuse handler (zjs-only TCO). S4 then skipped this fold
+                // with a stale "zjs emits tail_call directly" comment. H3
+                // (36cf6476) reopened emission; reuse dropped Error.stack and
+                // skipped overflow (−4.46% DB); allow_inline=false (a4a301e0)
+                // broke machine_inits==1. The surviving shape is same-Machine
+                // pushCall plus the leftover return as the shared return stub
+                // (H3 CLOSED "忠实形态"). Do not flip reuse back on.
                 op.call, op.call_method => {
                     if (try self.matchReturnAfter(position_next)) |_| {
                         try self.attachSource();
@@ -2047,9 +2058,10 @@ const Resolver = struct {
                         try self.consumeInstructionAtom(position, instruction, true);
                         // Keep the following `return` (do not skipDeadCode it).
                         // zjs inline frames resume the caller at the next pc;
-                        // leaving `return` makes that resume `goto done` without
-                        // an EOF fetch. qjs fuses the return into the opcode
-                        // because JS_CallInternal + `goto done` never resumes.
+                        // leaving `return` is the H3 shared return stub
+                        // (`goto done` without an EOF fetch). qjs fuses the
+                        // return into the opcode because JS_CallInternal +
+                        // `goto done` never resumes.
                     } else {
                         try self.copyDefault(layout, position, instruction);
                     }
