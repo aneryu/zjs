@@ -482,14 +482,9 @@ const Resolver = struct {
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
     last_attached_source: ?SourcePoint = null,
-    /// qjs-shaped emit-time fusion: remember the last emitted opcode so the
-    /// next `emitOp` can rewrite A in place. No post-walk scan.
     last_op: ?u8 = null,
     last_pc: u32 = 0,
-    fuse_enabled: bool = false,
-    /// Set when `processBindsAt` binds a label to `output_len` — the next
-    /// emitted opcode is a jump target and must not be fusion B.
-    output_head_is_label: bool = false,
+    last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
         if (self.output_atoms_owned) {
@@ -703,34 +698,16 @@ const Resolver = struct {
         self.output_len += 1;
     }
 
-    /// Emit one opcode byte. Fusion is decided here against the previous
-    /// opcode (qjs `get_prev_opcode` shape) so resolve_labels does not scan
-    /// the finished stream again. Only the six pair endpoints touch `last_*`.
-    inline fn emitOp(self: *Resolver, opc: u8) Error!void {
-        if (self.fuse_enabled) {
-            switch (opc) {
-                op.get_field, op.if_false8, op.get_loc8 => self.maybeFusePrev(opc),
-                else => {},
-            }
-        }
-        const pc = self.output_len;
-        try self.appendByte(opc);
-        if (self.fuse_enabled) {
-            switch (opc) {
-                op.get_loc0, op.lt, op.put_loc8 => {
-                    self.last_pc = pc;
-                    self.last_op = opc;
-                },
-                else => {},
-            }
-        }
+    inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
+        self.last_pc = pc;
+        self.last_op = opc;
     }
 
-    fn maybeFusePrev(self: *Resolver, b: u8) void {
+    noinline fn maybeFusePrev(self: *Resolver, b: u8) void {
         const a = self.last_op orelse return;
         const a_sz: u32 = if (a == op.put_loc8) 2 else 1;
         if (self.output_len != self.last_pc + a_sz) return;
-        if (self.output_head_is_label) return;
+        if (self.output_len == self.last_bound_output) return;
         const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
             op.get_loc0_field
         else if (a == op.lt and b == op.if_false8)
@@ -1156,7 +1133,6 @@ const Resolver = struct {
     /// `== position` for the pass-over loop. That compare is then the whole
     /// per-instruction cost of the out-of-band identity table.
     inline fn processBindsAt(self: *Resolver, position: u32) Error!void {
-        self.output_head_is_label = false;
         if (position < self.next_bind_offset) return;
         return self.processBindsAtCold(position);
     }
@@ -1175,7 +1151,7 @@ const Resolver = struct {
                 return error.InvalidBytecode;
             }
             self.addr[entry.label_index] = self.output_len;
-            self.output_head_is_label = true;
+            self.last_bound_output = self.output_len;
             const slot = &self.product.label_slots[entry.label_index];
             var reloc_index = slot.first_reloc;
             var walked: u32 = 0;
@@ -1618,12 +1594,15 @@ const Resolver = struct {
     ) Error!void {
         if (layout == .short) {
             if (shortSlotOp(op_id, idx)) |short_op| {
-                if (self.fuse_enabled and
-                    (short_op == op.get_loc0 or short_op == op.put_loc8 or
-                        short_op == op.get_loc8))
-                    try self.emitOp(short_op)
-                else
-                    try self.appendByte(short_op);
+                const pc = self.output_len;
+                if (comptime layout == .short) {
+                    if (short_op == op.get_loc8) self.maybeFusePrev(op.get_loc8);
+                }
+                try self.appendByte(short_op);
+                if (comptime layout == .short) {
+                    if (short_op == op.get_loc0 or short_op == op.put_loc8)
+                        self.noteFusionA(short_op, pc);
+                }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
                     short_op == op.set_loc8)
                 {
@@ -1773,7 +1752,8 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
-                try self.emitOp(short_op);
+                if (short_op == op.if_false8) self.maybeFusePrev(op.if_false8);
+                try self.appendByte(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
                 try self.appendByte(0);
@@ -1799,7 +1779,8 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
-                try self.emitOp(short_op);
+                if (short_op == op.if_false8) self.maybeFusePrev(op.if_false8);
+                try self.appendByte(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
                 try self.appendByte(@bitCast(@as(i8, @intCast(diff))));
@@ -1882,12 +1863,13 @@ const Resolver = struct {
             );
         } else {
             const first = self.code[position];
-            if (self.fuse_enabled and (first == op.lt or first == op.get_field)) {
-                try self.emitOp(first);
-                if (instruction.size > 1)
-                    try self.appendRaw(self.code[position + 1 .. position_next]);
-            } else {
-                try self.appendRaw(self.code[position..position_next]);
+            if (comptime layout == .short) {
+                if (first == op.get_field) self.maybeFusePrev(op.get_field);
+            }
+            const pc = self.output_len;
+            try self.appendRaw(self.code[position..position_next]);
+            if (comptime layout == .short) {
+                if (first == op.lt) self.noteFusionA(op.lt, pc);
             }
         }
         try self.consumeInstructionAtom(position, instruction, true);
@@ -2006,7 +1988,6 @@ const Resolver = struct {
     }
 
     fn walk(self: *Resolver, comptime layout: LayoutMode) Error!void {
-        self.fuse_enabled = layout == .short;
         try self.emitFunctionPrologue(layout);
 
         var position: u32 = 0;
