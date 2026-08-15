@@ -925,7 +925,7 @@ const Resolver = struct {
                         // alone turns it into a displacement.
                         const defined_label = try self.newProductLabel();
                         try self.emitAtomWide(op.get_field2, gv.var_name);
-                        try self.emitInstruction(&.{op.is_undefined}, null);
+                        try self.emitInstruction(&.{ op.using, opcode.using_sub.is_undefined }, null);
                         try self.emitProductJump(op.if_false, defined_label);
                         try self.emitInstruction(&.{op.undefined}, null);
                         try self.emitAtomWide(op.define_field, gv.var_name);

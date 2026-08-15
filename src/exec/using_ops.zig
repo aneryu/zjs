@@ -8,6 +8,7 @@ const stack_mod = @import("stack.zig");
 const call_runtime = @import("call_runtime.zig");
 const disposable_ops = @import("disposable_ops.zig");
 const promise_ops = @import("promise_ops.zig");
+const value_vm = @import("vm_value.zig");
 
 pub const Step = enum {
     done,
@@ -78,6 +79,18 @@ pub noinline fn execVm(
         bytecode.opcode.using_sub.create => createStackVm(ctx, global, stack, frame, catch_target, output),
         bytecode.opcode.using_sub.dispose => disposeStackVm(ctx, output, global, stack, frame, catch_target, .normal),
         bytecode.opcode.using_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
+        bytecode.opcode.using_sub.is_undefined => {
+            try value_vm.isUndefined(ctx.runtime, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.typeof_is_undefined => {
+            try value_vm.typeOfIsUndefined(ctx.runtime, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.typeof_is_function => {
+            try value_vm.typeOfIsFunction(ctx.runtime, stack);
+            return .done;
+        },
         else => error.InvalidBytecode,
     };
 }

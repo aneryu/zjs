@@ -12433,7 +12433,7 @@ pub const parser_core = struct {
         // zjs-only explicit-resource-management lowering: the optional
         // await continuation is born and bound as a label.
         try Emitter.op(s, opcode.op.dup);
-        try Emitter.op(s, opcode.op.is_undefined);
+        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.is_undefined);
         var skip_await: Label = .{};
         try Emitter.newLabel(s, &skip_await);
         try Emitter.jump(s, opcode.op.if_true, &skip_await);
@@ -15520,7 +15520,7 @@ pub const parser_core = struct {
                             // qjs js_parse_function_decl2: keep an already-supplied
                             // argument, otherwise evaluate and store its initializer.
                             try Emitter.opU16(s, opcode.op.get_arg, @intCast(arg_index));
-                            try Emitter.op(s, opcode.op.is_undefined);
+                            try Emitter.opU8(s, opcode.op.using, opcode.using_sub.is_undefined);
                             var keep_value: Label = .{};
                             try Emitter.newLabel(s, &keep_value);
                             try Emitter.jump(s, opcode.op.if_false, &keep_value);
@@ -16451,7 +16451,7 @@ pub const parser_core = struct {
                             // qjs js_parse_function_decl2: arrow parameters use
                             // the same supplied-value/default-value merge.
                             try Emitter.opU16(s, opcode.op.get_arg, @intCast(arg_index));
-                            try Emitter.op(s, opcode.op.is_undefined);
+                            try Emitter.opU8(s, opcode.op.using, opcode.using_sub.is_undefined);
                             var keep_value: Label = .{};
                             try Emitter.newLabel(s, &keep_value);
                             try Emitter.jump(s, opcode.op.if_false, &keep_value);

@@ -241,7 +241,7 @@ pub noinline fn field(
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     switch (opc) {
-        op.get_field => {
+        op.get_field, op.get_field_field2 => {
             if (stack.len() == 0) return error.StackUnderflow;
             const top_index = stack.len() - 1;
             const receiver = stack.values[top_index];

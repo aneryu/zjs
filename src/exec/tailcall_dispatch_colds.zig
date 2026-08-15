@@ -545,26 +545,14 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             try value_vm.typeOf(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.typeof_is_undefined] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            try value_vm.typeOfIsUndefined(vm.ctx.runtime, vm.stack);
-        }
-    }.b);
-    t[op.typeof_is_function] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            try value_vm.typeOfIsFunction(vm.ctx.runtime, vm.stack);
-        }
-    }.b);
+    t[op.get_var_field] = td.op_get_var_field_cold;
+    t[op.get_loc2_field2] = td.op_get_loc2_field2_cold;
     t[op.is_undefined_or_null] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.isUndefinedOrNull(vm.ctx.runtime, vm.stack);
         }
     }.b);
-    t[op.is_undefined] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            try value_vm.isUndefined(vm.ctx.runtime, vm.stack);
-        }
-    }.b);
+    t[op.get_field_field2] = td.op_get_field_field2_cold;
     t[op.is_null] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.isNull(vm.ctx.runtime, vm.stack);
@@ -809,6 +797,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     //     frameless leaf instead of carrying the cold 128B frame on its hot path). ---
     t[op.get_loc0_field] = td.op_get_loc0_field_cold;
     t[op.get_loc2_field] = td.op_get_loc2_field_cold;
+    t[op.get_loc2_field2] = td.op_get_loc2_field2_cold;
+    t[op.get_field_field2] = td.op_get_field_field2_cold;
+    t[op.get_var_field] = td.op_get_var_field_cold;
     t[op.get_field2_call_method] = td.op_get_field2_call_method_cold;
     t[op.cmp_if_false8] = td.op_cmp_if_false8_cold;
     t[op.eq_if_false8] = td.op_eq_if_false8_cold;
@@ -950,6 +941,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
     t[op.get_loc0_field] = td.op_get_loc0_field;
     t[op.get_loc2_field] = td.op_get_loc2_field;
+    t[op.get_loc2_field2] = td.op_get_loc2_field2;
+    t[op.get_field_field2] = td.op_get_field_field2;
+    t[op.get_var_field] = td.op_get_var_field;
     t[op.get_field2_call_method] = td.op_get_field2_call_method;
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field

@@ -335,10 +335,14 @@ pub const opcode = struct {
         pub const call1: u8 = 237;
         pub const call2: u8 = 238;
         pub const call3: u8 = 239;
-        pub const is_undefined: u8 = 240;
+        /// Fusion v3 (using-prefix reclaim of the three zoo-cold type tests).
+        /// `get_field` + leftover `get_field2`. Size/stack match `get_field`.
+        pub const get_field_field2: u8 = 240;
         pub const is_null: u8 = 241;
-        pub const typeof_is_undefined: u8 = 242;
-        pub const typeof_is_function: u8 = 243;
+        /// `get_var` + leftover `get_field`. Size/stack match `get_var`.
+        pub const get_var_field: u8 = 242;
+        /// `get_loc2` + leftover `get_field2`. Size/stack match `get_loc2`.
+        pub const get_loc2_field2: u8 = 243;
         /// zjs-only ERM prefix. Operand is `using_sub` (create/dispose/
         /// dispose_throw, or `add_base+hint`). Frees 245–247 for fusion v2.
         pub const using: u8 = 244;
@@ -415,6 +419,10 @@ pub const opcode = struct {
         pub const create: u8 = 0;
         pub const dispose: u8 = 1;
         pub const dispose_throw: u8 = 2;
+        /// Reclaimed type-test shorts (were ids 240/242/243).
+        pub const is_undefined: u8 = 3;
+        pub const typeof_is_undefined: u8 = 4;
+        pub const typeof_is_function: u8 = 5;
         pub const add_base: u8 = 16;
 
         pub fn add(hint: u8) u8 {
@@ -435,6 +443,7 @@ pub const opcode = struct {
                 create => 0,
                 dispose => 1,
                 dispose_throw => 2,
+                is_undefined, typeof_is_undefined, typeof_is_function => 1,
                 else => 0,
             };
         }
@@ -445,6 +454,7 @@ pub const opcode = struct {
                 create => 1,
                 dispose => 1,
                 dispose_throw => 1,
+                is_undefined, typeof_is_undefined, typeof_is_function => 1,
                 else => 0,
             };
         }
@@ -714,10 +724,10 @@ pub const opcode = struct {
         .{ .name = "call1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [256] id 237 (short, shifted)
         .{ .name = "call2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [257] id 238 (short, shifted)
         .{ .name = "call3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [258] id 239 (short, shifted)
-        .{ .name = "is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [259] id 240 (short, shifted)
+        .{ .name = "get_field_field2", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [259] id 240
         .{ .name = "is_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [260] id 241 (short, shifted)
-        .{ .name = "typeof_is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [261] id 242 (short, shifted)
-        .{ .name = "typeof_is_function", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [262] id 243 (short, shifted)
+        .{ .name = "get_var_field", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [261] id 242
+        .{ .name = "get_loc2_field2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [262] id 243
         .{ .name = "using", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .u8 }, // [263] id 244
         .{ .name = "get_field2_call_method", .size = 5, .n_pop = 1, .n_push = 2, .fmt = .atom }, // [264] id 245
         .{ .name = "get_loc2_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [265] id 246
@@ -933,7 +943,7 @@ pub const opcode = struct {
         try std.testing.expectEqual(@as(u8, 10), sizeOfPhase1(op.with_get_var));
         try std.testing.expectEqual(sizeOf(op.get_length), sizeOfPhase1(op.get_length));
         try std.testing.expectEqual(sizeOf(op.if_false8), sizeOfPhase1(op.if_false8));
-        try std.testing.expectEqual(sizeOf(op.is_undefined), sizeOfPhase1(op.is_undefined));
+        try std.testing.expectEqual(sizeOf(op.get_field_field2), sizeOfPhase1(op.get_field_field2));
     }
 
     test "QuickJS opcode table has no host print opcode names" {
