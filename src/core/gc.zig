@@ -1404,6 +1404,24 @@ pub const Registry = struct {
         if (tracked) self.linkGcObjectTail(h);
     }
 
+    /// qjs `add_gc_object` for shapes (quickjs.c:6540): rc/kind already live
+    /// in the prefix, then heap_accounted + old_space + list_add_tail.
+    /// Shapes stay below `large_object_threshold` (8KiB); skip the large
+    /// compare, standalone size_class stamp, and isCycleCandidate test.
+    pub fn addInitializedShape(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
+        std.debug.assert(h.meta().rc == 1);
+        std.debug.assert(!h.meta().alloc_info.heap_accounted);
+        std.debug.assert(h.prev == null and h.next == null);
+        if (h.meta().alloc_info.standalone) {
+            self.addInitializedWithSizeNoFail(h, bytes);
+            return;
+        }
+        std.debug.assert(!h.meta().alloc_info.large);
+        h.meta().alloc_info.heap_accounted = true;
+        self.old_space.recordAlloc(bytes);
+        self.linkGcObjectTail(h);
+    }
+
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
         return switch (h.metaConst().flags.kind) {
             .object => @sizeOf(object.Object),

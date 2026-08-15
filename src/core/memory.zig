@@ -1107,7 +1107,10 @@ pub const MemoryAccount = struct {
     }
 
     fn checkAllocation(self: MemoryAccount, bytes: usize) !void {
-        const limit = self.limit orelse return;
+        const limit = self.limit orelse {
+            @branchHint(.likely);
+            return;
+        };
         const next = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (next > limit) return error.OutOfMemory;
     }

@@ -302,7 +302,7 @@ pub const Registry = struct {
         // `fam_bytes` was sized from the same capacity fields just stored, so
         // `@sizeOf(Shape) + fam_bytes == allocationSize()` bit-for-bit; skip
         // the recompute (registerObjectWithBytes precedent, runtime.zig).
-        try self.gc_registry.addInitializedWithSize(&shape.header, @sizeOf(Shape) + fam_bytes);
+        self.gc_registry.addInitializedShape(&shape.header, @sizeOf(Shape) + fam_bytes);
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
@@ -331,7 +331,7 @@ pub const Registry = struct {
         errdefer self.unlink(shape);
         // Same-value passthrough: fam_bytes derives from the capacity fields
         // stored above, so this equals allocationSize() bit-for-bit.
-        try self.gc_registry.addInitializedWithSize(&shape.header, @sizeOf(Shape) + fam_bytes);
+        self.gc_registry.addInitializedShape(&shape.header, @sizeOf(Shape) + fam_bytes);
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
@@ -519,7 +519,7 @@ pub const Registry = struct {
         self.gc_registry.unlinkObjectWithBytes(&old.header, old_allocation_size);
         // Registration only links/accountes the already initialized header.
         // Same-value passthrough: new_fam_bytes sized the block above.
-        self.gc_registry.addInitializedWithSize(&new_shape.header, @sizeOf(Shape) + new_fam_bytes) catch unreachable;
+        self.gc_registry.addInitializedShape(&new_shape.header, @sizeOf(Shape) + new_fam_bytes);
         if (new_shape.is_hashed) self.insertShapeHash(new_shape);
 
         // Free the OLD block's raw memory only — proto + atoms have moved.
@@ -643,7 +643,7 @@ pub const Registry = struct {
         const old_fam_bytes = old.famByteSize();
         if (old.is_hashed) self.removeShapeHash(old);
         self.gc_registry.unlinkObjectWithBytes(&old.header, @sizeOf(Shape) + old_fam_bytes);
-        self.gc_registry.addInitializedWithSize(&new_shape.header, @sizeOf(Shape) + fam_bytes) catch unreachable;
+        self.gc_registry.addInitializedShape(&new_shape.header, @sizeOf(Shape) + fam_bytes);
         if (new_shape.is_hashed) self.insertShapeHash(new_shape);
 
         // Discard the OLD layout: free its prop atoms (NOT carried over) + block.
@@ -801,7 +801,7 @@ pub const Registry = struct {
         errdefer self.unlink(shape);
         // Same-value passthrough: fam_bytes derives from the capacity fields
         // stored above, so this equals allocationSize() bit-for-bit.
-        try self.gc_registry.addInitializedWithSize(&shape.header, @sizeOf(Shape) + fam_bytes);
+        self.gc_registry.addInitializedShape(&shape.header, @sizeOf(Shape) + fam_bytes);
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
