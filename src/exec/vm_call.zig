@@ -574,6 +574,10 @@ pub fn call(
     };
 }
 
+/// Generic tail-call helper. Source-emitted `op.tail_call` no longer
+/// enters here — the dispatch table aliases it to `op_call` so the
+/// empty-leaf / exact-args / simple_inline / pushExactSimple chain
+/// stays on the same I-cache copy (X-89 rework).
 pub noinline fn tailCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -840,6 +844,9 @@ fn dropUnusedCallResult(
     return true;
 }
 
+/// Generic tail method helper. Source-emitted `op.tail_call_method`
+/// aliases `op_call_method` (same admission, including native fast
+/// dispatch). Kept for handwritten/internal callers.
 pub noinline fn tailCallMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
