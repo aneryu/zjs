@@ -3028,6 +3028,10 @@ test "compiler_v2.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.push_this_put_loc0));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.put_loc0_get_loc0));
+    try std.testing.expectEqual(@as(u8, 5), opcode.sizeOf(qop.get_field2_call_method));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc2_field));
+    try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.eq_if_false8));
+    try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.using));
 }
 
 fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
@@ -3146,6 +3150,30 @@ test "compiler_v2.fuse: push_this_put_loc0 and put_loc0_get_loc0 emit and execut
     ,
         1,
         &.{ qop.push_this_put_loc0, qop.put_loc0_get_loc0 },
+    );
+}
+
+test "compiler_v2.fuse: get_field2_call_method emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var o = { m: function () { return 7; } }; var r = o.m(); return r; })();",
+        7,
+        &.{ qop.get_field2_call_method, qop.call_method },
+    );
+}
+
+test "compiler_v2.fuse: get_loc2_field emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var a = 1, b = 2, o = { x: 6 }; var t = a + b; return o.x + t; })();",
+        9,
+        &.{ qop.get_loc2_field, qop.get_field },
+    );
+}
+
+test "compiler_v2.fuse: eq_if_false8 emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { var x = 1; if (x == 1) return 4; return 0; })();",
+        4,
+        &.{ qop.eq_if_false8, qop.if_false8 },
     );
 }
 

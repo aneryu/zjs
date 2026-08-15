@@ -12873,10 +12873,7 @@ test "using early exit before await using keeps sync disposal synchronous" {
     try std.testing.expectEqualStrings("dispose true\n", stream.buffered());
 
     const plain = try globalFunctionBytecode(js, "plainBlockForUsingOpcodeCheck");
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_create_stack));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_add_resource));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_dispose_stack));
-    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_dispose_stack_for_throw));
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using));
 
     var disassembly_buffer: [2048]u8 = undefined;
     var disassembly = std.Io.Writer.fixed(&disassembly_buffer);

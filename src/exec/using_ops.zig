@@ -58,7 +58,7 @@ pub noinline fn createStackVm(
     return .done;
 }
 
-pub noinline fn addResourceVm(
+pub noinline fn execVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -67,8 +67,30 @@ pub noinline fn addResourceVm(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
-    const hint_byte = function.byteCode()[frame.pc];
+    const code = function.byteCode();
+    if (frame.pc >= code.len) return error.InvalidBytecode;
+    const sub = code[frame.pc];
     frame.pc += 1;
+    if (bytecode.opcode.using_sub.isAdd(sub)) {
+        return addResourceWithHint(ctx, output, global, stack, frame, catch_target, bytecode.opcode.using_sub.addHint(sub));
+    }
+    return switch (sub) {
+        bytecode.opcode.using_sub.create => createStackVm(ctx, global, stack, frame, catch_target, output),
+        bytecode.opcode.using_sub.dispose => disposeStackVm(ctx, output, global, stack, frame, catch_target, .normal),
+        bytecode.opcode.using_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
+        else => error.InvalidBytecode,
+    };
+}
+
+fn addResourceWithHint(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    hint_byte: u8,
+) !Step {
     const hint: core.object.DisposalHint = switch (hint_byte) {
         @intFromEnum(core.object.DisposalHint.sync) => .sync,
         @intFromEnum(core.object.DisposalHint.async) => .async,
