@@ -3217,6 +3217,64 @@ test "compiler_v2.fuse: push_2_sar emit and execute" {
     );
 }
 
+test "compiler_v2.fuse: push_0_shr emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { return (8 >>> 0) + (4 >>> 0); })();",
+        12,
+        &.{qop.push_0_shr},
+    );
+}
+
+test "compiler_v2.fuse: get_loc8_push_1 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function () {
+        \\    var a=0,b=0,c=0,d=0,e=8;
+        \\    var keep = a + b + c + d;
+        \\    return (e + 1) + keep * 0;
+        \\})();
+    ,
+        9,
+        &.{qop.get_loc8_push_1},
+    );
+}
+
+test "compiler_v2.fuse: get_var_ref0_get_loc8 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function () {
+        \\    var captured = 7;
+        \\    return (function () {
+        \\        var a=0,b=0,c=0,d=0,e=1;
+        \\        var keep = a + b + c + d;
+        \\        return captured + e + keep * 0;
+        \\    })();
+        \\})();
+    ,
+        8,
+        &.{qop.get_var_ref0_get_loc8},
+    );
+}
+
+test "compiler_v2.fuse: push_i8_add emit and execute" {
+    try v2CompileRunAndCount(
+        "(function () { return 10 + 20; })();",
+        30,
+        &.{qop.push_i8_add},
+    );
+}
+
+test "compiler_v2.fuse: get_loc8_push_i8 emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function () {
+        \\    var a=0,b=0,c=0,d=0,e=5;
+        \\    var keep = a + b + c + d;
+        \\    return (e + 10) + keep * 0;
+        \\})();
+    ,
+        15,
+        &.{qop.get_loc8_push_i8},
+    );
+}
+
 test "compiler_v2.fuse: get_loc8_push_2 emit and execute" {
     try v2CompileRunAndCount(
         \\(function () {

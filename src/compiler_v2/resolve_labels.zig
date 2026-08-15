@@ -490,6 +490,8 @@ const Resolver = struct {
     fuse_op: u8 = 0,
     fuse_b2: u8 = 0,
     fuse_op2: u8 = 0,
+    fuse_b3: u8 = 0,
+    fuse_op3: u8 = 0,
     last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
@@ -746,7 +748,8 @@ const Resolver = struct {
 
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
-        // Record the one (or two) legal B for this A. Callers stay a single
+        self.fuse_b3 = 0;
+        // Record the legal B(s) for this A. Callers stay a single
         // forward walk — maybeFusePrev is O(1) and does not rescan pairs.
         switch (opc) {
             op.get_loc0 => {
@@ -810,14 +813,18 @@ const Resolver = struct {
                 self.fuse_op = op.get_var_field;
                 self.fuse_b2 = 0;
             },
-            op.push_0 => if (v4On(v4_push_0_or)) {
+            op.push_0 => {
                 self.last_sz = 1;
-                self.fuse_b = op.@"or";
-                self.fuse_op = op.push_0_or;
-                self.fuse_b2 = 0;
-            } else {
-                self.fuse_b = 0;
-                self.fuse_b2 = 0;
+                if (v4On(v4_push_0_or)) {
+                    self.fuse_b = op.@"or";
+                    self.fuse_op = op.push_0_or;
+                    self.fuse_b2 = op.shr;
+                    self.fuse_op2 = op.push_0_shr;
+                } else {
+                    self.fuse_b = op.shr;
+                    self.fuse_op = op.push_0_shr;
+                    self.fuse_b2 = 0;
+                }
             },
             op.sar => if (v4On(v4_sar_get_array_el)) {
                 self.last_sz = 1;
@@ -837,13 +844,31 @@ const Resolver = struct {
                 self.fuse_b = 0;
                 self.fuse_b2 = 0;
             },
-            op.get_loc8 => if (v4On(v4_get_loc8_push_2)) {
+            op.get_loc8 => {
                 self.last_sz = 2;
-                self.fuse_b = op.push_2;
-                self.fuse_op = op.get_loc8_push_2;
+                if (v4On(v4_get_loc8_push_2)) {
+                    self.fuse_b = op.push_2;
+                    self.fuse_op = op.get_loc8_push_2;
+                    self.fuse_b2 = op.push_1;
+                    self.fuse_op2 = op.get_loc8_push_1;
+                } else {
+                    self.fuse_b = op.push_1;
+                    self.fuse_op = op.get_loc8_push_1;
+                    self.fuse_b2 = 0;
+                }
+                self.fuse_b3 = op.push_i8;
+                self.fuse_op3 = op.get_loc8_push_i8;
+            },
+            op.push_i8 => {
+                self.last_sz = 2;
+                self.fuse_b = op.add;
+                self.fuse_op = op.push_i8_add;
                 self.fuse_b2 = 0;
-            } else {
-                self.fuse_b = 0;
+            },
+            op.get_var_ref0 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_loc8;
+                self.fuse_op = op.get_var_ref0_get_loc8;
                 self.fuse_b2 = 0;
             },
             else => {
@@ -862,6 +887,8 @@ const Resolver = struct {
             self.output[self.last_pc] = self.fuse_op;
         } else if (self.fuse_b2 != 0 and b == self.fuse_b2) {
             self.output[self.last_pc] = self.fuse_op2;
+        } else if (self.fuse_b3 != 0 and b == self.fuse_b3) {
+            self.output[self.last_pc] = self.fuse_op3;
         }
     }
 
@@ -1768,7 +1795,7 @@ const Resolver = struct {
                 if (comptime layout == .short) {
                     if (short_op == op.get_loc0 or short_op == op.put_loc8 or
                         short_op == op.put_loc0 or short_op == op.get_loc2 or
-                        short_op == op.get_loc8)
+                        short_op == op.get_loc8 or short_op == op.get_var_ref0)
                         self.noteFusionA(short_op, pc);
                 }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
@@ -1797,7 +1824,8 @@ const Resolver = struct {
         if (value >= -1 and value <= 7) {
             const short_op: u8 = @intCast(@as(i32, op.push_0) + value);
             if (comptime layout == .short) {
-                if (short_op == op.push_0 or short_op == op.push_2)
+                if (short_op == op.push_0 or short_op == op.push_2 or
+                    short_op == op.push_1)
                     self.maybeFusePrev(short_op);
             }
             const pc = self.output_len;
@@ -1807,8 +1835,11 @@ const Resolver = struct {
                     self.noteFusionA(short_op, pc);
             }
         } else if (value >= std.math.minInt(i8) and value <= std.math.maxInt(i8)) {
+            if (comptime layout == .short) self.maybeFusePrev(op.push_i8);
+            const pc = self.output_len;
             try self.appendByte(op.push_i8);
             try self.appendByte(@bitCast(@as(i8, @intCast(value))));
+            if (comptime layout == .short) self.noteFusionA(op.push_i8, pc);
         } else if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
             try self.appendByte(op.push_i16);
             try self.appendI16(@intCast(value));
@@ -2048,7 +2079,8 @@ const Resolver = struct {
                 // below is enough for get_var → get_field.
                 if (first == op.get_field or first == op.call_method or
                     first == op.get_field2 or first == op.@"or" or
-                    first == op.get_array_el or first == op.sar)
+                    first == op.get_array_el or first == op.sar or
+                    first == op.shr or first == op.add or first == op.push_i8)
                     self.maybeFusePrev(first);
             }
             const pc = self.output_len;
@@ -2057,7 +2089,8 @@ const Resolver = struct {
                 if (first == op.lt or first == op.push_this or
                     first == op.get_field2 or first == op.eq or
                     first == op.get_field or first == op.get_var or
-                    first == op.get_array_el or first == op.sar)
+                    first == op.get_array_el or first == op.sar or
+                    first == op.push_i8)
                     self.noteFusionA(first, pc);
             }
         }
