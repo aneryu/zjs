@@ -3442,6 +3442,10 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 /// `set_value(ctx, &p->u.array.u.values[idx], sp[-1])` (quickjs.c:19552-19581)
 /// -- and its shared interpreter frame pays no per-op prologue.
 ///
+/// The no-grow append arm is the same CASE (quickjs.c:19616-19636): `idx ==
+/// count && fast_array && can_extend && new_len <= size`. Realloc stays in
+/// the cold twin. Typed-array / non-Array receivers never enter this block.
+///
 /// Everything that needs an operand ADDRESS lives in the cold twin below. The
 /// slow legs hand `&value` to setValuePropertyWithThrow / the typed-array
 /// writer, and LLVM hoists that frame materialization above every branch, so
@@ -3473,6 +3477,30 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                                 return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
                             }
                             return cont(pc + 1, sp - 3, var_buf, vm);
+                        }
+                        // qjs OP_put_array_el append (quickjs.c:19616-19636):
+                        // idx == count, fast_array, can_extend, new_len <= size.
+                        // Growing `.length` needs the length slot writable;
+                        // filling a hole at `count` while `count < length` does not.
+                        if (array_object.flags.fast_array and index == array_object.u.array.count) {
+                            const new_count = index +% 1;
+                            if (new_count > index and
+                                new_count <= array_object.u.array.capacity and
+                                array_object.canExtendFastArray() and
+                                (new_count <= array_object.u.array.length or
+                                    array_object.flags.length_writable))
+                            {
+                                const slot = array_object.fastArraySlotAssumeCapacity(index);
+                                storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                                array_object.u.array.count = new_count;
+                                if (new_count > array_object.u.array.length)
+                                    array_object.u.array.length = new_count;
+                                array_object.flags.may_have_indexed_properties = true;
+                                if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(vm.ctx.runtime)) {
+                                    return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                                }
+                                return cont(pc + 1, sp - 3, var_buf, vm);
+                            }
                         }
                     }
                 }
