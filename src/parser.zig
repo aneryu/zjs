@@ -7835,13 +7835,16 @@ pub const parser_core = struct {
             try setObjectName(s, lvalue.name);
         }
 
-        try Emitter.opNoSource(s, switch (lvalue.depth) {
-            0 => opcode.op.dup,
-            1 => opcode.op.insert2,
-            2 => opcode.op.insert3,
-            3 => opcode.op.insert4,
-            else => unreachable,
-        });
+        if (lvalue.depth == 3) {
+            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.insert4);
+        } else {
+            try Emitter.opNoSource(s, switch (lvalue.depth) {
+                0 => opcode.op.dup,
+                1 => opcode.op.insert2,
+                2 => opcode.op.insert3,
+                else => unreachable,
+            });
+        }
         try putLValue(s, lvalue, .no_keep_depth);
         var end: Label = .{};
         try Emitter.newLabel(s, &end);
@@ -8201,8 +8204,8 @@ pub const parser_core = struct {
             },
             .super_value => switch (mode) {
                 .no_keep, .no_keep_depth => null,
-                .keep_top => opcode.op.insert4,
-                .keep_second => opcode.op.perm5,
+                .keep_top => null,
+                .keep_second => null,
                 .no_keep_bottom => opcode.op.rot4l,
             },
         };
@@ -8233,8 +8236,13 @@ pub const parser_core = struct {
         }
 
         // qjs put_lvalue (quickjs.c:26081-26161): apply the selected stack
-        // preservation shuffle before emitting the setter.
-        if (shuffle_op) |op_id| try v2FEmitOpNoSource(s, op_id);
+        // preservation shuffle before emitting the setter. insert4 was
+        // reclaimed for fusion v4 and emits as using+sub.
+        if (lvalue.opcode == .super_value and mode == .keep_top)
+            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.insert4)
+        else if (lvalue.opcode == .super_value and mode == .keep_second)
+            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.perm5)
+        else if (shuffle_op) |op_id| try v2FEmitOpNoSource(s, op_id);
 
         switch (lvalue.opcode) {
             .scope_var => {
@@ -16921,8 +16929,8 @@ pub const parser_core = struct {
             1 => try Emitter.op(s, opcode.op.rot3r),
             2 => try Emitter.op(s, opcode.op.swap2),
             3 => {
-                try Emitter.op(s, opcode.op.rot5l);
-                try Emitter.op(s, opcode.op.rot5l);
+                try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
+                try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
             },
             else => unreachable,
         }

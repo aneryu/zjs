@@ -770,6 +770,36 @@ const Resolver = struct {
                 self.fuse_op = op.get_var_field;
                 self.fuse_b2 = 0;
             },
+            op.push_0 => {
+                self.last_sz = 1;
+                self.fuse_b = op.@"or";
+                self.fuse_op = op.push_0_or;
+                self.fuse_b2 = 0;
+            },
+            op.get_array_el => {
+                self.last_sz = 1;
+                self.fuse_b = op.push_0;
+                self.fuse_op = op.get_array_el_push_0;
+                self.fuse_b2 = 0;
+            },
+            op.sar => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_array_el;
+                self.fuse_op = op.sar_get_array_el;
+                self.fuse_b2 = 0;
+            },
+            op.push_2 => {
+                self.last_sz = 1;
+                self.fuse_b = op.sar;
+                self.fuse_op = op.push_2_sar;
+                self.fuse_b2 = 0;
+            },
+            op.get_loc8 => {
+                self.last_sz = 2;
+                self.fuse_b = op.push_2;
+                self.fuse_op = op.get_loc8_push_2;
+                self.fuse_b2 = 0;
+            },
             else => {
                 self.fuse_b = 0;
                 self.fuse_b2 = 0;
@@ -1691,7 +1721,8 @@ const Resolver = struct {
                 try self.appendByte(short_op);
                 if (comptime layout == .short) {
                     if (short_op == op.get_loc0 or short_op == op.put_loc8 or
-                        short_op == op.put_loc0 or short_op == op.get_loc2)
+                        short_op == op.put_loc0 or short_op == op.get_loc2 or
+                        short_op == op.get_loc8)
                         self.noteFusionA(short_op, pc);
                 }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
@@ -1718,7 +1749,17 @@ const Resolver = struct {
             return;
         }
         if (value >= -1 and value <= 7) {
-            try self.appendByte(@intCast(@as(i32, op.push_0) + value));
+            const short_op: u8 = @intCast(@as(i32, op.push_0) + value);
+            if (comptime layout == .short) {
+                if (short_op == op.push_0 or short_op == op.push_2)
+                    self.maybeFusePrev(short_op);
+            }
+            const pc = self.output_len;
+            try self.appendByte(short_op);
+            if (comptime layout == .short) {
+                if (short_op == op.push_0 or short_op == op.push_2)
+                    self.noteFusionA(short_op, pc);
+            }
         } else if (value >= std.math.minInt(i8) and value <= std.math.maxInt(i8)) {
             try self.appendByte(op.push_i8);
             try self.appendByte(@bitCast(@as(i8, @intCast(value))));
@@ -1960,7 +2001,8 @@ const Resolver = struct {
                 // B-side only. get_var is never a B — recording it as A
                 // below is enough for get_var → get_field.
                 if (first == op.get_field or first == op.call_method or
-                    first == op.get_field2)
+                    first == op.get_field2 or first == op.@"or" or
+                    first == op.get_array_el or first == op.sar)
                     self.maybeFusePrev(first);
             }
             const pc = self.output_len;
@@ -1968,7 +2010,8 @@ const Resolver = struct {
             if (comptime layout == .short) {
                 if (first == op.lt or first == op.push_this or
                     first == op.get_field2 or first == op.eq or
-                    first == op.get_field or first == op.get_var)
+                    first == op.get_field or first == op.get_var or
+                    first == op.get_array_el or first == op.sar)
                     self.noteFusionA(first, pc);
             }
         }

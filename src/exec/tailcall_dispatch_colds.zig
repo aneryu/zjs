@@ -166,14 +166,16 @@ pub const SpecialHandlers = struct {
 
 pub const BuiltTable = struct {
     table: [256]Handler,
-    /// Geometry keep: the three type-test coldStd leaves that used to
-    /// occupy 240/242/243. Live so LLVM cannot DCE them.
-    keep: [3]Handler,
+    /// Geometry keep: reclaimed-slot coldStd leaves. Live so LLVM cannot DCE them.
+    keep: [6]Handler,
 };
 
 pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     var t: [256]Handler = [_]Handler{s.op_invalid} ** 256;
-    var keep: [3]Handler = .{ s.op_invalid, s.op_invalid, s.op_invalid };
+    var keep: [6]Handler = .{
+        s.op_invalid, s.op_invalid, s.op_invalid,
+        s.op_invalid, s.op_invalid, s.op_invalid,
+    };
 
     // --- pushes ---
     t[op.push_i32] = h(struct {
@@ -632,7 +634,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try value_vm.insert3(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.insert4] = h(struct {
+    keep[3] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.insert4(vm.ctx, vm.stack);
         }
@@ -652,7 +654,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try value_vm.rot4l(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.rot5l] = h(struct {
+    keep[4] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.rot5l(vm.ctx, vm.stack);
         }
@@ -667,7 +669,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try value_vm.perm4(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.perm5] = h(struct {
+    keep[5] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.perm5(vm.ctx, vm.stack);
         }
@@ -833,6 +835,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8_cold;
     t[op.push_this_put_loc0] = td.op_push_this_put_loc0_cold;
     t[op.put_loc0_get_loc0] = td.op_put_loc0_get_loc0_cold;
+    t[op.push_0_or] = td.op_push_0_or_cold;
+    t[op.get_array_el_push_0] = td.op_get_array_el_push_0_cold;
+    t[op.sar_get_array_el] = td.op_sar_get_array_el_cold;
+    t[op.push_2_sar] = td.op_push_2_sar_cold;
+    t[op.get_loc8_push_2] = td.op_get_loc8_push_2_cold;
     if (!fast) return .{ .table = t, .keep = keep };
     t[op.undefined] = td.op_undefined_fast;
     t[op.null] = td.op_null_fast;
@@ -955,10 +962,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // logicalNot assigned above (qjs reaches those via an out-of-line JS_ToBoolFree
     // bl too — pinned binary, JS_CallInternal+0x6abc).
     t[op.lnot] = td.op_lnot;
-    // qjs CASE(OP_is_null):20625-20630 compares the top-slot tag in place;
-    // set_true (20648-20650) overwrites null without a free, while
-    // free_and_set_false (20651-20654) releases only refcounted non-null values
-    // through JS_FreeValue's inline tag guard before overwriting with false.
     t[op.is_null] = td.op_is_null;
     t[op.inc_loc] = td.op_update_loc;
     t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8;
@@ -976,6 +979,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element
+    t[op.push_0_or] = td.op_push_0_or;
+    t[op.get_array_el_push_0] = td.op_get_array_el_push_0;
+    t[op.sar_get_array_el] = td.op_sar_get_array_el;
+    t[op.push_2_sar] = td.op_push_2_sar;
+    t[op.get_loc8_push_2] = td.op_get_loc8_push_2;
     t[op.get_array_el2] = td.op_get_array_el2; // keep-receiver twin; miss → cold h_get_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_put_array_element
     t[op.get_length] = td.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
