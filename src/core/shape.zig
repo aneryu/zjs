@@ -722,14 +722,13 @@ pub const Registry = struct {
     }
 
     fn destroyShape(self: *Registry, shape: *Shape) void {
-        // Capture the FAM size while the capacity fields are intact; it also
-        // feeds the GC free-accounting (`allocationSize` is bit-for-bit
-        // `@sizeOf(Shape) + famByteSize()` and nothing mutates the capacity
-        // fields in between), so the size is derived exactly once per destroy —
-        // qjs js_free_shape0 never re-derives the block size at all (the malloc
-        // block header carries it, quickjs.c:5199-5215).
-        const fam_bytes = shape.famByteSize();
-        self.gc_registry.unlinkObjectWithBytes(&shape.header, @sizeOf(Shape) + fam_bytes);
+        // qjs js_free_shape0 never re-derives block size from prop_size; the
+        // malloc header carries it (quickjs.c:1614). Slab shapes debit the
+        // class usable payload; standalone prefixes still read live fields.
+        const accounted = memory.MemoryAccount.gcSlabAccountedPayload(shape) orelse
+            (@sizeOf(Shape) + shape.famByteSize());
+        const fam_bytes = accounted - @sizeOf(Shape);
+        self.gc_registry.unlinkObjectWithBytes(&shape.header, accounted);
         self.unlink(shape);
         // Prop atoms stay valid until freed below; the inline storage lives in
         // the single block freed last (qjs js_free_shape0 releases atoms +

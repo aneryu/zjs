@@ -155,6 +155,11 @@ pub const SmallObjectSlab = struct {
         return blockHeaderFromUser(ptr).block_size_idx;
     }
 
+    /// qjs `__js_malloc_usable_size` small-block formula (quickjs.c:1722).
+    pub inline fn usablePayloadFromClass(class: usize) usize {
+        return block_sizes[class] - block_header_size;
+    }
+
     pub inline fn alloc(self: *SmallObjectSlab, backing: std.mem.Allocator, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
         const index = classIndex(byte_count, alignment).?;
         return self.allocAtIndex(backing, index, true);
@@ -1017,9 +1022,20 @@ pub const MemoryAccount = struct {
         return ptr;
     }
 
+    /// Accounted payload of a slab-backed GC FAM, or null when the object
+    /// uses a standalone prefix (caller falls back to live capacity fields).
+    /// qjs `__js_free` never re-derives size from JSShape.prop_size.
+    pub fn gcSlabAccountedPayload(ptr: *const anyopaque) ?usize {
+        const info = gcAllocInfoByte(ptr);
+        if (info & alloc_info_standalone != 0) return null;
+        return SmallObjectSlab.usablePayloadFromClass(info & alloc_info_class_mask);
+    }
+
     /// Frees a `createWithFam` allocation. `fam_bytes` MUST equal the value
     /// passed to `createWithFam` (the caller derives it from the live object's
-    /// capacity fields before clearing them).
+    /// capacity fields before clearing them) on the standalone-prefix path.
+    /// The slab arm trusts the header class (qjs `__js_free`, quickjs.c:1614)
+    /// and does not re-run `classIndex` on the requested length.
     pub fn destroyWithFam(self: *MemoryAccount, comptime T: type, ptr: *T, fam_bytes: usize) void {
         comptime std.debug.assert(isGcObject(T));
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
@@ -1032,7 +1048,6 @@ pub const MemoryAccount = struct {
         if (info & alloc_info_standalone == 0) {
             const slab_class: usize = info & alloc_info_class_mask;
             std.debug.assert(self.small_slab_enabled);
-            std.debug.assert(slab_class == SmallObjectSlab.classIndex(payload_bytes, alignment).?);
             self.allocated_bytes -%= payload_bytes;
             self.noteFreeDiagnostics(true);
             return self.small_slab.freeAtIndex(&self.backing_allocator, @ptrCast(ptr), slab_class);
