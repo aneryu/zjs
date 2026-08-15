@@ -1496,7 +1496,8 @@ pub inline fn applyForwardTakeOk(
 }
 
 /// True when `call_pc` is the rewritten apply-forward `call_method`.
-pub inline fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
+/// noinline: siteForPc/callerState must not inflate `op_call_method` (F1).
+pub noinline fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
     // Header mirror, not hotExtension().call_facts: the FAM word sits at the
     // end of the bytecode image and would miss the caller's first cache line
     // on every non-apply `op_call_method`.

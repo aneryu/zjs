@@ -589,18 +589,54 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
-/// L1 apply-forward twin of pushAndEnter: generic/simple method entry plus
-/// D8-L1 `native_caller` = realm Function.prototype.apply. Leaf arms overlay
-/// resume words on that slot, so they are not used here.
-inline fn pushAndEnterApplyForward(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16) Outcome {
+const ApplyForwardEntryResult = union(enum) {
+    entry: *inline_calls.Entry,
+    handled,
+    threw,
+};
+
+/// Fat apply-forward setup. Outlined so `op_call_method` does not grow a
+/// 0x4a0 frame around `pushMethodCall` / `attachApplyForwardNativeCaller`.
+/// `enterEntry` / `coldNext` stay in `op_call_method` because
+/// `@call(.always_tail)` requires the handler signature.
+noinline fn pushApplyForwardEntry(
+    vm: *Vm,
+    target: *const inline_calls.InlineTarget,
+    region_start: [*]JSValue,
+    argc: u16,
+) ApplyForwardEntryResult {
     const source_count = @as(usize, argc) + 2;
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
-        return coldNext(vb, vm);
+        return .handled;
     };
     attachApplyForwardNativeCaller(vm, entry);
-    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+    return .{ .entry = entry };
+}
+
+/// Cold apply-forward enter. Same Handler type as `op_call_method` (not
+/// `noinline` — that attribute is part of the Zig fn type and breaks
+/// `@call(.always_tail)`). Fat setup lives in `pushApplyForwardEntry`.
+fn applyForwardCallMethod(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    vb: [*]JSValue,
+    vm: *Vm,
+) callconv(.c) Outcome {
+    _ = sp;
+    const argc = readInt(u16, pc + 1);
+    const region_start = vm.stack.topPtr();
+    const receiver = region_start[0];
+    const method = region_start[1];
+    const method_obj = class_vm.objectFromValue(method) orelse return .threw;
+    const resolved = inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj) orelse return .threw;
+    const target = resolved.bind(receiver, method);
+    return switch (pushApplyForwardEntry(vm, &target, region_start, argc)) {
+        .entry => |entry| enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr),
+        .handled => coldNext(vb, vm),
+        .threw => .threw,
+    };
 }
 
 /// Warm OP_call0 / OP_call_method(argc=0) entry after receiver-independent
@@ -1653,10 +1689,13 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     // L1 apply-forward: live-argv call_method of initialize.
                     // Skip leaf arms (they overlay resume on native_caller) and
                     // attach Function.prototype.apply as D8-L1 native_caller.
-                    if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
+                    // Bit test stays here (one load of call_facts_mirror @ 0x14).
+                    // The site walk is noinline — do not `bl` it on every method.
+                    if (vm.function.call_facts_mirror.execution.apply_forward_inlined) {
                         @branchHint(.unlikely);
-                        const target = resolved.bind(receiver, method);
-                        return pushAndEnterApplyForward(vb, vm, &target, region_start, argc);
+                        if (small_inline.isApplyForwardCall(vm.function, call_pc)) {
+                            return @call(.always_tail, applyForwardCallMethod, .{ pc, sp, vb, vm });
+                        }
                     }
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
