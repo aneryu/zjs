@@ -11175,6 +11175,9 @@ pub const Object = extern struct {
     ///   updateMappedArgumentsBinding hook live in the resolver;
     /// - accessor/read-only hits anywhere on the chain: setter invocation and
     ///   throw_on_set_failure polarity need the caller frame;
+    /// - exotic proto miss after find: TA canonical-index / oob and
+    ///   set_property / get_own_property traps stay in the resolver (SPI
+    ///   2f80c). Named miss on a fast_array proto falls through like qjs.
     /// - a global receiver may take the own-hit write but never the add — qjs
     ///   likewise routes JS_CLASS_GLOBAL_OBJECT to generic_create_prop
     ///   (quickjs.c:9882-9883);
@@ -11241,19 +11244,41 @@ pub const Object = extern struct {
             array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
         if (self.isGlobal()) return .slow;
 
-        // qjs's prototype walk (quickjs.c:9739-9854): the FIRST holder of the
-        // key decides — setter/auto_init/read-only entries defer to the
-        // resolver, a plain writable data property does NOT shadow the create
-        // (break and add an own slot). Exotic/proxy/typed links keep their
-        // trap/canonical-index semantics in the resolver.
+        // qjs prototype walk (quickjs.c:9739-9854 / SPI 2f8ec-2f9f8):
+        // find_own first, then is_exotic. Empty/end is tested locally as
+        // `idx ^ u26max` (lowers to hoisted-sentinel `cmp` / `cbz`-class
+        // flag test). The stored 0-based / no_property_index ABI is
+        // untouched. Non-exotic protos do not pay typed/proxy cmps.
+        // Exotic miss follows SPI control-flow (named fast_array
+        // fallthrough; TA / trap classes decline) — not an unconditional
+        // `.slow` before find.
         var prototype = self.getPrototype();
+        var proto_writable_data = false;
+        const empty_bucket: u32 = comptime @as(u32, shape.no_property_index);
         while (prototype) |proto| {
-            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return .slow;
-            if (isTypedArrayObjectForSetFastPath(proto)) return .slow;
-            if (proto.findPropertyProbeTrusted(atom_id)) |proto_lookup| {
-                const proto_flags = property.Flags.fromBits(proto_lookup.prop.flags);
-                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return .slow;
-                break;
+            const props = proto.shape_ref.props().ptr;
+            var idx: u32 = proto.shape_ref.firstPropertyIndex(atom_id);
+            // Local empty test: `idx ^ u26max == 0`. LLVM hoists the
+            // sentinel and `cmp`s (cbz-class flag test). ABI untouched.
+            while (idx ^ empty_bucket != 0) {
+                const prop = props[idx];
+                if (prop.atom_id == atom_id) {
+                    const proto_flags = property.Flags.fromBits(prop.flags);
+                    if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable)
+                        return .slow;
+                    proto_writable_data = true;
+                    break;
+                }
+                idx = prop.hash_next;
+            }
+            if (proto_writable_data) break;
+            // find miss → SPI 2f80c `ldrh is_exotic`. Ordinary proto: next.
+            if (proto.flags.has_exotic_methods) {
+                // fast_array + non-TA named miss: qjs falls through (atom
+                // already rejected tagged-int). TA canonical-index / oob
+                // and non-fast_array traps stay in the resolver.
+                if (!proto.flags.fast_array or isTypedArrayObjectForSetFastPath(proto))
+                    return .slow;
             }
             prototype = proto.getPrototype();
         }
