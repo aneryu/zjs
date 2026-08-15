@@ -482,8 +482,14 @@ const Resolver = struct {
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
     last_attached_source: ?SourcePoint = null,
-    last_op: ?u8 = null,
     last_pc: u32 = 0,
+    last_sz: u32 = 0,
+    /// Expected B opcode for the live A, or 0 if the last emit is not a
+    /// fusion A. A second B (get_loc2 → get_field / get_field2) uses fuse_b2.
+    fuse_b: u8 = 0,
+    fuse_op: u8 = 0,
+    fuse_b2: u8 = 0,
+    fuse_op2: u8 = 0,
     last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
@@ -700,41 +706,87 @@ const Resolver = struct {
 
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
-        self.last_op = opc;
+        // Record the one (or two) legal B for this A. Callers stay a single
+        // forward walk — maybeFusePrev is O(1) and does not rescan pairs.
+        switch (opc) {
+            op.get_loc0 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_field;
+                self.fuse_op = op.get_loc0_field;
+                self.fuse_b2 = 0;
+            },
+            op.lt => {
+                self.last_sz = 1;
+                self.fuse_b = op.if_false8;
+                self.fuse_op = op.cmp_if_false8;
+                self.fuse_b2 = 0;
+            },
+            op.put_loc8 => {
+                self.last_sz = 2;
+                self.fuse_b = op.get_loc8;
+                self.fuse_op = op.put_loc8_get_loc8;
+                self.fuse_b2 = 0;
+            },
+            op.push_this => {
+                self.last_sz = 1;
+                self.fuse_b = op.put_loc0;
+                self.fuse_op = op.push_this_put_loc0;
+                self.fuse_b2 = 0;
+            },
+            op.put_loc0 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_loc0;
+                self.fuse_op = op.put_loc0_get_loc0;
+                self.fuse_b2 = 0;
+            },
+            op.get_field2 => {
+                self.last_sz = 5;
+                self.fuse_b = op.call_method;
+                self.fuse_op = op.get_field2_call_method;
+                self.fuse_b2 = 0;
+            },
+            op.get_loc2 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_field;
+                self.fuse_op = op.get_loc2_field;
+                self.fuse_b2 = op.get_field2;
+                self.fuse_op2 = op.get_loc2_field2;
+            },
+            op.eq => {
+                self.last_sz = 1;
+                self.fuse_b = op.if_false8;
+                self.fuse_op = op.eq_if_false8;
+                self.fuse_b2 = 0;
+            },
+            op.get_field => {
+                self.last_sz = 5;
+                self.fuse_b = op.get_field2;
+                self.fuse_op = op.get_field_field2;
+                self.fuse_b2 = 0;
+            },
+            op.get_var => {
+                self.last_sz = 3;
+                self.fuse_b = op.get_field;
+                self.fuse_op = op.get_var_field;
+                self.fuse_b2 = 0;
+            },
+            else => {
+                self.fuse_b = 0;
+                self.fuse_b2 = 0;
+            },
+        }
     }
 
-    noinline fn maybeFusePrev(self: *Resolver, b: u8) void {
-        const a = self.last_op orelse return;
-        const a_sz: u32 = opcode.sizeOf(a);
-        if (a_sz == 0) return;
-        if (self.output_len != self.last_pc + a_sz) return;
+    inline fn maybeFusePrev(self: *Resolver, b: u8) void {
+        const expect = self.fuse_b;
+        if (expect == 0) return;
+        if (self.output_len != self.last_pc + self.last_sz) return;
         if (self.output_len == self.last_bound_output) return;
-        const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
-            op.get_loc0_field
-        else if (a == op.lt and b == op.if_false8)
-            op.cmp_if_false8
-        else if (a == op.put_loc8 and b == op.get_loc8)
-            op.put_loc8_get_loc8
-        else if (a == op.push_this and b == op.put_loc0)
-            op.push_this_put_loc0
-        else if (a == op.put_loc0 and b == op.get_loc0)
-            op.put_loc0_get_loc0
-        else if (a == op.get_field2 and b == op.call_method)
-            op.get_field2_call_method
-        else if (a == op.get_loc2 and b == op.get_field)
-            op.get_loc2_field
-        else if (a == op.eq and b == op.if_false8)
-            op.eq_if_false8
-        else if (a == op.get_field and b == op.get_field2)
-            op.get_field_field2
-        else if (a == op.get_var and b == op.get_field)
-            op.get_var_field
-        else if (a == op.get_loc2 and b == op.get_field2)
-            op.get_loc2_field2
-        else
-            null;
-        if (fused) |fused_op|
-            self.output[self.last_pc] = fused_op;
+        if (b == expect) {
+            self.output[self.last_pc] = self.fuse_op;
+        } else if (self.fuse_b2 != 0 and b == self.fuse_b2) {
+            self.output[self.last_pc] = self.fuse_op2;
+        }
     }
 
     inline fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
@@ -1905,8 +1957,10 @@ const Resolver = struct {
         } else {
             const first = self.code[position];
             if (comptime layout == .short) {
+                // B-side only. get_var is never a B — recording it as A
+                // below is enough for get_var → get_field.
                 if (first == op.get_field or first == op.call_method or
-                    first == op.get_field2 or first == op.get_var)
+                    first == op.get_field2)
                     self.maybeFusePrev(first);
             }
             const pc = self.output_len;

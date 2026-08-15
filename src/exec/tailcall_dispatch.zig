@@ -5615,7 +5615,11 @@ const specials: colds.SpecialHandlers = .{
 /// All-cold table (no fast overrides): the fast handlers tail-call THROUGH
 /// `cold_table[pc[0]]` on a guard miss. The runtime index defeats devirtualization,
 /// so the cold publish+helper is NOT inlined into the lean fast handler.
-const cold_table: [256]Handler = colds.buildTable(specials, false);
+const cold_built = colds.buildTable(specials, false);
+const cold_table: [256]Handler = cold_built.table;
+/// Wave-22: exported so the three type-test coldStd leaves stay in the
+/// island at their v2.1 source order (240/242/243 slots are fusion now).
+export const zjs_w22_island_keep: [3]Handler = cold_built.keep;
 // O1 exact-args leaf cold constructors. Defined AFTER the handler cluster
 // so their machine code lands past the established opcode bodies: inserting
 // them mid-cluster shifted every subsequent handler address and reproducibly
@@ -5707,7 +5711,7 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
 }
 
 const dispatch_table: [256]Handler = blk: {
-    const base: [256]Handler = colds.buildTable(specials, true);
+    const base: [256]Handler = colds.buildTable(specials, true).table;
     if (!vm_profile.enabled) break :blk base;
     @setEvalBranchQuota(8192);
     var wrapped: [256]Handler = undefined;
