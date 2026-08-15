@@ -2276,7 +2276,9 @@ fn op_tail_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linkse
             return .returned;
         },
         .tail_inline => {
-            vm.tail_is_reuse = true;
+            // qjs:18195 `goto done` after nested CallInternal — keep the
+            // caller Entry (pushCall) so Error.stack still names it.
+            vm.tail_is_reuse = false;
             return .tail;
         },
     }
@@ -2290,7 +2292,7 @@ fn op_tail_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
             return .returned;
         },
         .tail_inline => {
-            vm.tail_is_reuse = true;
+            vm.tail_is_reuse = false;
             return .tail;
         },
     }

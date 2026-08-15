@@ -10307,6 +10307,78 @@ test "pc2line stack locations match QuickJS return and throw matrix" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "X-89 tail_call keeps caller on Error.stack like QuickJS" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\function outer() { return inner(); }
+        \\function inner() { throw new Error("x"); }
+        \\var captured;
+        \\try { outer(); } catch (error) { captured = error.stack; }
+        \\assert.sameValue(captured.indexOf("at inner") >= 0, true);
+        \\assert.sameValue(captured.indexOf("at outer") >= 0, true);
+        \\function methOuter() { return o.m(); }
+        \\var o = { m: function m() { throw new Error("m"); } };
+        \\try { methOuter(); } catch (error) { captured = error.stack; }
+        \\assert.sameValue(captured.indexOf("at m") >= 0, true);
+        \\assert.sameValue(captured.indexOf("at methOuter") >= 0, true);
+    , .{ .filename = "x89-stack.js" });
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "X-89 tail_call recursion still overflows like QuickJS" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function f(n) { if (n <= 0) return 0; return f(n - 1); }
+        \\var threw = false;
+        \\try { f(20000); } catch (e) {
+        \\  threw = e instanceof InternalError && String(e.message).indexOf("stack overflow") >= 0;
+        \\}
+        \\assert.sameValue(threw, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "X-89 frame disasm: return call and method emit tail opcodes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function tailPlain(x) { return g(x); }
+        \\function tailMethod(o, x) { return o.m(x); }
+        \\function noFold(p) { return p ? f() : g(); }
+    );
+    defer result.free(js.runtime);
+
+    var buf: [2048]u8 = undefined;
+
+    const plain = try globalFunctionBytecode(js, "tailPlain");
+    var plain_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&plain_w, plain, &js.runtime.atoms, .{});
+    const plain_dump = plain_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, plain_dump, ": tail_call ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_dump, "tail_call_method") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_dump, ": return\n") != null);
+
+    const method = try globalFunctionBytecode(js, "tailMethod");
+    var method_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&method_w, method, &js.runtime.atoms, .{});
+    const method_dump = method_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, method_dump, ": tail_call_method ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, method_dump, ": return\n") != null);
+
+    const no_fold = try globalFunctionBytecode(js, "noFold");
+    var no_fold_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&no_fold_w, no_fold, &js.runtime.atoms, .{});
+    const no_fold_dump = no_fold_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, no_fold_dump, "tail_call") == null);
+}
+
 test "pc2line malformed transition reports zero location instead of header fallback" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -16729,12 +16801,12 @@ test "ordinary arrow and method recursion exhaust the logical stack budget" {
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    // The baseline source compiler deliberately emits ordinary call + return,
-    // not parser-produced tail-call opcodes.  Like QuickJS without the
-    // tail-call-optimization feature, sufficiently deep recursion must consume
-    // the logical stack budget and surface the catchable stack-overflow error.
-    // Exercise arrows, mutual methods, and a self method, then prove that the
-    // same runtime remains usable after each caught overflow.
+    // X-89 emits tail_call* for `return f()` / `return this.m()` (qjs:34941)
+    // but does not reuse the caller frame. Like QuickJS JS_CallInternal +
+    // goto done, sufficiently deep recursion must still consume the logical
+    // stack budget and surface the catchable stack-overflow error. Exercise
+    // arrows, mutual methods, and a self method, then prove that the same
+    // runtime remains usable after each caught overflow.
     const result = try js.evalWithOutput(
         \\function expectStackOverflow(run) {
         \\  try {

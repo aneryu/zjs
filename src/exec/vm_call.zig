@@ -587,6 +587,9 @@ pub noinline fn tailCall(
 ) !TailCallResult {
     const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
+    // Inline is allowed so JS→JS tails stay on the same Machine (qjs nested
+    // JS_CallInternal). The dispatch `.tail` arm must pushCall, not
+    // tailCallReuse: reuse would drop the caller from Error.stack.
     switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline, req_out)) {
         .done => {},
         .continue_loop => return .handled,
@@ -848,15 +851,8 @@ pub noinline fn tailCallMethod(
 ) !TailCallMethodResult {
     const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
-    // Inline frame-reuse fast path: a tail-positioned method call whose
-    // callable is a plain bytecode function reuses the current inline frame
-    // instead of recursing, mirroring op.tail_call. The receiver, callable,
-    // and args stay on the operand stack (zero-copy) at
-    // `[region_base ..][receiver, callable, args...]` until the dispatch loop
-    // moves them into the reused frame; `resolveInlineTarget` binds the
-    // receiver as the callee's `this` (or the arrow's lexical `this`). Native
-    // builtin methods — the common case — are not inline-eligible and fall
-    // through to the fast native dispatch below.
+    // Same as tailCall: allow inline so JS→JS tails stay on one Machine, but
+    // the dispatch arm must pushCall (not reuse) so Error.stack keeps outer.
     if (allow_inline) {
         const total = @as(usize, argc) + 2;
         if (stack.len() >= total) {
