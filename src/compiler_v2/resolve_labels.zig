@@ -482,6 +482,14 @@ const Resolver = struct {
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
     last_attached_source: ?SourcePoint = null,
+    /// qjs-shaped emit-time fusion: remember the last emitted opcode so the
+    /// next `emitOp` can rewrite A in place. No post-walk scan.
+    last_op: ?u8 = null,
+    last_pc: u32 = 0,
+    fuse_enabled: bool = false,
+    /// Set when `processBindsAt` binds a label to `output_len` — the next
+    /// emitted opcode is a jump target and must not be fusion B.
+    output_head_is_label: bool = false,
 
     fn deinit(self: *Resolver) void {
         if (self.output_atoms_owned) {
@@ -693,6 +701,46 @@ const Resolver = struct {
         try self.ensureOutput(1);
         self.output[self.output_len] = value;
         self.output_len += 1;
+    }
+
+    /// Emit one opcode byte. Fusion is decided here against the previous
+    /// opcode (qjs `get_prev_opcode` shape) so resolve_labels does not scan
+    /// the finished stream again. Only the six pair endpoints touch `last_*`.
+    inline fn emitOp(self: *Resolver, opc: u8) Error!void {
+        if (self.fuse_enabled) {
+            switch (opc) {
+                op.get_field, op.if_false8, op.get_loc8 => self.maybeFusePrev(opc),
+                else => {},
+            }
+        }
+        const pc = self.output_len;
+        try self.appendByte(opc);
+        if (self.fuse_enabled) {
+            switch (opc) {
+                op.get_loc0, op.lt, op.put_loc8 => {
+                    self.last_pc = pc;
+                    self.last_op = opc;
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn maybeFusePrev(self: *Resolver, b: u8) void {
+        const a = self.last_op orelse return;
+        const a_sz: u32 = if (a == op.put_loc8) 2 else 1;
+        if (self.output_len != self.last_pc + a_sz) return;
+        if (self.output_head_is_label) return;
+        const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
+            op.get_loc0_field
+        else if (a == op.lt and b == op.if_false8)
+            op.cmp_if_false8
+        else if (a == op.put_loc8 and b == op.get_loc8)
+            op.put_loc8_get_loc8
+        else
+            null;
+        if (fused) |fused_op|
+            self.output[self.last_pc] = fused_op;
     }
 
     inline fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
@@ -1108,6 +1156,7 @@ const Resolver = struct {
     /// `== position` for the pass-over loop. That compare is then the whole
     /// per-instruction cost of the out-of-band identity table.
     inline fn processBindsAt(self: *Resolver, position: u32) Error!void {
+        self.output_head_is_label = false;
         if (position < self.next_bind_offset) return;
         return self.processBindsAtCold(position);
     }
@@ -1126,6 +1175,7 @@ const Resolver = struct {
                 return error.InvalidBytecode;
             }
             self.addr[entry.label_index] = self.output_len;
+            self.output_head_is_label = true;
             const slot = &self.product.label_slots[entry.label_index];
             var reloc_index = slot.first_reloc;
             var walked: u32 = 0;
@@ -1568,7 +1618,12 @@ const Resolver = struct {
     ) Error!void {
         if (layout == .short) {
             if (shortSlotOp(op_id, idx)) |short_op| {
-                try self.appendByte(short_op);
+                if (self.fuse_enabled and
+                    (short_op == op.get_loc0 or short_op == op.put_loc8 or
+                        short_op == op.get_loc8))
+                    try self.emitOp(short_op)
+                else
+                    try self.appendByte(short_op);
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
                     short_op == op.set_loc8)
                 {
@@ -1718,7 +1773,7 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
-                try self.appendByte(short_op);
+                try self.emitOp(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
                 try self.appendByte(0);
@@ -1744,7 +1799,7 @@ const Resolver = struct {
                 const short_op = try shortJumpOp(op_id);
                 self.jump_slots[jump_index].op = short_op;
                 self.jump_slots[jump_index].size = 1;
-                try self.appendByte(short_op);
+                try self.emitOp(short_op);
                 const operand_pos = self.output_len;
                 self.jump_slots[jump_index].pos = operand_pos;
                 try self.appendByte(@bitCast(@as(i8, @intCast(diff))));
@@ -1826,7 +1881,14 @@ const Resolver = struct {
                 try readU16(self.code, position),
             );
         } else {
-            try self.appendRaw(self.code[position..position_next]);
+            const first = self.code[position];
+            if (self.fuse_enabled and (first == op.lt or first == op.get_field)) {
+                try self.emitOp(first);
+                if (instruction.size > 1)
+                    try self.appendRaw(self.code[position + 1 .. position_next]);
+            } else {
+                try self.appendRaw(self.code[position..position_next]);
+            }
         }
         try self.consumeInstructionAtom(position, instruction, true);
     }
@@ -1944,6 +2006,7 @@ const Resolver = struct {
     }
 
     fn walk(self: *Resolver, comptime layout: LayoutMode) Error!void {
+        self.fuse_enabled = layout == .short;
         try self.emitFunctionPrologue(layout);
 
         var position: u32 = 0;
@@ -2783,6 +2846,14 @@ const Resolver = struct {
             if (source_start > self.output_len or destination_start > source_start)
                 return error.InvalidBytecode;
             self.output[jump.pos - 1] = new_op;
+            // Jump shortening is when `if_false8` first exists. Fold lt→
+            // cmp_if_false8 here instead of rescanning the whole stream.
+            if (new_op == op.if_false8 and jump.pos >= 2) {
+                const a_pc = jump.pos - 2;
+                if (self.output[a_pc] == op.lt and
+                    !self.isLabelAddress(jump.pos - 1))
+                    self.output[a_pc] = op.cmp_if_false8;
+            }
             const tail_len: usize = @intCast(self.output_len - source_start);
             std.mem.copyForwards(
                 u8,
@@ -3106,36 +3177,6 @@ const Resolver = struct {
         cfg.recordFinalBoundaryHops(live_group_count);
     }
 
-    /// Size-preserving emit-time fusion. Rewrites A in place when the next
-    /// instruction is the partner and is not a jump target. `noinline` keeps
-    /// this off the packed-finalizer inliner (QCP-1B).
-    noinline fn fuseShortPairs(self: *Resolver) void {
-        const code = self.output[0..self.output_len];
-        var position: u32 = 0;
-        while (position < self.output_len) {
-            const a = code[position];
-            const info = opcode.finalCompactInfo(a) orelse break;
-            if (info.size == 0 or info.size > self.output_len - position) break;
-            const b_pos = position + info.size;
-            if (b_pos >= self.output_len) break;
-            const b = code[b_pos];
-            const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
-                op.get_loc0_field
-            else if (a == op.lt and b == op.if_false8)
-                op.cmp_if_false8
-            else if (a == op.put_loc8 and b == op.get_loc8)
-                op.put_loc8_get_loc8
-            else
-                null;
-            if (fused) |fused_op| {
-                if (!self.isLabelAddress(b_pos)) {
-                    self.output[position] = fused_op;
-                }
-            }
-            position = b_pos;
-        }
-    }
-
     fn isLabelAddress(self: *const Resolver, pc: u32) bool {
         for (self.addr) |addr| {
             if (addr == pc) return true;
@@ -3266,10 +3307,6 @@ fn runImpl(
         defer stability.deinit(resolver.memory);
         try resolver.relaxJumps();
         resolver.reportAnchorCoincidence(&stability);
-        // After shorts exist (`get_loc0`, `if_false8`, `goto8`). Size-preserving
-        // rewrite of A only; B stays so exception pc / poll stay on B.
-        // Independent stage: do not fold into packed finalize (QCP-1B).
-        resolver.fuseShortPairs();
     }
     if (comptime cfg.audit_oracles) try resolver.auditFinalBoundaryIdentity();
     if (comptime packed_finalize_validates_code) {
