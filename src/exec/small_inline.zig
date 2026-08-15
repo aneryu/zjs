@@ -831,7 +831,7 @@ fn rewriteBody(
                 if (kind == .constructor) {
                     if (!emitLocOp(&out, true, this_slot)) return null;
                 } else {
-                    if (!emitByte(&out, op.@"undefined")) return null;
+                    if (!emitByte(&out, op.undefined)) return null;
                 }
                 if (!emitGoto(&out, 0)) return null;
                 recordMap(&out, map_from, src_pc);

@@ -429,7 +429,7 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
                     null;
                 setRequiredMethodNativeBuiltinId(method, .weak_ref, id);
             },
-            .buffer_prototype =>setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
+            .buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.arrayBufferPrototypeMethodId(name)),
             .shared_buffer_prototype => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.sharedArrayBufferPrototypeMethodId(name)),
             .array_buffer_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.staticMethodId(name)),
             .uint8_array_static => setRequiredMethodNativeBuiltinId(method, .buffer, buffer_builtin.uint8ArrayStaticMethodId(name)),
