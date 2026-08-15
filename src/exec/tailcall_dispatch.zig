@@ -3615,19 +3615,16 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 /// accessor or read-only hits) declines with zero state mutated and re-tails
 /// to the cold twin, whose own publish(pc, sp) re-covers the intact operands.
 ///
-/// Throwing-tail contract (first throwing resident property tail; op_add_
-/// strings precedent, plus the cold arm's value_consumed/close-iterator/
-/// handleCatchableRuntimeError sequence):
-/// - BEFORE the throwing helper the live stack boundary is synced to sp - 2:
-///   the helper's owned contract consumes `value` on error, and the catch
-///   delivery below trims the stack to the handler's marker — both must see
-///   a boundary that excludes the two consumed operand slots.
-/// - On error, `value` is already consumed (owned contract), so only the
-///   receiver's ref remains ours (the cold arm's `defer obj.free`); frame.pc
-///   is synced one past the full instruction (the cold arm's site + 5) so
-///   error materialization captures the write site.
-/// - On success the receiver free runs here (the cold arm's defer), then
-///   dispatch continues at pc + 5 with both operands popped.
+/// Owned-tail contract (setOrDefine is no longer `!T`):
+/// - BEFORE the helper the live stack boundary is synced to sp - 2 so a GC
+///   triggered by the C_W_E append does not re-walk the two operand slots
+///   (on `.done` they are consumed; on `.slow` the cold twin republishes).
+/// - `.done`: the helper consumed `value`; release the receiver (the cold
+///   arm's `defer obj.free`) and continue at pc + 5 with both operands popped.
+/// - `.slow`: no state was mutated and ownership of both operands stays with
+///   the stack; the cold twin's publish(pc, sp) re-covers them. Append /
+///   auto_init OOM is also `.slow` — `setValueProperty` (still `!T`) is the
+///   OOM channel.
 fn op_put_field_add_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug) std.debug.assert(pc[0] == op.put_field);
     const receiver_value = (sp - 2)[0];
@@ -3637,24 +3634,15 @@ fn op_put_field_add_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
     const value = (sp - 1)[0];
     const rt = vm.ctx.runtime;
     vm.syncSp(sp - 2);
-    const done = receiver.setOrDefineOwnDataPropertyForPutFieldOwned(rt, atom_id, value) catch |err| {
-        // Owned contract: the error path consumed `value`; release our
-        // receiver ref, then run the cold arm's catch sequence against the
-        // already-synced sp - 2 boundary.
-        receiver_value.freeObjectAssumeObjectDuringActiveBytecode(rt);
-        vm.syncPc(pc, 5);
-        forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(vm.ctx, vm.output, vm.global, vm.stack, vm.frame) catch |e2| return vm.fail(e2);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
-        if (!caught) return vm.fail(err);
-        return coldNext(var_buf, vm);
-    };
-    if (done) {
-        receiver_value.freeObjectAssumeObjectDuringActiveBytecode(rt);
-        return cont(pc + 5, sp - 2, var_buf, vm);
+    switch (receiver.setOrDefineOwnDataPropertyForPutFieldOwned(rt, atom_id, value)) {
+        .done => {
+            receiver_value.freeObjectAssumeObjectDuringActiveBytecode(rt);
+            return cont(pc + 5, sp - 2, var_buf, vm);
+        },
+        .slow => {
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        },
     }
-    // Decline: no state was mutated and ownership of both operands stays with
-    // the stack; the cold twin's publish(pc, sp) re-covers them.
-    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 /// Rare-leg tails for the hot put_field hit (get_field_release_receiver
