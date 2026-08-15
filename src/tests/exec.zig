@@ -22001,7 +22001,8 @@ test "small-function-inlining L1: apply-arguments ctor specializes" {
     const state = zjs.exec.small_inline.callerState(outer_fb);
     try std.testing.expect(state != null);
     try std.testing.expect(state.?.inlined_len >= 1);
-    try std.testing.expect(state.?.inlined[0].apply_forwarded);
+    try std.testing.expect(state.?.apply_forward[0].call_pc != std.math.maxInt(u32));
+    try std.testing.expect(outer_fb.applyForwardInlined());
 }
 
 test "small-function-inlining L1: next-entry take does not leak initialize return" {
