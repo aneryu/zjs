@@ -825,6 +825,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_loc0_field] = td.op_get_loc0_field_cold;
     t[op.cmp_if_false8] = td.op_cmp_if_false8_cold;
     t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8_cold;
+    t[op.push_this_put_loc0] = td.op_push_this_put_loc0_cold;
+    t[op.put_loc0_get_loc0] = td.op_put_loc0_get_loc0_cold;
     if (!fast) return t;
     t[op.undefined] = td.op_undefined_fast;
     t[op.null] = td.op_null_fast;
@@ -953,6 +955,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.is_null] = td.op_is_null;
     t[op.inc_loc] = td.op_update_loc;
     t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8;
+    t[op.push_this_put_loc0] = td.op_push_this_put_loc0;
+    t[op.put_loc0_get_loc0] = td.op_put_loc0_get_loc0;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
     t[op.get_loc0_field] = td.op_get_loc0_field;

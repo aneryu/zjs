@@ -1288,8 +1288,9 @@ fn semanticOpcodeForTest(op_id: u8) u8 {
         op.fclosure8 => op.fclosure,
         op.push_empty_string => op.push_atom_value,
         op.get_loc8 => op.get_loc,
-        op.put_loc8, op.put_loc8_get_loc8 => op.put_loc,
+        op.put_loc8, op.put_loc8_get_loc8, op.put_loc0_get_loc0 => op.put_loc,
         op.get_loc0_field => op.get_loc,
+        op.push_this_put_loc0 => op.push_this,
         op.cmp_if_false8 => op.lt,
         op.set_loc8 => op.set_loc,
         op.get_length => op.get_field,
@@ -5060,7 +5061,11 @@ test "F7: static field initializer is a synthetic child called with the class re
     const init = static_init orelse return error.TestExpectedEqual;
     try std.testing.expect(varDefNamed(init, env.rt, "this") != null);
     try std.testing.expect(!init.argumentsAllowed());
-    try expectOpcode(init.byteCode(), op.push_this);
+    try std.testing.expect(
+        countOpcode(init.byteCode(), op.push_this) +
+            countOpcode(init.byteCode(), op.push_this_put_loc0) >
+            0,
+    );
 
     var saw_immediate_receiver_call = false;
     var pc: usize = 0;
@@ -10578,6 +10583,7 @@ test "final bytecode authorizes plain var-ref stores before execution" {
             countOpcode(code, op.put_loc) +
             countOpcode(code, op.put_loc8) +
             countOpcode(code, op.put_loc8_get_loc8) +
+            countOpcode(code, op.put_loc0_get_loc0) +
             countOpcode(code, op.put_loc0) +
             countOpcode(code, op.put_loc1) +
             countOpcode(code, op.put_loc2) +
