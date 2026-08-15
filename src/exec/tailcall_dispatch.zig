@@ -5152,6 +5152,87 @@ pub fn op_put_loc8_get_loc8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
     return coldNext(var_buf, vm);
 }
 
+/// `push_this` then last-ref-safe `put_loc0`. B stays in the stream; we
+/// skip its dispatch (`cont` at pc+2) so LLVM cannot inline `put_loc0`'s
+/// destroy frame onto this leaf. Store `this` straight into loc0 — a
+/// temporary JSValue spills a 0x30 frame.
+pub fn op_push_this_put_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    const old = var_buf[0];
+    if (old.requiresRefCount()) {
+        if (old.refCountHeader()) |header| {
+            if (header.metaConst().rc == 1)
+                return @call(.always_tail, op_push_this_put_loc0_cold, .{ pc, sp, var_buf, vm });
+            if (!storeThisInLoc0(var_buf, vm))
+                return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            header.meta().rc -= 1;
+        } else if (old.stringHeader()) |header| {
+            if (header.rc == 1)
+                return @call(.always_tail, op_push_this_put_loc0_cold, .{ pc, sp, var_buf, vm });
+            if (!storeThisInLoc0(var_buf, vm))
+                return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            header.rc -= 1;
+        } else {
+            return @call(.always_tail, op_push_this_put_loc0_cold, .{ pc, sp, var_buf, vm });
+        }
+    } else if (!storeThisInLoc0(var_buf, vm)) {
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
+    return cont(pc + 2, sp, var_buf, vm);
+}
+
+inline fn storeThisInLoc0(var_buf: [*]JSValue, vm: *Vm) bool {
+    const v = vm.frame.this_value;
+    if (v.isObject()) {
+        var_buf[0] = v.dup();
+        return true;
+    }
+    if (vm.function.isStrictMode() or vm.function.runtimeStrictMode()) {
+        if (v.isUninitialized()) return false;
+        var_buf[0] = v.dup();
+        return true;
+    }
+    if (v.isUndefined() or v.isNull()) {
+        var_buf[0] = vm.global.value().dup();
+        return true;
+    }
+    return false;
+}
+
+pub fn op_push_this_put_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    _ = value_vm.pushThisVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `put_loc0` then musttail `get_loc0`. Last-ref overwrite tails to cold.
+pub fn op_put_loc0_get_loc0(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    const old = var_buf[0];
+    if (old.requiresRefCount()) {
+        if (old.refCountHeader()) |header| {
+            if (header.metaConst().rc == 1)
+                return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
+            var_buf[0] = (sp - 1)[0];
+            header.meta().rc -= 1;
+        } else if (old.stringHeader()) |header| {
+            if (header.rc == 1)
+                return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
+            var_buf[0] = (sp - 1)[0];
+            header.rc -= 1;
+        } else {
+            return @call(.always_tail, op_put_loc0_get_loc0_cold, .{ pc, sp, var_buf, vm });
+        }
+    } else {
+        var_buf[0] = (sp - 1)[0];
+    }
+    return @call(.always_tail, opLoc(.get, .c0), .{ pc + 1, sp - 1, var_buf, vm });
+}
+
+pub fn op_put_loc0_get_loc0_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.put_loc0) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
 /// Dedicated cold handler for OP_inc_loc/OP_dec_loc's non-int32 operand (float /
 /// BigInt / object counter — the `for (var x=0.5; …; x++)` shape). Installed as the
 /// cold_table entry for inc_loc/dec_loc, so op_update_loc reaches it via the same

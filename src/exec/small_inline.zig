@@ -399,7 +399,7 @@ const ApplyForwardPlan = struct {
 
 fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
     return switch (opc) {
-        op.get_loc0, op.put_loc0, op.get_loc0_field => 0,
+        op.get_loc0, op.put_loc0, op.get_loc0_field, op.put_loc0_get_loc0 => 0,
         op.get_loc1, op.put_loc1 => 1,
         op.get_loc2, op.put_loc2 => 2,
         op.get_loc3, op.put_loc3 => 3,
@@ -411,7 +411,7 @@ fn locIndexOf(opc: u8, src: []const u8, pc: usize) ?u16 {
 
 fn isPutLoc(opc: u8) bool {
     return switch (opc) {
-        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc, op.put_loc8_get_loc8 => true,
+        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc8, op.put_loc, op.put_loc8_get_loc8, op.put_loc0_get_loc0 => true,
         else => false,
     };
 }
@@ -558,7 +558,7 @@ fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
     const tap = prevOpBefore(code, gap);
     const this_opc = code[tap];
     const this_local = firstThisLocal(code) orelse return null;
-    if (this_opc == op.push_this) {
+    if (this_opc == op.push_this or this_opc == op.push_this_put_loc0) {
         // ok
     } else if (isGetLoc(this_opc)) {
         const idx = locIndexOf(this_opc, code, tap) orelse return null;
@@ -567,7 +567,7 @@ fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
 
     const before_method = prevOpBefore(code, mgp);
     const bm_op = code[before_method];
-    if (bm_op == op.push_this) {
+    if (bm_op == op.push_this or bm_op == op.push_this_put_loc0) {
         // ok
     } else if (isGetLoc(bm_op)) {
         const idx = locIndexOf(bm_op, code, before_method) orelse return null;
@@ -606,7 +606,8 @@ fn firstThisLocal(code: []const u8) ?u16 {
         const opc = code[pc];
         const size: usize = bytecode.opcode.sizeOf(opc);
         if (size == 0 or pc + size > code.len) return null;
-        if (isPutLoc(opc) and prev_op == op.push_this) return locIndexOf(opc, code, pc);
+        if (isPutLoc(opc) and (prev_op == op.push_this or prev_op == op.push_this_put_loc0))
+            return locIndexOf(opc, code, pc);
         prev_op = opc;
         pc += size;
     }
@@ -800,9 +801,12 @@ fn rewriteBody(
             op.get_loc0_field => {
                 if (!emitLocOp(&out, true, var_base + 0)) return null;
             },
-            op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => {
-                const idx: u16 = @intCast(opc - op.put_loc0);
+            op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.put_loc0_get_loc0 => {
+                const idx: u16 = if (opc == op.put_loc0_get_loc0) 0 else @intCast(opc - op.put_loc0);
                 if (!emitLocOp(&out, false, var_base + idx)) return null;
+            },
+            op.push_this_put_loc0 => {
+                if (!emitLocOp(&out, true, this_slot)) return null;
             },
             op.get_loc8 => {
                 if (!emitLocOp(&out, true, var_base + src[src_pc + 1])) return null;
