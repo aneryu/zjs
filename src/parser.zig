@@ -12407,7 +12407,7 @@ pub const parser_core = struct {
         const stack_loc = try appendAnonymousTempLocal(s);
         // zjs-only explicit-resource-management lowering: mirror the
         // legacy stack creation and local-store sequence exactly.
-        try Emitter.op(s, opcode.op.using_create_stack);
+        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.create);
         try Emitter.opU16(s, opcode.op.put_loc, stack_loc);
         return stack_loc;
     }
@@ -12425,7 +12425,7 @@ pub const parser_core = struct {
         // legacy stack/resource operand order and disposal hint.
         try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
         try Emitter.opU16(s, opcode.op.get_loc, resource_loc);
-        try Emitter.opU8(s, opcode.op.using_add_resource, @intFromEnum(kind));
+        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.add(@intFromEnum(kind)));
     }
 
     fn emitUsingAwaitIfNeeded(s: *State, may_be_async: bool) Error!void {
@@ -12445,7 +12445,7 @@ pub const parser_core = struct {
         // zjs-only explicit-resource-management lowering: mirror the
         // normal-completion disposal prefix exactly.
         try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
-        try Emitter.op(s, opcode.op.using_dispose_stack);
+        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dispose);
         try emitUsingAwaitIfNeeded(s, may_be_async);
         try Emitter.op(s, opcode.op.drop);
     }
@@ -12455,7 +12455,7 @@ pub const parser_core = struct {
         // thrown value beneath the disposable stack before suppression.
         try Emitter.opU16(s, opcode.op.get_loc, stack_loc);
         try Emitter.op(s, opcode.op.swap);
-        try Emitter.op(s, opcode.op.using_dispose_stack_for_throw);
+        try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dispose_throw);
         try emitUsingAwaitIfNeeded(s, may_be_async);
         try Emitter.op(s, opcode.op.drop);
     }

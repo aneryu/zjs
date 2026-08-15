@@ -287,7 +287,7 @@ pub noinline fn field(
             errdefer value.free(ctx.runtime);
             stack.pushOwnedAssumeCapacity(value);
         },
-        op.get_field2 => {
+        op.get_field2, op.get_field2_call_method => {
             const obj = try stackValueFromTop(stack, 0);
             defer obj.free(ctx.runtime);
             if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
