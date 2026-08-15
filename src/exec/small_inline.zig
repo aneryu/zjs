@@ -6,7 +6,7 @@
 //!
 //! Approved gates: K=40, D=2, M=8, ≤4 specialized copies per caller.
 //! L1 apply-arguments-forwarding rewrites a proven `fn.apply(this, arguments)`
-//! ctor body to a live-argv `call_method` (no L2 initialize expansion).
+//! ctor body to a live-argv `call_method_apply_fwd` (no L2 initialize expansion).
 
 const std = @import("std");
 
@@ -654,8 +654,8 @@ fn emitLocOp(out: *Rewrite, get: bool, slot: u16) bool {
     return emitSlice(out, &buf);
 }
 
-fn emitCallMethod(out: *Rewrite, argc: u16) bool {
-    if (!emitByte(out, op.call_method)) return false;
+fn emitCallMethodApplyFwd(out: *Rewrite, argc: u16) bool {
+    if (!emitByte(out, op.call_method_apply_fwd)) return false;
     var buf: [2]u8 = undefined;
     std.mem.writeInt(u16, &buf, argc, .little);
     return emitSlice(out, &buf);
@@ -759,8 +759,8 @@ fn rewriteBody(
                 }
                 out.forward_call_rel = @intCast(out.len);
                 out.method_atom = p.method_atom;
-                if (!emitCallMethod(&out, site_argc)) return null;
-                // call_method leaves initialize's return; the ctor result is
+                if (!emitCallMethodApplyFwd(&out, site_argc)) return null;
+                // apply-fwd leaves initialize's return; the ctor result is
                 // `this`. Drop the unused value so it cannot pile up across
                 // next-entry takes.
                 if (!emitByte(&out, op.drop)) return null;
@@ -1258,8 +1258,8 @@ fn cloneAndExpand(
 }
 
 /// R-v11-a consumes `callee.arg_count` (extras stay in the region and are
-/// DROPped). L1 apply-forward rewrites to a live-argv `call_method` whose
-/// argc is the *site* argc (I6); those slots must be MOVEd into the window.
+/// DROPped). L1 apply-forward rewrites to a live-argv `call_method_apply_fwd`
+/// whose argc is the *site* argc (I6); those slots must be MOVEd into the window.
 pub fn consumedArgSlots(fb: *const FunctionBytecode, site: *const InlinedSite) u16 {
     const state = callerState(fb);
     const forwarded = if (state) |st| siteApplyForwarded(st, site) else false;
@@ -1495,22 +1495,8 @@ pub inline fn applyForwardTakeOk(
     return applyForwardGuardHolds(rt, global, ctor, fwd.method_atom);
 }
 
-/// True when `call_pc` is the rewritten apply-forward `call_method`.
-/// noinline: siteForPc/callerState must not inflate `op_call_method` (F1).
-pub noinline fn isApplyForwardCall(fb: *const FunctionBytecode, call_pc: u32) bool {
-    // Header mirror, not hotExtension().call_facts: the FAM word sits at the
-    // end of the bytecode image and would miss the caller's first cache line
-    // on every non-apply `op_call_method`.
-    if (!fb.call_facts_mirror.execution.apply_forward_inlined) return false;
-    const site = siteForPc(fb, call_pc) orelse return false;
-    const state = callerState(fb) orelse return false;
-    const fwd = applyForwardColdOf(state, site);
-    return fwd.call_pc == call_pc;
-}
-
-/// After `op_call_method` advances pc past the 3-byte instruction, recover
-/// the apply-forward site (or null). Used by enterEntry to attach
-/// `Entry.native_caller` (D8-L1) without inserting an InlinedSite ghost.
+/// After the 3-byte apply-fwd instruction, recover the site (or null).
+/// Used to attach `Entry.native_caller` (D8-L1) without an InlinedSite ghost.
 pub fn applyForwardSiteAfterCall(fb: *const FunctionBytecode, pc_after: u32) ?*const InlinedSite {
     if (!fb.call_facts_mirror.execution.apply_forward_inlined) return null;
     if (pc_after < 3) return null;
