@@ -12836,6 +12836,24 @@ test "Engine eval preserves local numeric add host output semantics" {
     try std.testing.expectEqualStrings("3\n2147483648\ncustom:3\n", stream.buffered());
 }
 
+test "int32 add sub mul overflow stays a number on the generic binary" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function add1(a, b) { return a + b; }
+        \\function sub1(a, b) { return a - b; }
+        \\function mul1(a, b) { return a * b; }
+        \\assert.sameValue(add1(2147483647, 1), 2147483648);
+        \\assert.sameValue(add1(-2147483648, -1), -2147483649);
+        \\assert.sameValue(sub1(-2147483648, 1), -2147483649);
+        \\assert.sameValue(mul1(1 << 30, 4), 4294967296);
+        \\assert.sameValue(1 / mul1(-1, 0), -Infinity);
+        \\assert.sameValue(add1(1, 2), 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval preserves collection read host output semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
