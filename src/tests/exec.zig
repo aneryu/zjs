@@ -12853,7 +12853,6 @@ test "get_array_el2 dense indexed call keeps the receiver" {
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
-
 test "int32 add sub mul overflow stays a number on the generic binary" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
