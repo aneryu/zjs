@@ -822,6 +822,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     //     handlers fall back THROUGH (indirect `cold_table[pc[0]]` tail call → the
     //     compiler can't devirtualize+inline it, so the fast handler stays a
     //     frameless leaf instead of carrying the cold 128B frame on its hot path). ---
+    t[op.get_loc0_field] = td.op_get_loc0_field_cold;
+    t[op.cmp_if_false8] = td.op_cmp_if_false8_cold;
+    t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8_cold;
     if (!fast) return t;
     t[op.undefined] = td.op_undefined_fast;
     t[op.null] = td.op_null_fast;
@@ -931,6 +934,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.drop] = td.op_drop_fast; // catch-marker (finally/catch epilogue) → cold s.op_drop
     t[op.goto8] = td.op_goto8;
     t[op.if_false8] = td.op_if_false8;
+    t[op.cmp_if_false8] = td.op_cmp_if_false8;
     t[op.if_true8] = td.op_if_true8;
     // Long-form conditional branch (qjs CASE(OP_if_false):18859 — same immediate/
     // object fast legs as the short form, 4-byte label); float/string/HTMLDDA and
@@ -948,8 +952,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // through JS_FreeValue's inline tag guard before overwriting with false.
     t[op.is_null] = td.op_is_null;
     t[op.inc_loc] = td.op_update_loc;
+    t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8;
     t[op.dec_loc] = td.op_update_loc;
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
+    t[op.get_loc0_field] = td.op_get_loc0_field;
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element

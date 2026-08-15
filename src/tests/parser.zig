@@ -1288,7 +1288,9 @@ fn semanticOpcodeForTest(op_id: u8) u8 {
         op.fclosure8 => op.fclosure,
         op.push_empty_string => op.push_atom_value,
         op.get_loc8 => op.get_loc,
-        op.put_loc8 => op.put_loc,
+        op.put_loc8, op.put_loc8_get_loc8 => op.put_loc,
+        op.get_loc0_field => op.get_loc,
+        op.cmp_if_false8 => op.lt,
         op.set_loc8 => op.set_loc,
         op.get_length => op.get_field,
         op.if_false8 => op.if_false,
@@ -10575,6 +10577,7 @@ test "final bytecode authorizes plain var-ref stores before execution" {
         const local_writes =
             countOpcode(code, op.put_loc) +
             countOpcode(code, op.put_loc8) +
+            countOpcode(code, op.put_loc8_get_loc8) +
             countOpcode(code, op.put_loc0) +
             countOpcode(code, op.put_loc1) +
             countOpcode(code, op.put_loc2) +
