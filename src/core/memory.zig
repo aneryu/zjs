@@ -49,6 +49,10 @@ pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 /// same rule that already governs `JSRuntime.allocStringAlignedBytes`.
 pub const allocation_gc_trigger_enabled: bool = builtin.is_test or force_gc_on_allocation_enabled;
 
+/// qjs `MALLOC_OVERHEAD` (quickjs.c:59-62): 0 on Apple, 8 elsewhere.
+/// Added to every `js_malloc` usable size in `js_def_malloc` (quickjs.c:2168).
+pub const malloc_overhead: usize = if (builtin.os.tag.isDarwin()) 0 else 8;
+
 const oom_coverage = struct {
     // Plain atomic spinlock: diagnostic instrumentation must not depend on
     // an Io handle (std.Io.Mutex) and contention is negligible (worker
@@ -129,7 +133,13 @@ pub const SmallObjectSlab = struct {
     };
 
     const block_header_size = std.mem.alignForward(usize, @sizeOf(BlockHeader), slab_alignment.toByteUnits());
+    /// Public name for the 8-byte slab header folded into each class block.
+    pub const block_header_bytes: usize = block_header_size;
     const arena_header_size = std.mem.alignForward(usize, @sizeOf(Arena), slab_alignment.toByteUnits());
+
+    pub inline fn blockSize(index: usize) usize {
+        return block_sizes[index];
+    }
 
     arenas: [block_sizes.len]?*Arena = @splat(null),
     free_arenas: [block_sizes.len]?*Arena = @splat(null),
@@ -405,6 +415,9 @@ pub const MemoryAccount = struct {
     backing_allocator: std.mem.Allocator,
     small_slab: SmallObjectSlab = .{},
     small_slab_enabled: bool = false,
+    /// qjs `malloc_state.malloc_size`. Slab blocks charge class size
+    /// (`usable + MALLOC_OVERHEAD`, quickjs.c:2168/1740); standalone charges
+    /// the backing request.
     allocated_bytes: usize = 0,
     allocation_count: usize = 0,
     peak_allocated_bytes: usize = 0,
@@ -422,6 +435,36 @@ pub const MemoryAccount = struct {
 
     pub fn init(allocator: std.mem.Allocator) MemoryAccount {
         return .{ .allocator = allocator, .persistent_allocator = allocator, .backing_allocator = allocator };
+    }
+
+    /// qjs `js_def_malloc` / `js_def_free` (quickjs.c:2168/2178):
+    /// `malloc_size ±= js_def_malloc_usable_size(ptr) + MALLOC_OVERHEAD`.
+    ///
+    /// Slab: `__js_malloc_usable_size` is `block_size - header`
+    /// (quickjs.c:1740-1741). Plus `MALLOC_OVERHEAD` that equals the class
+    /// size on Linux (96/112/…), which is what we charge. Standalone / large
+    /// have no class; charge the backing request. Adding another
+    /// `MALLOC_OVERHEAD` there would double-count the 8-byte GC prefix that
+    /// standalone already folds into `request_bytes`.
+    pub fn accountedMallocSize(request_bytes: usize, slab_class: ?usize) usize {
+        if (slab_class) |index| {
+            const usable = SmallObjectSlab.blockSize(index) - SmallObjectSlab.block_header_bytes;
+            return usable + malloc_overhead;
+        }
+        return request_bytes;
+    }
+
+    /// Charge for a request that may land in the slab (`classIndex` is private).
+    pub fn accountedSizeForRequest(request_bytes: usize, alignment: std.mem.Alignment) usize {
+        return accountedMallocSize(request_bytes, SmallObjectSlab.classIndex(request_bytes, alignment));
+    }
+
+    inline fn creditAlloc(self: *MemoryAccount, request_bytes: usize, slab_class: ?usize) void {
+        self.allocated_bytes +%= accountedMallocSize(request_bytes, slab_class);
+    }
+
+    inline fn debitAlloc(self: *MemoryAccount, request_bytes: usize, slab_class: ?usize) void {
+        self.allocated_bytes -%= accountedMallocSize(request_bytes, slab_class);
     }
 
     pub fn initWithTrace(allocator: std.mem.Allocator, writer: *std.Io.Writer) MemoryAccount {
@@ -616,7 +659,7 @@ pub const MemoryAccount = struct {
                     const raw = self.slabPopHot(comptime slab_class.?, false) orelse
                         return self.allocInternalSlow(T, count, trigger_gc);
                     initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), comptime slab_class.?);
-                    self.allocated_bytes +%= bytes;
+                    self.creditAlloc(bytes, comptime slab_class);
                     self.noteAllocDiagnostics(false, @sizeOf(T), count, @intFromPtr(raw));
                     const ptr: [*]T = @ptrCast(@alignCast(raw));
                     return ptr[0..count];
@@ -630,7 +673,7 @@ pub const MemoryAccount = struct {
                     if (comptime trigger_gc) self.triggerGCBeforeAllocation(payload_bytes);
                     const raw = self.slabPopHot(slab_class, true) orelse
                         return self.allocInternalSlow(T, count, trigger_gc);
-                    self.allocated_bytes +%= payload_bytes;
+                    self.creditAlloc(payload_bytes, slab_class);
                     self.noteAllocDiagnostics(false, @sizeOf(T), count, @intFromPtr(raw));
                     const ptr: [*]T = @ptrCast(@alignCast(raw));
                     return ptr[0..count];
@@ -648,7 +691,7 @@ pub const MemoryAccount = struct {
         if (comptime is_gc) std.debug.assert(count == 1);
         const payload_bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
-        const slab_index = if (comptime is_gc) self.gcSlabClassIndex(payload_bytes, alignment) else null;
+        const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(payload_bytes, alignment) else null;
         const prefix = if (comptime is_gc) (if (slab_index != null) 0 else gcPrefixSize(T)) else 0;
         const bytes = prefix + payload_bytes;
         try self.checkAllocation(bytes);
@@ -666,7 +709,7 @@ pub const MemoryAccount = struct {
         else
             @ptrCast(@alignCast(raw));
         const slice = ptr[0..count];
-        self.allocated_bytes +%= bytes;
+        self.creditAlloc(if (slab_index != null) payload_bytes else bytes, slab_index);
         self.noteAllocDiagnostics(false, @sizeOf(T), count, @intFromPtr(slice.ptr));
         return slice;
     }
@@ -688,19 +731,18 @@ pub const MemoryAccount = struct {
             if (comptime slab_class != null) {
                 if (self.small_slab_enabled) {
                     std.debug.assert(gcAllocInfoByte(bytes_ptr) & (alloc_info_standalone | alloc_info_class_mask) == comptime slab_class.?);
-                    self.allocated_bytes -%= payload_bytes;
+                    self.debitAlloc(payload_bytes, comptime slab_class);
                     self.noteFreeDiagnostics(false);
                     return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, comptime slab_class.?);
                 }
             }
             const prefix = comptime gcPrefixSize(T);
             const bytes = prefix + payload_bytes;
-            self.allocated_bytes -%= bytes;
+            self.debitAlloc(bytes, null);
             self.noteFreeDiagnostics(false);
             const base: [*]u8 = @ptrFromInt(@intFromPtr(slice.ptr) - prefix);
             return self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
         }
-        self.allocated_bytes -%= payload_bytes;
         self.noteFreeDiagnostics(false);
         if (self.small_slab_enabled and SmallObjectSlab.eligibleSize(payload_bytes, alignment)) {
             // The runtime enables the slab before managed allocations begin;
@@ -709,8 +751,10 @@ pub const MemoryAccount = struct {
             // of re-deriving the class (qjs __js_free, quickjs.c:1614).
             const slab_class = SmallObjectSlab.headerClassIndex(bytes_ptr);
             std.debug.assert(slab_class == SmallObjectSlab.classIndex(payload_bytes, alignment).?);
+            self.debitAlloc(payload_bytes, slab_class);
             return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, slab_class);
         }
+        self.debitAlloc(payload_bytes, null);
         self.backing_allocator.rawFree(bytes_ptr[0..payload_bytes], alignment, @returnAddress());
     }
 
@@ -768,7 +812,9 @@ pub const MemoryAccount = struct {
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(byte_count);
         }
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, byte_count) catch return error.OutOfMemory;
+        const slab_class = if (self.small_slab_enabled) SmallObjectSlab.classIndex(byte_count, alignment) else null;
+        const accounted = accountedMallocSize(byte_count, slab_class);
+        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, accounted) catch return error.OutOfMemory;
         const ptr = try self.rawAlloc(byte_count, alignment);
         self.allocated_bytes = next_allocated_bytes;
         if (comptime diagnostic_accounting_enabled) {
@@ -784,12 +830,19 @@ pub const MemoryAccount = struct {
     pub fn freeAlignedBytes(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
         if (bytes.len == 0) return;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(bytes.ptr));
-        self.allocated_bytes -= bytes.len;
         if (comptime diagnostic_accounting_enabled) {
             self.allocation_count -= 1;
             self.free_calls += 1;
         }
-        self.rawFree(bytes, alignment);
+        if (self.small_slab_enabled and SmallObjectSlab.eligibleSize(bytes.len, alignment)) {
+            const index = SmallObjectSlab.headerClassIndex(bytes.ptr);
+            std.debug.assert(index == SmallObjectSlab.classIndex(bytes.len, alignment).?);
+            self.debitAlloc(bytes.len, index);
+            self.small_slab.freeAtIndex(&self.backing_allocator, bytes.ptr, index);
+            return;
+        }
+        self.debitAlloc(bytes.len, null);
+        self.backing_allocator.rawFree(bytes, alignment, @returnAddress());
     }
 
     /// Returns owned memory. Caller must destroy it with `destroy`.
@@ -896,7 +949,7 @@ pub const MemoryAccount = struct {
                 const raw = self.slabPopHot(comptime slab_class.?, !is_gc) orelse
                     return self.createInternalSlow(T, trigger_gc);
                 if (comptime is_gc) initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), comptime slab_class.?);
-                self.allocated_bytes +%= bytes;
+                self.creditAlloc(bytes, comptime slab_class);
                 self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(raw));
                 return @ptrCast(@alignCast(raw));
             }
@@ -910,7 +963,7 @@ pub const MemoryAccount = struct {
     noinline fn createInternalSlow(self: *MemoryAccount, comptime T: type, comptime trigger_gc: bool) !*T {
         const is_gc = comptime isGcObject(T);
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
-        const slab_index = if (comptime is_gc) self.gcSlabClassIndex(@sizeOf(T), alignment) else null;
+        const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(@sizeOf(T), alignment) else null;
         const prefix = if (comptime is_gc) (if (slab_index != null) 0 else gcPrefixSize(T)) else 0;
         const bytes = prefix + @sizeOf(T);
         try self.checkAllocation(bytes);
@@ -927,7 +980,7 @@ pub const MemoryAccount = struct {
             @ptrFromInt(obj_addr)
         else
             @ptrCast(@alignCast(raw));
-        self.allocated_bytes +%= bytes;
+        self.creditAlloc(if (slab_index != null) @sizeOf(T) else bytes, slab_index);
         self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(ptr));
         return ptr;
     }
@@ -943,14 +996,14 @@ pub const MemoryAccount = struct {
         if (comptime slab_class != null) {
             if (self.small_slab_enabled) {
                 if (comptime is_gc) std.debug.assert(gcAllocInfoByte(ptr) & (alloc_info_standalone | alloc_info_class_mask) == comptime slab_class.?);
-                self.allocated_bytes -%= @sizeOf(T);
+                self.debitAlloc(@sizeOf(T), comptime slab_class);
                 self.noteFreeDiagnostics(true);
                 return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, comptime slab_class.?);
             }
         }
         const prefix = if (comptime is_gc) gcPrefixSize(T) else 0;
         const bytes = prefix + @sizeOf(T);
-        self.allocated_bytes -%= bytes;
+        self.debitAlloc(bytes, null);
         self.noteFreeDiagnostics(true);
         const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - prefix);
         self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
@@ -987,7 +1040,7 @@ pub const MemoryAccount = struct {
                 const raw = self.slabPopHot(slab_class, false) orelse
                     return self.createWithFamInternalSlow(T, fam_bytes, trigger_gc);
                 initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), slab_class);
-                self.allocated_bytes +%= payload_bytes;
+                self.creditAlloc(payload_bytes, slab_class);
                 self.noteAllocDiagnostics(true, 1, payload_bytes, @intFromPtr(raw));
                 return @ptrCast(@alignCast(raw));
             }
@@ -1012,7 +1065,7 @@ pub const MemoryAccount = struct {
         const obj_addr = @intFromPtr(raw) + prefix;
         initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
         const ptr: *T = @ptrFromInt(obj_addr);
-        self.allocated_bytes +%= bytes;
+        self.creditAlloc(if (slab_index != null) payload_bytes else bytes, slab_index);
         self.noteAllocDiagnostics(true, 1, bytes, @intFromPtr(ptr));
         return ptr;
     }
@@ -1033,13 +1086,13 @@ pub const MemoryAccount = struct {
             const slab_class: usize = info & alloc_info_class_mask;
             std.debug.assert(self.small_slab_enabled);
             std.debug.assert(slab_class == SmallObjectSlab.classIndex(payload_bytes, alignment).?);
-            self.allocated_bytes -%= payload_bytes;
+            self.debitAlloc(payload_bytes, slab_class);
             self.noteFreeDiagnostics(true);
             return self.small_slab.freeAtIndex(&self.backing_allocator, @ptrCast(ptr), slab_class);
         }
         const prefix = comptime gcPrefixSize(T);
         const bytes = prefix + payload_bytes;
-        self.allocated_bytes -%= bytes;
+        self.debitAlloc(bytes, null);
         self.noteFreeDiagnostics(true);
         const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - prefix);
         self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
@@ -1198,10 +1251,10 @@ test "small slab GC allocation reuses allocator header for metadata" {
     const second = try account.create(TestGc);
     second.* = .{};
 
-    // The slab's existing 8-byte block header carries the GC metadata. Only
-    // the 64-byte payload is charged/requested, so the physical slab class is
-    // 72 bytes (8-byte allocator header + payload), not the old 80 bytes.
-    try std.testing.expectEqual(2 * @sizeOf(TestGc), account.allocated_bytes);
+    // qjs js_def_malloc (quickjs.c:2168): usable + MALLOC_OVERHEAD per block.
+    // 64-byte TestGc lands in class 72; Linux charge is the class size.
+    const test_class = SmallObjectSlab.classIndex(@sizeOf(TestGc), MemoryAccount.gcAlignment(TestGc)).?;
+    try std.testing.expectEqual(2 * MemoryAccount.accountedMallocSize(@sizeOf(TestGc), test_class), account.allocated_bytes);
 
     const second_meta: [*]const u8 = @ptrFromInt(@intFromPtr(second) - MemoryAccount.gc_prefix_size);
     // Byte 2 = allocator class stamp (qjs block_size_idx), byte 3 = kind in
@@ -1219,5 +1272,33 @@ test "small slab GC allocation reuses allocator header for metadata" {
 
     account.destroy(TestGc, reused);
     account.destroy(TestGc, first);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+}
+
+test "GC ledger charges slab class usable plus malloc overhead (qjs:2168)" {
+    var account = MemoryAccount.init(std.testing.allocator);
+    account.enableSmallObjectSlab();
+    defer account.deinitSmallObjectSlab();
+
+    // 32-byte raw payload → total 40 → class 40. Linux charge is the class size.
+    const request: usize = 32;
+    const class = SmallObjectSlab.classIndex(request, .@"8").?;
+    try std.testing.expectEqual(@as(usize, 40), SmallObjectSlab.blockSize(class));
+    const charged = MemoryAccount.accountedMallocSize(request, class);
+    if (malloc_overhead == 8) {
+        try std.testing.expectEqual(@as(usize, 40), charged);
+    } else {
+        try std.testing.expectEqual(request, charged);
+    }
+
+    const ptr = try account.alloc(u8, request);
+    try std.testing.expectEqual(charged, account.allocated_bytes);
+    account.free(u8, ptr);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+
+    const standalone_request: usize = 600;
+    const standalone = try account.alloc(u8, standalone_request);
+    try std.testing.expectEqual(standalone_request, account.allocated_bytes);
+    account.free(u8, standalone);
     try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
 }

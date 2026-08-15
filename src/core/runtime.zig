@@ -1280,7 +1280,7 @@ pub const JSRuntime = struct {
         self.memory.deinitSmallObjectSlab();
         if (self.compact_state.owns_self_allocation) {
             std.debug.assert(self.memory.allocation_count == 1);
-            std.debug.assert(self.memory.allocated_bytes == @sizeOf(JSRuntime));
+            std.debug.assert(self.memory.allocated_bytes == memory.MemoryAccount.accountedMallocSize(@sizeOf(JSRuntime), null));
         } else {
             std.debug.assert(!self.memory.hasOutstandingAllocations());
         }
@@ -2683,6 +2683,9 @@ pub const JSRuntime = struct {
             _ = self.forceGC(null) catch {};
             return;
         }
+        // qjs js_trigger_gc (quickjs.c:1780-1788):
+        //   force_gc = (malloc_size + size) > malloc_gc_threshold
+        // malloc_size is allocated_bytes (usable+MALLOC_OVERHEAD, quickjs.c:2168).
         const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
         if (total > self.malloc_gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
@@ -2715,6 +2718,8 @@ pub const JSRuntime = struct {
     }
 
     fn resetGCThreshold(self: *JSRuntime) void {
+        // qjs js_trigger_gc after JS_RunGC (quickjs.c:1795-1796):
+        //   malloc_gc_threshold = malloc_size + (malloc_size >> 1)
         self.malloc_gc_threshold = std.math.add(usize, self.memory.allocated_bytes, self.memory.allocated_bytes >> 1) catch std.math.maxInt(usize);
         self.gc.resetAllocationDebt();
     }
