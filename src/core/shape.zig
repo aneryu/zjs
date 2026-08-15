@@ -4,9 +4,11 @@ const memory = @import("memory.zig");
 const Object = @import("object.zig").Object;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 
-pub const initial_prop_size = 4;
+/// qjs `JS_PROP_INITIAL_SIZE` (quickjs.c:965).
+pub const initial_prop_size = 2;
 pub const initial_hash_size = 4;
-pub const initial_shape_hash_bits: u6 = 6;
+/// qjs `rt->shape_hash_bits = 4` → 16 hashed shapes (quickjs.c:5134).
+pub const initial_shape_hash_bits: u6 = 4;
 pub const no_property_hash: u32 = 0;
 /// End-of-chain / not-found sentinel for the property hash list. Mirrors qjs's
 /// 8-byte JSShapeProperty packing (quickjs.c:968 `hash_next:26`): the chain index
