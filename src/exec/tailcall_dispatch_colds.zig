@@ -167,14 +167,14 @@ pub const SpecialHandlers = struct {
 pub const BuiltTable = struct {
     table: [256]Handler,
     /// Geometry keep: reclaimed-slot coldStd leaves. Live so LLVM cannot DCE them.
-    keep: [6]Handler,
+    keep: [8]Handler,
 };
 
 pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     var t: [256]Handler = [_]Handler{s.op_invalid} ** 256;
-    var keep: [6]Handler = .{
-        s.op_invalid, s.op_invalid, s.op_invalid,
-        s.op_invalid, s.op_invalid, s.op_invalid,
+    var keep: [8]Handler = .{
+        s.op_invalid, s.op_invalid, s.op_invalid, s.op_invalid,
+        s.op_invalid, s.op_invalid, s.op_invalid, s.op_invalid,
     };
 
     // --- pushes ---
@@ -614,7 +614,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try value_vm.dup1(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.dup2] = h(struct {
+    keep[6] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.dup2(vm.ctx, vm.stack);
         }
@@ -674,7 +674,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try value_vm.perm5(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.swap2] = h(struct {
+    keep[7] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.swap2(vm.ctx, vm.stack);
         }

@@ -5619,7 +5619,7 @@ const cold_built = colds.buildTable(specials, false);
 const cold_table: [256]Handler = cold_built.table;
 /// Wave-22: exported so the three type-test coldStd leaves stay in the
 /// island at their v2.1 source order (240/242/243 slots are fusion now).
-export const zjs_w22_island_keep: [6]Handler = cold_built.keep;
+export const zjs_w22_island_keep: [8]Handler = cold_built.keep;
 // O1 exact-args leaf cold constructors. Defined AFTER the handler cluster
 // so their machine code lands past the established opcode bodies: inserting
 // them mid-cluster shifted every subsequent handler address and reproducibly

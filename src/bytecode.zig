@@ -114,7 +114,8 @@ pub const opcode = struct {
         pub const nip1: u8 = 16;
         pub const dup: u8 = 17;
         pub const dup1: u8 = 18;
-        pub const dup2: u8 = 19;
+        /// Fusion v4 (using-prefix reclaim of zoo-cold `dup2`). `push_0` + leftover `or`.
+        pub const push_0_or: u8 = 19;
         pub const dup3: u8 = 20;
         pub const insert2: u8 = 21;
         pub const insert3: u8 = 22;
@@ -125,7 +126,8 @@ pub const opcode = struct {
         /// Fusion v4 (using-prefix reclaim). `sar` + leftover `get_array_el`.
         pub const sar_get_array_el: u8 = 26;
         pub const swap: u8 = 27;
-        pub const swap2: u8 = 28;
+        /// Fusion v4 (using-prefix reclaim of zoo-cold `swap2`). `get_array_el` + leftover `push_0`.
+        pub const get_array_el_push_0: u8 = 28;
         pub const rot3l: u8 = 29;
         pub const rot3r: u8 = 30;
         pub const rot4l: u8 = 31;
@@ -378,10 +380,6 @@ pub const opcode = struct {
         /// Emit-time fusion: `put_loc0` + `get_loc0`. Size/stack match
         /// `put_loc0`; the following `get_loc0` stays in the stream.
         pub const put_loc0_get_loc0: u8 = 253;
-        /// Fusion v4. `push_0` + leftover `or`. Size/stack match `push_0`.
-        pub const push_0_or: u8 = 254;
-        /// Fusion v4. `get_array_el` + leftover `push_0`. Size/stack match `get_array_el`.
-        pub const get_array_el_push_0: u8 = 255;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -412,7 +410,7 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 256;
+        pub const op_count: u16 = 254;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -430,10 +428,12 @@ pub const opcode = struct {
         pub const is_undefined: u8 = 3;
         pub const typeof_is_undefined: u8 = 4;
         pub const typeof_is_function: u8 = 5;
-        /// Reclaimed zoo-cold shorts (were ids 241/23/32) for fusion v4.
+        /// Reclaimed zoo-cold shorts (were ids 23/32/26/19/28) for fusion v4.
         pub const insert4: u8 = 6;
         pub const rot5l: u8 = 7;
         pub const perm5: u8 = 8;
+        pub const dup2: u8 = 9;
+        pub const swap2: u8 = 10;
         pub const add_base: u8 = 16;
 
         pub fn add(hint: u8) u8 {
@@ -457,6 +457,8 @@ pub const opcode = struct {
                 is_undefined, typeof_is_undefined, typeof_is_function => 1,
                 insert4 => 4,
                 rot5l, perm5 => 5,
+                dup2 => 2,
+                swap2 => 4,
                 else => 0,
             };
         }
@@ -469,12 +471,13 @@ pub const opcode = struct {
                 dispose_throw => 1,
                 is_undefined, typeof_is_undefined, typeof_is_function => 1,
                 insert4, rot5l, perm5 => 5,
+                dup2, swap2 => 4,
                 else => 0,
             };
         }
     };
 
-    pub const op_info_len: usize = 275;
+    pub const op_info_len: usize = 273;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -498,7 +501,7 @@ pub const opcode = struct {
         .{ .name = "nip1", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [16] id 16
         .{ .name = "dup", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [17] id 17
         .{ .name = "dup1", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [18] id 18
-        .{ .name = "dup2", .size = 1, .n_pop = 2, .n_push = 4, .fmt = .none }, // [19] id 19
+        .{ .name = "push_0_or", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [19] id 19
         .{ .name = "dup3", .size = 1, .n_pop = 3, .n_push = 6, .fmt = .none }, // [20] id 20
         .{ .name = "insert2", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [21] id 21
         .{ .name = "insert3", .size = 1, .n_pop = 3, .n_push = 4, .fmt = .none }, // [22] id 22
@@ -507,7 +510,7 @@ pub const opcode = struct {
         .{ .name = "perm4", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [25] id 25
         .{ .name = "sar_get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [26] id 26
         .{ .name = "swap", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [27] id 27
-        .{ .name = "swap2", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [28] id 28
+        .{ .name = "get_array_el_push_0", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [28] id 28
         .{ .name = "rot3l", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [29] id 29
         .{ .name = "rot3r", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [30] id 30
         .{ .name = "rot4l", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [31] id 31
@@ -752,8 +755,6 @@ pub const opcode = struct {
         .{ .name = "put_loc8_get_loc8", .size = 2, .n_pop = 1, .n_push = 0, .fmt = .loc8 }, // [270] id 251
         .{ .name = "push_this_put_loc0", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [271] id 252
         .{ .name = "put_loc0_get_loc0", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_loc }, // [272] id 253
-        .{ .name = "push_0_or", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [273] id 254
-        .{ .name = "get_array_el_push_0", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [274] id 255
     };
 
     /// Name-free production view of `opcode_info`, matching QuickJS's
@@ -934,8 +935,8 @@ pub const opcode = struct {
         try std.testing.expectEqual(@as(u8, 2), sizeOf(op.get_loc8));
         try std.testing.expectEqual(Format.loc8, formatOf(op.set_loc8));
         // Unclaimed ids report no entry.
-        try std.testing.expectEqual(@as(u8, 1), sizeOf(255));
-        try std.testing.expectEqualStrings("get_array_el_push_0", nameOf(255));
+        try std.testing.expectEqual(@as(u8, 0), sizeOf(255));
+        try std.testing.expectEqualStrings("", nameOf(255));
     }
 
     test "phase-1 view resolves temp forms in the overlap range" {
