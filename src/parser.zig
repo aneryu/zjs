@@ -7983,6 +7983,10 @@ pub const parser_core = struct {
         s.emitOpcodeBytesNoSourceAssumeCapacity(&[_]u8{op_id});
     }
 
+    fn emitOpU8NoSourceAssumeCapacity(s: *State, op_id: u8, val: u8) void {
+        s.emitOpcodeBytesNoSourceAssumeCapacity(&[_]u8{ op_id, val });
+    }
+
     fn reemitLValueGetterAssumeCapacity(s: *State, lvalue: *const LValue) void {
         switch (lvalue.opcode) {
             .scope_var => {
@@ -7997,7 +8001,7 @@ pub const parser_core = struct {
             .array_element => emitOpNoSourceAssumeCapacity(s, opcode.op.get_array_el3),
             .super_value => {
                 emitOpNoSourceAssumeCapacity(s, opcode.op.to_propkey);
-                emitOpNoSourceAssumeCapacity(s, opcode.op.dup3);
+                emitOpU8NoSourceAssumeCapacity(s, opcode.op.using, opcode.using_sub.dup3);
                 emitOpNoSourceAssumeCapacity(s, opcode.op.get_super_value);
             },
             .ref_value => emitOpNoSourceAssumeCapacity(s, opcode.op.get_ref_value),
@@ -8033,7 +8037,7 @@ pub const parser_core = struct {
                 // qjs get_lvalue (quickjs.c:26027-26030): preserve the super
                 // receiver/base/key triple around the value load.
                 try v2FEmitOpNoSource(s, opcode.op.to_propkey);
-                try v2FEmitOpNoSource(s, opcode.op.dup3);
+                try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.dup3);
                 try v2FEmitOpNoSource(s, opcode.op.get_super_value);
             },
             .ref_value => {
@@ -8206,7 +8210,7 @@ pub const parser_core = struct {
                 .no_keep, .no_keep_depth => null,
                 .keep_top => null,
                 .keep_second => null,
-                .no_keep_bottom => opcode.op.rot4l,
+                .no_keep_bottom => null,
             },
         };
 
@@ -8242,6 +8246,8 @@ pub const parser_core = struct {
             try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.insert4)
         else if (lvalue.opcode == .super_value and mode == .keep_second)
             try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.perm5)
+        else if (lvalue.opcode == .super_value and mode == .no_keep_bottom)
+            try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot4l)
         else if (shuffle_op) |op_id| try v2FEmitOpNoSource(s, op_id);
 
         switch (lvalue.opcode) {
@@ -10512,7 +10518,7 @@ pub const parser_core = struct {
         }
         try expectPunct(s, ']');
         if (spread_active) {
-            try Emitter.op(s, opcode.op.dup1);
+            try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dup1);
             try Emitter.opAtom(s, opcode.op.put_field, atom_module.ids.length);
         } else if (!sparse_active) {
             try Emitter.opU16(s, opcode.op.array_from, count);
@@ -16918,7 +16924,7 @@ pub const parser_core = struct {
             0 => {},
             1 => try Emitter.op(s, opcode.op.swap),
             2 => try Emitter.op(s, opcode.op.rot3l),
-            3 => try Emitter.op(s, opcode.op.rot4l),
+            3 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.rot4l),
             else => unreachable,
         }
     }
@@ -16926,8 +16932,8 @@ pub const parser_core = struct {
     fn rotateComputedSourcePastTarget(s: *State, depth: u8) Error!void {
         switch (depth) {
             0 => {},
-            1 => try Emitter.op(s, opcode.op.rot3r),
-            2 => try Emitter.op(s, opcode.op.swap2),
+            1 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.rot3r),
+            2 => try Emitter.opU8(s, opcode.op.using, opcode.using_sub.swap2),
             3 => {
                 try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
                 try v2FEmitOpU8(s, opcode.op.using, opcode.using_sub.rot5l);
@@ -17074,7 +17080,7 @@ pub const parser_core = struct {
                     try Emitter.op(s, opcode.op.drop);
                 } else {
                     // qjs emit_return iterator cleanup (quickjs.c:28441-28444): rotate value, add dummy catch offset, close.
-                    try Emitter.op(s, opcode.op.rot3r);
+                    try Emitter.opU8(s, opcode.op.using, opcode.using_sub.rot3r);
                     try Emitter.op(s, opcode.op.undefined);
                     try Emitter.op(s, opcode.op.iterator_close);
                 }
@@ -17223,7 +17229,7 @@ pub const parser_core = struct {
                     } else {
                         try Emitter.op(s, opcode.op.to_propkey);
                     }
-                    try Emitter.op(s, opcode.op.dup1);
+                    try Emitter.opU8(s, opcode.op.using, opcode.using_sub.dup1);
                 } else {
                     const property = property_info orelse return Error.UnexpectedToken;
                     if (has_rest) try addNamedObjectRestExclusion(s, property.atom);

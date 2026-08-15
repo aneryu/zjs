@@ -113,10 +113,12 @@ pub const opcode = struct {
         pub const nip: u8 = 15;
         pub const nip1: u8 = 16;
         pub const dup: u8 = 17;
-        pub const dup1: u8 = 18;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `dup1`). `get_loc8` + leftover `push_i8`.
+        pub const get_loc8_push_i8: u8 = 18;
         /// Fusion v4 (using-prefix reclaim of zoo-cold `dup2`). `push_0` + leftover `or`.
         pub const push_0_or: u8 = 19;
-        pub const dup3: u8 = 20;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `dup3`). `push_i8` + leftover `add`.
+        pub const push_i8_add: u8 = 20;
         pub const insert2: u8 = 21;
         pub const insert3: u8 = 22;
         /// Fusion v4 (using-prefix reclaim). `push_2` + leftover `sar`.
@@ -126,10 +128,13 @@ pub const opcode = struct {
         /// Fusion v4 (using-prefix reclaim). `sar` + leftover `get_array_el`.
         pub const sar_get_array_el: u8 = 26;
         pub const swap: u8 = 27;
-        pub const swap2: u8 = 28;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `swap2`). `push_0` + leftover `shr`.
+        pub const push_0_shr: u8 = 28;
         pub const rot3l: u8 = 29;
-        pub const rot3r: u8 = 30;
-        pub const rot4l: u8 = 31;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `rot3r`). `get_loc8` + leftover `push_1`.
+        pub const get_loc8_push_1: u8 = 30;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `rot4l`). `get_var_ref0` + leftover `get_loc8`.
+        pub const get_var_ref0_get_loc8: u8 = 31;
         /// Fusion v4 (using-prefix reclaim). `get_loc8` + leftover `push_2`.
         pub const get_loc8_push_2: u8 = 32;
         pub const call_constructor: u8 = 33;
@@ -432,6 +437,11 @@ pub const opcode = struct {
         pub const rot5l: u8 = 7;
         pub const perm5: u8 = 8;
         pub const dup2: u8 = 9;
+        pub const swap2: u8 = 10;
+        pub const rot3r: u8 = 11;
+        pub const rot4l: u8 = 12;
+        pub const dup3: u8 = 13;
+        pub const dup1: u8 = 14;
         pub const add_base: u8 = 16;
 
         pub fn add(hint: u8) u8 {
@@ -456,6 +466,10 @@ pub const opcode = struct {
                 insert4 => 4,
                 rot5l, perm5 => 5,
                 dup2 => 2,
+                swap2, rot4l => 4,
+                rot3r => 3,
+                dup3 => 3,
+                dup1 => 2,
                 else => 0,
             };
         }
@@ -468,7 +482,10 @@ pub const opcode = struct {
                 dispose_throw => 1,
                 is_undefined, typeof_is_undefined, typeof_is_function => 1,
                 insert4, rot5l, perm5 => 5,
-                dup2 => 4,
+                dup2, swap2, rot4l => 4,
+                rot3r => 3,
+                dup3 => 6,
+                dup1 => 3,
                 else => 0,
             };
         }
@@ -497,9 +514,9 @@ pub const opcode = struct {
         .{ .name = "nip", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [15] id 15
         .{ .name = "nip1", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [16] id 16
         .{ .name = "dup", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [17] id 17
-        .{ .name = "dup1", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [18] id 18
+        .{ .name = "get_loc8_push_i8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [18] id 18
         .{ .name = "push_0_or", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [19] id 19
-        .{ .name = "dup3", .size = 1, .n_pop = 3, .n_push = 6, .fmt = .none }, // [20] id 20
+        .{ .name = "push_i8_add", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .i8 }, // [20] id 20
         .{ .name = "insert2", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [21] id 21
         .{ .name = "insert3", .size = 1, .n_pop = 3, .n_push = 4, .fmt = .none }, // [22] id 22
         .{ .name = "push_2_sar", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [23] id 23
@@ -507,10 +524,10 @@ pub const opcode = struct {
         .{ .name = "perm4", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [25] id 25
         .{ .name = "sar_get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [26] id 26
         .{ .name = "swap", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [27] id 27
-        .{ .name = "swap2", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [28] id 28
+        .{ .name = "push_0_shr", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [28] id 28
         .{ .name = "rot3l", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [29] id 29
-        .{ .name = "rot3r", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [30] id 30
-        .{ .name = "rot4l", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [31] id 31
+        .{ .name = "get_loc8_push_1", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [30] id 30
+        .{ .name = "get_var_ref0_get_loc8", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [31] id 31
         .{ .name = "get_loc8_push_2", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [32] id 32
         .{ .name = "call_constructor", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [33] id 33
         .{ .name = "call", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .npop }, // [34] id 34
@@ -5359,7 +5376,7 @@ pub const binding_rules = struct {
                 .private_method, .private_getter => throw_error_instr_size,
                 .private_setter, .private_getter_setter => blk: {
                     const setter = resolvePrivateSetter(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
-                    break :blk privateAccessorSize(ctx, setter) + 8;
+                    break :blk privateAccessorSize(ctx, setter) + 9;
                 },
                 else => return error.ClosureVarNotFound,
             },
@@ -5438,10 +5455,14 @@ pub const binding_rules = struct {
                     const setter = resolvePrivateSetter(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
                     writePrivateAccessor(ctx, output, out_idx, setter);
                     output[out_idx.*] = opcode.op.swap;
-                    output[out_idx.* + 1] = opcode.op.rot3r;
-                    output[out_idx.* + 2] = opcode.op.check_brand;
-                    output[out_idx.* + 3] = opcode.op.rot3l;
-                    out_idx.* += 4;
+                    out_idx.* += 1;
+                    output[out_idx.*] = opcode.op.using;
+                    output[out_idx.* + 1] = opcode.using_sub.rot3r;
+                    out_idx.* += 2;
+                    output[out_idx.*] = opcode.op.check_brand;
+                    out_idx.* += 1;
+                    output[out_idx.*] = opcode.op.rot3l;
+                    out_idx.* += 1;
                     output[out_idx.*] = opcode.op.call_method;
                     std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], 1, .little);
                     out_idx.* += 3;

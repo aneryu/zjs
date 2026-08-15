@@ -107,6 +107,26 @@ pub noinline fn execVm(
             try value_vm.dup2(ctx, stack);
             return .done;
         },
+        bytecode.opcode.using_sub.swap2 => {
+            try value_vm.swap2(ctx, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.rot3r => {
+            try value_vm.rot3r(ctx, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.rot4l => {
+            try value_vm.rot4l(ctx, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.dup3 => {
+            try value_vm.dup3(ctx, stack);
+            return .done;
+        },
+        bytecode.opcode.using_sub.dup1 => {
+            try value_vm.dup1(ctx, stack);
+            return .done;
+        },
         else => error.InvalidBytecode,
     };
 }

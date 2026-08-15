@@ -3566,7 +3566,7 @@ test "F4: array literal spread [...a] starts with array_from 0 + push_i32 0" {
     var fn_bc = try parseExpr(&env, "[...a]");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.array_from, op.push_0, op.get_var, op.append, op.dup1, op.put_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.array_from, op.push_0, op.get_var, op.append, op.using, op.put_field });
 }
 
 test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
@@ -3575,7 +3575,7 @@ test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
     var fn_bc = try parseExpr(&env, "[a, ...b, c]");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.array_from, op.push_1, op.get_var, op.append, op.get_var, op.define_array_el, op.inc, op.dup1, op.put_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.array_from, op.push_1, op.get_var, op.append, op.get_var, op.define_array_el, op.inc, op.using, op.put_field });
 }
 
 test "F4: template with empty middle still emits call_method with correct argc" {
