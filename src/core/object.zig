@@ -11142,6 +11142,12 @@ pub const Object = extern struct {
         return true;
     }
 
+    /// Result of `setOrDefineOwnDataPropertyForPutFieldOwned`. Not an error
+    /// union: `.slow` is a decline (no mutation, caller keeps `new_value`).
+    /// Auto-init clone / new-property append OOM also returns `.slow` so the
+    /// still-`!T` `setValueProperty` resolver stays the OOM channel.
+    pub const PutFieldFast = enum { done, slow };
+
     /// qjs JS_SetPropertyInternal's single-walk core (quickjs.c:9706-9890) for
     /// the put_field cold shell: ONE trusted own probe that classifies the hit
     /// (plain writable data / var_ref / auto_init handled here; accessor and
@@ -11154,12 +11160,12 @@ pub const Object = extern struct {
     /// setValuePropertyWithThrow -> setOwnWritableDataProperty ->
     /// defineNewOwnDataPropertyForSimpleSet).
     ///
-    /// Returns true when the write was fully performed; false defers to the
-    /// full setValueProperty resolver with NO state mutated. OWNED value
-    /// contract (qjs consumes `val` the same way): `new_value` is consumed
-    /// when `true` is returned AND on the error path (the append's errdefer
-    /// destroys the prepared slot); a `false` return leaves ownership with
-    /// the caller.
+    /// Returns `.done` when the write was fully performed; `.slow` defers to
+    /// the full setValueProperty resolver with NO state mutated. OWNED value
+    /// contract: `new_value` is consumed on `.done` and left with the caller
+    /// on `.slow`. Allocation failure on the auto_init / append legs rolls
+    /// the object back and returns `.slow` (no consume) so the resolver can
+    /// still surface `error.OutOfMemory`.
     ///
     /// Deliberate defers that pin the resolver's semantic order:
     /// - with-environment receivers: the strict-miss ReferenceError door in
@@ -11175,18 +11181,18 @@ pub const Object = extern struct {
     /// - the extensible check sits AFTER the prototype walk (qjs order,
     ///   quickjs.c:9862-9865): a non-extensible receiver whose chain holds a
     ///   setter must reach that setter, never a synthesized failure.
-    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
+    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) PutFieldFast {
         // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
         // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
         // classes, whose set semantics (length, canonical numeric indices,
         // binding mirrors, traps) all live in the resolver.
-        if (self.needsSlowPropertyAccess()) return false;
-        if (self.proxyTarget() != null) return false;
-        if (self.flags.is_with_environment) return false;
+        if (self.needsSlowPropertyAccess()) return .slow;
+        if (self.proxyTarget() != null) return .slow;
+        if (self.flags.is_with_environment) return .slow;
 
         if (self.findPropertyProbeTrusted(atom_id)) |lookup| {
             const entry_flags = property.Flags.fromBits(lookup.prop.flags);
-            if (entry_flags.deleted or !entry_flags.writable) return false;
+            if (entry_flags.deleted or !entry_flags.writable) return .slow;
             const entry = &self.prop_values[lookup.index];
             switch (entry_flags.kind) {
                 // qjs's single-mask fast case (quickjs.c:9708-9713): swap the
@@ -11195,14 +11201,14 @@ pub const Object = extern struct {
                     const old_slot = entry.slot;
                     entry.slot = .{ .data = new_value };
                     destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
-                    return true;
+                    return .done;
                 },
                 // JS_PROP_VARREF: set_value through the cell
                 // (quickjs.c:9720-9726); module_ns cells were excluded by the
                 // class gate and const cells carry writable == false.
                 .var_ref => {
                     entry.slot.var_ref.setVarRefValue(rt, new_value);
-                    return true;
+                    return .done;
                 },
                 // Data-destined AUTOINIT (quickjs.c:9727-9733 instantiates and
                 // retries; the retry lands in the fast case): discard the lazy
@@ -11211,16 +11217,15 @@ pub const Object = extern struct {
                 // isAccessorOrAccessorPlaceholderAt); non-writable placeholders
                 // were deferred above.
                 .auto_init => {
-                    self.ensureUniqueShapeForMutation(rt) catch |err| {
-                        // Owned contract: errors consume new_value.
-                        new_value.free(rt);
-                        return err;
-                    };
+                    // Shape-clone OOM: leave new_value with the caller and
+                    // decline so setValueProperty (still `!T`) is the OOM
+                    // channel. The object is unchanged.
+                    self.ensureUniqueShapeForMutation(rt) catch return .slow;
                     self.setEntryKindAndSlot(rt, atom_id, lookup.index, entry_flags.withKind(.data), .{ .data = new_value });
                     self.pruneBorrowedReferenceHolderIfEmpty(rt);
-                    return true;
+                    return .done;
                 },
-                .accessor => return false,
+                .accessor => return .slow,
             }
         }
 
@@ -11231,10 +11236,10 @@ pub const Object = extern struct {
         // runs for dense-storage-capable classes alone, mirroring qjs's
         // fast_array-arm-only __JS_AtomIsTaggedInt (quickjs.c:9868-9877)
         // against the probe-free ordinary add (quickjs.c:9884-9890).
-        if (atom.isTaggedInt(atom_id)) return false;
+        if (atom.isTaggedInt(atom_id)) return .slow;
         if (classOwnsIndexedElementStorage(self.class_id) and
-            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
-        if (self.isGlobal()) return false;
+            array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
+        if (self.isGlobal()) return .slow;
 
         // qjs's prototype walk (quickjs.c:9739-9854): the FIRST holder of the
         // key decides — setter/auto_init/read-only entries defer to the
@@ -11243,35 +11248,38 @@ pub const Object = extern struct {
         // trap/canonical-index semantics in the resolver.
         var prototype = self.getPrototype();
         while (prototype) |proto| {
-            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
-            if (isTypedArrayObjectForSetFastPath(proto)) return false;
+            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return .slow;
+            if (isTypedArrayObjectForSetFastPath(proto)) return .slow;
             if (proto.findPropertyProbeTrusted(atom_id)) |proto_lookup| {
                 const proto_flags = property.Flags.fromBits(proto_lookup.prop.flags);
-                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return false;
+                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return .slow;
                 break;
             }
             prototype = proto.getPrototype();
         }
 
         // Extensibility AFTER the walk (quickjs.c:9862-9865, see doc note).
-        if (!self.flags.extensible) return false;
+        if (!self.flags.extensible) return .slow;
 
-        // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890). The
-        // prepared slot takes the caller's ref; on append failure the errdefer
-        // inside destroys it (owned contract).
-        // Both callers decode `atom_id` from the active immutable bytecode's
-        // OP_put_field operand, whose FunctionBytecode owns the atom across
-        // this allocation/GC window. qjs add_property relies on that same
-        // operand root and retains only the Shape's reference.
-        try self.appendPreparedPropertyEntryImpl(
+        // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890).
+        // `slot_borrowed_until_commit`: on append OOM the staged value is
+        // un-staged without destroy, so `.slow` can leave ownership with the
+        // caller and the resolver remains the OOM channel. Success MOVEs the
+        // caller's ref into the committed slot (same consume-on-success
+        // contract as the previous owned-slot append). Both callers decode
+        // `atom_id` from the active immutable bytecode's OP_put_field
+        // operand, whose FunctionBytecode owns the atom across this
+        // allocation/GC window. qjs add_property relies on that same operand
+        // root and retains only the Shape's reference.
+        self.appendPreparedPropertyEntryImpl(
             true,
-            false,
+            true,
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
             .{ .data = new_value },
-        );
-        return true;
+        ) catch return .slow;
+        return .done;
     }
 
     fn defineModuleNamespaceProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !bool {
