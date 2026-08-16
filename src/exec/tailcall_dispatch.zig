@@ -4496,6 +4496,76 @@ fn opCompareEq(comptime opc: u8) Handler {
     }.hnd;
 }
 
+/// No-`bl` mixed body. Int leaf and leftover `eq_if_false8` still `b`
+/// `zjs_cmp_*_mixed` (硬门 #9). Both-string `b`s the framed export
+/// (flatStringsEq / compareStringValues). Last-ref is detected by the
+/// existing NeedsDestroy dec (no extra peek): lhs last-ref `b`s framed
+/// with the stack intact; rhs last-ref stores the result then `b`s the
+/// shared destroy sibling. Those `bl`s cannot fold back (export).
+fn opCompareEqFast(comptime opc: u8) Handler {
+    return struct {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
+            const strict = comptime (opc == op.strict_eq or opc == op.strict_neq);
+            const inv = comptime (opc == op.neq or opc == op.strict_neq);
+            const lhs = (sp - 2)[0];
+            const rhs = (sp - 1)[0];
+
+            if (lhs.isString() and rhs.isString()) {
+                return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
+            }
+
+            const resolved: ?bool = blk: {
+                if (lhs.asInt32()) |a| {
+                    if (rhs.asFloat64()) |d2| break :blk @as(f64, @floatFromInt(a)) == d2;
+                    break :blk if (comptime strict) false else null;
+                }
+                if (lhs.asFloat64()) |d1| {
+                    if (rhs.asInt32()) |b| break :blk d1 == @as(f64, @floatFromInt(b));
+                    if (rhs.asFloat64()) |d2| break :blk d1 == d2;
+                    break :blk if (comptime strict) false else null;
+                }
+                if (lhs.isObject()) {
+                    if (rhs.isObject()) {
+                        break :blk lhs.refHeaderAssumeObject() == rhs.refHeaderAssumeObject();
+                    }
+                    if (comptime strict) break :blk false;
+                    if (rhs.isNull() or rhs.isUndefined()) break :blk core.value_semantics.isHTMLDDA(lhs);
+                    break :blk null;
+                }
+                if (lhs.asBool()) |a| {
+                    if (rhs.asBool()) |b| break :blk a == b;
+                    if (comptime strict) break :blk false;
+                    break :blk null;
+                }
+                if (lhs.isNull() or lhs.isUndefined()) {
+                    if (comptime strict) break :blk lhs.tagOf() == rhs.tagOf();
+                    if (rhs.isNull() or rhs.isUndefined()) break :blk true;
+                    if (rhs.isObject()) break :blk core.value_semantics.isHTMLDDA(rhs);
+                    break :blk null;
+                }
+                break :blk null;
+            };
+
+            const res = resolved orelse
+                return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+
+            const rt = vm.ctx.runtime;
+            if (lhs.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
+                return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
+            }
+            if (rhs.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
+                (sp - 2)[0] = JSValue.boolean(res != inv);
+                return @call(.always_tail, zjs_cmp_release_rhs_hop, .{ pc, sp, var_buf, vm });
+            }
+
+            (sp - 2)[0] = JSValue.boolean(res != inv);
+            const nsp = sp - 1;
+            vm.stack.setTopPtr(nsp);
+            return cont(pc + 1, nsp, var_buf, vm);
+        }
+    }.hnd;
+}
+
 /// ELF-visible mixed-type entries so the int leaf can `always_tail` a
 /// PC-relative `b` (硬门 #9) without a `resident_tail_tbl` load. Same
 /// `callconv(.c)` as `Handler` (unlike `noinline`, which breaks
@@ -4511,18 +4581,53 @@ fn compareEqExport(comptime opc: u8) Handler {
     };
 }
 
+fn compareEqFramedExport(comptime opc: u8) Handler {
+    return switch (opc) {
+        op.eq => &zjs_cmp_eq_framed,
+        op.neq => &zjs_cmp_neq_framed,
+        op.strict_eq => &zjs_cmp_strict_eq_framed,
+        op.strict_neq => &zjs_cmp_strict_neq_framed,
+        else => unreachable,
+    };
+}
+
 export fn zjs_cmp_eq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    return @call(.always_tail, opCompareEq(op.eq), .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, opCompareEqFast(op.eq), .{ pc, sp, var_buf, vm });
 }
 export fn zjs_cmp_neq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    return @call(.always_tail, opCompareEq(op.neq), .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, opCompareEqFast(op.neq), .{ pc, sp, var_buf, vm });
 }
 export fn zjs_cmp_strict_eq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    return @call(.always_tail, opCompareEq(op.strict_eq), .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, opCompareEqFast(op.strict_eq), .{ pc, sp, var_buf, vm });
 }
 export fn zjs_cmp_strict_neq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEqFast(op.strict_neq), .{ pc, sp, var_buf, vm });
+}
+
+export fn zjs_cmp_eq_framed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEq(op.eq), .{ pc, sp, var_buf, vm });
+}
+export fn zjs_cmp_neq_framed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEq(op.neq), .{ pc, sp, var_buf, vm });
+}
+export fn zjs_cmp_strict_eq_framed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEq(op.strict_eq), .{ pc, sp, var_buf, vm });
+}
+export fn zjs_cmp_strict_neq_framed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     return @call(.always_tail, opCompareEq(op.strict_neq), .{ pc, sp, var_buf, vm });
 }
+
+/// Shared last-ref rhs tail: lhs already released, result is in (sp - 2),
+/// dying rhs still at (sp - 1). The hop slot is `export var` so LTO
+/// cannot inline the destroy `bl` back into the mixed leaves.
+export fn zjs_cmp_release_rhs(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    (sp - 1)[0].freeDuringActiveBytecode(vm.ctx.runtime);
+    const nsp = sp - 1;
+    vm.stack.setTopPtr(nsp);
+    return cont(pc + 1, nsp, var_buf, vm);
+}
+
+export var zjs_cmp_release_rhs_hop: Handler = zjs_cmp_release_rhs;
 
 /// Dedicated cold-table handler for OP_mod after its positive-int32 CASE misses.
 /// QJS `js_binary_arith_slow` tests the both-number case first and calls fmod
