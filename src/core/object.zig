@@ -8263,9 +8263,61 @@ pub const Object = extern struct {
                     }
                 }
             }
+
+            /// qjs:6585-6597 TMASK arms (GETSET / VARREF / AUTOINIT). Kept off
+            /// the ordinary data-slot loop so the hot OBJECT path is shape +
+            /// `JS_MarkValue` (qjs:6598-6600). Still reachable: a plain `{}`
+            /// may hold an accessor.
+            fn traceUnusualProperty(vis: anytype, entry: *property.Entry, slot_flags: property.Flags) !void {
+                switch (slot_flags.kind) {
+                    .data => unreachable,
+                    .accessor => {
+                        var getter_value = entry.slot.accessor.getterValue();
+                        try callVisitValue(vis, &getter_value);
+                        entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
+                        var setter_value = entry.slot.accessor.setterValue();
+                        try callVisitValue(vis, &setter_value);
+                        entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
+                    },
+                    .var_ref => {
+                        var cell_value = entry.slot.var_ref.valueRef();
+                        try callVisitValue(vis, &cell_value);
+                    },
+                    .auto_init => {
+                        const realm_header = entry.slot.auto_init.realm_and_id.realmHeader() orelse unreachable;
+                        var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
+                        try callVisitRealm(vis, &realm);
+                        entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm orelse unreachable).header);
+                    },
+                }
+            }
         };
 
         try Helper.callVisitShape(visitor, self.shape_ref);
+        // qjs:6568-6611 OBJECT arm: mark shape, then properties, then stop
+        // when `class_id == JS_CLASS_OBJECT` (no `gc_mark`). Realm / C-function
+        // / global / class-payload probes belong on the non-ordinary path —
+        // they cannot fire for `class_id==object && payload_kind==none`.
+        if (self.class_id == class.ids.object and self.flags.class_payload_kind == .none) {
+            const traced_prop_count = self.shape_ref.prop_count;
+            for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
+                const slot_flags = self.propFlagsAt(index);
+                if (slot_flags.deleted) continue;
+                if (slot_flags.kind == .data) {
+                    try Helper.callVisitValue(visitor, &entry.slot.data);
+                    continue;
+                }
+                try Helper.traceUnusualProperty(visitor, entry, slot_flags);
+            }
+            // zjs-only iterator-next cache (qjs has no analogue). Empty on
+            // the TS/splay/EB hot graphs; keep the len check as the rare tail.
+            if (rt.cached_iterator_next_entries.len != 0) {
+                if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
+                    try Helper.traceOptValue(visitor, slot);
+                }
+            }
+            return;
+        }
         if (self.flags.class_payload_kind == .realm_record) {
             const ptr = self.u.payload orelse unreachable;
             const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
@@ -8299,41 +8351,12 @@ pub const Object = extern struct {
         for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
             const slot_flags = self.propFlagsAt(index);
             if (slot_flags.deleted) continue;
-            switch (slot_flags.kind) {
-                .data => try Helper.callVisitValue(visitor, &entry.slot.data),
-                .accessor => {
-                    // Accessor getter/setter are `?*gc.Header`, not JSValue, so
-                    // round-trip through value space: read -> visit (the visitor
-                    // may rewrite under a moving collector) -> sync back.
-                    var getter_value = entry.slot.accessor.getterValue();
-                    try Helper.callVisitValue(visitor, &getter_value);
-                    entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
-                    var setter_value = entry.slot.accessor.setterValue();
-                    try Helper.callVisitValue(visitor, &setter_value);
-                    entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
-                },
-                // JS_PROP_VARREF: the slot owns a ref on a cell (global lexical
-                // bindings). Visit it so GC keeps the cell alive; without this a
-                // cell only reachable through ctx.lexicals would be collected
-                // (UAF). Visitors read the value by value, so a stack temp is safe.
-                .var_ref => {
-                    var cell_value = entry.slot.var_ref.valueRef();
-                    try Helper.callVisitValue(visitor, &cell_value);
-                },
-                .auto_init => {
-                    const realm_header = entry.slot.auto_init.realm_and_id.realmHeader() orelse unreachable;
-                    var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
-                    try Helper.callVisitRealm(visitor, &realm);
-                    entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm orelse unreachable).header);
-                },
+            if (slot_flags.kind == .data) {
+                try Helper.callVisitValue(visitor, &entry.slot.data);
+                continue;
             }
+            try Helper.traceUnusualProperty(visitor, entry, slot_flags);
         }
-        // QuickJS `mark_children` stops after the shape/property scan for
-        // JS_CLASS_OBJECT; only non-ordinary classes consult their class GC
-        // marker (quickjs.c:6586-6591). A payload-less ordinary object has no
-        // remaining out-of-line edges below, so keep the same boundary instead
-        // of probing every specialized payload kind on each collector pass.
-        if (self.class_id == class.ids.object and self.flags.class_payload_kind == .none) return;
         if (self.ordinaryPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.callsite_file);
             try Helper.traceOptValue(visitor, &payload.callsite_function);
