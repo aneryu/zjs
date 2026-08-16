@@ -3483,8 +3483,62 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 /// pairs and two operand spills on a path that never reads them back. Both
 /// rare destroys (a dying old element, a dying receiver) route to tails for the
 /// same reason op_put_field routes its pair.
+/// Island-tail TA `[i] =` arm. Musttailed from `op_put_array_el` after a
+/// class_id hit so the dense ARRAY path does not inherit this frame.
+/// Int32 RHS stores inline (qjs ToInt32 + strb/str in the same GPV arm).
+/// Object/BigInt/Symbol (observable conversion) and non-int primitives
+/// musttail the existing rest handler. Same export-var pin as GET.
+pub fn op_put_array_el_ta(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    const key = (sp - 2)[0];
+    const obj = (sp - 3)[0];
+    if (value.isObject() or value.isBigInt() or value.isSymbol())
+        return @call(.always_tail, propertyTailHandler(vm, .put_array_el_rest), .{ pc, sp, var_buf, vm });
+    const integer = value.asInt32() orelse
+        return @call(.always_tail, propertyTailHandler(vm, .put_array_el_rest), .{ pc, sp, var_buf, vm });
+    const object = object_ops.objectFromValueTrustedExpression(obj) orelse
+        return @call(.always_tail, propertyTailHandler(vm, .put_array_el_rest), .{ pc, sp, var_buf, vm });
+    const key_int = key.asInt32() orelse
+        return @call(.always_tail, propertyTailHandler(vm, .put_array_el_rest), .{ pc, sp, var_buf, vm });
+    const index: u32 = @bitCast(key_int);
+    const rt = vm.ctx.runtime;
+    if (object.u.payload) |raw| {
+        const payload: *const core.object.TypedArrayPayload = @ptrCast(@alignCast(raw));
+        const backing = payload.backing_payload orelse {
+            value.freeDuringActiveBytecode(rt);
+            obj.freeDuringActiveBytecode(rt);
+            return cont(pc + 1, sp - 3, var_buf, vm);
+        };
+        if (!backing.immutable and index < payload.live_length) {
+            if (payload.data) |data| {
+                core.typed_array.writeInt32NumericElementByClass(object.class_id, data, index, integer);
+            }
+        }
+    }
+    value.freeDuringActiveBytecode(rt);
+    obj.freeDuringActiveBytecode(rt);
+    return cont(pc + 1, sp - 3, var_buf, vm);
+}
+
+export var zjs_op_put_array_el_ta: Handler = op_put_array_el_ta;
+
+/// Hot inline put_array_el, lowered like `op_put_field`: qjs settles the
+/// in-range store inside JS_CallInternal with the operands in registers --
+/// object/int tag pair, JS_CLASS_ARRAY, one bounds test, then
+/// `set_value(ctx, &p->u.array.u.values[idx], sp[-1])` (quickjs.c:19552-19581)
+/// -- and its shared interpreter frame pays no per-op prologue.
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     const obj = (sp - 3)[0];
+    // qjs CASE: class==ARRAY → dense; else TA jumptable. Same ARRAY hint as GET.
+    if (obj.isObject()) {
+        if (object_ops.objectFromValueTrustedExpression(obj)) |object| {
+            if (object.class_id == core.class.ids.array) {
+                @branchHint(.likely);
+            } else if ((sp - 2)[0].isInt() and core.class.isNumericTypedArrayClass(object.class_id)) {
+                return @call(.always_tail, zjs_op_put_array_el_ta, .{ pc, sp, var_buf, vm });
+            }
+        }
+    }
     if (obj.isObject()) {
         if (class_vm.objectFromValue(obj)) |array_object| {
             if (array_object.isArray()) {
@@ -3991,15 +4045,16 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     const key = (sp - 1)[0];
     const obj = (sp - 2)[0];
     const rt = vm.ctx.runtime;
-    // qjs CASE: class!=ARRAY → GPV TA jumptable, never dense/own-int.
-    // TA bitmask first (ARRAY misses in 5 ALU and falls to dense). Inverting
-    // to `class==ARRAY` first made LLVM route ARRAY *through* the bitmask
-    // miss; keep the predicate that musttails TA before any dense/own-int
-    // probe. This arm must stay a `b`/`br`, no `bl`.
-    if (key.isInt() and obj.isObject()) {
+    // Same shape as `op_put_array_el`: class==ARRAY first (one `cmp #2`),
+    // then the TA bitmask. Wrapping this in `key.isInt()` made LLVM fold
+    // ARRAY into the bitmask miss — that is the navier dense-[i] tax.
+    if (obj.isObject()) {
         if (object_ops.objectFromValueTrustedExpression(obj)) |object| {
-            if (core.class.isNumericTypedArrayClass(object.class_id))
+            if (object.class_id == core.class.ids.array) {
+                @branchHint(.likely);
+            } else if (key.isInt() and core.class.isNumericTypedArrayClass(object.class_id)) {
                 return @call(.always_tail, zjs_op_get_array_el_ta, .{ pc, sp, var_buf, vm });
+            }
         }
     }
     if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {

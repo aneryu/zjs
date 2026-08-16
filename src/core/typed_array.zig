@@ -824,6 +824,35 @@ pub inline fn decodeNumericElementByClass(class_id: class.ClassId, data: [*]cons
     };
 }
 
+/// Class-id twin of `writeInt32NumericElement` for the `[i] = int32` arm
+/// (qjs JS_SetPropertyValue UINT8..FLOAT64). Conversion is infallible, so
+/// the caller only rechecks `live_length` then stores. Width lives in the
+/// arm; Uint8C clamps, integer kinds truncate, floats are `@floatFromInt`.
+pub inline fn writeInt32NumericElementByClass(
+    class_id: class.ClassId,
+    data: [*]u8,
+    index: u32,
+    integer: i32,
+) void {
+    const i: usize = index;
+    const bits: u32 = @bitCast(integer);
+    switch (class_id) {
+        class.ids.int8_array, class.ids.uint8_array => data[i] = @truncate(bits),
+        class.ids.uint8c_array => data[i] = if (integer <= 0)
+            0
+        else if (integer >= 255)
+            255
+        else
+            @intCast(integer),
+        class.ids.int16_array, class.ids.uint16_array => std.mem.writeInt(u16, data[i * 2 ..][0..2], @truncate(bits), .little),
+        class.ids.int32_array, class.ids.uint32_array => std.mem.writeInt(u32, data[i * 4 ..][0..4], bits, .little),
+        class.ids.float16_array => std.mem.writeInt(u16, data[i * 2 ..][0..2], f64ToFloat16(@floatFromInt(integer)), .little),
+        class.ids.float32_array => std.mem.writeInt(u32, data[i * 4 ..][0..4], @bitCast(@as(f32, @floatFromInt(integer))), .little),
+        class.ids.float64_array => std.mem.writeInt(u64, data[i * 8 ..][0..8], @bitCast(@as(f64, @floatFromInt(integer))), .little),
+        else => unreachable,
+    }
+}
+
 fn bigIntResult(rt: *JSRuntime, value: i128) !JSValue {
     const big = try bigint.BigInt.create(rt, value);
     return big.valueRef();
