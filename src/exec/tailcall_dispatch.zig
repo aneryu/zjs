@@ -4114,14 +4114,20 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         }
     }
     if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
-        obj.freeDuringActiveBytecode(rt);
         key.freeDuringActiveBytecode(rt);
+        if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+            (sp - 1)[0] = value;
+            return @call(.always_tail, zjs_op_get_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+        }
         (sp - 2)[0] = value;
         return cont(pc + 1, sp - 1, var_buf, vm);
     }
     if (key.isInt() and obj.isObject()) {
         if (vm_property_field.fastArrayOwnIntElementValue(obj, key)) |value| {
-            obj.freeDuringActiveBytecode(rt);
+            if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+                (sp - 1)[0] = value;
+                return @call(.always_tail, zjs_op_get_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+            }
             (sp - 2)[0] = value;
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
@@ -4131,6 +4137,21 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
+
+/// Contract: the dup'd element is parked at (sp-1) (int key overwritten);
+/// the receiver at (sp-2) is last-ref and has not been destroyed yet.
+/// Same put_array_el / put_field release-tail so the dense hit stays a
+/// prologue-free leaf (TS ④e: last-ref `bl` was forcing a 0x50 frame on
+/// every hit).
+fn op_get_array_el_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    (sp - 2)[0].freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
+    (sp - 2)[0] = (sp - 1)[0];
+    return cont(pc + 1, sp - 1, var_buf, vm);
+}
+
+/// Reloc so LLVM cannot IPSCCP-inline the destroy tail back into the
+/// dense hit (TA-GET `zjs_op_get_array_el_ta` precedent).
+export var zjs_op_get_array_el_release_receiver_tail: Handler = op_get_array_el_release_receiver_tail;
 
 /// Hot `OP_get_array_el2` — qjs `GET_ARRAY_EL_INLINE(..., keep=1)`
 /// (quickjs.c:19438-19439). Same dense predicate as `op_get_array_el`; the
