@@ -35,16 +35,11 @@ pub const OpcodeProfile = struct {
         self.nanos[opcode] +|= elapsed_nanos;
     }
 
-    /// One hot-table dispatch in a profiling build: close the previous
-    /// opcode's wall interval (a scope cannot span an `always_tail` chain)
-    /// and open this one.
+    /// One table dispatch (`cont`/`next`). Count only — `clock_gettime` in
+    /// the musttail path was a second crash source (syscall frame vs
+    /// `always_tail`). Nanos stay 0; leftover-ladder work needs counts.
     pub fn noteDispatch(self: *OpcodeProfile, opcode: u8) void {
-        const now = nowNanos();
-        if (self.pending_op != no_pending_op) {
-            self.recordOpcode(@intCast(self.pending_op), now -| self.pending_start_ns);
-        }
-        self.pending_op = opcode;
-        self.pending_start_ns = now;
+        self.count[opcode] +|= 1;
     }
 
     /// Close the final open interval; must run before any dump or detach.

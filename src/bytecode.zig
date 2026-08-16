@@ -135,7 +135,8 @@ pub const opcode = struct {
         pub const get_loc8_push_1: u8 = 30;
         /// Fusion last-round (using-prefix reclaim of zoo-cold `rot4l`). `get_var_ref0` + leftover `get_loc8`.
         pub const get_var_ref0_get_loc8: u8 = 31;
-        /// Fusion v4 (using-prefix reclaim). `get_loc8` + leftover `push_2`.
+        /// Fusion v4 (using-prefix reclaim). `get_loc8` + leftover `push_2`
+        /// (also leftover `push_0` / `push_0_shr` / `push_0_or` — same slot).
         pub const get_loc8_push_2: u8 = 32;
         pub const call_constructor: u8 = 33;
         pub const call: u8 = 34;

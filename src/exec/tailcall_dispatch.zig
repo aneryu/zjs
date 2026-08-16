@@ -289,6 +289,7 @@ inline fn residentTailHandler(vm: *const Vm, comptime slot: ResidentTailSlot) Ha
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug)
         std.debug.assert(@intFromPtr(pc) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len));
+    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, pc[0]);
     return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -2606,6 +2607,7 @@ fn op_add_strings(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// additionally Debug-asserts `pc < code_end` and remains the driver/jump entry
 /// point.
 inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
+    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, npc[0]);
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, nsp, var_buf, vm });
 }
 
@@ -5710,28 +5712,12 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
     return .{ .entry = entry };
 }
 
-const dispatch_table: [256]Handler = blk: {
-    const base: [256]Handler = colds.buildTable(specials, true).table;
-    if (!vm_profile.enabled) break :blk base;
-    @setEvalBranchQuota(8192);
-    var wrapped: [256]Handler = undefined;
-    for (base, 0..) |handler, op_index| wrapped[op_index] = profiledHandler(@intCast(op_index), handler);
-    break :blk wrapped;
-};
-
-/// Profiling-build shim around every hot-table entry: count the dispatched
-/// opcode and delta-attribute wall time to the previous one, then tail into
-/// the real handler. `cold_table` and the property/specialized tail tables
-/// stay unwrapped deliberately — they re-dispatch the SAME pc, and wrapping
-/// them would double-count. Default builds take the `base` table verbatim.
-fn profiledHandler(comptime profiled_op: u8, comptime real: Handler) Handler {
-    return struct {
-        fn dispatch(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
-            vm_profile.noteDispatch(vm.ctx.runtime, profiled_op);
-            return @call(.always_tail, real, .{ pc, sp, var_buf, vm });
-        }
-    }.dispatch;
-}
+/// Hot table is never wrapped. A 256-entry `profiledHandler` shim in
+/// `.text.zjs.op_handlers` slid the island and clobbered the `op_return`
+/// musttail ABI (`sp` arrived 0 on zlib; SIGSEGV in VmStackArena.restore).
+/// Profiling builds count in `cont`/`next` — the same two table-dispatch
+/// sites — so handler bodies stay identical to the default binary.
+const dispatch_table: [256]Handler = colds.buildTable(specials, true).table;
 const property_tail_table = [16]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
@@ -6066,11 +6052,24 @@ pub fn op_push_2_sar_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     return coldNext(var_buf, vm);
 }
 
-/// `get_loc8` then musttail leftover `push_2`. Re-fused leftover enters
-/// `push_2_sar` so a later `sar` miss never sees a fused `pc[0]`.
+/// `get_loc8` then musttail leftover `push_2` / `push_0_*`.
+///
+/// Leftover rewrite (single pass): `push_0` may already be `push_0_shr` /
+/// `push_0_or`, and `push_2` may already be `push_2_sar`. Fused leftovers
+/// live at opcode ≤ `get_loc8_push_2` (32); raw `push_0..7` are 179–186.
+/// Compare the high range first so the original `get_loc8 → push_2` hot
+/// arm stays one taken branch — extra fused-B tests only run on the
+/// low-opcode leftover path (would otherwise add br to the existing pair).
 inline fn tailPush2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
-    if (pc[2] == op.push_2_sar)
+    const b = pc[2];
+    if (b > op.get_loc8_push_2)
+        return @call(.always_tail, op_push_small, .{ pc + 2, sp, var_buf, vm });
+    if (b == op.push_2_sar)
         return @call(.always_tail, op_push_2_sar, .{ pc + 2, sp, var_buf, vm });
+    if (b == op.push_0_shr)
+        return @call(.always_tail, op_push_0_shr, .{ pc + 2, sp, var_buf, vm });
+    if (b == op.push_0_or)
+        return @call(.always_tail, op_push_0_or, .{ pc + 2, sp, var_buf, vm });
     return @call(.always_tail, op_push_small, .{ pc + 2, sp, var_buf, vm });
 }
 
@@ -6111,10 +6110,14 @@ pub fn op_get_loc8_push_1_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
 }
 
 /// Leftover `get_loc8` may already be a push fusion.
+/// Order is hottest leftover first (`get_loc8_push_2` ≈ 95M of 106M
+/// `get_var_ref0_get_loc8` entries) so the common arm is one compare.
 inline fn tailGetLoc8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
     const b = pc[0];
-    if (b == op.get_loc8_push_2)
+    if (b == op.get_loc8_push_2) {
+        @branchHint(.likely);
         return @call(.always_tail, op_get_loc8_push_2, .{ pc, sp, var_buf, vm });
+    }
     if (b == op.get_loc8_push_1)
         return @call(.always_tail, op_get_loc8_push_1, .{ pc, sp, var_buf, vm });
     if (b == op.get_loc8_push_i8)

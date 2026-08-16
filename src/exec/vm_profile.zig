@@ -2,13 +2,12 @@
 //!
 //! The pre-threading design wrapped each opcode in an enter/deinit scope;
 //! a scope cannot span an `always_tail` chain, so that API is retired.
-//! Profiling builds instead wrap the whole hot dispatch table
-//! (`tailcall_dispatch.profiledHandler`): every table dispatch calls
-//! `noteDispatch`, which closes the previous opcode's wall interval
-//! (delta attribution) and opens its own. The final open interval is
-//! closed by `OpcodeProfile.flushPendingDispatch` before any dump.
-//! Compiled out entirely in default builds — the dispatch table is built
-//! without the shim and the default binary carries no per-opcode cost.
+//! A later 256-entry table shim (`profiledHandler` in `.op_handlers`)
+//! slid the L-1 island and broke `op_return`'s musttail ABI on zlib
+//! (SIGSEGV, `sp == 0`). Profiling builds now call `noteDispatch` from
+//! `cont`/`next` only — handler bodies stay unwrapped. The final open
+//! interval is closed by `OpcodeProfile.flushPendingDispatch` before any
+//! dump. Compiled out entirely in default builds.
 
 const build_options = @import("build_options");
 const core = @import("../core/root.zig");
