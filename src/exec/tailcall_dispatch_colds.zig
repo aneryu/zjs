@@ -164,8 +164,19 @@ pub const SpecialHandlers = struct {
     op_invalid: Handler,
 };
 
-pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
+pub const BuiltTable = struct {
+    table: [256]Handler,
+    /// Geometry keep: reclaimed-slot coldStd leaves. Live so LLVM cannot DCE them.
+    keep: [12]Handler,
+};
+
+pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     var t: [256]Handler = [_]Handler{s.op_invalid} ** 256;
+    var keep: [12]Handler = .{
+        s.op_invalid, s.op_invalid, s.op_invalid, s.op_invalid,
+        s.op_invalid, s.op_invalid, s.op_invalid, s.op_invalid,
+        s.op_invalid, s.op_invalid, s.op_invalid, s.op_invalid,
+    };
 
     // --- pushes ---
     t[op.push_i32] = h(struct {
@@ -545,26 +556,33 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             try value_vm.typeOf(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.typeof_is_undefined] = h(struct {
+    // 240/242/243 were these three type tests. Fusion v3 reclaimed the
+    // slots; instantiate the same coldStd leaves here (returned in
+    // `keep` so LLVM cannot DCE them) so later island offsets match
+    // 6a61951e. Both tables instantiate — ICF folds the pair, same as v2.1.
+    keep[0] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.typeOfIsUndefined(vm.ctx.runtime, vm.stack);
         }
     }.b);
-    t[op.typeof_is_function] = h(struct {
+    keep[1] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.typeOfIsFunction(vm.ctx.runtime, vm.stack);
         }
     }.b);
+    t[op.get_var_field] = td.op_get_var_field_cold;
+    t[op.get_loc2_field2] = td.op_get_loc2_field2_cold;
     t[op.is_undefined_or_null] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.isUndefinedOrNull(vm.ctx.runtime, vm.stack);
         }
     }.b);
-    t[op.is_undefined] = h(struct {
+    keep[2] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.isUndefined(vm.ctx.runtime, vm.stack);
         }
     }.b);
+    t[op.get_field_field2] = td.op_get_field_field2_cold;
     t[op.is_null] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.isNull(vm.ctx.runtime, vm.stack);
@@ -592,17 +610,17 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             try value_vm.nip1(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.dup1] = h(struct {
+    keep[11] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.dup1(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.dup2] = h(struct {
+    keep[6] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.dup2(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.dup3] = h(struct {
+    keep[10] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.dup3(vm.ctx, vm.stack);
         }
@@ -617,7 +635,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             try value_vm.insert3(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.insert4] = h(struct {
+    keep[3] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.insert4(vm.ctx, vm.stack);
         }
@@ -627,17 +645,17 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             try value_vm.rot3l(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.rot3r] = h(struct {
+    keep[8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.rot3r(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.rot4l] = h(struct {
+    keep[9] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.rot4l(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.rot5l] = h(struct {
+    keep[4] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.rot5l(vm.ctx, vm.stack);
         }
@@ -652,12 +670,12 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             try value_vm.perm4(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.perm5] = h(struct {
+    keep[5] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.perm5(vm.ctx, vm.stack);
         }
     }.b);
-    t[op.swap2] = h(struct {
+    keep[7] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try value_vm.swap2(vm.ctx, vm.stack);
         }
@@ -809,13 +827,25 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     //     frameless leaf instead of carrying the cold 128B frame on its hot path). ---
     t[op.get_loc0_field] = td.op_get_loc0_field_cold;
     t[op.get_loc2_field] = td.op_get_loc2_field_cold;
+    t[op.get_loc2_field2] = td.op_get_loc2_field2_cold;
+    t[op.get_field_field2] = td.op_get_field_field2_cold;
+    t[op.get_var_field] = td.op_get_var_field_cold;
     t[op.get_field2_call_method] = td.op_get_field2_call_method_cold;
     t[op.cmp_if_false8] = td.op_cmp_if_false8_cold;
     t[op.eq_if_false8] = td.op_eq_if_false8_cold;
     t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8_cold;
     t[op.push_this_put_loc0] = td.op_push_this_put_loc0_cold;
     t[op.put_loc0_get_loc0] = td.op_put_loc0_get_loc0_cold;
-    if (!fast) return t;
+    t[op.push_0_or] = td.op_push_0_or_cold;
+    t[op.sar_get_array_el] = td.op_sar_get_array_el_cold;
+    t[op.push_2_sar] = td.op_push_2_sar_cold;
+    t[op.get_loc8_push_2] = td.op_get_loc8_push_2_cold;
+    t[op.push_0_shr] = td.op_push_0_shr_cold;
+    t[op.get_loc8_push_1] = td.op_get_loc8_push_1_cold;
+    t[op.get_var_ref0_get_loc8] = td.op_get_var_ref0_get_loc8_cold;
+    t[op.push_i8_add] = td.op_push_i8_add_cold;
+    t[op.get_loc8_push_i8] = td.op_get_loc8_push_i8_cold;
+    if (!fast) return .{ .table = t, .keep = keep };
     t[op.undefined] = td.op_undefined_fast;
     t[op.null] = td.op_null_fast;
     t[op.push_false] = td.op_push_false_fast;
@@ -937,10 +967,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // logicalNot assigned above (qjs reaches those via an out-of-line JS_ToBoolFree
     // bl too — pinned binary, JS_CallInternal+0x6abc).
     t[op.lnot] = td.op_lnot;
-    // qjs CASE(OP_is_null):20625-20630 compares the top-slot tag in place;
-    // set_true (20648-20650) overwrites null without a free, while
-    // free_and_set_false (20651-20654) releases only refcounted non-null values
-    // through JS_FreeValue's inline tag guard before overwriting with false.
     t[op.is_null] = td.op_is_null;
     t[op.inc_loc] = td.op_update_loc;
     t[op.put_loc8_get_loc8] = td.op_put_loc8_get_loc8;
@@ -950,10 +976,23 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_field] = td.op_get_field; // inline-cache fast path; IC miss → cold h_field
     t[op.get_loc0_field] = td.op_get_loc0_field;
     t[op.get_loc2_field] = td.op_get_loc2_field;
+    t[op.get_loc2_field2] = td.op_get_loc2_field2;
+    t[op.get_field_field2] = td.op_get_field_field2;
+    t[op.get_var_field] = td.op_get_var_field;
     t[op.get_field2_call_method] = td.op_get_field2_call_method;
+    t[op.using] = td.op_using;
     t[op.get_field2] = td.op_get_field2; // primitive-string method resolution; else → cold h_field
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_get_array_element
+    t[op.push_0_or] = td.op_push_0_or;
+    t[op.sar_get_array_el] = td.op_sar_get_array_el;
+    t[op.push_2_sar] = td.op_push_2_sar;
+    t[op.get_loc8_push_2] = td.op_get_loc8_push_2;
+    t[op.push_0_shr] = td.op_push_0_shr;
+    t[op.get_loc8_push_1] = td.op_get_loc8_push_1;
+    t[op.get_var_ref0_get_loc8] = td.op_get_var_ref0_get_loc8;
+    t[op.push_i8_add] = td.op_push_i8_add;
+    t[op.get_loc8_push_i8] = td.op_get_loc8_push_i8;
     t[op.get_array_el2] = td.op_get_array_el2; // keep-receiver twin; miss → cold h_get_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_put_array_element
     t[op.get_length] = td.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
@@ -993,7 +1032,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.set_var_ref3, .h = td.opSetVarRef(.c3) },
         .{ .o = op.set_var_ref, .h = td.opSetVarRef(.half) },
     }) |e| t[e.o] = e.h;
-    return t;
+    return .{ .table = t, .keep = keep };
 }
 
 // Operand-carrying singletons that need `pc[0]` — small helpers returning a Handler.

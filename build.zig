@@ -268,6 +268,12 @@ pub fn build(b: *std.Build) void {
         .name = "zjs-profile",
         .root_module = zjs_profile_cli_mod,
     });
+    // Same L-1 island as production zjs. The retired table-wrapper lived
+    // in `.op_handlers` and slid every handler; keep the profile artifact
+    // on the same script so leftover-ladder disassembly matches prod.
+    if (target.result.cpu.arch == .aarch64 and target.result.ofmt == .elf) {
+        zjs_profile_exe.setLinkerScript(b.path("src/exec/tail_hot_layout_aarch64.ld"));
+    }
     const install_zjs_profile = b.addInstallArtifact(zjs_profile_exe, .{});
     const zjs_profile_step = b.step("zjs-profile", "Build and install the profiling zjs (per-opcode dispatch scopes)");
     zjs_profile_step.dependOn(&install_zjs_profile.step);

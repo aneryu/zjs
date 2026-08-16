@@ -3137,15 +3137,17 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     bc.installAtomOperands(fresh_atoms);
 
     try std.testing.expectEqual(carried_refs, rt.atoms.refCount(name).?);
-    const carried_backing_bytes =
-        16 * @sizeOf(u8) + 8 * @sizeOf(core.atom.Atom);
+    const carried_code_charge = core.memory.MemoryAccount.accountedSizeForRequest(16 * @sizeOf(u8), .@"1");
+    const carried_atom_charge = core.memory.MemoryAccount.accountedSizeForRequest(8 * @sizeOf(core.atom.Atom), std.mem.Alignment.of(core.atom.Atom));
+    const fresh_code_charge = core.memory.MemoryAccount.accountedSizeForRequest(fresh_code.len * @sizeOf(u8), .@"1");
+    const fresh_atom_charge = core.memory.MemoryAccount.accountedSizeForRequest(fresh_atoms.len * @sizeOf(core.atom.Atom), std.mem.Alignment.of(core.atom.Atom));
     try std.testing.expectEqual(
-        bytes_with_both_generations - carried_backing_bytes,
+        bytes_with_both_generations - carried_code_charge - carried_atom_charge,
         rt.memory.allocated_bytes,
     );
     try std.testing.expectEqual(count_with_both_generations - 2, rt.memory.allocation_count);
     try std.testing.expectEqual(
-        base_bytes + fresh_code.len * @sizeOf(u8) + fresh_atoms.len * @sizeOf(core.atom.Atom),
+        base_bytes + fresh_code_charge + fresh_atom_charge,
         rt.memory.allocated_bytes,
     );
     try std.testing.expectEqual(base_count + 2, rt.memory.allocation_count);

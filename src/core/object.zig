@@ -3235,7 +3235,7 @@ pub const Object = extern struct {
         };
     }
 
-    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
+    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) align(16) void {
         const self: *Object = @alignCast(@fieldParentPtr("header", header));
         // qjs marks an object "about to be freed" before its zero-refcount free
         // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479), and
@@ -5979,6 +5979,11 @@ pub const Object = extern struct {
 
     pub fn nativeRecord(self: *const Object) ?*const host_function.InternalRecord {
         if (self.class_id != class.ids.c_function) return null;
+        return self.nativeRecordAssumeCFunction();
+    }
+
+    /// Caller already proved `class_id == c_function` (K1: skip the repeat).
+    pub fn nativeRecordAssumeCFunction(self: *const Object) ?*const host_function.InternalRecord {
         if (self.functionPayloadConst()) |payload| return payload.native.call_cache;
         return null;
     }
@@ -7029,6 +7034,11 @@ pub const Object = extern struct {
     /// returns null because it consumes the caller's context.
     pub fn nativeFunctionRealm(self: *const Object) ?*context_mod.RealmContext {
         if (self.class_id != class.ids.c_function) return null;
+        return self.nativeFunctionRealmAssumeCFunction();
+    }
+
+    /// Caller already proved `class_id == c_function` (K1).
+    pub fn nativeFunctionRealmAssumeCFunction(self: *const Object) ?*context_mod.RealmContext {
         const payload = self.functionPayloadConst() orelse return null;
         return payload.native.realm.borrow();
     }
@@ -7505,7 +7515,7 @@ pub const Object = extern struct {
         return rt.runObjectCycleRemoval();
     }
 
-    fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) void {
+    fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) align(16) void {
         switch (header.meta().flags.kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
@@ -8253,9 +8263,61 @@ pub const Object = extern struct {
                     }
                 }
             }
+
+            /// qjs:6585-6597 TMASK arms (GETSET / VARREF / AUTOINIT). Kept off
+            /// the ordinary data-slot loop so the hot OBJECT path is shape +
+            /// `JS_MarkValue` (qjs:6598-6600). Still reachable: a plain `{}`
+            /// may hold an accessor.
+            fn traceUnusualProperty(vis: anytype, entry: *property.Entry, slot_flags: property.Flags) !void {
+                switch (slot_flags.kind) {
+                    .data => unreachable,
+                    .accessor => {
+                        var getter_value = entry.slot.accessor.getterValue();
+                        try callVisitValue(vis, &getter_value);
+                        entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
+                        var setter_value = entry.slot.accessor.setterValue();
+                        try callVisitValue(vis, &setter_value);
+                        entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
+                    },
+                    .var_ref => {
+                        var cell_value = entry.slot.var_ref.valueRef();
+                        try callVisitValue(vis, &cell_value);
+                    },
+                    .auto_init => {
+                        const realm_header = entry.slot.auto_init.realm_and_id.realmHeader() orelse unreachable;
+                        var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
+                        try callVisitRealm(vis, &realm);
+                        entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm orelse unreachable).header);
+                    },
+                }
+            }
         };
 
         try Helper.callVisitShape(visitor, self.shape_ref);
+        // qjs:6568-6611 OBJECT arm: mark shape, then properties, then stop
+        // when `class_id == JS_CLASS_OBJECT` (no `gc_mark`). Realm / C-function
+        // / global / class-payload probes belong on the non-ordinary path —
+        // they cannot fire for `class_id==object && payload_kind==none`.
+        if (self.class_id == class.ids.object and self.flags.class_payload_kind == .none) {
+            const traced_prop_count = self.shape_ref.prop_count;
+            for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
+                const slot_flags = self.propFlagsAt(index);
+                if (slot_flags.deleted) continue;
+                if (slot_flags.kind == .data) {
+                    try Helper.callVisitValue(visitor, &entry.slot.data);
+                    continue;
+                }
+                try Helper.traceUnusualProperty(visitor, entry, slot_flags);
+            }
+            // zjs-only iterator-next cache (qjs has no analogue). Empty on
+            // the TS/splay/EB hot graphs; keep the len check as the rare tail.
+            if (rt.cached_iterator_next_entries.len != 0) {
+                if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
+                    try Helper.traceOptValue(visitor, slot);
+                }
+            }
+            return;
+        }
         if (self.flags.class_payload_kind == .realm_record) {
             const ptr = self.u.payload orelse unreachable;
             const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
@@ -8289,41 +8351,12 @@ pub const Object = extern struct {
         for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
             const slot_flags = self.propFlagsAt(index);
             if (slot_flags.deleted) continue;
-            switch (slot_flags.kind) {
-                .data => try Helper.callVisitValue(visitor, &entry.slot.data),
-                .accessor => {
-                    // Accessor getter/setter are `?*gc.Header`, not JSValue, so
-                    // round-trip through value space: read -> visit (the visitor
-                    // may rewrite under a moving collector) -> sync back.
-                    var getter_value = entry.slot.accessor.getterValue();
-                    try Helper.callVisitValue(visitor, &getter_value);
-                    entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
-                    var setter_value = entry.slot.accessor.setterValue();
-                    try Helper.callVisitValue(visitor, &setter_value);
-                    entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
-                },
-                // JS_PROP_VARREF: the slot owns a ref on a cell (global lexical
-                // bindings). Visit it so GC keeps the cell alive; without this a
-                // cell only reachable through ctx.lexicals would be collected
-                // (UAF). Visitors read the value by value, so a stack temp is safe.
-                .var_ref => {
-                    var cell_value = entry.slot.var_ref.valueRef();
-                    try Helper.callVisitValue(visitor, &cell_value);
-                },
-                .auto_init => {
-                    const realm_header = entry.slot.auto_init.realm_and_id.realmHeader() orelse unreachable;
-                    var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
-                    try Helper.callVisitRealm(visitor, &realm);
-                    entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm orelse unreachable).header);
-                },
+            if (slot_flags.kind == .data) {
+                try Helper.callVisitValue(visitor, &entry.slot.data);
+                continue;
             }
+            try Helper.traceUnusualProperty(visitor, entry, slot_flags);
         }
-        // QuickJS `mark_children` stops after the shape/property scan for
-        // JS_CLASS_OBJECT; only non-ordinary classes consult their class GC
-        // marker (quickjs.c:6586-6591). A payload-less ordinary object has no
-        // remaining out-of-line edges below, so keep the same boundary instead
-        // of probing every specialized payload kind on each collector pass.
-        if (self.class_id == class.ids.object and self.flags.class_payload_kind == .none) return;
         if (self.ordinaryPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.callsite_file);
             try Helper.traceOptValue(visitor, &payload.callsite_function);
@@ -11175,13 +11208,16 @@ pub const Object = extern struct {
     ///   updateMappedArgumentsBinding hook live in the resolver;
     /// - accessor/read-only hits anywhere on the chain: setter invocation and
     ///   throw_on_set_failure polarity need the caller frame;
+    /// - exotic proto miss after find: TA canonical-index / oob and
+    ///   set_property / get_own_property traps stay in the resolver (SPI
+    ///   2f80c). Named miss on a fast_array proto falls through like qjs.
     /// - a global receiver may take the own-hit write but never the add — qjs
     ///   likewise routes JS_CLASS_GLOBAL_OBJECT to generic_create_prop
     ///   (quickjs.c:9882-9883);
     /// - the extensible check sits AFTER the prototype walk (qjs order,
     ///   quickjs.c:9862-9865): a non-extensible receiver whose chain holds a
     ///   setter must reach that setter, never a synthesized failure.
-    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) PutFieldFast {
+    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) align(16) PutFieldFast {
         // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
         // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
         // classes, whose set semantics (length, canonical numeric indices,
@@ -11241,19 +11277,41 @@ pub const Object = extern struct {
             array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
         if (self.isGlobal()) return .slow;
 
-        // qjs's prototype walk (quickjs.c:9739-9854): the FIRST holder of the
-        // key decides — setter/auto_init/read-only entries defer to the
-        // resolver, a plain writable data property does NOT shadow the create
-        // (break and add an own slot). Exotic/proxy/typed links keep their
-        // trap/canonical-index semantics in the resolver.
+        // qjs prototype walk (quickjs.c:9739-9854 / SPI 2f8ec-2f9f8):
+        // find_own first, then is_exotic. Empty/end is tested locally as
+        // `idx ^ u26max` (lowers to hoisted-sentinel `cmp` / `cbz`-class
+        // flag test). The stored 0-based / no_property_index ABI is
+        // untouched. Non-exotic protos do not pay typed/proxy cmps.
+        // Exotic miss follows SPI control-flow (named fast_array
+        // fallthrough; TA / trap classes decline) — not an unconditional
+        // `.slow` before find.
         var prototype = self.getPrototype();
+        var proto_writable_data = false;
+        const empty_bucket: u32 = comptime @as(u32, shape.no_property_index);
         while (prototype) |proto| {
-            if (proto.hasExoticMethods() or proto.proxyTarget() != null) return .slow;
-            if (isTypedArrayObjectForSetFastPath(proto)) return .slow;
-            if (proto.findPropertyProbeTrusted(atom_id)) |proto_lookup| {
-                const proto_flags = property.Flags.fromBits(proto_lookup.prop.flags);
-                if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable) return .slow;
-                break;
+            const props = proto.shape_ref.props().ptr;
+            var idx: u32 = proto.shape_ref.firstPropertyIndex(atom_id);
+            // Local empty test: `idx ^ u26max == 0`. LLVM hoists the
+            // sentinel and `cmp`s (cbz-class flag test). ABI untouched.
+            while (idx ^ empty_bucket != 0) {
+                const prop = props[idx];
+                if (prop.atom_id == atom_id) {
+                    const proto_flags = property.Flags.fromBits(prop.flags);
+                    if (proto_flags.deleted or proto_flags.kind != .data or !proto_flags.writable)
+                        return .slow;
+                    proto_writable_data = true;
+                    break;
+                }
+                idx = prop.hash_next;
+            }
+            if (proto_writable_data) break;
+            // find miss → SPI 2f80c `ldrh is_exotic`. Ordinary proto: next.
+            if (proto.flags.has_exotic_methods) {
+                // fast_array + non-TA named miss: qjs falls through (atom
+                // already rejected tagged-int). TA canonical-index / oob
+                // and non-fast_array traps stay in the resolver.
+                if (!proto.flags.fast_array or isTypedArrayObjectForSetFastPath(proto))
+                    return .slow;
             }
             prototype = proto.getPrototype();
         }
@@ -12232,7 +12290,9 @@ pub const Object = extern struct {
     /// JS_DupValue(pr->u.value) (quickjs.c:6135, 19125-19133).
     pub inline fn findOwnDataSlotFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?*const JSValue {
         const object_shape = self.shape_ref;
-        if (!object_shape.hasPropertyHash()) return null;
+        // qjs find_own_property (quickjs.c:6115): `h = atom & mask; load; cbz h`.
+        // Empty shapes still have the 4-bucket table (`createShape`); a missing
+        // hash is an empty bucket, not a second miss (F3).
         const props = object_shape.props().ptr;
         var shape_index = object_shape.firstPropertyIndexAssumeHash(atom_id);
         while (shape_index != shape.no_property_index) {
@@ -12272,7 +12332,7 @@ pub const Object = extern struct {
     /// data); the caller initializes it to false.
     pub inline fn findWritableOwnDataSlotFast(self: *Object, atom_id: atom.Atom, slow: *bool) ?*JSValue {
         const props = self.shape_ref.props().ptr;
-        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        var shape_index = self.shape_ref.firstPropertyIndexAssumeHash(atom_id);
         while (shape_index != shape.no_property_index) {
             const index: usize = @intCast(shape_index);
             const prop = props[index];

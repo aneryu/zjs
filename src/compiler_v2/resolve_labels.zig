@@ -482,8 +482,21 @@ const Resolver = struct {
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
     last_attached_source: ?SourcePoint = null,
-    last_op: ?u8 = null,
     last_pc: u32 = 0,
+    last_sz: u32 = 0,
+    /// Expected B opcode for the live A, or 0 if the last emit is not a
+    /// fusion A. A second B (get_loc2 → get_field / get_field2) uses fuse_b2.
+    fuse_b: u8 = 0,
+    fuse_op: u8 = 0,
+    fuse_b2: u8 = 0,
+    fuse_op2: u8 = 0,
+    fuse_b3: u8 = 0,
+    fuse_op3: u8 = 0,
+    /// Fourth B: leftover re-fuse of an already-fused opcode (get_loc8 → push_0,
+    /// leftover later rewritten to push_0_shr / push_0_or). Reuses an existing
+    /// fused A opcode — no new slot.
+    fuse_b4: u8 = 0,
+    fuse_op4: u8 = 0,
     last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
@@ -698,37 +711,198 @@ const Resolver = struct {
         self.output_len += 1;
     }
 
-    inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
-        self.last_pc = pc;
-        self.last_op = opc;
+    /// Isolation mask for fusion-v4 pairs (v2.1 matrix). Default = remaining four.
+    /// `ZJS_FUSE_V4=none` / `all` / comma list: `push_0_or,sar_get_array_el,
+    /// push_2_sar,get_loc8_push_2`. Diagnostic only. `get_array_el_push_0` dropped
+    /// (cloned `get_array_el` shrank the island by 84B).
+    const v4_push_0_or: u8 = 1 << 0;
+    const v4_sar_get_array_el: u8 = 1 << 2;
+    const v4_push_2_sar: u8 = 1 << 3;
+    const v4_get_loc8_push_2: u8 = 1 << 4;
+    const v4_all: u8 = v4_push_0_or | v4_sar_get_array_el | v4_push_2_sar | v4_get_loc8_push_2;
+
+    var v4_bits_ready: bool = false;
+    var v4_bits: u8 = v4_all;
+
+    fn v4Mask() u8 {
+        if (v4_bits_ready) return v4_bits;
+        v4_bits_ready = true;
+        v4_bits = loadV4Mask();
+        return v4_bits;
     }
 
-    noinline fn maybeFusePrev(self: *Resolver, b: u8) void {
-        const a = self.last_op orelse return;
-        const a_sz: u32 = opcode.sizeOf(a);
-        if (a_sz == 0) return;
-        if (self.output_len != self.last_pc + a_sz) return;
+    fn loadV4Mask() u8 {
+        const raw = std.c.getenv("ZJS_FUSE_V4") orelse return v4_all;
+        const s = std.mem.span(raw);
+        if (s.len == 0 or std.mem.eql(u8, s, "all")) return v4_all;
+        if (std.mem.eql(u8, s, "none")) return 0;
+        var bits: u8 = 0;
+        var it = std.mem.splitScalar(u8, s, ',');
+        while (it.next()) |name| {
+            if (std.mem.eql(u8, name, "push_0_or")) bits |= v4_push_0_or;
+            if (std.mem.eql(u8, name, "sar_get_array_el")) bits |= v4_sar_get_array_el;
+            if (std.mem.eql(u8, name, "push_2_sar")) bits |= v4_push_2_sar;
+            if (std.mem.eql(u8, name, "get_loc8_push_2")) bits |= v4_get_loc8_push_2;
+        }
+        return bits;
+    }
+
+    inline fn v4On(bit: u8) bool {
+        return (v4Mask() & bit) != 0;
+    }
+
+    inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
+        self.last_pc = pc;
+        self.fuse_b3 = 0;
+        self.fuse_b4 = 0;
+        // Record the legal B(s) for this A. Callers stay a single
+        // forward walk — maybeFusePrev is O(1) and does not rescan pairs.
+        switch (opc) {
+            op.get_loc0 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_field;
+                self.fuse_op = op.get_loc0_field;
+                self.fuse_b2 = 0;
+            },
+            op.lt => {
+                self.last_sz = 1;
+                self.fuse_b = op.if_false8;
+                self.fuse_op = op.cmp_if_false8;
+                self.fuse_b2 = 0;
+            },
+            op.put_loc8 => {
+                self.last_sz = 2;
+                self.fuse_b = op.get_loc8;
+                self.fuse_op = op.put_loc8_get_loc8;
+                self.fuse_b2 = 0;
+            },
+            op.push_this => {
+                self.last_sz = 1;
+                self.fuse_b = op.put_loc0;
+                self.fuse_op = op.push_this_put_loc0;
+                self.fuse_b2 = 0;
+            },
+            op.put_loc0 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_loc0;
+                self.fuse_op = op.put_loc0_get_loc0;
+                self.fuse_b2 = 0;
+            },
+            op.get_field2 => {
+                self.last_sz = 5;
+                self.fuse_b = op.call_method;
+                self.fuse_op = op.get_field2_call_method;
+                self.fuse_b2 = 0;
+            },
+            op.get_loc2 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_field;
+                self.fuse_op = op.get_loc2_field;
+                self.fuse_b2 = op.get_field2;
+                self.fuse_op2 = op.get_loc2_field2;
+            },
+            op.eq => {
+                self.last_sz = 1;
+                self.fuse_b = op.if_false8;
+                self.fuse_op = op.eq_if_false8;
+                self.fuse_b2 = 0;
+            },
+            op.get_field => {
+                self.last_sz = 5;
+                self.fuse_b = op.get_field2;
+                self.fuse_op = op.get_field_field2;
+                self.fuse_b2 = 0;
+            },
+            op.get_var => {
+                self.last_sz = 3;
+                self.fuse_b = op.get_field;
+                self.fuse_op = op.get_var_field;
+                self.fuse_b2 = 0;
+            },
+            op.push_0 => {
+                self.last_sz = 1;
+                if (v4On(v4_push_0_or)) {
+                    self.fuse_b = op.@"or";
+                    self.fuse_op = op.push_0_or;
+                    self.fuse_b2 = op.shr;
+                    self.fuse_op2 = op.push_0_shr;
+                } else {
+                    self.fuse_b = op.shr;
+                    self.fuse_op = op.push_0_shr;
+                    self.fuse_b2 = 0;
+                }
+            },
+            op.sar => if (v4On(v4_sar_get_array_el)) {
+                self.last_sz = 1;
+                self.fuse_b = op.get_array_el;
+                self.fuse_op = op.sar_get_array_el;
+                self.fuse_b2 = 0;
+            } else {
+                self.fuse_b = 0;
+                self.fuse_b2 = 0;
+            },
+            op.push_2 => if (v4On(v4_push_2_sar)) {
+                self.last_sz = 1;
+                self.fuse_b = op.sar;
+                self.fuse_op = op.push_2_sar;
+                self.fuse_b2 = 0;
+            } else {
+                self.fuse_b = 0;
+                self.fuse_b2 = 0;
+            },
+            op.get_loc8 => {
+                self.last_sz = 2;
+                if (v4On(v4_get_loc8_push_2)) {
+                    self.fuse_b = op.push_2;
+                    self.fuse_op = op.get_loc8_push_2;
+                    self.fuse_b2 = op.push_1;
+                    self.fuse_op2 = op.get_loc8_push_1;
+                } else {
+                    self.fuse_b = op.push_1;
+                    self.fuse_op = op.get_loc8_push_1;
+                    self.fuse_b2 = 0;
+                }
+                self.fuse_b3 = op.push_i8;
+                self.fuse_op3 = op.get_loc8_push_i8;
+                // Leftover re-fuse: get_loc8 → push_0 (later push_0_shr /
+                // push_0_or). Reuse get_loc8_push_2 — handler tail-musts the
+                // leftover opcode, no new slot.
+                self.fuse_b4 = op.push_0;
+                self.fuse_op4 = op.get_loc8_push_2;
+            },
+            op.push_i8 => {
+                self.last_sz = 2;
+                self.fuse_b = op.add;
+                self.fuse_op = op.push_i8_add;
+                self.fuse_b2 = 0;
+            },
+            op.get_var_ref0 => {
+                self.last_sz = 1;
+                self.fuse_b = op.get_loc8;
+                self.fuse_op = op.get_var_ref0_get_loc8;
+                self.fuse_b2 = 0;
+            },
+            else => {
+                self.fuse_b = 0;
+                self.fuse_b2 = 0;
+            },
+        }
+    }
+
+    inline fn maybeFusePrev(self: *Resolver, b: u8) void {
+        const expect = self.fuse_b;
+        if (expect == 0) return;
+        if (self.output_len != self.last_pc + self.last_sz) return;
         if (self.output_len == self.last_bound_output) return;
-        const fused: ?u8 = if (a == op.get_loc0 and b == op.get_field)
-            op.get_loc0_field
-        else if (a == op.lt and b == op.if_false8)
-            op.cmp_if_false8
-        else if (a == op.put_loc8 and b == op.get_loc8)
-            op.put_loc8_get_loc8
-        else if (a == op.push_this and b == op.put_loc0)
-            op.push_this_put_loc0
-        else if (a == op.put_loc0 and b == op.get_loc0)
-            op.put_loc0_get_loc0
-        else if (a == op.get_field2 and b == op.call_method)
-            op.get_field2_call_method
-        else if (a == op.get_loc2 and b == op.get_field)
-            op.get_loc2_field
-        else if (a == op.eq and b == op.if_false8)
-            op.eq_if_false8
-        else
-            null;
-        if (fused) |fused_op|
-            self.output[self.last_pc] = fused_op;
+        if (b == expect) {
+            self.output[self.last_pc] = self.fuse_op;
+        } else if (self.fuse_b2 != 0 and b == self.fuse_b2) {
+            self.output[self.last_pc] = self.fuse_op2;
+        } else if (self.fuse_b3 != 0 and b == self.fuse_b3) {
+            self.output[self.last_pc] = self.fuse_op3;
+        } else if (self.fuse_b4 != 0 and b == self.fuse_b4) {
+            self.output[self.last_pc] = self.fuse_op4;
+        }
     }
 
     inline fn appendRaw(self: *Resolver, bytes: []const u8) Error!void {
@@ -1633,7 +1807,8 @@ const Resolver = struct {
                 try self.appendByte(short_op);
                 if (comptime layout == .short) {
                     if (short_op == op.get_loc0 or short_op == op.put_loc8 or
-                        short_op == op.put_loc0 or short_op == op.get_loc2)
+                        short_op == op.put_loc0 or short_op == op.get_loc2 or
+                        short_op == op.get_loc8 or short_op == op.get_var_ref0)
                         self.noteFusionA(short_op, pc);
                 }
                 if (short_op == op.get_loc8 or short_op == op.put_loc8 or
@@ -1660,10 +1835,24 @@ const Resolver = struct {
             return;
         }
         if (value >= -1 and value <= 7) {
-            try self.appendByte(@intCast(@as(i32, op.push_0) + value));
+            const short_op: u8 = @intCast(@as(i32, op.push_0) + value);
+            if (comptime layout == .short) {
+                if (short_op == op.push_0 or short_op == op.push_2 or
+                    short_op == op.push_1)
+                    self.maybeFusePrev(short_op);
+            }
+            const pc = self.output_len;
+            try self.appendByte(short_op);
+            if (comptime layout == .short) {
+                if (short_op == op.push_0 or short_op == op.push_2)
+                    self.noteFusionA(short_op, pc);
+            }
         } else if (value >= std.math.minInt(i8) and value <= std.math.maxInt(i8)) {
+            if (comptime layout == .short) self.maybeFusePrev(op.push_i8);
+            const pc = self.output_len;
             try self.appendByte(op.push_i8);
             try self.appendByte(@bitCast(@as(i8, @intCast(value))));
+            if (comptime layout == .short) self.noteFusionA(op.push_i8, pc);
         } else if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
             try self.appendByte(op.push_i16);
             try self.appendI16(@intCast(value));
@@ -1899,14 +2088,22 @@ const Resolver = struct {
         } else {
             const first = self.code[position];
             if (comptime layout == .short) {
-                if (first == op.get_field or first == op.call_method)
+                // B-side only. get_var is never a B — recording it as A
+                // below is enough for get_var → get_field.
+                if (first == op.get_field or first == op.call_method or
+                    first == op.get_field2 or first == op.@"or" or
+                    first == op.get_array_el or first == op.sar or
+                    first == op.shr or first == op.add or first == op.push_i8)
                     self.maybeFusePrev(first);
             }
             const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
             if (comptime layout == .short) {
                 if (first == op.lt or first == op.push_this or
-                    first == op.get_field2 or first == op.eq)
+                    first == op.get_field2 or first == op.eq or
+                    first == op.get_field or first == op.get_var or
+                    first == op.get_array_el or first == op.sar or
+                    first == op.push_i8)
                     self.noteFusionA(first, pc);
             }
         }
@@ -2444,7 +2641,8 @@ const Resolver = struct {
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
-                        try self.appendByte(op.is_undefined);
+                        try self.appendByte(op.using);
+                        try self.appendByte(opcode.using_sub.is_undefined);
                         position_next = match.end;
                     } else if (try self.matchSeq(position_next, &.{
                         .{ .options = &.{op.strict_neq} },
@@ -2452,7 +2650,8 @@ const Resolver = struct {
                     })) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
-                        try self.appendByte(op.is_undefined);
+                        try self.appendByte(op.using);
+                        try self.appendByte(opcode.using_sub.is_undefined);
                         const inverted = if (self.code[match.positions[1]] == op.if_false)
                             op.if_true
                         else
@@ -2772,9 +2971,9 @@ const Resolver = struct {
                         1,
                     );
                     const test_op: ?u8 = if (atom_id == core.atom.ids.undefined_)
-                        op.typeof_is_undefined
+                        opcode.using_sub.typeof_is_undefined
                     else if (atom_id == core.atom.ids.type_function)
-                        op.typeof_is_function
+                        opcode.using_sub.typeof_is_function
                     else
                         null;
                     if (test_op) |selected_test| {
@@ -2791,6 +2990,7 @@ const Resolver = struct {
                             const deferred_end = self.source_cursor;
                             self.absorbSources(compare_match.end);
                             self.source_attach_cursor = self.source_cursor;
+                            try self.appendByte(op.using);
                             try self.appendByte(selected_test);
                             try self.consumeAtomsRange(
                                 position,
@@ -2814,6 +3014,7 @@ const Resolver = struct {
                             const deferred_end = self.source_cursor;
                             self.absorbSources(branch_match.end);
                             self.source_attach_cursor = self.source_cursor;
+                            try self.appendByte(op.using);
                             try self.appendByte(selected_test);
                             try self.consumeAtomsRange(
                                 position,
@@ -3668,16 +3869,16 @@ test "compiler_v2.resolve_labels: typeof string fold preserves legacy source rel
 
     try std.testing.expectEqualSlices(
         u8,
-        &.{ op.typeof_is_undefined, op.push_false, op.strict_eq, op.@"return" },
+        &.{ op.using, opcode.using_sub.typeof_is_undefined, op.push_false, op.strict_eq, op.@"return" },
         harness.function.code,
     );
     try std.testing.expectEqualSlices(
         SourceLocSlot,
         &.{
             .{ .pc = 0, .line_num = 10, .col_num = 2 },
-            .{ .pc = 1, .line_num = 20, .col_num = 4 },
-            .{ .pc = 1, .line_num = 40, .col_num = 8 },
-            .{ .pc = 2, .line_num = 50, .col_num = 10 },
+            .{ .pc = 2, .line_num = 20, .col_num = 4 },
+            .{ .pc = 2, .line_num = 40, .col_num = 8 },
+            .{ .pc = 3, .line_num = 50, .col_num = 10 },
         },
         harness.function.source_loc_slots,
     );
@@ -3720,8 +3921,8 @@ test "compiler_v2.resolve_labels: typeof branch keeps equal next-op source" {
         SourceLocSlot,
         &.{
             .{ .pc = 0, .line_num = 10, .col_num = 2 },
-            .{ .pc = 3, .line_num = 20, .col_num = 4 },
-            .{ .pc = 3, .line_num = 40, .col_num = 8 },
+            .{ .pc = 4, .line_num = 20, .col_num = 4 },
+            .{ .pc = 4, .line_num = 40, .col_num = 8 },
         },
         harness.function.source_loc_slots,
     );
@@ -4093,9 +4294,10 @@ test "compiler_v2.resolve_labels: folded typeof branch threads through dead goto
         &.{
             op.object,
             op.if_false8,
-            7,
+            8,
             op.get_arg0,
-            op.typeof_is_undefined,
+            op.using,
+            opcode.using_sub.typeof_is_undefined,
             op.if_true8,
             5,
             op.object,
@@ -4112,9 +4314,9 @@ test "compiler_v2.resolve_labels: folded typeof branch threads through dead goto
 }
 
 test "compiler_v2.resolve_labels: folded nullish branches thread through dead goto" {
-    const cases = [_]struct { literal: u8, test_op: u8 }{
-        .{ .literal = op.null, .test_op = op.is_null },
-        .{ .literal = op.undefined, .test_op = op.is_undefined },
+    const cases = [_]struct { literal: u8, test_bytes: []const u8 }{
+        .{ .literal = op.null, .test_bytes = &.{op.is_null} },
+        .{ .literal = op.undefined, .test_bytes = &.{ op.using, opcode.using_sub.is_undefined } },
     };
 
     for (cases) |case| {
@@ -4146,25 +4348,24 @@ test "compiler_v2.resolve_labels: folded nullish branches thread through dead go
         var product = try harness.resolve();
         defer product.deinitUncommitted();
         try run(.short, &harness.function, null, &product);
-        try std.testing.expectEqualSlices(
-            u8,
-            &.{
-                op.object,
-                op.if_false8,
-                7,
-                op.get_arg0,
-                case.test_op,
-                op.if_true8,
-                5,
-                op.object,
-                op.@"return",
-                op.null,
-                op.@"return",
-                op.get_arg0,
-                op.@"return",
-            },
-            harness.function.code,
-        );
+        const extra: u8 = @intCast(case.test_bytes.len - 1);
+        const expected = try std.testing.allocator.alloc(u8, 12 + case.test_bytes.len);
+        defer std.testing.allocator.free(expected);
+        expected[0] = op.object;
+        expected[1] = op.if_false8;
+        expected[2] = 7 + extra;
+        expected[3] = op.get_arg0;
+        @memcpy(expected[4..][0..case.test_bytes.len], case.test_bytes);
+        const i = 4 + case.test_bytes.len;
+        expected[i] = op.if_true8;
+        expected[i + 1] = 5;
+        expected[i + 2] = op.object;
+        expected[i + 3] = op.@"return";
+        expected[i + 4] = op.null;
+        expected[i + 5] = op.@"return";
+        expected[i + 6] = op.get_arg0;
+        expected[i + 7] = op.@"return";
+        try std.testing.expectEqualSlices(u8, expected, harness.function.code);
         try std.testing.expectEqual(@as(u32, 0), product.label_slots[through.index()].ref_count);
     }
 }

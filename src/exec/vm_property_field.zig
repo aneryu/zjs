@@ -236,12 +236,12 @@ pub noinline fn field(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-) !Step {
+) align(16) !Step {
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     switch (opc) {
-        op.get_field => {
+        op.get_field, op.get_field_field2 => {
             if (stack.len() == 0) return error.StackUnderflow;
             const top_index = stack.len() - 1;
             const receiver = stack.values[top_index];
@@ -511,7 +511,8 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
 /// potentially-shape-mutating operation; both callers consume it immediately.
 pub inline fn qjsGetFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
     var absent = false;
-    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true, false, &absent);
+    // Named bytecode atom: never a tagged-int / mapped-args binding (F2).
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, false, &absent);
 }
 
 /// Tri-state twin of `qjsGetFieldFastSlot` for op_get_field / op_get_field2.
@@ -528,7 +529,9 @@ pub inline fn qjsGetFieldFastSlotOrAbsent(
     atom_id: core.Atom,
     absent: *bool,
 ) ?*const core.JSValue {
-    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true, true, absent);
+    // Named bytecode atom: skip isTaggedInt / mapped-args (F2). Computed-key
+    // `qjsGetFieldFast` keeps the tagged-int probe.
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, true, absent);
 }
 
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
@@ -1223,33 +1226,33 @@ pub noinline fn getArrayElement(
     return .done;
 }
 
-// Inline typed-array element read for `obj[int]`, mirroring qjs's
-// `JS_GetPropertyValue` per-`class_id` switch (quickjs.c:9029) which reads the
-// element straight from the typed storage (`int8_ptr/.../double_ptr`) after a
-// single bounds check. Covers every non-BigInt element kind (Int8/Uint8/
-// Uint8Clamped/Int16/Uint16/Int32/Uint32/Float16/Float32/Float64 — kinds 1..10),
-// which are all allocation-free; BigInt64/BigUint64 (kinds 11/12) return null so
-// the value flows through the (correct, allocating) generic path. The byte→value
-// mapping is delegated to the canonical `readNumericElement`, which is also used
-// by the generic core reader, so no kind-specific decoder is duplicated here.
+// qjs JS_GetPropertyValue TA arm (quickjs.c:9050-9083): one live-count
+// bounds check (detach publishes count=0), then a class-id load. No second
+// data/width probe — `live_length > 0` implies a published pointer.
+/// Non-optional JSValue (same two-reg ABI as `readNumericElement`) so the
+/// get_array_el caller does not grow a 0x160 optional-unwrap frame.
+pub noinline fn readTypedArrayIndexFast(
+    object: *const core.Object,
+    class_id: core.class.ClassId,
+    index: u32,
+) core.JSValue {
+    const payload = object.typedArrayPayloadFast() orelse return core.JSValue.undefinedValue();
+    // Detach/OOB: qjs only checks `idx >= u.array.count`. zjs publishes
+    // live_length=0 (and data=null) on detach, so this one compare is enough.
+    if (index >= payload.live_length) return core.JSValue.undefinedValue();
+    return core.typed_array.decodeNumericElementByClass(class_id, payload.data.?, index);
+}
+
+// Inline typed-array element read for `obj[int]`. Callers that already
+// classified `class_id` should use `readTypedArrayIndexFast` so ARRAY/own-int
+// probes never run on a TA receiver (qjs CASE: class!=ARRAY → GPV jumptable).
 pub fn fastTypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JSValue {
     const object = objectFromValue(obj) orelse return null;
     const key_int = key.asInt32() orelse return null;
     if (key_int < 0) return null;
-    // QuickJS keeps the live element count and base pointer on the TypedArray
-    // object and refreshes them from the ArrayBuffer's view list on every
-    // detach/resize. Read that state once: one bounds check, then one typed
-    // load. DataView (`element_size == 0`) and allocating BigInt kinds punt.
-    const payload = object.typedArrayPayloadFast() orelse return null;
-    const kind = payload.kind;
-    if (kind < 1 or kind > 10) return null;
-    const index: u32 = @intCast(key_int);
-    if (index >= payload.live_length) return core.JSValue.undefinedValue();
-    const data = payload.data orelse return core.JSValue.undefinedValue();
-    const width: usize = payload.element_size;
-    if (width == 0) return null;
-    const element_offset = @as(usize, index) * width;
-    return core.typed_array.readNumericElement(kind, data + element_offset);
+    const class_id = object.class_id;
+    if (!core.class.isNumericTypedArrayClass(class_id)) return null;
+    return readTypedArrayIndexFast(object, class_id, @intCast(key_int));
 }
 
 pub const TypedArrayWriteFast = enum { not_typed_array, handled };

@@ -8,6 +8,11 @@ const string_mod = @import("string.zig");
 /// When true, JSValue uses the 8-byte NaN-boxed representation (build -Dzjs_nan_boxing=true).
 pub const nan_boxing: bool = build_options.zjs_nan_boxing;
 
+/// Value-free profile hooks stay off even in `zjs-profile`. Compiling them
+/// into JSValue.free / call-profile guards slid WPO (zlib SIGSEGV, `sp==0`
+/// into `op_return`). Dispatch counts live in `cont`/`next` only.
+const value_free_profile = false;
+
 pub const Tag = struct {
     pub const first: i32 = -9;
     pub const big_int: i32 = -9;
@@ -573,6 +578,15 @@ pub const JSValue = extern struct {
         };
     }
 
+    /// qjs `JS_VALUE_GET_OBJ`: tag already proven, payload is the object.
+    /// Release does not re-test a null pointer (F1); Debug still asserts.
+    pub inline fn refHeaderAssumeObject(self: JSValue) *gc.Header {
+        std.debug.assert(self.isObject());
+        const payload = self.payloadOf();
+        std.debug.assert(payload != 0);
+        return @ptrFromInt(payload);
+    }
+
     pub fn stringHeader(self: JSValue) ?*gc.StringHeader {
         return switch (self.tagOf()) {
             Tag.symbol, Tag.string, Tag.string_rope => self.refCountWordAssumeRefCounted(),
@@ -629,7 +643,7 @@ pub const JSValue = extern struct {
             // deinit-phase skip for {module, object, function_bytecode} — the
             // contiguous tail [deinit_skip_min, refcount_max].
             if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
-            if (comptime build_options.zjs_enable_opcode_profile) {
+            if (comptime value_free_profile) {
                 if (rt.opcode_profile) |prof| prof.recordValueFree();
             }
             self.releaseCommonRefCount(rt);
@@ -638,7 +652,7 @@ pub const JSValue = extern struct {
         if (!self.requiresRefCount()) return;
         const tag = self.tagOf();
         if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return;
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         self.releaseCommonRefCount(rt);
@@ -666,14 +680,14 @@ pub const JSValue = extern struct {
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
             if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
-            if (comptime build_options.zjs_enable_opcode_profile) {
+            if (comptime value_free_profile) {
                 if (rt.opcode_profile) |prof| prof.recordValueFree();
             }
             self.releaseCommonRefCount(rt);
             return;
         }
         if (!self.requiresRefCount()) return;
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         self.releaseCommonRefCount(rt);
@@ -687,7 +701,7 @@ pub const JSValue = extern struct {
     pub inline fn freeObjectAssumeObject(self: JSValue, rt: anytype) void {
         std.debug.assert(self.tagOf() == Tag.object);
         if (rt.gc.phase == .deinit) return;
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         const hdr = self.refCountWordAssumeRefCounted();
@@ -706,7 +720,7 @@ pub const JSValue = extern struct {
         std.debug.assert(self.tagOf() == Tag.object);
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         const hdr = self.refCountWordAssumeRefCounted();
@@ -759,7 +773,7 @@ pub const JSValue = extern struct {
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         hdr.rc -= 1;
@@ -783,7 +797,7 @@ pub const JSValue = extern struct {
             const hdr = self.refCountWordAssumeRefCounted();
             std.debug.assert(hdr.rc > 0);
             if (hdr.rc == 1) return true;
-            if (comptime build_options.zjs_enable_opcode_profile) {
+            if (comptime value_free_profile) {
                 if (rt.opcode_profile) |prof| prof.recordValueFree();
             }
             hdr.rc -= 1;
@@ -795,7 +809,7 @@ pub const JSValue = extern struct {
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         hdr.rc -= 1;
@@ -813,7 +827,7 @@ pub const JSValue = extern struct {
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         hdr.rc -= 1;
@@ -831,7 +845,7 @@ pub const JSValue = extern struct {
             const hdr = self.refCountWordAssumeRefCounted();
             std.debug.assert(hdr.rc > 0);
             if (hdr.rc == 1) return true;
-            if (comptime build_options.zjs_enable_opcode_profile) {
+            if (comptime value_free_profile) {
                 if (rt.opcode_profile) |prof| prof.recordValueFree();
             }
             hdr.rc -= 1;
@@ -841,7 +855,7 @@ pub const JSValue = extern struct {
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         if (hdr.rc == 1) return true;
-        if (comptime build_options.zjs_enable_opcode_profile) {
+        if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
         hdr.rc -= 1;

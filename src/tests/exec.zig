@@ -5785,6 +5785,105 @@ test "resident stack permutations preserve assignment values and ownership" {
     try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(perm3.byteCode(), op.perm3));
 }
 
+test "empty object named field miss is undefined and own hit stores" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const o = {};
+        \\assert.sameValue(o.missing, undefined);
+        \\assert.sameValue(o.x = 1, 1);
+        \\assert.sameValue(o.x, 1);
+        \\assert.sameValue(({}).y, undefined);
+    );
+    _ = result;
+}
+
+test "mapped arguments named field skips binding alias; computed index stays aliased" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function f(a) {
+        \\  assert.sameValue(arguments[0], 7);
+        \\  assert.sameValue(arguments.foo, undefined);
+        \\  arguments.foo = 1;
+        \\  assert.sameValue(arguments.foo, 1);
+        \\  assert.sameValue(a, 7);
+        \\  arguments[0] = 8;
+        \\  assert.sameValue(a, 8);
+        \\  assert.sameValue(arguments[0], 8);
+        \\}
+        \\f(7);
+    );
+    _ = result;
+}
+
+test "typed array integer get uses class-id arm and qjs tag shape" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const u8 = new Uint8Array([255, 1]);
+        \\assert.sameValue(u8[0], 255);
+        \\assert.sameValue(u8[1], 1);
+        \\assert.sameValue(u8[2], undefined);
+        \\assert.sameValue(u8[-1], undefined);
+        \\const i32 = new Int32Array([-1, 2147483647]);
+        \\assert.sameValue(i32[0], -1);
+        \\assert.sameValue(i32[1], 2147483647);
+        \\const u32 = new Uint32Array([2147483648, 1]);
+        \\assert.sameValue(u32[0], 2147483648);
+        \\assert.sameValue(u32[1], 1);
+        \\const f64 = new Float64Array([1, -0]);
+        \\assert.sameValue(f64[0], 1);
+        \\assert.sameValue(Object.is(f64[1], -0), true);
+        \\const dense = [9, 8, 7];
+        \\assert.sameValue(dense[1], 8);
+        \\const buf = new ArrayBuffer(4);
+        \\const view = new Uint8Array(buf);
+        \\view[0] = 3;
+        \\assert.sameValue(view[0], 3);
+        \\const detached = new Uint8Array(new ArrayBuffer(2));
+        \\detached[0] = 9;
+        \\detached.buffer.transfer();
+        \\assert.sameValue(detached[0], undefined);
+    );
+    _ = result;
+}
+
+test "typed array integer put uses class-id arm" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const u8 = new Uint8Array(3);
+        \\assert.sameValue(u8[0] = 255, 255);
+        \\assert.sameValue(u8[0], 255);
+        \\assert.sameValue(u8[1] = -1, -1);
+        \\assert.sameValue(u8[1], 255);
+        \\assert.sameValue(u8[2] = 300, 300);
+        \\assert.sameValue(u8[2], 44);
+        \\assert.sameValue(u8[3] = 7, 7);
+        \\assert.sameValue(u8[3], undefined);
+        \\const i32 = new Int32Array(1);
+        \\assert.sameValue(i32[0] = -2147483648, -2147483648);
+        \\assert.sameValue(i32[0], -2147483648);
+        \\const f64 = new Float64Array(1);
+        \\assert.sameValue(f64[0] = 42, 42);
+        \\assert.sameValue(f64[0], 42);
+        \\const dense = [0, 0];
+        \\assert.sameValue(dense[1] = 8, 8);
+        \\assert.sameValue(dense[1], 8);
+        \\const detached = new Uint8Array(new ArrayBuffer(2));
+        \\detached[0] = 9;
+        \\detached.buffer.transfer();
+        \\assert.sameValue(detached[0] = 1, 1);
+        \\assert.sameValue(detached[0], undefined);
+    );
+    _ = result;
+}
+
 test "typed array int32 store fast arm preserves conversion and assignment semantics" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -9923,6 +10022,46 @@ test "instanceof resident dispatch preserves GetMethod and result coercion seman
         \\} finally {
         \\  delete Number.prototype[Symbol.hasInstance];
         \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "default Function hasInstance uses Ordinary; other native records still Call" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function C() {}
+        \\const instance = new C();
+        \\assert.sameValue(instance instanceof C, true);
+        \\assert.sameValue(1 instanceof C, false);
+        \\assert.sameValue(({}) instanceof C, false);
+        \\const Bound = C.bind(null);
+        \\assert.sameValue(instance instanceof Bound, true);
+        \\
+        \\const original = Function.prototype[Symbol.hasInstance];
+        \\Object.defineProperty(C, Symbol.hasInstance, {
+        \\  value: Function.prototype.call,
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(instance instanceof C, false);
+        \\delete C[Symbol.hasInstance];
+        \\assert.sameValue(instance instanceof C, true);
+        \\
+        \\let calls = 0;
+        \\Object.defineProperty(C, Symbol.hasInstance, {
+        \\  value: function(value) {
+        \\    calls++;
+        \\    return original.call(this, value);
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(instance instanceof C, true);
+        \\assert.sameValue(calls, 1);
+        \\delete C[Symbol.hasInstance];
+        \\assert.sameValue(instance instanceof C, true);
     );
     defer result.free(js.runtime);
 

@@ -587,12 +587,12 @@ pub fn dataViewGet(rt: *JSRuntime, view_value: JSValue, kind: u32, args: []const
         3 => JSValue.int32(std.mem.readInt(i16, bytes[0..2], endian)),
         4 => JSValue.int32(std.mem.readInt(u16, bytes[0..2], endian)),
         5 => JSValue.int32(std.mem.readInt(i32, bytes[0..4], endian)),
-        6 => numberResult(@floatFromInt(std.mem.readInt(u32, bytes[0..4], endian))),
-        7 => numberResult(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], endian))))),
-        8 => numberResult(@bitCast(std.mem.readInt(u64, bytes[0..8], endian))),
+        6 => decodeUint32(std.mem.readInt(u32, bytes[0..4], endian)),
+        7 => JSValue.float64(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], endian))))),
+        8 => JSValue.float64(@bitCast(std.mem.readInt(u64, bytes[0..8], endian))),
         9 => bigIntResult(rt, std.mem.readInt(i64, bytes[0..8], endian)),
         10 => bigIntResult(rt, @intCast(std.mem.readInt(u64, bytes[0..8], endian))),
-        11 => numberResult(float16ToF64(std.mem.readInt(u16, bytes[0..2], endian))),
+        11 => JSValue.float64(float16ToF64(std.mem.readInt(u16, bytes[0..2], endian))),
         else => error.TypeError,
     };
 }
@@ -780,11 +780,77 @@ fn relativeSliceIndex(rt: *JSRuntime, value: JSValue, len: usize, undefined_is_l
     return @intFromFloat(truncated);
 }
 
-fn numberResult(value: f64) JSValue {
-    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !std.math.isNegativeZero(value)) {
-        return JSValue.int32(@intFromFloat(value));
+/// qjs JS_NewUint32: fits int32 stays int-tagged; bit31 set becomes float64.
+inline fn decodeUint32(bits: u32) JSValue {
+    if (bits <= std.math.maxInt(i32)) return JSValue.int32(@intCast(bits));
+    return JSValue.float64(@floatFromInt(bits));
+}
+
+/// qjs `[i]` / `js_TA_get_*` decode: integer kinds are JS_NewInt32, Uint32 is
+/// JS_NewUint32 (one high-bit test), floats are a bare float64 tag
+/// (`__JS_NewFloat64`). Do not scan "can this float be an int32" — that
+/// canonicalizer is the helper tax on zlib's HEAPF64/HEAP32 path.
+pub inline fn decodeNumericElement(kind: u8, bytes: [*]const u8) JSValue {
+    return switch (kind) {
+        1 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
+        2, 3 => JSValue.int32(bytes[0]),
+        4 => JSValue.int32(std.mem.readInt(i16, bytes[0..2], .little)),
+        5 => JSValue.int32(std.mem.readInt(u16, bytes[0..2], .little)),
+        6 => JSValue.int32(std.mem.readInt(i32, bytes[0..4], .little)),
+        7 => decodeUint32(std.mem.readInt(u32, bytes[0..4], .little)),
+        8 => JSValue.float64(float16ToF64(std.mem.readInt(u16, bytes[0..2], .little))),
+        9 => JSValue.float64(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))))),
+        10 => JSValue.float64(@bitCast(std.mem.readInt(u64, bytes[0..8], .little))),
+        else => unreachable,
+    };
+}
+
+/// Class-id twin of `decodeNumericElement` so `[i]` can jumptable on
+/// `object.class_id` like qjs JS_GetPropertyValue, with the element width
+/// folded into each arm (no extra `element_size` load).
+pub inline fn decodeNumericElementByClass(class_id: class.ClassId, data: [*]const u8, index: u32) JSValue {
+    const i: usize = index;
+    return switch (class_id) {
+        class.ids.int8_array => JSValue.int32(@as(i8, @bitCast(data[i]))),
+        class.ids.uint8_array, class.ids.uint8c_array => JSValue.int32(data[i]),
+        class.ids.int16_array => JSValue.int32(std.mem.readInt(i16, data[i * 2 ..][0..2], .little)),
+        class.ids.uint16_array => JSValue.int32(std.mem.readInt(u16, data[i * 2 ..][0..2], .little)),
+        class.ids.int32_array => JSValue.int32(std.mem.readInt(i32, data[i * 4 ..][0..4], .little)),
+        class.ids.uint32_array => decodeUint32(std.mem.readInt(u32, data[i * 4 ..][0..4], .little)),
+        class.ids.float16_array => JSValue.float64(float16ToF64(std.mem.readInt(u16, data[i * 2 ..][0..2], .little))),
+        class.ids.float32_array => JSValue.float64(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, data[i * 4 ..][0..4], .little))))),
+        class.ids.float64_array => JSValue.float64(@bitCast(std.mem.readInt(u64, data[i * 8 ..][0..8], .little))),
+        else => unreachable,
+    };
+}
+
+/// Class-id twin of `writeInt32NumericElement` for the `[i] = int32` arm
+/// (qjs JS_SetPropertyValue UINT8..FLOAT64). Conversion is infallible, so
+/// the caller only rechecks `live_length` then stores. Width lives in the
+/// arm; Uint8C clamps, integer kinds truncate, floats are `@floatFromInt`.
+pub inline fn writeInt32NumericElementByClass(
+    class_id: class.ClassId,
+    data: [*]u8,
+    index: u32,
+    integer: i32,
+) void {
+    const i: usize = index;
+    const bits: u32 = @bitCast(integer);
+    switch (class_id) {
+        class.ids.int8_array, class.ids.uint8_array => data[i] = @truncate(bits),
+        class.ids.uint8c_array => data[i] = if (integer <= 0)
+            0
+        else if (integer >= 255)
+            255
+        else
+            @intCast(integer),
+        class.ids.int16_array, class.ids.uint16_array => std.mem.writeInt(u16, data[i * 2 ..][0..2], @truncate(bits), .little),
+        class.ids.int32_array, class.ids.uint32_array => std.mem.writeInt(u32, data[i * 4 ..][0..4], bits, .little),
+        class.ids.float16_array => std.mem.writeInt(u16, data[i * 2 ..][0..2], f64ToFloat16(@floatFromInt(integer)), .little),
+        class.ids.float32_array => std.mem.writeInt(u32, data[i * 4 ..][0..4], @bitCast(@as(f32, @floatFromInt(integer))), .little),
+        class.ids.float64_array => std.mem.writeInt(u64, data[i * 8 ..][0..8], @bitCast(@as(f64, @floatFromInt(integer))), .little),
+        else => unreachable,
     }
-    return JSValue.float64(value);
 }
 
 fn bigIntResult(rt: *JSRuntime, value: i128) !JSValue {
@@ -855,19 +921,7 @@ fn f64ToFloat16(value: f64) u16 {
 /// This is also the single source of truth for numeric decoding: readElement
 /// delegates kinds 1..10 here before handling the allocating BigInt kinds.
 pub noinline fn readNumericElement(kind: u8, bytes: [*]const u8) callconv(.c) JSValue {
-    return switch (kind) {
-        1 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
-        2 => JSValue.int32(bytes[0]),
-        3 => JSValue.int32(bytes[0]),
-        4 => JSValue.int32(std.mem.readInt(i16, bytes[0..2], .little)),
-        5 => JSValue.int32(std.mem.readInt(u16, bytes[0..2], .little)),
-        6 => JSValue.int32(std.mem.readInt(i32, bytes[0..4], .little)),
-        7 => numberResult(@floatFromInt(std.mem.readInt(u32, bytes[0..4], .little))),
-        8 => numberResult(float16ToF64(std.mem.readInt(u16, bytes[0..2], .little))),
-        9 => numberResult(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))))),
-        10 => numberResult(@bitCast(std.mem.readInt(u64, bytes[0..8], .little))),
-        else => unreachable,
-    };
+    return decodeNumericElement(kind, bytes);
 }
 
 pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {

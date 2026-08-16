@@ -113,21 +113,31 @@ pub const opcode = struct {
         pub const nip: u8 = 15;
         pub const nip1: u8 = 16;
         pub const dup: u8 = 17;
-        pub const dup1: u8 = 18;
-        pub const dup2: u8 = 19;
-        pub const dup3: u8 = 20;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `dup1`). `get_loc8` + leftover `push_i8`.
+        pub const get_loc8_push_i8: u8 = 18;
+        /// Fusion v4 (using-prefix reclaim of zoo-cold `dup2`). `push_0` + leftover `or`.
+        pub const push_0_or: u8 = 19;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `dup3`). `push_i8` + leftover `add`.
+        pub const push_i8_add: u8 = 20;
         pub const insert2: u8 = 21;
         pub const insert3: u8 = 22;
-        pub const insert4: u8 = 23;
+        /// Fusion v4 (using-prefix reclaim). `push_2` + leftover `sar`.
+        pub const push_2_sar: u8 = 23;
         pub const perm3: u8 = 24;
         pub const perm4: u8 = 25;
-        pub const perm5: u8 = 26;
+        /// Fusion v4 (using-prefix reclaim). `sar` + leftover `get_array_el`.
+        pub const sar_get_array_el: u8 = 26;
         pub const swap: u8 = 27;
-        pub const swap2: u8 = 28;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `swap2`). `push_0` + leftover `shr`.
+        pub const push_0_shr: u8 = 28;
         pub const rot3l: u8 = 29;
-        pub const rot3r: u8 = 30;
-        pub const rot4l: u8 = 31;
-        pub const rot5l: u8 = 32;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `rot3r`). `get_loc8` + leftover `push_1`.
+        pub const get_loc8_push_1: u8 = 30;
+        /// Fusion last-round (using-prefix reclaim of zoo-cold `rot4l`). `get_var_ref0` + leftover `get_loc8`.
+        pub const get_var_ref0_get_loc8: u8 = 31;
+        /// Fusion v4 (using-prefix reclaim). `get_loc8` + leftover `push_2`
+        /// (also leftover `push_0` / `push_0_shr` / `push_0_or` — same slot).
+        pub const get_loc8_push_2: u8 = 32;
         pub const call_constructor: u8 = 33;
         pub const call: u8 = 34;
         pub const tail_call: u8 = 35;
@@ -335,10 +345,14 @@ pub const opcode = struct {
         pub const call1: u8 = 237;
         pub const call2: u8 = 238;
         pub const call3: u8 = 239;
-        pub const is_undefined: u8 = 240;
+        /// Fusion v3 (using-prefix reclaim of the three zoo-cold type tests).
+        /// `get_field` + leftover `get_field2`. Size/stack match `get_field`.
+        pub const get_field_field2: u8 = 240;
         pub const is_null: u8 = 241;
-        pub const typeof_is_undefined: u8 = 242;
-        pub const typeof_is_function: u8 = 243;
+        /// `get_var` + leftover `get_field`. Size/stack match `get_var`.
+        pub const get_var_field: u8 = 242;
+        /// `get_loc2` + leftover `get_field2`. Size/stack match `get_loc2`.
+        pub const get_loc2_field2: u8 = 243;
         /// zjs-only ERM prefix. Operand is `using_sub` (create/dispose/
         /// dispose_throw, or `add_base+hint`). Frees 245–247 for fusion v2.
         pub const using: u8 = 244;
@@ -415,6 +429,20 @@ pub const opcode = struct {
         pub const create: u8 = 0;
         pub const dispose: u8 = 1;
         pub const dispose_throw: u8 = 2;
+        /// Reclaimed type-test shorts (were ids 240/242/243).
+        pub const is_undefined: u8 = 3;
+        pub const typeof_is_undefined: u8 = 4;
+        pub const typeof_is_function: u8 = 5;
+        /// Reclaimed zoo-cold shorts (were ids 23/32/26/19) for fusion v4.
+        pub const insert4: u8 = 6;
+        pub const rot5l: u8 = 7;
+        pub const perm5: u8 = 8;
+        pub const dup2: u8 = 9;
+        pub const swap2: u8 = 10;
+        pub const rot3r: u8 = 11;
+        pub const rot4l: u8 = 12;
+        pub const dup3: u8 = 13;
+        pub const dup1: u8 = 14;
         pub const add_base: u8 = 16;
 
         pub fn add(hint: u8) u8 {
@@ -435,6 +463,14 @@ pub const opcode = struct {
                 create => 0,
                 dispose => 1,
                 dispose_throw => 2,
+                is_undefined, typeof_is_undefined, typeof_is_function => 1,
+                insert4 => 4,
+                rot5l, perm5 => 5,
+                dup2 => 2,
+                swap2, rot4l => 4,
+                rot3r => 3,
+                dup3 => 3,
+                dup1 => 2,
                 else => 0,
             };
         }
@@ -445,6 +481,12 @@ pub const opcode = struct {
                 create => 1,
                 dispose => 1,
                 dispose_throw => 1,
+                is_undefined, typeof_is_undefined, typeof_is_function => 1,
+                insert4, rot5l, perm5 => 5,
+                dup2, swap2, rot4l => 4,
+                rot3r => 3,
+                dup3 => 6,
+                dup1 => 3,
                 else => 0,
             };
         }
@@ -473,21 +515,21 @@ pub const opcode = struct {
         .{ .name = "nip", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [15] id 15
         .{ .name = "nip1", .size = 1, .n_pop = 3, .n_push = 2, .fmt = .none }, // [16] id 16
         .{ .name = "dup", .size = 1, .n_pop = 1, .n_push = 2, .fmt = .none }, // [17] id 17
-        .{ .name = "dup1", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [18] id 18
-        .{ .name = "dup2", .size = 1, .n_pop = 2, .n_push = 4, .fmt = .none }, // [19] id 19
-        .{ .name = "dup3", .size = 1, .n_pop = 3, .n_push = 6, .fmt = .none }, // [20] id 20
+        .{ .name = "get_loc8_push_i8", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [18] id 18
+        .{ .name = "push_0_or", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [19] id 19
+        .{ .name = "push_i8_add", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .i8 }, // [20] id 20
         .{ .name = "insert2", .size = 1, .n_pop = 2, .n_push = 3, .fmt = .none }, // [21] id 21
         .{ .name = "insert3", .size = 1, .n_pop = 3, .n_push = 4, .fmt = .none }, // [22] id 22
-        .{ .name = "insert4", .size = 1, .n_pop = 4, .n_push = 5, .fmt = .none }, // [23] id 23
+        .{ .name = "push_2_sar", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [23] id 23
         .{ .name = "perm3", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [24] id 24
         .{ .name = "perm4", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [25] id 25
-        .{ .name = "perm5", .size = 1, .n_pop = 5, .n_push = 5, .fmt = .none }, // [26] id 26
+        .{ .name = "sar_get_array_el", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [26] id 26
         .{ .name = "swap", .size = 1, .n_pop = 2, .n_push = 2, .fmt = .none }, // [27] id 27
-        .{ .name = "swap2", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [28] id 28
+        .{ .name = "push_0_shr", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [28] id 28
         .{ .name = "rot3l", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [29] id 29
-        .{ .name = "rot3r", .size = 1, .n_pop = 3, .n_push = 3, .fmt = .none }, // [30] id 30
-        .{ .name = "rot4l", .size = 1, .n_pop = 4, .n_push = 4, .fmt = .none }, // [31] id 31
-        .{ .name = "rot5l", .size = 1, .n_pop = 5, .n_push = 5, .fmt = .none }, // [32] id 32
+        .{ .name = "get_loc8_push_1", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [30] id 30
+        .{ .name = "get_var_ref0_get_loc8", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [31] id 31
+        .{ .name = "get_loc8_push_2", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .loc8 }, // [32] id 32
         .{ .name = "call_constructor", .size = 3, .n_pop = 2, .n_push = 1, .fmt = .npop }, // [33] id 33
         .{ .name = "call", .size = 3, .n_pop = 1, .n_push = 1, .fmt = .npop }, // [34] id 34
         .{ .name = "tail_call", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .npop }, // [35] id 35
@@ -714,10 +756,10 @@ pub const opcode = struct {
         .{ .name = "call1", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [256] id 237 (short, shifted)
         .{ .name = "call2", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [257] id 238 (short, shifted)
         .{ .name = "call3", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .npopx }, // [258] id 239 (short, shifted)
-        .{ .name = "is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [259] id 240 (short, shifted)
+        .{ .name = "get_field_field2", .size = 5, .n_pop = 1, .n_push = 1, .fmt = .atom }, // [259] id 240
         .{ .name = "is_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [260] id 241 (short, shifted)
-        .{ .name = "typeof_is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [261] id 242 (short, shifted)
-        .{ .name = "typeof_is_function", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [262] id 243 (short, shifted)
+        .{ .name = "get_var_field", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [261] id 242
+        .{ .name = "get_loc2_field2", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [262] id 243
         .{ .name = "using", .size = 2, .n_pop = 0, .n_push = 1, .fmt = .u8 }, // [263] id 244
         .{ .name = "get_field2_call_method", .size = 5, .n_pop = 1, .n_push = 2, .fmt = .atom }, // [264] id 245
         .{ .name = "get_loc2_field", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_loc }, // [265] id 246
@@ -933,7 +975,7 @@ pub const opcode = struct {
         try std.testing.expectEqual(@as(u8, 10), sizeOfPhase1(op.with_get_var));
         try std.testing.expectEqual(sizeOf(op.get_length), sizeOfPhase1(op.get_length));
         try std.testing.expectEqual(sizeOf(op.if_false8), sizeOfPhase1(op.if_false8));
-        try std.testing.expectEqual(sizeOf(op.is_undefined), sizeOfPhase1(op.is_undefined));
+        try std.testing.expectEqual(sizeOf(op.get_field_field2), sizeOfPhase1(op.get_field_field2));
     }
 
     test "QuickJS opcode table has no host print opcode names" {
@@ -5161,7 +5203,7 @@ pub const binding_rules = struct {
         // the same atom through the current and parent functions again: two
         // same-name closure rows may have different lexical metadata, and the
         // resolved ref_idx is the authoritative row.
-        if (op_id == opcode.op.scope_get_var and
+        if ((op_id == opcode.op.scope_get_var or op_id == opcode.op.scope_get_var_undef) and
             (resolved.varKind() == .function_decl or !resolved.isLexical()))
         {
             ref_op = opcode.op.get_var_ref;
@@ -5207,6 +5249,14 @@ pub const binding_rules = struct {
         try std.testing.expectEqual(
             opcode.op.get_var_ref_check,
             lowerScopeVarOpForClosure(&ctx, binding, @intCast(lexical_idx), opcode.op.scope_get_var),
+        );
+        try std.testing.expectEqual(
+            opcode.op.get_var_ref_check,
+            lowerScopeVarOpForClosure(&ctx, binding, @intCast(lexical_idx), opcode.op.scope_get_var_undef),
+        );
+        try std.testing.expectEqual(
+            opcode.op.get_var_ref,
+            lowerScopeVarOpForClosure(&ctx, binding, 0, opcode.op.scope_get_var_undef),
         );
         try std.testing.expectEqual(
             opcode.op.put_var_ref_check,
@@ -5335,7 +5385,7 @@ pub const binding_rules = struct {
                 .private_method, .private_getter => throw_error_instr_size,
                 .private_setter, .private_getter_setter => blk: {
                     const setter = resolvePrivateSetter(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
-                    break :blk privateAccessorSize(ctx, setter) + 8;
+                    break :blk privateAccessorSize(ctx, setter) + 9;
                 },
                 else => return error.ClosureVarNotFound,
             },
@@ -5414,10 +5464,14 @@ pub const binding_rules = struct {
                     const setter = resolvePrivateSetter(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
                     writePrivateAccessor(ctx, output, out_idx, setter);
                     output[out_idx.*] = opcode.op.swap;
-                    output[out_idx.* + 1] = opcode.op.rot3r;
-                    output[out_idx.* + 2] = opcode.op.check_brand;
-                    output[out_idx.* + 3] = opcode.op.rot3l;
-                    out_idx.* += 4;
+                    out_idx.* += 1;
+                    output[out_idx.*] = opcode.op.using;
+                    output[out_idx.* + 1] = opcode.using_sub.rot3r;
+                    out_idx.* += 2;
+                    output[out_idx.*] = opcode.op.check_brand;
+                    out_idx.* += 1;
+                    output[out_idx.*] = opcode.op.rot3l;
+                    out_idx.* += 1;
                     output[out_idx.*] = opcode.op.call_method;
                     std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], 1, .little);
                     out_idx.* += 3;
@@ -5532,8 +5586,10 @@ pub const binding_rules = struct {
 
     fn lowerScopeVarOpClosure(op_id: u8) u8 {
         return switch (op_id) {
-            opcode.op.scope_get_var, opcode.op.scope_get_var_checkthis => opcode.op.get_var_ref_check,
-            opcode.op.scope_get_var_undef => opcode.op.get_var_ref,
+            // qjs 33352-33376: `scope_get_var` and `scope_get_var_undef`
+            // share the lexical → `get_var_ref_check` rewrite. `typeof`
+            // of an uninitialized import/let must still throw TDZ.
+            opcode.op.scope_get_var, opcode.op.scope_get_var_checkthis, opcode.op.scope_get_var_undef => opcode.op.get_var_ref_check,
             opcode.op.scope_put_var => opcode.op.put_var_ref_check,
             opcode.op.scope_put_var_init => opcode.op.put_var_ref,
             else => unreachable,

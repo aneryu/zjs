@@ -515,14 +515,16 @@ fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
                 }
             }
         }
-        if (opc == op.get_field or opc == op.get_field2 or opc == op.get_field2_call_method) {
+        if (opc == op.get_field or opc == op.get_field2 or opc == op.get_field2_call_method or
+            opc == op.get_field_field2)
+        {
             const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
             if (atom_id == core.atom.ids.apply and
                 (opc == op.get_field2 or opc == op.get_field2_call_method))
             {
                 if (apply_get_pc != null) return null;
                 apply_get_pc = pc;
-                if (prev_op != op.get_field) return null;
+                if (prev_op != op.get_field and prev_op != op.get_field_field2) return null;
                 method_get_pc = prev_pc;
                 method_atom = std.mem.readInt(u32, code[prev_pc + 1 ..][0..4], .little);
                 if (method_atom == core.atom.ids.apply) return null;

@@ -6093,6 +6093,47 @@ test "object traceChildEdgesFallible propagates visitor errors" {
     try std.testing.expectError(error.OutOfMemory, obj.traceChildEdgesFallible(rt, &visitor));
 }
 
+test "ordinary object trace visits data slots and TMASK accessor edges" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const data_child = try core.Object.create(rt, core.class.ids.object, null);
+    defer data_child.value().free(rt);
+    const getter = try core.Object.create(rt, core.class.ids.object, null);
+    defer getter.value().free(rt);
+    const data_key = try rt.internAtom("ordinary-data");
+    defer rt.atoms.free(data_key);
+    const acc_key = try rt.internAtom("ordinary-acc");
+    defer rt.atoms.free(acc_key);
+
+    try obj.defineOwnProperty(rt, data_key, core.Descriptor.data(data_child.value(), true, true, true));
+    try obj.defineOwnProperty(rt, acc_key, core.Descriptor.accessor(getter.value(), core.JSValue.undefinedValue(), true, true));
+
+    const Visitor = struct {
+        data_hits: usize = 0,
+        getter_hits: usize = 0,
+        data_child: *core.Object,
+        getter: *core.Object,
+
+        pub fn visitValue(self: *@This(), slot: *core.JSValue) void {
+            const header = slot.refHeader() orelse return;
+            if (header == &self.data_child.header) self.data_hits += 1;
+            if (header == &self.getter.header) self.getter_hits += 1;
+        }
+    };
+
+    var visitor = Visitor{ .data_child = data_child, .getter = getter };
+    try obj.traceChildEdgesFallible(rt, &visitor);
+    try std.testing.expectEqual(@as(usize, 1), visitor.data_hits);
+    try std.testing.expectEqual(@as(usize, 1), visitor.getter_hits);
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(data_child.header.meta().rc > 0);
+    try std.testing.expect(getter.header.meta().rc > 0);
+}
+
 test "object traceChildEdgesFallible propagates class payload visitor errors" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8828,8 +8869,11 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
     } else {
         // QJS resets malloc_gc_threshold immediately after its pre-object GC,
         // after its Shape is owned but before the triggering JSObject body is
-        // charged.
-        const boundary_bytes = rt.memory.allocated_bytes - survivor.allocationSize(rt);
+        // charged. The body is a slab class (usable+MALLOC_OVERHEAD), not the
+        // request length (quickjs.c:2168/1795).
+        const object_request = survivor.allocationSize(rt);
+        const object_charge = core.memory.MemoryAccount.accountedSizeForRequest(object_request, .@"8");
+        const boundary_bytes = rt.memory.allocated_bytes - object_charge;
         const expected = boundary_bytes + (boundary_bytes >> 1);
         try std.testing.expectEqual(expected, rt.gcThreshold());
     }
@@ -10616,7 +10660,10 @@ test "heap multiplication costs one allocation and one block" {
 
     const payload = @sizeOf(core.bigint.BigInt) + 4 * @sizeOf(bigint.Limb);
     try std.testing.expectEqual(@as(usize, 88), payload);
-    try std.testing.expectEqual(bytes_before + payload, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(
+        bytes_before + core.memory.MemoryAccount.accountedSizeForRequest(payload, .@"8"),
+        rt.memory.allocated_bytes,
+    );
     // 88 bytes plus an 8-byte block header lands in the 96-byte slab class; the
     // two-allocation shape used the 64- and 40-byte blocks, 104 bytes of block
     // for the same 88 bytes of payload.

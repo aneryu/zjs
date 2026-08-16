@@ -66,7 +66,7 @@ pub const internal_entries = stringEntries: {
         // (call path) and `new String(...)` (construct path), so it is marked
         // construct-capable; `stringCall` branches on `is_constructor`.
         stringConstructorEntry("String", 1, @intFromEnum(ConstructorMethod.call)),
-        stringEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code)),
+        stringExecDirectEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code), &stringFromCharCodeCall, &stringFromCharCodeDirect),
         stringEntry("fromCodePoint", 1, @intFromEnum(StaticMethod.from_code_point)),
         stringEntry("raw", 1, @intFromEnum(StaticMethod.raw)),
         // Prototype methods that carry a `(.string, id)` native record id
@@ -122,6 +122,21 @@ fn stringDirectEntry(
     return stringEntryWithHandler(name, length, id, handler);
 }
 
+/// K3: dedicated handler plus `exec_direct` so the hot NMFD path skips TLS /
+/// typed-cproto / `stringCall` magic mux (charCodeAt's dedicated-handler
+/// shape plus Function.apply's exec_direct ABI).
+fn stringExecDirectEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+    comptime direct: builtin_dispatch.ExecDirectCallFn,
+) core.host_function.InternalEntry {
+    var entry = stringEntryWithHandler(name, length, id, handler);
+    entry.exec_direct = builtin_dispatch.execDirectFunction(direct);
+    return entry;
+}
+
 fn stringEntryWithHandler(
     comptime name: []const u8,
     comptime length: u8,
@@ -144,6 +159,20 @@ fn genericMagicHandler(entry: core.host_function.InternalEntry) ?core.host_funct
         .generic_magic => |handler| handler,
         else => null,
     };
+}
+
+test "String.fromCharCode uses exec_direct and a dedicated handler" {
+    var found = false;
+    for (internal_entries) |entry| {
+        if (entry.id != @intFromEnum(StaticMethod.from_char_code)) continue;
+        found = true;
+        try std.testing.expect(genericMagicHandler(entry).? == &stringFromCharCodeCall);
+        try std.testing.expect(entry.exec_direct != null);
+        try std.testing.expect(entry.exec_direct.? ==
+            builtin_dispatch.execDirectFunction(&stringFromCharCodeDirect));
+        try std.testing.expect(!entry.forwards_call);
+    }
+    try std.testing.expect(found);
 }
 
 test "String case conversion methods have a dedicated native record handler" {
@@ -312,6 +341,36 @@ fn stringConcatCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (try stringPrimitiveConcat(host_call)) |value| return value;
     return stringCall(native_ctx, native_this, native_args, native_magic);
+}
+
+fn stringFromCharCodeDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    _ = this_value;
+    _ = caller_function;
+    _ = caller_frame;
+    return string_ops.qjsStringFromCharCode(ctx, output, global, args) catch |err| return @as(HostError, @errorCast(err));
+}
+
+fn stringFromCharCodeCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == host_call.ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
+    return string_ops.qjsStringFromCharCode(host_call.ctx, host_call.output, global, host_call.args) catch |err| return @as(HostError, @errorCast(err));
 }
 
 fn stringCharCodeAtCall(
