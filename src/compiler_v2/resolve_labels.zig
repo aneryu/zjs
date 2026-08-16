@@ -492,6 +492,11 @@ const Resolver = struct {
     fuse_op2: u8 = 0,
     fuse_b3: u8 = 0,
     fuse_op3: u8 = 0,
+    /// Fourth B: leftover re-fuse of an already-fused opcode (get_loc8 → push_0,
+    /// leftover later rewritten to push_0_shr / push_0_or). Reuses an existing
+    /// fused A opcode — no new slot.
+    fuse_b4: u8 = 0,
+    fuse_op4: u8 = 0,
     last_bound_output: u32 = std.math.maxInt(u32),
 
     fn deinit(self: *Resolver) void {
@@ -749,6 +754,7 @@ const Resolver = struct {
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
         self.fuse_b3 = 0;
+        self.fuse_b4 = 0;
         // Record the legal B(s) for this A. Callers stay a single
         // forward walk — maybeFusePrev is O(1) and does not rescan pairs.
         switch (opc) {
@@ -858,6 +864,11 @@ const Resolver = struct {
                 }
                 self.fuse_b3 = op.push_i8;
                 self.fuse_op3 = op.get_loc8_push_i8;
+                // Leftover re-fuse: get_loc8 → push_0 (later push_0_shr /
+                // push_0_or). Reuse get_loc8_push_2 — handler tail-musts the
+                // leftover opcode, no new slot.
+                self.fuse_b4 = op.push_0;
+                self.fuse_op4 = op.get_loc8_push_2;
             },
             op.push_i8 => {
                 self.last_sz = 2;
@@ -889,6 +900,8 @@ const Resolver = struct {
             self.output[self.last_pc] = self.fuse_op2;
         } else if (self.fuse_b3 != 0 and b == self.fuse_b3) {
             self.output[self.last_pc] = self.fuse_op3;
+        } else if (self.fuse_b4 != 0 and b == self.fuse_b4) {
+            self.output[self.last_pc] = self.fuse_op4;
         }
     }
 

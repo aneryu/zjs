@@ -20,7 +20,11 @@
 const std = @import("std");
 const build_options = @import("build_options");
 
-pub const enabled = build_options.zjs_enable_opcode_profile;
+// Keep the host-dispatch side table off in the profile artifact too:
+// flipping this with `zjs_enable_opcode_profile` was part of the WPO
+// surface that SIGSEGV'd zlib (`sp == 0` into op_return). Opcode
+// counts live in `cont`/`next` only.
+pub const enabled = false;
 
 /// One tag per dispatch fallback site.
 pub const Site = enum(u16) {

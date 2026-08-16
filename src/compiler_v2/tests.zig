@@ -3288,6 +3288,19 @@ test "compiler_v2.fuse: get_loc8_push_2 emit and execute" {
     );
 }
 
+test "compiler_v2.fuse: get_loc8 leftover push_0_shr emit and execute" {
+    try v2CompileRunAndCount(
+        \\(function () {
+        \\    var a=0,b=0,c=0,d=0,e=8;
+        \\    var keep = a + b + c + d;
+        \\    return (e >>> 0) + keep * 0;
+        \\})();
+    ,
+        8,
+        &.{ qop.get_loc8_push_2, qop.push_0_shr },
+    );
+}
+
 test "compiler_v2.fuse: eq_if_false8 emit and execute" {
     try v2CompileRunAndCount(
         "(function () { var x = 1; if (x == 1) return 4; return 0; })();",

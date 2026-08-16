@@ -65,7 +65,7 @@ pub const CallDepthGuard = struct {
     }
 };
 
-pub const CallProfileGuard = if (build_options.zjs_enable_opcode_profile) struct {
+pub const CallProfileGuard = if (false) struct {
     rt: *core.JSRuntime,
     previous: ?*core.profile.OpcodeProfile,
 
@@ -338,7 +338,7 @@ noinline fn inlineCallDepthOverflow(ctx: *core.JSContext, global: *core.Object) 
 }
 
 pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
-    if (comptime !build_options.zjs_enable_opcode_profile) {
+    if (comptime true) {
         return .{};
     }
     if (rt.opcode_profile == null) {
