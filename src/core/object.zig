@@ -11314,6 +11314,10 @@ pub const Object = extern struct {
                 if (!proto.flags.fast_array or isTypedArrayObjectForSetFastPath(proto))
                     return .slow;
             }
+            // Proxy is not `has_exotic_methods` (traps live in the class
+            // switch, not the exotic-methods table). Skipping it here
+            // created an own data slot and never ran [[Set]].
+            if (proto.isProxy()) return .slow;
             prototype = proto.getPrototype();
         }
 
