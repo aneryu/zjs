@@ -5619,7 +5619,7 @@ const cold_built = colds.buildTable(specials, false);
 const cold_table: [256]Handler = cold_built.table;
 /// Wave-22: exported so the three type-test coldStd leaves stay in the
 /// island at their v2.1 source order (240/242/243 slots are fusion now).
-export const zjs_w22_island_keep: [7]Handler = cold_built.keep;
+export const zjs_w22_island_keep: [12]Handler = cold_built.keep;
 // O1 exact-args leaf cold constructors. Defined AFTER the handler cluster
 // so their machine code lands past the established opcode bodies: inserting
 // them mid-cluster shifted every subsequent handler address and reproducibly
@@ -6080,6 +6080,88 @@ pub fn op_get_loc8_push_2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
 }
 
 pub fn op_get_loc8_push_2_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc8) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `push_0` then musttail leftover `shr`.
+pub fn op_push_0_shr(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = JSValue.int32(0);
+    return @call(.always_tail, opBinary(.shr), .{ pc + 1, sp + 1, var_buf, vm });
+}
+
+pub fn op_push_0_shr_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    sp[0] = JSValue.int32(0);
+    vm.stack.setTopPtr(sp + 1);
+    return coldNext(var_buf, vm);
+}
+
+/// `get_loc8` then musttail leftover `push_1`.
+pub fn op_get_loc8_push_1(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = value_slot.loadOwned(&var_buf[pc[1]]);
+    return @call(.always_tail, op_push_small, .{ pc + 2, sp + 1, var_buf, vm });
+}
+
+pub fn op_get_loc8_push_1_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc8) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// Leftover `get_loc8` may already be a push fusion.
+inline fn tailGetLoc8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
+    const b = pc[0];
+    if (b == op.get_loc8_push_2)
+        return @call(.always_tail, op_get_loc8_push_2, .{ pc, sp, var_buf, vm });
+    if (b == op.get_loc8_push_1)
+        return @call(.always_tail, op_get_loc8_push_1, .{ pc, sp, var_buf, vm });
+    if (b == op.get_loc8_push_i8)
+        return @call(.always_tail, op_get_loc8_push_i8, .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, opLoc(.get, .byte), .{ pc, sp, var_buf, vm });
+}
+
+/// `get_var_ref0` then musttail leftover `get_loc8` (possibly already fused).
+pub fn op_get_var_ref0_get_loc8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    std.debug.assert(0 < vm.frame.var_refs.len);
+    const cell = vm.var_refs_base[0];
+    const v = cell.pvalue.*;
+    if (v.isUninitialized())
+        return @call(.always_tail, op_get_var_ref0_get_loc8_cold, .{ pc, sp, var_buf, vm });
+    sp[0] = v.dup();
+    return tailGetLoc8(pc + 1, sp + 1, var_buf, vm);
+}
+
+pub fn op_get_var_ref0_get_loc8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    _ = vm_property_locals.varRefVm(vm.ctx, vm.output, vm.function, vm.global, vm.frame, vm.stack, op.get_var_ref0, vm.catch_target) catch |e| return vm.fail(e);
+    return coldNext(var_buf, vm);
+}
+
+/// `push_i8` then musttail leftover `add`.
+pub fn op_push_i8_add(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = JSValue.int32(@as(i8, @bitCast(pc[1])));
+    return @call(.always_tail, opBinary(.add), .{ pc + 2, sp + 1, var_buf, vm });
+}
+
+pub fn op_push_i8_add_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    sp[0] = JSValue.int32(@as(i8, @bitCast(pc[1])));
+    vm.stack.setTopPtr(sp + 1);
+    vm.frame.pc += 1;
+    return coldNext(var_buf, vm);
+}
+
+/// `get_loc8` then musttail leftover `push_i8` (possibly already fused to `push_i8_add`).
+pub fn op_get_loc8_push_i8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    sp[0] = value_slot.loadOwned(&var_buf[pc[1]]);
+    if (pc[2] == op.push_i8_add)
+        return @call(.always_tail, op_push_i8_add, .{ pc + 2, sp + 1, var_buf, vm });
+    return @call(.always_tail, op_push_i8, .{ pc + 2, sp + 1, var_buf, vm });
+}
+
+pub fn op_get_loc8_push_i8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
     vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, op.get_loc8) catch |e| return vm.fail(e);
     return coldNext(var_buf, vm);
