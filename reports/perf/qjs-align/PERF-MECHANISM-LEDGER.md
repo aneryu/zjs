@@ -82,3 +82,20 @@
 预计:      L1+L2 诚实中位 ~+0.5pp（2.53M×~150cyc≈0.38G，raytrace 0.777→0.82-0.90）。
 状态:      APPROVED-DESIGN；实施排队（EB 双刀+v11 之后）；前置=K 数据+D8 规格
 ```
+
+## 条目 #2：opcode-fusion（高频相邻 opcode 融合）— 2026-08-15 用户批准立项
+
+**动机**：取指碎片化墙（STALL-TAXONOMY §6：zlib/mandreel/box2d/gbemu br/insn +29~37%、
+FE stall 79%、五假设收敛）+ EB ⑤ 350M。faithful 镜像不可达（qjs 长 CASE 直线段是其形态红利）。
+
+**四条件申报**：
+1. **通用机制**：JSC/V8 均有先例（superinstruction/融合字节码）；qjs 自身有 get_field2 等
+   emit 期融合——本机制是同一思想的一般化。按**全 zoo 并集频次**选融合对（禁单基准拟合，
+   同 L-1.5 名单纪律）；融合对语义=顺序执行两 op，无形态特判。
+2. **用户码必执行**：融合不跳过任何用户可见操作，仅合并解释器分派边界。
+3. **可观察等价**：poll/interrupt 点保持（融合对内不得跨越 qjs 会 poll 的边界）；
+   异常/栈迹/调试行为逐位；test262 全量 + difftest 为 oracle。
+4. **zoo 验收**：三 pad（或 >2% 单 pad）常规流程；compute 四件套 + EB 为主判读，
+   全场无同号负为过线条件。
+
+**状态**：设计简报阶段（pQ）。opcode 槽位预算为设计第一约束（248 已用）。
