@@ -5979,6 +5979,11 @@ pub const Object = extern struct {
 
     pub fn nativeRecord(self: *const Object) ?*const host_function.InternalRecord {
         if (self.class_id != class.ids.c_function) return null;
+        return self.nativeRecordAssumeCFunction();
+    }
+
+    /// Caller already proved `class_id == c_function` (K1: skip the repeat).
+    pub fn nativeRecordAssumeCFunction(self: *const Object) ?*const host_function.InternalRecord {
         if (self.functionPayloadConst()) |payload| return payload.native.call_cache;
         return null;
     }
@@ -7029,6 +7034,11 @@ pub const Object = extern struct {
     /// returns null because it consumes the caller's context.
     pub fn nativeFunctionRealm(self: *const Object) ?*context_mod.RealmContext {
         if (self.class_id != class.ids.c_function) return null;
+        return self.nativeFunctionRealmAssumeCFunction();
+    }
+
+    /// Caller already proved `class_id == c_function` (K1).
+    pub fn nativeFunctionRealmAssumeCFunction(self: *const Object) ?*context_mod.RealmContext {
         const payload = self.functionPayloadConst() orelse return null;
         return payload.native.realm.borrow();
     }

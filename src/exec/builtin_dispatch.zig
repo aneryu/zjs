@@ -265,6 +265,17 @@ pub inline fn preflightCFunctionCall(
 ) HostError!void {
     const object = func_obj orelse return;
     if (object.class_id != core.class.ids.c_function) return;
+    return preflightCFunctionCallAssumeCFunction(caller_ctx, caller_global, object, formal_length);
+}
+
+/// K1: skip the class_id gate; caller already proved C_FUNCTION.
+pub inline fn preflightCFunctionCallAssumeCFunction(
+    caller_ctx: *core.JSContext,
+    caller_global: ?*core.Object,
+    func_obj: *core.Object,
+    formal_length: usize,
+) HostError!void {
+    _ = func_obj;
     const planned_stack_bytes = std.math.mul(
         usize,
         formal_length,
@@ -361,6 +372,31 @@ pub inline fn callInternalRecordDirect(
     try preflightCFunctionCall(ctx, global, func_obj, record.length);
     const view = try finalCallEnvironment(ctx, global, globals, func_obj);
     return callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame);
+}
+
+/// K1: `op_call_method` already proved `func_obj.class_id == c_function`.
+/// Skip the class re-admit in preflight and realm switch (qjs reads
+/// `p->u.cfunc` directly after the class.call hook).
+pub inline fn callInternalRecordDirectAssumeCFunction(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func_obj: *core.Object,
+    this_value: core.JSValue,
+    record: *const core.host_function.InternalRecord,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
+    try preflightCFunctionCallAssumeCFunction(ctx, global, func_obj, record.length);
+    const realm = func_obj.nativeFunctionRealmAssumeCFunction() orelse return error.InvalidBuiltinRegistry;
+    const realm_global = realm.global orelse return error.InvalidBuiltinRegistry;
+    return callInternalRecordDirectWithEnvironment(.{
+        .ctx = realm,
+        .global = realm_global,
+        .globals = empty_realm_globals[0..],
+        .callable_realm = .{ .realm = realm, .global = realm_global },
+    }, output, func_obj, this_value, record, args, caller_function, caller_frame);
 }
 
 /// Final C-function terminal for a dispatcher that already loaded the record
