@@ -158,6 +158,26 @@ pub const Payload = ?*anyopaque;
 /// Function classes whose `.function` payload uses the bytecode arm. Mirrors
 /// QuickJS's `JSObject.u.func` discriminator: every other `.function` payload
 /// class uses the mutually-exclusive native/c-function arm.
+/// Numeric TypedArray classes whose `[i]` read is allocation-free
+/// (qjs JS_GetPropertyValue INT8..FLOAT64 arms). BigInt64/BigUint64
+/// and DataView stay off this predicate so they keep the allocating path.
+pub inline fn isNumericTypedArrayClass(id: ClassId) bool {
+    return switch (id) {
+        ids.uint8c_array,
+        ids.int8_array,
+        ids.uint8_array,
+        ids.int16_array,
+        ids.uint16_array,
+        ids.int32_array,
+        ids.uint32_array,
+        ids.float16_array,
+        ids.float32_array,
+        ids.float64_array,
+        => true,
+        else => false,
+    };
+}
+
 pub inline fn isBytecodeFunctionClass(id: ClassId) bool {
     return switch (id) {
         ids.bytecode_function,

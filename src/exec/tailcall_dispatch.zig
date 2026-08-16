@@ -3950,40 +3950,67 @@ fn op_get_array_el_atom_key_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]J
 // tail-dispatch to a separate ordinary-data shape walker before that cold resolver,
 // mirroring qjs JS_ValueToAtom -> JS_GetProperty without inflating this handler.
 // 1-byte op (operands are on the stack).
+/// Island-tail TA `[i]` arm. Musttailed from `op_get_array_el` after a
+/// class_id hit so the dense ARRAY path does not inherit this frame.
+/// Decode is inlined here — a noinline helper would be a non-tail `bl`
+/// on this frame (handler invariant). Called through `Handler` so LLVM
+/// cannot merge the body back into `op_get_array_el` (a direct
+/// `@call(.always_tail, op_get_array_el_ta)` was inlined, and `noinline`
+/// on the callee breaks Zig's always_tail type match with `cont`/`cold`).
+pub fn op_get_array_el_ta(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const key = (sp - 1)[0];
+    const obj = (sp - 2)[0];
+    const object = object_ops.objectFromValueTrustedExpression(obj) orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const key_int = key.asInt32() orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // qjs treats a negative int32 index as a huge unsigned idx; it dies
+    // on `idx >= count` and returns undefined (no sign branch, no cold).
+    const index: u32 = @bitCast(key_int);
+    // One JSValue home. A `blk`/`switch` result used to allocate a 16-byte
+    // slot per kind and blow this frame to 0x100.
+    var result = JSValue.undefinedValue();
+    // class_id already proved numeric TA: skip the payload-kind reload.
+    if (object.u.payload) |raw| {
+        const payload: *const core.object.TypedArrayPayload = @ptrCast(@alignCast(raw));
+        if (index < payload.live_length) {
+            result = core.typed_array.decodeNumericElementByClass(object.class_id, payload.data.?, index);
+        }
+    }
+    obj.freeDuringActiveBytecode(vm.ctx.runtime);
+    (sp - 2)[0] = result;
+    return cont(pc + 1, sp - 1, var_buf, vm);
+}
+
+/// Address-taken copy used by `op_get_array_el`. A named `const Handler`
+/// is not enough — LLVM folds it and inlines. An exported slot is a
+/// reloc LLVM cannot IPSCCP, so the classify arm stays a tail `br`.
+export var zjs_op_get_array_el_ta: Handler = op_get_array_el_ta;
+
 pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) linksection(op_handler_section) callconv(.c) Outcome {
     const key = (sp - 1)[0];
     const obj = (sp - 2)[0];
     const rt = vm.ctx.runtime;
+    // qjs CASE: class!=ARRAY → GPV TA jumptable, never dense/own-int.
+    // TA bitmask first (ARRAY misses in 5 ALU and falls to dense). Inverting
+    // to `class==ARRAY` first made LLVM route ARRAY *through* the bitmask
+    // miss; keep the predicate that musttails TA before any dense/own-int
+    // probe. This arm must stay a `b`/`br`, no `bl`.
+    if (key.isInt() and obj.isObject()) {
+        if (object_ops.objectFromValueTrustedExpression(obj)) |object| {
+            if (core.class.isNumericTypedArrayClass(object.class_id))
+                return @call(.always_tail, zjs_op_get_array_el_ta, .{ pc, sp, var_buf, vm });
+        }
+    }
     if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
         obj.freeDuringActiveBytecode(rt);
         key.freeDuringActiveBytecode(rt);
-        (sp - 2)[0] = value; // owned (fastArrayElementDup dups)
+        (sp - 2)[0] = value;
         return cont(pc + 1, sp - 1, var_buf, vm);
     }
-    // Typed-array integer read: qjs JS_GetPropertyValue's per-class typed arm
-    // (quickjs.c:9048-9083) is the slow path for OP_get_array_el but is itself a
-    // compact bounds-check + typed load. Reach it directly from the hot handler
-    // (int key returns an owned/undefined JSValue) instead of the
-    // cold_table -> arrayElement -> fastTypedArrayElementValue detour. Non-typed
-    // /BigInt/negative/length-tracking cases return null and fall through.
     if (key.isInt() and obj.isObject()) {
-        // Slow/sparse Array own integer element (e.g. crypto BigInteger digit
-        // arrays, filled high-index-first so they convert to shape storage):
-        // read the int-atom own data property directly. Placed before the
-        // typed-array probe (an Array is never a typed array, so this also
-        // spares slow arrays that probe) and before the cold arrayElement chain
-        // (which re-tries the dense/typed fast paths and re-derives this int
-        // atom through toPropertyKeyAtom). A hole / accessor / prototype element
-        // returns null and falls through unchanged.
         if (vm_property_field.fastArrayOwnIntElementValue(obj, key)) |value| {
             obj.freeDuringActiveBytecode(rt);
-            // key is an int (no refcount); nothing to free.
-            (sp - 2)[0] = value;
-            return cont(pc + 1, sp - 1, var_buf, vm);
-        }
-        if (vm_property_field.fastTypedArrayElementValue(obj, key)) |value| {
-            obj.freeDuringActiveBytecode(rt);
-            // key is an int (no refcount); nothing to free.
             (sp - 2)[0] = value;
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
