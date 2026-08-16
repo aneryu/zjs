@@ -1997,7 +1997,7 @@ pub const Machine = struct {
         target: *const InlineTarget,
         source: ArgsSource,
         caller_fp: usize,
-    ) ?*Entry {
+    ) align(32) ?*Entry {
         comptime std.debug.assert(!method_receiver or !strict_this);
         if (comptime snapshot_args) return null;
 
@@ -3320,7 +3320,7 @@ pub const Machine = struct {
         /// success; `null` for direct `new F(...)`, whose new-target is the
         /// callable itself. On failure the caller still owns it.
         owned_new_target: ?core.JSValue,
-    ) HostError!*Entry {
+    ) align(16) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(target.this_value.isObject());
         const source = ArgsSource.initStack(region_start, argc, true);
@@ -4911,7 +4911,7 @@ pub const Machine = struct {
     ///
     /// Outline on purpose: the return handler pays one bl here instead of
     /// growing its resident body (the ninth-knife frame-boundary lesson).
-    pub noinline fn popConstructorReturn(self: *Machine, result: core.JSValue) core.JSValue {
+    pub noinline fn popConstructorReturn(self: *Machine, result: core.JSValue) align(16) core.JSValue {
         const dying = self.topEntry();
         std.debug.assert(dying.teardown.constructor_completion);
         std.debug.assert(!dying.teardown.has_native_caller);

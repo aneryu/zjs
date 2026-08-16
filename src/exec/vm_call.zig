@@ -705,7 +705,7 @@ pub noinline fn nativeMethodFastDispatch(
     catch_target: *?usize,
     method_obj: *core.Object,
     argc: u16,
-) !NativeFastDispatchResult {
+) align(32) !NativeFastDispatchResult {
     const total: usize = @as(usize, argc) + 2;
     if (stack.len() < total) return error.StackUnderflow;
     const region_base = stack.len() - total;

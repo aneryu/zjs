@@ -3235,7 +3235,7 @@ pub const Object = extern struct {
         };
     }
 
-    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
+    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) align(16) void {
         const self: *Object = @alignCast(@fieldParentPtr("header", header));
         // qjs marks an object "about to be freed" before its zero-refcount free
         // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479), and
@@ -7505,7 +7505,7 @@ pub const Object = extern struct {
         return rt.runObjectCycleRemoval();
     }
 
-    fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) void {
+    fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) align(16) void {
         switch (header.meta().flags.kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
@@ -11184,7 +11184,7 @@ pub const Object = extern struct {
     /// - the extensible check sits AFTER the prototype walk (qjs order,
     ///   quickjs.c:9862-9865): a non-extensible receiver whose chain holds a
     ///   setter must reach that setter, never a synthesized failure.
-    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) PutFieldFast {
+    pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) align(16) PutFieldFast {
         // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
         // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
         // classes, whose set semantics (length, canonical numeric indices,
