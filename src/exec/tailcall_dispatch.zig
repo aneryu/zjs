@@ -32,6 +32,7 @@ const stack_mod = @import("stack.zig");
 const inline_calls = @import("inline_calls.zig");
 const small_inline = @import("small_inline.zig");
 const call_runtime = @import("call_runtime.zig");
+const function_ops = @import("function_ops.zig");
 const object_ops = @import("object_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
@@ -4855,6 +4856,32 @@ const InternalMethodBoundary = struct {
     }
 };
 
+/// qjs:16005-16017 `js_operator_instanceof` epilogue after a successful
+/// `JS_IsInstanceOf`: free both operands and write the bool at `sp[-2]`.
+/// When Get already resolved the default `Function.prototype[@@hasInstance]`
+/// (qjs:41379-41383 `js_function_hasInstance` → `JS_OrdinaryIsInstanceOf`),
+/// skip the generic native Call adapter and invoke Ordinary directly.
+noinline fn completeOrdinaryInstanceof(vm: *Vm, has_instance: JSValue) InternalMethodDispatch {
+    defer has_instance.free(vm.rt);
+    const region_base = vm.stack.len() - 2;
+    const lhs = vm.stack.values[region_base];
+    const rhs = vm.stack.values[region_base + 1];
+    const result = call_runtime.ordinaryHasInstance(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        rhs,
+        lhs,
+        vm.function,
+        vm.frame,
+    ) catch |err| {
+        return recoverOwnedInternalCallRegion(vm, region_base, err);
+    };
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+    vm.stack.pushOwnedAssumeCapacity(JSValue.boolean(result));
+    return .completed;
+}
+
 /// Authoritative slow completion for the null-method legacy arm, primitive
 /// RHS rejection, and the rare stack-without-a-spare-slot case.
 noinline fn completeInstanceofSlow(vm: *Vm, has_instance: JSValue) InternalMethodDispatch {
@@ -4897,6 +4924,17 @@ pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
             .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
             .caught => return coldNext(var_buf, vm),
             .threw => return .threw,
+        }
+    }
+    if (class_vm.objectFromValue(has_instance)) |method_object| {
+        if (call_vm.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
+            if (function_ops.isDefaultHasInstanceRecord(vm.ctx.runtime, record)) {
+                switch (completeOrdinaryInstanceof(vm, has_instance)) {
+                    .completed => return cont(pc + 1, vm.stack.topPtr(), var_buf, vm),
+                    .caught => return coldNext(var_buf, vm),
+                    .threw => return .threw,
+                }
+            }
         }
     }
     // Transfer `[lhs, rhs]` plus the owned method into the one standard method
