@@ -5766,7 +5766,7 @@ export const zjs_w22_island_keep: [12]Handler = cold_built.keep;
 // cost the untouched inline-control loop +2.4% cycles at bit-identical
 // instruction counts (BTB/fetch aliasing).
 /// Exact-args twin of `pushEmptyLeafMiss`.
-noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16) EmptyLeafMiss {
+noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16) align(32) EmptyLeafMiss {
     const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return .recovered;
