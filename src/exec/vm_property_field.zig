@@ -511,7 +511,8 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
 /// potentially-shape-mutating operation; both callers consume it immediately.
 pub inline fn qjsGetFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
     var absent = false;
-    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true, false, &absent);
+    // Named bytecode atom: never a tagged-int / mapped-args binding (F2).
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, false, &absent);
 }
 
 /// Tri-state twin of `qjsGetFieldFastSlot` for op_get_field / op_get_field2.
@@ -528,7 +529,9 @@ pub inline fn qjsGetFieldFastSlotOrAbsent(
     atom_id: core.Atom,
     absent: *bool,
 ) ?*const core.JSValue {
-    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true, true, absent);
+    // Named bytecode atom: skip isTaggedInt / mapped-args (F2). Computed-key
+    // `qjsGetFieldFast` keeps the tagged-int probe.
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, true, absent);
 }
 
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {

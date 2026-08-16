@@ -578,6 +578,15 @@ pub const JSValue = extern struct {
         };
     }
 
+    /// qjs `JS_VALUE_GET_OBJ`: tag already proven, payload is the object.
+    /// Release does not re-test a null pointer (F1); Debug still asserts.
+    pub inline fn refHeaderAssumeObject(self: JSValue) *gc.Header {
+        std.debug.assert(self.isObject());
+        const payload = self.payloadOf();
+        std.debug.assert(payload != 0);
+        return @ptrFromInt(payload);
+    }
+
     pub fn stringHeader(self: JSValue) ?*gc.StringHeader {
         return switch (self.tagOf()) {
             Tag.symbol, Tag.string, Tag.string_rope => self.refCountWordAssumeRefCounted(),

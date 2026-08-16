@@ -12257,7 +12257,9 @@ pub const Object = extern struct {
     /// JS_DupValue(pr->u.value) (quickjs.c:6135, 19125-19133).
     pub inline fn findOwnDataSlotFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?*const JSValue {
         const object_shape = self.shape_ref;
-        if (!object_shape.hasPropertyHash()) return null;
+        // qjs find_own_property (quickjs.c:6115): `h = atom & mask; load; cbz h`.
+        // Empty shapes still have the 4-bucket table (`createShape`); a missing
+        // hash is an empty bucket, not a second miss (F3).
         const props = object_shape.props().ptr;
         var shape_index = object_shape.firstPropertyIndexAssumeHash(atom_id);
         while (shape_index != shape.no_property_index) {
@@ -12297,7 +12299,7 @@ pub const Object = extern struct {
     /// data); the caller initializes it to false.
     pub inline fn findWritableOwnDataSlotFast(self: *Object, atom_id: atom.Atom, slow: *bool) ?*JSValue {
         const props = self.shape_ref.props().ptr;
-        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        var shape_index = self.shape_ref.firstPropertyIndexAssumeHash(atom_id);
         while (shape_index != shape.no_property_index) {
             const index: usize = @intCast(shape_index);
             const prop = props[index];

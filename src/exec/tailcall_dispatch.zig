@@ -246,6 +246,13 @@ const op_handler_section_tail = switch (builtin.target.ofmt) {
     else => ".text",
 };
 
+/// In-hole tombstone (w22R/w26R). Export so LTO cannot fold the keep
+/// flag or DCE the pad. Live hit predicts not-taken (`cbnz`). Tune
+/// `.space` so nm sizes match main@8d6ae58c:
+/// get_field 0x35c, get_field2 0x31c, get_field2_call_method 0x300,
+/// put_field 0x104.
+export var zjs_f_tombstone_keep: u8 = 0;
+
 const PropertyTailSlot = enum(usize) {
     get_field_primitive,
     get_field2_primitive,
@@ -3257,8 +3264,13 @@ pub fn op_get_loc2_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
 pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
-    if (!receiver.isObject())
+    if (!receiver.isObject()) {
+        if (zjs_f_tombstone_keep != 0) {
+            asm volatile (".space 0x140");
+            unreachable;
+        }
         return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
+    }
     var absent = false;
     if (vm_property_field.qjsGetFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
@@ -3361,7 +3373,13 @@ fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
 pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
-    if (!receiver.isObject()) return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
+    if (!receiver.isObject()) {
+        if (zjs_f_tombstone_keep != 0) {
+            asm volatile (".space 0x100");
+            unreachable;
+        }
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
+    }
     // qjs OP_get_field does an inline find_own_property on each access (no cache).
     // Walk self+prototype for a plain data property; on a hit the value is BORROWED
     // from the holder slot, so dup onto the stack (which owns its entries) and free
@@ -3436,7 +3454,13 @@ fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
 pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
-    if (!receiver.isObject()) return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
+    if (!receiver.isObject()) {
+        if (zjs_f_tombstone_keep != 0) {
+            asm volatile (".space 0x138");
+            unreachable;
+        }
+        return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
+    }
     // Object receiver: own-or-prototype data/method via the same self+prototype
     // walk the cold get_field2 runs first (e.g. arr.push, map.get). The value is
     // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
@@ -3736,8 +3760,18 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         }
         return cont(pc + 5, sp - 2, var_buf, vm);
     }
+    if (zjs_f_tombstone_keep != 0) {
+        asm volatile (".space 0x8");
+        unreachable;
+    }
     return @call(.always_tail, propertyTailHandler(vm, .put_field_add), .{ pc, sp, var_buf, vm });
 }
+
+// Root the padded leaves so the tombstone blocks cannot be stripped.
+export const zjs_f_tombstone_get_field: Handler = op_get_field;
+export const zjs_f_tombstone_get_field2: Handler = op_get_field2;
+export const zjs_f_tombstone_get_field2_cm: Handler = op_get_field2_call_method;
+export const zjs_f_tombstone_put_field: Handler = op_put_field;
 
 /// Resident add-tail for the hot put_field miss (T6-W1). qjs OP_put_field's
 /// slow leg is ONE JS_SetPropertyInternal direct call from the shared
