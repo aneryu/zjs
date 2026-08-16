@@ -2132,7 +2132,7 @@ pub const Machine = struct {
         global: *core.Object,
         target: *const InlineTarget,
         source: ArgsSource,
-    ) HostError!*Entry {
+    ) align(32) HostError!*Entry {
         return pushExactSimpleFrameImpl(self, strict_this, snapshot_args, method_receiver, global, target, source);
     }
 
@@ -2286,7 +2286,7 @@ pub const Machine = struct {
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
-    ) HostError!*Entry {
+    ) align(32) HostError!*Entry {
         const method_receiver = comptime leaf_this == .receiver;
         const ctx = self.ctx;
         const rt = ctx.runtime;
