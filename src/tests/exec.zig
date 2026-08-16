@@ -5818,6 +5818,38 @@ test "typed array integer get uses class-id arm and qjs tag shape" {
     _ = result;
 }
 
+test "typed array integer put uses class-id arm" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const u8 = new Uint8Array(3);
+        \\assert.sameValue(u8[0] = 255, 255);
+        \\assert.sameValue(u8[0], 255);
+        \\assert.sameValue(u8[1] = -1, -1);
+        \\assert.sameValue(u8[1], 255);
+        \\assert.sameValue(u8[2] = 300, 300);
+        \\assert.sameValue(u8[2], 44);
+        \\assert.sameValue(u8[3] = 7, 7);
+        \\assert.sameValue(u8[3], undefined);
+        \\const i32 = new Int32Array(1);
+        \\assert.sameValue(i32[0] = -2147483648, -2147483648);
+        \\assert.sameValue(i32[0], -2147483648);
+        \\const f64 = new Float64Array(1);
+        \\assert.sameValue(f64[0] = 42, 42);
+        \\assert.sameValue(f64[0], 42);
+        \\const dense = [0, 0];
+        \\assert.sameValue(dense[1] = 8, 8);
+        \\assert.sameValue(dense[1], 8);
+        \\const detached = new Uint8Array(new ArrayBuffer(2));
+        \\detached[0] = 9;
+        \\detached.buffer.transfer();
+        \\assert.sameValue(detached[0] = 1, 1);
+        \\assert.sameValue(detached[0], undefined);
+    );
+    _ = result;
+}
+
 test "typed array int32 store fast arm preserves conversion and assignment semantics" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
