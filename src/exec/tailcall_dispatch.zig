@@ -4135,6 +4135,15 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     if (key.isString() or key.isSymbol()) {
         return @call(.always_tail, propertyTailHandler(vm, .get_array_el_atom_key), .{ pc, sp, var_buf, vm });
     }
+    // Release-tail knife dropped the last-ref `bl` and shrunk this handler
+    // 0x280→0x1d0. Pad the cold miss so put_field/get_field2 keep the
+    // 8aea93e0 addresses (body-shrink slide is the TS cyc+13M class).
+    // 0x90 tuned after 0xb0 overshot +0x20 (live body 0x1f0 without the
+    // in-island release tail).
+    if (zjs_f_tombstone_keep != 0) {
+        asm volatile (".space 0x90");
+        unreachable;
+    }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -4143,7 +4152,7 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 /// Same put_array_el / put_field release-tail so the dense hit stays a
 /// prologue-free leaf (TS ④e: last-ref `bl` was forcing a 0x50 frame on
 /// every hit).
-fn op_get_array_el_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+fn op_get_array_el_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     (sp - 2)[0].freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
     (sp - 2)[0] = (sp - 1)[0];
     return cont(pc + 1, sp - 1, var_buf, vm);
