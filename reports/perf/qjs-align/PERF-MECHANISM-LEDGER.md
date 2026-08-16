@@ -99,3 +99,14 @@ FE stall 79%、五假设收敛）+ EB ⑤ 350M。faithful 镜像不可达（qjs 
    全场无同号负为过线条件。
 
 **状态**：设计简报阶段（pQ）。opcode 槽位预算为设计第一约束（248 已用）。
+
+## 条目 #3：property-load-ic（2026-08-17 立项，六期宪章）
+
+先例：JSC get_by_id IC / V8 feedback / SM PIC；qjs 无对应物。四条件申报文=/tmp/lanes/IC-SPIKE.md
+（通用=全位点全 shape 禁基准拟合；用户码必执行=只免查找不免语义、guard 三比较每发必验；
+可观察等价=getter/proxy/exotic/delete/原型变更全走失效协议、own 数据 only、不缓存 JSValue；
+zoo 验收=3-pad cyc 主尺+四资产哨）。选型=内嵌 u16 site_id（get_field 5→7B）+FB 侧 32B 槽表，
+quickening 排除（254/255 保全）、pc sidecar 不取（命中路径更长）。命中臂目标 22/硬顶 28 insn
+（今日 47/qjs 51）、零 bl、零帧、岛体积不增（活代码缩短+墓碑填回 0x340）、walk 单份出岛表跳。
+可行性（pT 普查）：TS get_field mono 80.4%/box2d 94.1%/EB 100%、表 1.32MB、纸面 TS ~337M cyc。
+P0 主尺过；P1 金丝雀获批（driver 2026-08-17）。

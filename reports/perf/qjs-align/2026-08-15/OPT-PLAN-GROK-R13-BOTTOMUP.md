@@ -983,3 +983,17 @@ P0 旗支不合入。真问题改写：② 壳是单价密度差（z ~23 cyc/cal
 **五期总账：** faithful 域五落后项全部持签字封条——pdfjs（壳密度+string 表示层）、
 EB（L1I 墙 S3-B）、TS（call/return architectural+残刀见底中）、box2d（BIN 族 IPC）、
 splay（⑦ RC 固有）。对冲模型前提「融合通道先干涸」已成立（#2 收官、#3 归档）。
+
+## 六期首裁包（2026-08-17，driver）
+
+**1. IC-SPIKE APPROVED + P1 金丝雀放行**，附三修正：IC-R1=delete 同位语义测试（Property 字
+确实改变=guard 承重假设）必须在任何 zoo 跑批前以 difftest+单测证成；IC-R2=get_field_field2
+去克隆（musttail 回正本）在 P1 内独立 commit+nm 几何门（可二分）；IC-R3=vm.ic_base 若致摊帧
+即删（spike 自含，升为硬门）。P1 主尺 TS cyc 3-pad 同号、box2d/EB/四资产哨、28 insn 硬顶。
+**2. pdfjs 壳封条 ACCEPT**（22.0 vs 4.6 cyc/call 对账；三大块=RC 收栈贴标/sret repr/0x3f0
+红线皆非宪内可删；B-R1 探针已证切 hop 是换房东）。pdfjs 残余=壳封条+string 表示层，IC 覆盖其
+get_field 段（mono 90.8%）。
+**3. splay 分布 ACCEPT**：真落后 1.3%（中位 0.987，P(≥1.0)=0），非双模态。IC 受益标的
+（2 槽 poly 吃 81%，P4 议题）。
+**4. TS-RESID-W42 ACCEPT**：+5.00→+3.58G，闭合 96.3%，残全系 call/return architectural——
+IC 对冲 TS get_field 占用 18.26G 为唯一翻案路径。
