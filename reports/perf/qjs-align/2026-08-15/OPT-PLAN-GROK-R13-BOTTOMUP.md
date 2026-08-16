@@ -967,3 +967,19 @@ grok/native-thin-p0。普查（无 tracefs，CG 样本不当 call count）：②
 由全部 n≈28M 调用共付；金丝雀 charCodeAt Direct 58M 是③体非②壳；P1 协议单独可退役 <30M 确认
 （7 参 marshall ~6M + Direct 帧瘦身）。裁：**P1 不当刀立**；按 B-R1 开 P1+P3 探针支
 （measurement-only）钉金丝雀份额 f 并量整层去留。P0 待 P1 裁决后同波合入。
+
+## 五期收束双裁（2026-08-17，driver）
+
+**1. CH3-FAT 不可达定理 ACCEPT，通道 #3 整体收案。** 共享不克隆⇒只能跳唯一热臂⇒musttail
+不返回/返回即外提/同函数多出口即 monolith——4 参 musttail 机器上无第四种控制转移。矿证：
+gf→gf 对 hop 并集仅 22.5M（TS 10.2/box2d 6.7），架构段残差不在字段 hop（box2d=BIN-MUL +30M；
+TS get_field 热臂已短于 qjs CASE）。254/255 永续保全。未来 toolchain 新能力的收件四门已存档。
+
+**2. B 线瘦层探针 NO-GO ACCEPT，thin-tier 归档。** f≈0.27，P1+P3 合并金丝雀本地仅 −22M，
+pdfjs FW 主尺 +32.7M（去离群 −17M）均 <30M；raytrace 哨 +275M。根因=v1 保 sf 语义下瘦终端
+0x190 与 assume 0x1c0 换房东；税打在 1−f=73% 非金丝雀上。探针支 ad4d275b 封存为反证。
+P0 旗支不合入。真问题改写：② 壳是单价密度差（z ~23 cyc/call vs q ~5），非层次差。
+
+**五期总账：** faithful 域五落后项全部持签字封条——pdfjs（壳密度+string 表示层）、
+EB（L1I 墙 S3-B）、TS（call/return architectural+残刀见底中）、box2d（BIN 族 IPC）、
+splay（⑦ RC 固有）。对冲模型前提「融合通道先干涸」已成立（#2 收官、#3 归档）。
