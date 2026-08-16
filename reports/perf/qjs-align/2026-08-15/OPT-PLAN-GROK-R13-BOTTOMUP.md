@@ -959,3 +959,11 @@ TS 1.0184–1.0228、box2d 1.0098–1.0115、DB 1.0025–1.0053、splay 0.9982�
 richards 三 pad 齐 +2.8%（eq 密集意外受益）。regexp pad7 0.9882 孤 pad 翻号=惯常噪声。
 **w42 为「执行全下放」新模式首例：pV 执行官全程跑批，driver 仅亲读产物裁决。**
 官方分数榜候 zoo-par 出数另记。
+
+## 五期 B 线：P0 交付裁决 + B-R1 探针放行（2026-08-17，driver）
+
+NATIVE-THIN-P0 ACCEPT：thin_leaf 旗+comptime 四拒+单测（offset#32 钉死），零行为，
+grok/native-thin-p0。普查（无 tracefs，CG 样本不当 call count）：② 壳 Σ656M（NMFD 338+assume 318）
+由全部 n≈28M 调用共付；金丝雀 charCodeAt Direct 58M 是③体非②壳；P1 协议单独可退役 <30M 确认
+（7 参 marshall ~6M + Direct 帧瘦身）。裁：**P1 不当刀立**；按 B-R1 开 P1+P3 探针支
+（measurement-only）钉金丝雀份额 f 并量整层去留。P0 待 P1 裁决后同波合入。
