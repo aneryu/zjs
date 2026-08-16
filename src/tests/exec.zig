@@ -5785,6 +5785,40 @@ test "resident stack permutations preserve assignment values and ownership" {
     try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(perm3.byteCode(), op.perm3));
 }
 
+test "empty object named field miss is undefined and own hit stores" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const o = {};
+        \\assert.sameValue(o.missing, undefined);
+        \\assert.sameValue(o.x = 1, 1);
+        \\assert.sameValue(o.x, 1);
+        \\assert.sameValue(({}).y, undefined);
+    );
+    _ = result;
+}
+
+test "mapped arguments named field skips binding alias; computed index stays aliased" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function f(a) {
+        \\  assert.sameValue(arguments[0], 7);
+        \\  assert.sameValue(arguments.foo, undefined);
+        \\  arguments.foo = 1;
+        \\  assert.sameValue(arguments.foo, 1);
+        \\  assert.sameValue(a, 7);
+        \\  arguments[0] = 8;
+        \\  assert.sameValue(a, 8);
+        \\  assert.sameValue(arguments[0], 8);
+        \\}
+        \\f(7);
+    );
+    _ = result;
+}
+
 test "typed array integer get uses class-id arm and qjs tag shape" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

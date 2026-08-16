@@ -2705,7 +2705,7 @@ pub fn objectFromValue(value: core.JSValue) ?*core.Object {
 /// So the kind re-load is dead on this path; Debug keeps it as an assert.
 pub inline fn objectFromValueTrustedExpression(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
+    const header = value.refHeaderAssumeObject();
     if (comptime builtin.mode == .Debug) {
         std.debug.assert(header.meta().flags.kind == .object);
     }
