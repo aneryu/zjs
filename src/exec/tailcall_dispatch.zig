@@ -276,21 +276,7 @@ const ResidentTailSlot = enum(usize) {
     add_strings,
     special_arguments,
     if_false8_complex,
-    compare_eq,
-    compare_neq,
-    compare_strict_eq,
-    compare_strict_neq,
 };
-
-inline fn compareEqSlot(comptime opc: u8) ResidentTailSlot {
-    return switch (opc) {
-        op.eq => .compare_eq,
-        op.neq => .compare_neq,
-        op.strict_eq => .compare_strict_eq,
-        op.strict_neq => .compare_strict_neq,
-        else => unreachable,
-    };
-}
 
 inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
     return vm.property_tail_tbl[@intFromEnum(slot)];
@@ -4317,10 +4303,14 @@ pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 /// qjs's int fast-path: one fused both-int tag fold (`asInt32Pair` = `orr+cbz`)
 /// + one cmp + one cset + write sp[-2] + tail-jump next. Relational misses keep
 /// the in-handler float64/int convert (qjs OP_CMP) then hop `cold_table[pc[0]]`.
-/// The eq family's remaining shapes live in `opCompareEq`, reached only through
-/// `resident_tail_tbl` — a direct `always_tail` to that sibling folds the
-/// release/`bl` ladder back and regrows a 0x70 frame on the int leaf
-/// (CMP-EQ-UNFRAME; leftover `eq_if_false8` is the proven zero-frame shape).
+/// The eq family's remaining shapes live in a `noinline` `opCompareEq`
+/// sibling on the handler-tail section. A same-file *inlinable* `always_tail`
+/// folds the release/`bl` ladder back and regrows a 0x70 frame on the int
+/// leaf. A `resident_tail_tbl` hop would keep the fold off but is 表载间接
+/// (硬门 #9 / w23 BTB). `noinline` + PC-relative `always_tail` is the
+/// 直跳单一冷入口: leftover `eq_if_false8` cannot share a `pc[0]` switch
+/// (that opcode is not `op.eq`; wave-21 tax). Each leaf `b`s to its own
+/// mixed sibling.
 pub fn opCompare(comptime opc: u8) Handler {
     return struct {
         // I-cache pin (see op_return).
@@ -4346,7 +4336,7 @@ pub fn opCompare(comptime opc: u8) Handler {
                         }
                         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     },
-                    else => return @call(.always_tail, residentTailHandler(vm, compareEqSlot(opc)), .{ pc, sp, var_buf, vm }),
+                    else => return @call(.always_tail, compareEqExport(opc), .{ pc, sp, var_buf, vm }),
                 }
             };
             const r = switch (opc) {
@@ -4373,13 +4363,14 @@ pub fn opCompare(comptime opc: u8) Handler {
 /// so every other shape paid the indirect `cold_table[pc[0]]` hop plus a `syncPc`
 /// store before `compareAt`.
 ///
-/// Reached by an *indirect* tail from `opCompare` (`resident_tail_tbl`) rather
-/// than a same-file `always_tail`: a direct hop lets LLVM fold this body back
-/// and the operand-release `bl`s regrow a 0x70 frame on the int leaf (the same
-/// reason `op_compare_cold` is dispatched through `cold_table` — a direct route
-/// once cost the canonical `s=s+i` loop +37 insn/iter). Unresolved shapes fall
-/// to the unchanged `cold_table[pc[0]]`, so string↔number coercion, ToPrimitive
-/// on objects, BigInt and Symbol keep the full `js_eq_slow` protocol.
+/// Reached by a `noinline` PC-relative tail from `opCompare` (硬门 #9: 直跳
+/// 单一冷入口, not `resident_tail_tbl`). An *inlinable* same-file hop lets
+/// LLVM fold this body back and the operand-release `bl`s regrow a 0x70 frame
+/// on the int leaf (the same reason `op_compare_cold` is dispatched through
+/// `cold_table` — a direct route once cost the canonical `s=s+i` loop +37
+/// insn/iter). Unresolved shapes fall to the unchanged `cold_table[pc[0]]`, so
+/// string↔number coercion, ToPrimitive on objects, BigInt and Symbol keep the
+/// full `js_eq_slow` protocol.
 ///
 /// Ownership: qjs frees exactly the operands whose tag is refcountable; `free` is a
 /// no-op on int/float/bool/null/undefined, so a single unconditional release pair at
@@ -4474,6 +4465,34 @@ fn opCompareEq(comptime opc: u8) Handler {
             return cont(pc + 1, nsp, var_buf, vm);
         }
     }.hnd;
+}
+
+/// ELF-visible mixed-type entries so the int leaf can `always_tail` a
+/// PC-relative `b` (硬门 #9) without a `resident_tail_tbl` load. Same
+/// `callconv(.c)` as `Handler` (unlike `noinline`, which breaks
+/// `always_tail`). `eq_if_false8` leftover jumps `zjs_cmp_eq_mixed`
+/// directly — it must not switch on `pc[0]`.
+fn compareEqExport(comptime opc: u8) Handler {
+    return switch (opc) {
+        op.eq => &zjs_cmp_eq_mixed,
+        op.neq => &zjs_cmp_neq_mixed,
+        op.strict_eq => &zjs_cmp_strict_eq_mixed,
+        op.strict_neq => &zjs_cmp_strict_neq_mixed,
+        else => unreachable,
+    };
+}
+
+export fn zjs_cmp_eq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEq(op.eq), .{ pc, sp, var_buf, vm });
+}
+export fn zjs_cmp_neq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEq(op.neq), .{ pc, sp, var_buf, vm });
+}
+export fn zjs_cmp_strict_eq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEq(op.strict_eq), .{ pc, sp, var_buf, vm });
+}
+export fn zjs_cmp_strict_neq_mixed(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    return @call(.always_tail, opCompareEq(op.strict_neq), .{ pc, sp, var_buf, vm });
 }
 
 /// Dedicated cold-table handler for OP_mod after its positive-int32 CASE misses.
@@ -5214,13 +5233,14 @@ pub fn op_cmp_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
 
 /// `eq` then musttail `op_if_false8`. Int32 hit stays on this leaf and
 /// `b`s into the one `op_if_false8` (poll lives there). Every other
-/// shape hops `resident_tail_tbl.compare_eq` — the same nine-arm body
-/// unfused `eq` uses — which `cont`s onto leftover B. Sending those
-/// shapes through `eq_if_false8_cold`/`compareAt` was the wave-21
-/// richards +579M tax (misattributed to 245). 246 is not in this repair.
+/// shape `b`s into the `noinline` `opCompareEq(eq)` sibling — the same
+/// nine-arm body unfused `eq` uses — which `cont`s onto leftover B.
+/// Sending those shapes through `eq_if_false8_cold`/`compareAt` was the
+/// wave-21 richards +579M tax (misattributed to 245). 246 is not in this
+/// repair. A shared `pc[0]` unusual would mis-route this leftover opcode.
 pub fn op_eq_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
-        return @call(.always_tail, residentTailHandler(vm, .compare_eq), .{ pc, sp, var_buf, vm });
+        return @call(.always_tail, zjs_cmp_eq_mixed, .{ pc, sp, var_buf, vm });
     (sp - 2)[0] = JSValue.boolean(ints.lhs == ints.rhs);
     return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
 }
@@ -5877,14 +5897,10 @@ const property_tail_table = [16]Handler{
     op_put_field_add_tail,
     op_put_array_el_cold,
 };
-const resident_tail_table = [7]Handler{
+const resident_tail_table = [3]Handler{
     op_add_strings,
     op_special_arguments,
     op_if_false8_complex,
-    opCompareEq(op.eq),
-    opCompareEq(op.neq),
-    opCompareEq(op.strict_eq),
-    opCompareEq(op.strict_neq),
 };
 
 // ===========================================================================
