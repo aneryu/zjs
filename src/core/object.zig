@@ -9974,6 +9974,7 @@ pub const Object = extern struct {
         try self.appendPreparedPropertyEntryImpl(
             true,
             false,
+            false,
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
@@ -11329,7 +11330,13 @@ pub const Object = extern struct {
         // operand, whose FunctionBytecode owns the atom across this
         // allocation/GC window. qjs add_property relies on that same operand
         // root and retains only the Shape's reference.
+        //
+        // `named_put_no_index`: tagged-int and indexed-class array-index
+        // atoms already returned `.slow` above. qjs's ordinary add_property
+        // (9884-9890) has no JS_AtomIsArrayIndex; a `bl atomIsArrayIndex`
+        // here was TS ~144M on identifier keys.
         self.appendPreparedPropertyEntryImpl(
+            true,
             true,
             true,
             rt,
@@ -11819,6 +11826,7 @@ pub const Object = extern struct {
         try self.appendPreparedPropertyEntryImpl(
             true, // caller_holds_atom_ref: the bytecode operand root (see above)
             true, // slot_borrowed_until_commit: consume-on-success contract (see above)
+            false,
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
@@ -11831,7 +11839,7 @@ pub const Object = extern struct {
     /// allocations below (which can trigger GC, whose object/shape sweep frees
     /// prop atoms — dropping an otherwise-unrooted atom to ref_count 0 mid-call).
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        return self.appendPreparedPropertyEntryImpl(false, false, rt, atom_id, entry_flags, slot);
+        return self.appendPreparedPropertyEntryImpl(false, false, false, rt, atom_id, entry_flags, slot);
     }
 
     /// `caller_holds_atom_ref == true` is the trusted bytecode-operand leg: the
@@ -11853,7 +11861,13 @@ pub const Object = extern struct {
     /// the VM stack). On success the value is committed as MOVED (the caller's
     /// consume-on-success contract). `false` keeps the historical owned-slot
     /// unwind: failure destroys the prepared slot via destroyPropertySlot.
-    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+    ///
+    /// `named_put_no_index == true` is the OP_put_field ordinary miss
+    /// (`setOrDefineOwnDataPropertyForPutFieldOwned`): tagged-int and
+    /// indexed-class array-index atoms already declined, so this monomorph
+    /// matches qjs add_property's probe-free named add (quickjs.c:9884-9890)
+    /// and must not `bl atomIsArrayIndex`.
+    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, comptime named_put_no_index: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // Root the atom across the shape allocations below unless the caller
         // already holds a live ref. The dup/free must span the WHOLE function
         // (defer at function scope), so gate via comptime rather than a runtime
@@ -11864,8 +11878,11 @@ pub const Object = extern struct {
         // qjs add_property invalidates the standard Array-prototype marker
         // before any fallible shape/property growth. The invalidation is
         // intentionally sticky even if the later allocation fails.
-        if (atom.isTaggedInt(atom_id)) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
-        const is_array_index = rt.atoms.atomIsArrayIndex(atom_id);
+        // named_put_no_index: tagged-int never reaches here.
+        if (comptime !named_put_no_index) {
+            if (atom.isTaggedInt(atom_id)) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
+        }
+        const is_array_index = if (comptime named_put_no_index) false else rt.atoms.atomIsArrayIndex(atom_id);
         var slot_owned = true;
         errdefer if (!slot_borrowed_until_commit and slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
