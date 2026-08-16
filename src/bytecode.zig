@@ -5203,7 +5203,7 @@ pub const binding_rules = struct {
         // the same atom through the current and parent functions again: two
         // same-name closure rows may have different lexical metadata, and the
         // resolved ref_idx is the authoritative row.
-        if (op_id == opcode.op.scope_get_var and
+        if ((op_id == opcode.op.scope_get_var or op_id == opcode.op.scope_get_var_undef) and
             (resolved.varKind() == .function_decl or !resolved.isLexical()))
         {
             ref_op = opcode.op.get_var_ref;
@@ -5249,6 +5249,14 @@ pub const binding_rules = struct {
         try std.testing.expectEqual(
             opcode.op.get_var_ref_check,
             lowerScopeVarOpForClosure(&ctx, binding, @intCast(lexical_idx), opcode.op.scope_get_var),
+        );
+        try std.testing.expectEqual(
+            opcode.op.get_var_ref_check,
+            lowerScopeVarOpForClosure(&ctx, binding, @intCast(lexical_idx), opcode.op.scope_get_var_undef),
+        );
+        try std.testing.expectEqual(
+            opcode.op.get_var_ref,
+            lowerScopeVarOpForClosure(&ctx, binding, 0, opcode.op.scope_get_var_undef),
         );
         try std.testing.expectEqual(
             opcode.op.put_var_ref_check,
@@ -5578,8 +5586,10 @@ pub const binding_rules = struct {
 
     fn lowerScopeVarOpClosure(op_id: u8) u8 {
         return switch (op_id) {
-            opcode.op.scope_get_var, opcode.op.scope_get_var_checkthis => opcode.op.get_var_ref_check,
-            opcode.op.scope_get_var_undef => opcode.op.get_var_ref,
+            // qjs 33352-33376: `scope_get_var` and `scope_get_var_undef`
+            // share the lexical → `get_var_ref_check` rewrite. `typeof`
+            // of an uninitialized import/let must still throw TDZ.
+            opcode.op.scope_get_var, opcode.op.scope_get_var_checkthis, opcode.op.scope_get_var_undef => opcode.op.get_var_ref_check,
             opcode.op.scope_put_var => opcode.op.put_var_ref_check,
             opcode.op.scope_put_var_init => opcode.op.put_var_ref,
             else => unreachable,

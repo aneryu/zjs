@@ -2477,7 +2477,8 @@ pub fn opBinary(comptime kind: BinOp) Handler {
                 // ((int)r != r)` then `__JS_NewFloat64((double)r)` still inside
                 // the CASE — not js_add_slow. Same int64-widen check as
                 // vm_arith.fastInt32Add / op_add_loc; overflow stays on this
-                // arm (qjs 19704-19708).
+                // arm (qjs 19704-19708). Separate if/else stores already lower
+                // to two independent `br`s — no LLVM join `b` on the int arm.
                 .add => {
                     const r: i64 = @as(i64, a) + b;
                     const r32: i32 = @truncate(r);
@@ -2812,7 +2813,13 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
             // `var_refs` local, quickjs.c:17844).
             const cell = vm.var_refs_base[idx];
             const v = cell.pvalue.*;
-            if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // qjs OP_get_var_ref0..3 / OP_get_var_ref (18613-18636):
+            // `*sp++ = JS_DupValue(ctx, *var_refs[i]->pvalue)` — no TDZ.
+            // TDZ is OP_get_var_ref_check only. `.half` also serves that
+            // opcode, so it keeps the probe; the short forms do not.
+            if (comptime idx_src == .half) {
+                if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            }
             // Guard #7 (nested-cell check) retired: a cell's VALUE is never
             // itself a cell — the direct-eval const view now pvalue-ALIASES
             // its target (eval_ops.directEvalOuterVarRefView) instead of
@@ -3555,65 +3562,62 @@ export var zjs_op_put_array_el_ta: Handler = op_put_array_el_ta;
 /// -- and its shared interpreter frame pays no per-op prologue.
 pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
     const obj = (sp - 3)[0];
-    // qjs CASE: class==ARRAY → dense; else TA jumptable. Same ARRAY hint as GET.
+    // qjs CASE: class==ARRAY → dense; else TA jumptable. Dense path stays
+    // inside the ARRAY arm so we do not re-enter class_vm.objectFromValue
+    // (header-kind `tst #7`) after class_id is already proven.
     if (obj.isObject()) {
         if (object_ops.objectFromValueTrustedExpression(obj)) |object| {
             if (object.class_id == core.class.ids.array) {
                 @branchHint(.likely);
-            } else if ((sp - 2)[0].isInt() and core.class.isNumericTypedArrayClass(object.class_id)) {
-                return @call(.always_tail, zjs_op_put_array_el_ta, .{ pc, sp, var_buf, vm });
-            }
-        }
-    }
-    if (obj.isObject()) {
-        if (class_vm.objectFromValue(obj)) |array_object| {
-            if (array_object.isArray()) {
+                // qjs 19560: `idx = JS_VALUE_GET_INT(sp[-2])` into uint32 —
+                // a negative int32 is a huge unsigned index and dies on the
+                // bounds test. No `tbnz #31` sign guard.
                 if ((sp - 2)[0].asInt32()) |index_i32| {
-                    if (index_i32 >= 0) {
-                        const index: u32 = @intCast(index_i32);
-                        if (array_object.isFastArrayIndexInBounds(index)) {
-                            const rt = vm.ctx.runtime;
-                            const slot = array_object.fastArraySlotAssumeCapacity(index);
-                            const old_value = loadValueAsIntPair(slot);
+                    const index: u32 = @bitCast(index_i32);
+                    if (object.isFastArrayIndexInBounds(index)) {
+                        const rt = vm.ctx.runtime;
+                        const slot = object.fastArraySlotAssumeCapacity(index);
+                        const old_value = loadValueAsIntPair(slot);
+                        storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
+                        if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
+                            // Park the dying element in the now-dead value
+                            // slot so the tail completes both releases off
+                            // intact operands (op_put_field precedent).
+                            storeValueAsIntPair(&(sp - 1)[0], old_value);
+                            return @call(.always_tail, zjs_op_put_array_el_release_old_tail, .{ pc, sp, var_buf, vm });
+                        }
+                        if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+                            return @call(.always_tail, zjs_op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                        }
+                        return cont(pc + 1, sp - 3, var_buf, vm);
+                    }
+                    // qjs OP_put_array_el append (quickjs.c:19616-19636):
+                    // idx == count, fast_array, can_extend, new_len <= size.
+                    // Growing `.length` needs the length slot writable;
+                    // filling a hole at `count` while `count < length` does not.
+                    if (object.flags.fast_array and index == object.u.array.count) {
+                        const new_count = index +% 1;
+                        if (new_count > index and
+                            new_count <= object.u.array.capacity and
+                            object.canExtendFastArray() and
+                            (new_count <= object.u.array.length or
+                                object.flags.length_writable))
+                        {
+                            const slot = object.fastArraySlotAssumeCapacity(index);
                             storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
-                            if (old_value.releaseRefCountedNeedsDestroyDuringActiveBytecode(rt)) {
-                                // Park the dying element in the now-dead value
-                                // slot so the tail completes both releases off
-                                // intact operands (op_put_field precedent).
-                                storeValueAsIntPair(&(sp - 1)[0], old_value);
-                                return @call(.always_tail, op_put_array_el_release_old_tail, .{ pc, sp, var_buf, vm });
-                            }
-                            if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
-                                return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                            object.u.array.count = new_count;
+                            if (new_count > object.u.array.length)
+                                object.u.array.length = new_count;
+                            object.flags.may_have_indexed_properties = true;
+                            if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(vm.ctx.runtime)) {
+                                return @call(.always_tail, zjs_op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
                             }
                             return cont(pc + 1, sp - 3, var_buf, vm);
                         }
-                        // qjs OP_put_array_el append (quickjs.c:19616-19636):
-                        // idx == count, fast_array, can_extend, new_len <= size.
-                        // Growing `.length` needs the length slot writable;
-                        // filling a hole at `count` while `count < length` does not.
-                        if (array_object.flags.fast_array and index == array_object.u.array.count) {
-                            const new_count = index +% 1;
-                            if (new_count > index and
-                                new_count <= array_object.u.array.capacity and
-                                array_object.canExtendFastArray() and
-                                (new_count <= array_object.u.array.length or
-                                    array_object.flags.length_writable))
-                            {
-                                const slot = array_object.fastArraySlotAssumeCapacity(index);
-                                storeValueAsIntPair(slot, loadValueAsIntPair(&(sp - 1)[0]));
-                                array_object.u.array.count = new_count;
-                                if (new_count > array_object.u.array.length)
-                                    array_object.u.array.length = new_count;
-                                array_object.flags.may_have_indexed_properties = true;
-                                if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(vm.ctx.runtime)) {
-                                    return @call(.always_tail, op_put_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
-                                }
-                                return cont(pc + 1, sp - 3, var_buf, vm);
-                            }
-                        }
                     }
                 }
+            } else if ((sp - 2)[0].isInt() and core.class.isNumericTypedArrayClass(object.class_id)) {
+                return @call(.always_tail, zjs_op_put_array_el_ta, .{ pc, sp, var_buf, vm });
             }
         }
     }
@@ -3621,6 +3625,15 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // inline, which is what keeps the address-taking slow legs (and their frame)
     // out of this handler. A direct call to the same function gets inlined and
     // the 144-byte frame comes straight back.
+    //
+    // Miss-arm tombstone: short-form get_var_ref0..3 dropped TDZ (~0x80) and
+    // this handler dropped sign+exotic (~0x10 plus alignment), sliding the
+    // field cluster -0x100 vs main@c7770616. Space lives on the rest miss
+    // so the dense hit stays 8 jumps (F-retrial miss-arm precedent).
+    if (zjs_f_tombstone_keep != 0) {
+        asm volatile (".space 0x100");
+        unreachable;
+    }
     return @call(.always_tail, propertyTailHandler(vm, .put_array_el_rest), .{ pc, sp, var_buf, vm });
 }
 
@@ -3640,6 +3653,13 @@ fn op_put_array_el_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_bu
     (sp - 3)[0].freeObjectAssumeObjectDuringActiveBytecode(vm.ctx.runtime);
     return cont(pc + 1, sp - 3, var_buf, vm);
 }
+
+// Address-taken pins: nesting the dense ARRAY arm lets LLVM inline these
+// tails (and their `bl` destroy) into the hot handler. An exported slot
+// is a reloc LLVM cannot IPSCCP, so the dying-old / dying-receiver legs
+// stay `br` like the pre-nest two-if shape.
+export var zjs_op_put_array_el_release_old_tail: Handler = op_put_array_el_release_old_tail;
+export var zjs_op_put_array_el_release_receiver_tail: Handler = op_put_array_el_release_receiver_tail;
 
 /// Every leg that needs an operand address, kept out of the hot handler. Not
 /// marked `noinline` because that would break the `musttail` transfers below;
