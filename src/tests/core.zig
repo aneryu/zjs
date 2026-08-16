@@ -2964,6 +2964,44 @@ test "ordinary property delete publishes absence before synchronous finalizer re
     try std.testing.expect(after.isUndefined());
 }
 
+test "IC-R1: in-place delete mutates the shape Property word" {
+    // Guard load-bearing: IC compares the 8-byte Property record. In-place
+    // delete (unique shape, rc==1) must change that word without replacing
+    // shape*. Shared shapes clone first (shape* changes) — also a miss.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    defer object.value().free(rt);
+    const key = try rt.internAtom("ic_r1_field");
+    defer rt.atoms.free(key);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+
+    const index = object.findProperty(key) orelse return error.TestUnexpectedResult;
+    const shape_before = object.shape_ref;
+    const word_before: u64 = @bitCast(shape_before.props()[index]);
+    try std.testing.expect(shape_before.props()[index].atom_id == key);
+    try std.testing.expect(word_before != 0);
+
+    const unique = shape_before.header.meta().rc == 1;
+    try std.testing.expect(object.deleteProperty(rt, key));
+    try std.testing.expect(object.findProperty(key) == null);
+
+    const shape_after = object.shape_ref;
+    if (unique) {
+        try std.testing.expectEqual(shape_before, shape_after);
+        const word_after: u64 = @bitCast(shape_after.props()[index]);
+        try std.testing.expect(word_before != word_after);
+        try std.testing.expectEqual(core.atom.null_atom, shape_after.props()[index].atom_id);
+    } else {
+        try std.testing.expect(shape_before != shape_after);
+    }
+
+    const got = try object.getProperty(key);
+    defer got.free(rt);
+    try std.testing.expect(got.isUndefined());
+}
+
 test "regexp lastIndex set publishes replacement before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
