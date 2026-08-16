@@ -10028,6 +10028,46 @@ test "instanceof resident dispatch preserves GetMethod and result coercion seman
     try std.testing.expect(result.isUndefined());
 }
 
+test "default Function hasInstance uses Ordinary; other native records still Call" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function C() {}
+        \\const instance = new C();
+        \\assert.sameValue(instance instanceof C, true);
+        \\assert.sameValue(1 instanceof C, false);
+        \\assert.sameValue(({}) instanceof C, false);
+        \\const Bound = C.bind(null);
+        \\assert.sameValue(instance instanceof Bound, true);
+        \\
+        \\const original = Function.prototype[Symbol.hasInstance];
+        \\Object.defineProperty(C, Symbol.hasInstance, {
+        \\  value: Function.prototype.call,
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(instance instanceof C, false);
+        \\delete C[Symbol.hasInstance];
+        \\assert.sameValue(instance instanceof C, true);
+        \\
+        \\let calls = 0;
+        \\Object.defineProperty(C, Symbol.hasInstance, {
+        \\  value: function(value) {
+        \\    calls++;
+        \\    return original.call(this, value);
+        \\  },
+        \\  configurable: true
+        \\});
+        \\assert.sameValue(instance instanceof C, true);
+        \\assert.sameValue(calls, 1);
+        \\delete C[Symbol.hasInstance];
+        \\assert.sameValue(instance instanceof C, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "local reference-tail lowering preserves binding semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

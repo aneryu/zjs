@@ -16,6 +16,17 @@ pub const PrototypeMethod = enum(u32) {
     has_instance = 5,
 };
 
+/// Identity of the realm-installed default `Function.prototype[@@hasInstance]`
+/// record (qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`).
+/// Pointer compare against the densified table slot — not a name or shape cache.
+pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.host_function.InternalRecord) bool {
+    const expected = rt.internalBuiltinRecord(
+        @intCast(@intFromEnum(core.function.NativeBuiltinDomain.function)),
+        @intFromEnum(PrototypeMethod.has_instance),
+    );
+    return if (expected) |slot| record == slot else false;
+}
+
 /// Declaration + dispatch table for the `.function` native-builtin domain
 /// (QuickJS `js_function_proto_funcs` analogue, quickjs.c:41390).
 pub const internal_entries = [_]core.host_function.InternalEntry{
