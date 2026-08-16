@@ -236,7 +236,7 @@ pub noinline fn field(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-) !Step {
+) align(16) !Step {
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;

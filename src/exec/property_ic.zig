@@ -201,7 +201,7 @@ inline fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, at
     return true;
 }
 
-fn fastImmediatePrototypeDataPropertyLookupForObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) FastProtoDataLookup {
+fn fastImmediatePrototypeDataPropertyLookupForObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) align(16) FastProtoDataLookup {
     switch (fastOwnOrdinaryDataPropertyLookupForObject(object, atom_id)) {
         .value, .slow => return .slow,
         .missing => {},

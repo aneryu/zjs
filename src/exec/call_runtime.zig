@@ -88,7 +88,7 @@ pub fn execCall(
     global: *core.Object,
     allow_inline: bool,
     req_out: *InlineCallRequest,
-) !ExecCallResult {
+) align(16) !ExecCallResult {
     // Zero-copy call sequence: borrow `func` and `args` directly from the
     // operand stack (which is owned by the caller's frame) instead
     // of popping them into a duplicated, separately rooted staging buffer.
