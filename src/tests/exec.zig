@@ -12036,6 +12036,25 @@ test "IC-R1: delete then get_field is undefined after a prior hit" {
     try std.testing.expectEqualStrings("1/true/undefined//2\n", stream.buffered());
 }
 
+test "IC-P1: OrdinarySet forwards to a Proxy proto [[Set]] trap" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var called = false;
+        \\var recv;
+        \\var p = new Proxy({}, { set: function (t, k, v, r) { called = true; recv = r; return true; } });
+        \\var o = Object.create(p);
+        \\o.x = 1;
+        \\print([called, o === recv, Object.prototype.hasOwnProperty.call(o, "x")].join("/"));
+    , &stream);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true/true/false\n", stream.buffered());
+}
+
 test "Engine eval executes simple variable assignment and print" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
