@@ -997,3 +997,16 @@ get_field 段（mono 90.8%）。
 （2 槽 poly 吃 81%，P4 议题）。
 **4. TS-RESID-W42 ACCEPT**：+5.00→+3.58G，闭合 96.3%，残全系 call/return architectural——
 IC 对冲 TS get_field 占用 18.26G 为唯一翻案路径。
+
+## IC-P1 首发裁决（2026-08-17，driver）：未过门，批准唯一一次瘦身迭代
+
+首发：命中臂 48 insn（硬顶 28）、自测 FW TS 1.681/box2d 1.360/EB 1.025 同号差、
+3 条 Proxy [[Set]] test262 新红（诚实披露未藏）。已成件：IC-R1 delete 语义证成 PASS、
+IC-R2 field2 去克隆（0x20c→0x4）、7B 编码全链、岛几何全过（0x340 钉满/if_false8 同址/0 bl/0 帧）。
+裁：**非「加形再试」而是「按已批目标形完成实施」**——首版多付=热扩三载寻址+state/count/magic
+五比（spike §3.2 目标形只有 shape*+Property 字两比+ic_base 单载）。瘦身令：①先修 3 条 Proxy
+[[Set]]（语义先于性能）；②vm.ic_base 单载（IC-R3 边界：摊帧即删）；③热路径只留两比
+（site_id 有效性由 emit 保证信任之，对齐 main 现行「trust bytecode atom roots」先例）；
+④objdump 复验 ≤28。终门：TS FW cyc 同号降，否则 **整通道 REJECT-ARCHIVE**，回滚至只留
+IC-R1 测试资产（7B 编码与 R2 去克隆无 IC 则无收益，一并回滚）。D-cache 风险（spike §7.4）
+由瘦身后 FW 判定。
