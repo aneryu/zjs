@@ -1010,3 +1010,11 @@ IC-R2 field2 去克隆（0x20c→0x4）、7B 编码全链、岛几何全过（0x
 ④objdump 复验 ≤28。终门：TS FW cyc 同号降，否则 **整通道 REJECT-ARCHIVE**，回滚至只留
 IC-R1 测试资产（7B 编码与 R2 去克隆无 IC 则无收益，一并回滚）。D-cache 风险（spike §7.4）
 由瘦身后 FW 判定。
+
+## IC-P1-V2 终裁（2026-08-17，driver）：通道 REJECT-ARCHIVE，抢救件走链
+
+V2 按令执行完整：目标形接到、终门跑满 ABBA n=4、FAIL 即回滚（tip=e1a7432f 仅留
+Proxy 修复+IC-R1 测试；产品 IC 全剥；试验树另存 archive 支）。V2 产品曾见 test262 RF
+7775-7800 窗 SIGSEGV（终门已死未深挖，产品已剥无此路径）。抢救件=object.zig +4 行
+proto.isProxy() 拒走（对齐兄弟函数既有 proxyTarget 检查）+3 条 test262 转绿+单测，
+派执行官走 gate 链合入。六期对冲实验闭幕：五封条+IC 否证=全 15≥1.0 无已知路径，递用户终裁。

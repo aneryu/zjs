@@ -110,3 +110,12 @@ quickening 排除（254/255 保全）、pc sidecar 不取（命中路径更长�
 （今日 47/qjs 51）、零 bl、零帧、岛体积不增（活代码缩短+墓碑填回 0x340）、walk 单份出岛表跳。
 可行性（pT 普查）：TS get_field mono 80.4%/box2d 94.1%/EB 100%、表 1.32MB、纸面 TS ~337M cyc。
 P0 主尺过；P1 金丝雀获批（driver 2026-08-17）。
+
+### 条目 #3 终局（2026-08-17）：REJECTED-ARCHIVE（实验否证）
+
+两发实施（首发 44/48 insn；瘦身 33 insn 含 cont=目标形已接）。终门 TS FW B/A=1.0123
+（A max<B min 区间不重叠）FAIL。根因非实现瑕疵而是经济结构：zjs 属性快臂已单探哈希
+≈2-3 cyc（F 刀信用、短于 qjs CASE），IC 命中差价太薄；miss/first-learn/mega 税+walk
+迁岛尾的远跳净负。纸面「10 cyc/hit 省」高估一档=本案主教训（纸面奖金必须用实测快臂
+单价折算，不用教科书中位）。证据树 grok/ic-p1-v2-archive@12611468。254/255 全程未占。
+抢救件：Proxy [[Set]] proto 走趟语义修复（main 既有洞）+IC-R1 delete 语义测试，独立合入。
