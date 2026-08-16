@@ -1976,7 +1976,7 @@ pub inline fn release(rt: anytype, header: anytype) void {
 /// Slow path after the caller has already decremented the common RC word to 0.
 /// JSValue.free uses this after its QuickJS-style payload-4 fast path; direct
 /// GC owners also arrive here through `release` above.
-pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(16) void {
+pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
     std.debug.assert(header.meta().rc == 0);
     if (header.meta().flags.finalizing and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
     if (rt.gc.phase == .deinit and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .shape or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;

@@ -1766,20 +1766,18 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     return pushAndEnter(vb, vm, &target, region_start, argc, .method);
                 }
             } else if (method_obj.class_id == core.class.ids.c_function) {
-                // Native c_function fast dispatch (Phase 2a/2b): skip
-                // callMethod's call boundary for the ~85% native-method case
-                // (Phase 1 measurement). The helper is outlined (noinline) to
-                // keep op_call_method's I-cache footprint unchanged; it mirrors
-                // callMethod's native leg exactly. forwards_call records
-                // (Function.prototype.call) return .miss so the forwarding arm
-                // below keeps its fused-frame optimization. On .miss, frame.pc
-                // is restored to the argc operand for the fallthrough paths.
-                // Sync stack top so the helper's stack.len() reflects the live
-                // region (syncPc above only updated frame.pc, not stack.top_ptr).
-                vm.stack.setTopPtr(sp);
-                switch (call_vm.nativeMethodFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc) catch |e| return vm.fail(e)) {
-                    .hit, .caught => return coldNext(vb, vm),
-                    .miss => {}, // fall through to forwarding arm / callMethod
+                // K2: resolve + filter forwards_call HERE so Function.prototype.call
+                // never enters NMFD (no tbnz on the hot native path). Do not keep
+                // `rec` live across the NMFD bl — that grew this handler 0x3f0→0x400
+                // and slid the island tails. NMFD re-resolves with the assume helper.
+                if (call_vm.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_obj)) |rec| {
+                    if (!rec.forwards_call) {
+                        vm.stack.setTopPtr(sp);
+                        switch (call_vm.nativeMethodFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc) catch |e| return vm.fail(e)) {
+                            .hit, .caught => return coldNext(vb, vm),
+                            .miss => {},
+                        }
+                    }
                 }
             }
         }

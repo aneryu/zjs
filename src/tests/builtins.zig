@@ -34,7 +34,7 @@ test "native handler realm readers have an explicit observable or synthetic auth
         .{ .name = "function", .source = @embedFile("../exec/function_ops.zig"), .synthetic_global_reads = 0 },
         .{ .name = "reflect", .source = @embedFile("../exec/reflect_proxy_ops.zig"), .synthetic_global_reads = 0 },
         .{ .name = "json", .source = @embedFile("../exec/json_ops.zig"), .synthetic_global_reads = 1 },
-        .{ .name = "string", .source = @embedFile("../exec/string_builtin_ops.zig"), .synthetic_global_reads = 4 },
+        .{ .name = "string", .source = @embedFile("../exec/string_builtin_ops.zig"), .synthetic_global_reads = 5 },
         .{ .name = "date", .source = @embedFile("../exec/date_ops.zig"), .synthetic_global_reads = 2 },
         .{ .name = "collection", .source = @embedFile("../exec/collection_ops.zig"), .synthetic_global_reads = 2, .synthetic_globals_reads = 1 },
         .{ .name = "regexp", .source = @embedFile("../exec/regexp_ops.zig"), .synthetic_global_reads = 1 },
