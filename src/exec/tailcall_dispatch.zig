@@ -276,7 +276,21 @@ const ResidentTailSlot = enum(usize) {
     add_strings,
     special_arguments,
     if_false8_complex,
+    compare_eq,
+    compare_neq,
+    compare_strict_eq,
+    compare_strict_neq,
 };
+
+inline fn compareEqSlot(comptime opc: u8) ResidentTailSlot {
+    return switch (opc) {
+        op.eq => .compare_eq,
+        op.neq => .compare_neq,
+        op.strict_eq => .compare_strict_eq,
+        op.strict_neq => .compare_strict_neq,
+        else => unreachable,
+    };
+}
 
 inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
     return vm.property_tail_tbl[@intFromEnum(slot)];
@@ -4299,59 +4313,53 @@ pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 /// both-int fast path is a single cmp+cset with no runtime predicate select).
 /// The former shared op_compare handler decoded pc[0] into the predicate through
 /// a cmp+cset+csel selection chain (~30 insn/compare measured vs qjs's 17). With
-/// `opc` comptime the switches below fold away and each handler compiles to:
-/// two tag checks + one cmp + one cset + write sp[-2] + tail-jump next —
-/// qjs's exact int fast-path shape. Non-number operands fall INDIRECTLY to
-/// cold_table[pc[0]] (op_compare_cold → full js_relational_slow/js_eq_slow
-/// semantics), the same routing discipline the shared handler used.
+/// `opc` comptime the switches below fold away and each handler compiles to
+/// qjs's int fast-path: one fused both-int tag fold (`asInt32Pair` = `orr+cbz`)
+/// + one cmp + one cset + write sp[-2] + tail-jump next. Relational misses keep
+/// the in-handler float64/int convert (qjs OP_CMP) then hop `cold_table[pc[0]]`.
+/// The eq family's remaining shapes live in `opCompareEq`, reached only through
+/// `resident_tail_tbl` — a direct `always_tail` to that sibling folds the
+/// release/`bl` ladder back and regrows a 0x70 frame on the int leaf
+/// (CMP-EQ-UNFRAME; leftover `eq_if_false8` is the proven zero-frame shape).
 pub fn opCompare(comptime opc: u8) Handler {
     return struct {
         // I-cache pin (see op_return).
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-            if ((sp - 2)[0].asInt32()) |a| {
-                if ((sp - 1)[0].asInt32()) |b| {
-                    const r = switch (opc) {
-                        op.lt => a < b,
-                        op.lte => a <= b,
-                        op.gt => a > b,
-                        op.gte => a >= b,
-                        op.eq, op.strict_eq => a == b,
-                        op.neq, op.strict_neq => a != b,
-                        else => unreachable,
-                    };
-                    (sp - 2)[0] = JSValue.boolean(r);
-                    return cont(pc + 1, sp - 1, var_buf, vm);
-                }
-            }
-            // qjs OP_CMP inlines the float64/int relational compare too (FLOAT64(a)||FLOAT64(b)
-            // → convert both to double, compare) before falling to js_relational_slow. Both
-            // operands are non-refcounted numbers here, so nothing to free. This is what makes
-            // a float-counter `x < n` not pay the cold hop every iteration. (Relational ops
-            // only — same coverage the shared handler had; the eq family keeps its existing
-            // int-int fast arm and falls cold otherwise.)
-            switch (opc) {
-                op.lt, op.lte, op.gt, op.gte => {
-                    if ((sp - 2)[0].asNumber()) |fa| {
-                        if ((sp - 1)[0].asNumber()) |fb| {
-                            const r = switch (opc) {
-                                op.lt => fa < fb,
-                                op.lte => fa <= fb,
-                                op.gt => fa > fb,
-                                op.gte => fa >= fb,
-                                else => unreachable,
-                            };
-                            (sp - 2)[0] = JSValue.boolean(r);
-                            return cont(pc + 1, sp - 1, var_buf, vm);
+            const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse {
+                switch (comptime opc) {
+                    op.lt, op.lte, op.gt, op.gte => {
+                        // qjs OP_CMP inlines the float64/int relational compare
+                        // (FLOAT64(a)||FLOAT64(b) → convert both to double) before
+                        // js_relational_slow. Both operands are non-refcounted here.
+                        if ((sp - 2)[0].asNumber()) |fa| {
+                            if ((sp - 1)[0].asNumber()) |fb| {
+                                const r = switch (opc) {
+                                    op.lt => fa < fb,
+                                    op.lte => fa <= fb,
+                                    op.gt => fa > fb,
+                                    op.gte => fa >= fb,
+                                    else => unreachable,
+                                };
+                                (sp - 2)[0] = JSValue.boolean(r);
+                                return cont(pc + 1, sp - 1, var_buf, vm);
+                            }
                         }
-                    }
-                },
-                // The eq family's remaining operand shapes are qjs's OP_CMP_EQ /
-                // OP_CMP_STRICT_EQ arms, which need refcount releases and so would
-                // regrow this handler's frame — they live in their own handler,
-                // tail-jumped exactly like opBinary → opBinaryFloat.
-                else => return @call(.always_tail, opCompareEq(opc), .{ pc, sp, var_buf, vm }),
-            }
-            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    },
+                    else => return @call(.always_tail, residentTailHandler(vm, compareEqSlot(opc)), .{ pc, sp, var_buf, vm }),
+                }
+            };
+            const r = switch (opc) {
+                op.lt => ints.lhs < ints.rhs,
+                op.lte => ints.lhs <= ints.rhs,
+                op.gt => ints.lhs > ints.rhs,
+                op.gte => ints.lhs >= ints.rhs,
+                op.eq, op.strict_eq => ints.lhs == ints.rhs,
+                op.neq, op.strict_neq => ints.lhs != ints.rhs,
+                else => unreachable,
+            };
+            (sp - 2)[0] = JSValue.boolean(r);
+            return cont(pc + 1, sp - 1, var_buf, vm);
         }
     }.h;
 }
@@ -4365,13 +4373,13 @@ pub fn opCompare(comptime opc: u8) Handler {
 /// so every other shape paid the indirect `cold_table[pc[0]]` hop plus a `syncPc`
 /// store before `compareAt`.
 ///
-/// Reached by tail-jump from `opCompare` rather than inlined into it: the object and
-/// string arms release operands, and a `bl` in `opCompare` would regrow the frame its
-/// hot both-int32 arm depends on (the same reason `op_compare_cold` is dispatched
-/// indirectly — routing it directly once cost the canonical `s=s+i` loop +37
-/// insn/iter). Unresolved shapes fall to the unchanged `cold_table[pc[0]]`, so
-/// string↔number coercion, ToPrimitive on objects, BigInt and Symbol keep the full
-/// `js_eq_slow` protocol.
+/// Reached by an *indirect* tail from `opCompare` (`resident_tail_tbl`) rather
+/// than a same-file `always_tail`: a direct hop lets LLVM fold this body back
+/// and the operand-release `bl`s regrow a 0x70 frame on the int leaf (the same
+/// reason `op_compare_cold` is dispatched through `cold_table` — a direct route
+/// once cost the canonical `s=s+i` loop +37 insn/iter). Unresolved shapes fall
+/// to the unchanged `cold_table[pc[0]]`, so string↔number coercion, ToPrimitive
+/// on objects, BigInt and Symbol keep the full `js_eq_slow` protocol.
 ///
 /// Ownership: qjs frees exactly the operands whose tag is refcountable; `free` is a
 /// no-op on int/float/bool/null/undefined, so a single unconditional release pair at
@@ -4380,7 +4388,7 @@ pub fn opCompare(comptime opc: u8) Handler {
 /// dead slot (`op_drop_fast`'s discipline).
 fn opCompareEq(comptime opc: u8) Handler {
     return struct {
-        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
             const strict = comptime (opc == op.strict_eq or opc == op.strict_neq);
             const inv = comptime (opc == op.neq or opc == op.strict_neq);
             const lhs = (sp - 2)[0];
@@ -5191,11 +5199,9 @@ pub fn op_if_false(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 /// `lt` then musttail `op_if_false8` at the following `if_false8`. Poll is
 /// therefore the same function as the unfused `if_false8` (qjs CASE poll).
 pub fn op_cmp_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    if ((sp - 2)[0].asInt32()) |a| {
-        if ((sp - 1)[0].asInt32()) |b| {
-            (sp - 2)[0] = JSValue.boolean(a < b);
-            return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
-        }
+    if (JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0])) |ints| {
+        (sp - 2)[0] = JSValue.boolean(ints.lhs < ints.rhs);
+        return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
     }
     if ((sp - 2)[0].asNumber()) |fa| {
         if ((sp - 1)[0].asNumber()) |fb| {
@@ -5208,18 +5214,15 @@ pub fn op_cmp_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
 
 /// `eq` then musttail `op_if_false8`. Int32 hit stays on this leaf and
 /// `b`s into the one `op_if_false8` (poll lives there). Every other
-/// shape shares `opCompare(eq)` — the same nine-arm body unfused `eq`
-/// uses — which `cont`s onto leftover B. Sending those shapes through
-/// `eq_if_false8_cold`/`compareAt` was the wave-21 richards +579M tax
-/// (misattributed to 245). 246 is not in this repair.
+/// shape hops `resident_tail_tbl.compare_eq` — the same nine-arm body
+/// unfused `eq` uses — which `cont`s onto leftover B. Sending those
+/// shapes through `eq_if_false8_cold`/`compareAt` was the wave-21
+/// richards +579M tax (misattributed to 245). 246 is not in this repair.
 pub fn op_eq_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    if ((sp - 2)[0].asInt32()) |a| {
-        if ((sp - 1)[0].asInt32()) |b| {
-            (sp - 2)[0] = JSValue.boolean(a == b);
-            return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
-        }
-    }
-    return @call(.always_tail, opCompare(op.eq), .{ pc, sp, var_buf, vm });
+    const ints = JSValue.asInt32Pair((sp - 2)[0], (sp - 1)[0]) orelse
+        return @call(.always_tail, residentTailHandler(vm, .compare_eq), .{ pc, sp, var_buf, vm });
+    (sp - 2)[0] = JSValue.boolean(ints.lhs == ints.rhs);
+    return @call(.always_tail, op_if_false8, .{ pc + 1, sp - 1, var_buf, vm });
 }
 
 pub fn op_eq_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
@@ -5874,10 +5877,14 @@ const property_tail_table = [16]Handler{
     op_put_field_add_tail,
     op_put_array_el_cold,
 };
-const resident_tail_table = [3]Handler{
+const resident_tail_table = [7]Handler{
     op_add_strings,
     op_special_arguments,
     op_if_false8_complex,
+    opCompareEq(op.eq),
+    opCompareEq(op.neq),
+    opCompareEq(op.strict_eq),
+    opCompareEq(op.strict_neq),
 };
 
 // ===========================================================================
