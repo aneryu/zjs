@@ -341,3 +341,15 @@ qjs JS_CallInternal 38.5KB 单体；refill 21.6×=139.8M vs 6.5M；FE +339M 为�
 **用户裁：S3-B 关墙**——architectural-capacity 入档，不立项、不平行刀、不把 22× 再当
 handler-section 缺口；EB 过线问题并入稍后「目标可达性」总裁决（候肥 op scoping 材料齐）。
 H2/P6 禁区重申：完整实现不得借 String capacity 字段或 adopt/reloc 就地扩当本墙刀形。
+
+## 2026-08-17 用户裁决：六期宪章 = IC 大额对冲立项
+
+五期收束：五落后项 faithful 封条齐（pdfjs 壳密度/EB L1I 墙/TS call-return/box2d BIN-IPC/
+splay ⑦ 固有），全 15≥1.0 现框不可达；对冲模型前提「融合通道先干涸」成立（#2 收官/#3 归档）。
+**用户裁：立项 inline-cache 类通用机制（大额对冲）**——JSC/V8 先例、qjs 无此机制、
+走 PERF-MECHANISM-LEDGER 四条件申报、spike 先行。属性访问同时打五落后项，是唯一
+能整体抬升的杠杆。「IC 超越型非必需」旧判语的适用前提（追平可由忠实域达成）已被
+五封条推翻，特此改判：IC 现为达标必需机制。
+纪律不变：不 bypass 用户可见语义（cache 只免查找不免语义、guard 必验 shape）、
+工作集纪律（EB L1I 墙教训：命中路径必须极短且不胀岛）、254/255 仍保全（优先位点表
+非 opcode 改写）、验收 3-pad cyc 主尺+资产哨。
