@@ -331,3 +331,13 @@ A=通道 #3 分派形态机制（热路径超块/特化类通用机制，spike �
 最大杠杆（box2d/TS/EB/残项同标的），负定理群为设计约束；
 B=native 协议瘦层（simple builtin ABI 分层重设计，设计书先行、分段落地）——pdfjs 心脏。
 C（preserve_none）维持封存；D 不采。w42 双尾刀并行收官 faithful 域。
+
+## 2026-08-17 用户裁决：EB 容量墙 = S3-B 关墙
+
+pS 材料（EB-CAPACITY-SCOPING）判明「容量墙」本体=L1I 工作集墙（handler 岛 185.7KB+助手 vs
+qjs JS_CallInternal 38.5KB 单体；refill 21.6×=139.8M vs 6.5M；FE +339M 为本墙周期上限）。
+布局三轮（L-1 合/L-1.5 拒/L-2 闭)已证只重排不缩体积无效。诚实预期：S3-A 密度战役满打
++3~5pp（0.83–0.85），叠形税残余 faithful 硬顶 ~0.87。
+**用户裁：S3-B 关墙**——architectural-capacity 入档，不立项、不平行刀、不把 22× 再当
+handler-section 缺口；EB 过线问题并入稍后「目标可达性」总裁决（候肥 op scoping 材料齐）。
+H2/P6 禁区重申：完整实现不得借 String capacity 字段或 adopt/reloc 就地扩当本墙刀形。
