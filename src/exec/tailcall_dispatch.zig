@@ -1766,12 +1766,13 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 }
             } else if (method_obj.class_id == core.class.ids.c_function) {
                 // K2: resolve + filter forwards_call HERE so Function.prototype.call
-                // never enters NMFD (no tbnz on the hot native path). K1: the
-                // record helper assumes the class_id we just proved.
+                // never enters NMFD (no tbnz on the hot native path). Do not keep
+                // `rec` live across the NMFD bl — that grew this handler 0x3f0→0x400
+                // and slid the island tails. NMFD re-resolves with the assume helper.
                 if (call_vm.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_obj)) |rec| {
                     if (!rec.forwards_call) {
                         vm.stack.setTopPtr(sp);
-                        switch (call_vm.nativeMethodFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, rec, argc) catch |e| return vm.fail(e)) {
+                        switch (call_vm.nativeMethodFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc) catch |e| return vm.fail(e)) {
                             .hit, .caught => return coldNext(vb, vm),
                             .miss => {},
                         }

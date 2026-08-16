@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 const bytecode = @import("../bytecode.zig");
@@ -693,10 +694,17 @@ pub inline fn callResolvedExecDirect(
     );
 }
 
+/// In-hole tombstone (PDFJS-K rework). NMFD body shrank 0x7b4→0x394 when
+/// the assume terminal was outlined; the hole slid w35 off-island helpers.
+/// Never-taken `cbnz` + `.space 0x2a8` restores the 0x7b4 footprint.
+export var zjs_nmfd_tombstone_keep: u8 = 0;
+
 /// Outlined native c_function fast dispatch for `op_call_method`.
-/// K1/K2: the caller already proved `class_id == c_function`, resolved `rec`,
-/// and filtered `forwards_call` so Function.prototype.call never enters here
-/// (the fused-frame arm stays on the miss/fallthrough path). No class/payload
+/// K1/K2: the caller already proved `class_id == c_function` and filtered
+/// `forwards_call` so Function.prototype.call never enters here (the
+/// fused-frame arm stays on the miss/fallthrough path). Rec is re-resolved
+/// here with the assume helper — not passed in — so `op_call_method` does
+/// not keep it live across this bl (0x3f0→0x400 slide). No class/payload
 /// re-admit and no `forwards_call` tbnz.
 pub noinline fn nativeMethodFastDispatch(
     ctx: *core.JSContext,
@@ -707,14 +715,21 @@ pub noinline fn nativeMethodFastDispatch(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     method_obj: *core.Object,
-    rec: *const core.host_function.InternalRecord,
     argc: u16,
 ) align(32) !NativeFastDispatchResult {
+    if (zjs_nmfd_tombstone_keep != 0) {
+        // 0x2a8: first pad 0x420 overshot to 0x92c; 0x92c-0x178=0x7b4.
+        asm volatile (".space 0x2a8");
+        unreachable;
+    }
     const total: usize = @as(usize, argc) + 2;
     if (stack.len() < total) return error.StackUnderflow;
     const region_base = stack.len() - total;
     const receiver = stack.values[region_base];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
+    // Resolve before poll/pc so a miss is a no-op (same contract as 5707718c).
+    // Caller already dropped forwards_call; this is the assume path only.
+    const rec = resolvedNativeMethodRecordAssumeCFunction(ctx, method_obj) orelse return .miss;
     // Committed to native dispatch: advance pc and poll interrupts before
     // entering user-observable code (mirrors callMethod's poll-then-call).
     frame.pc += 2; // consume argc operand
@@ -744,10 +759,19 @@ pub noinline fn nativeMethodFastDispatch(
     return .hit;
 }
 
+// Root the NMFD tombstone so LTO cannot strip the pad.
+export const zjs_nmfd_tombstone: *const anyopaque = @ptrCast(&nativeMethodFastDispatch);
+
 /// K1: same terminal as `callResolvedNativeMethod` without repeating the
 /// `class_id == c_function` gates inside preflight / realm switch.
 /// `noinline` keeps NativeCallEnvironment / exec_direct spills out of the
-/// NMFD prologue (0x1c0→0x1d0 constitution lesson).
+/// NMFD prologue (0x1c0→0x1d0 constitution lesson). Cold section so this
+/// 0x334 body is not an NMFD neighbor (w35 13-member packing).
+const nmfd_term_section = switch (builtin.target.ofmt) {
+    .elf => ".text.zjs.nmfd_term",
+    else => ".text",
+};
+
 noinline fn callResolvedNativeMethodAssumeCFunction(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -758,7 +782,7 @@ noinline fn callResolvedNativeMethodAssumeCFunction(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
+) linksection(nmfd_term_section) !core.JSValue {
     return builtin_dispatch.callInternalRecordDirectAssumeCFunction(
         ctx,
         output,
