@@ -107,13 +107,15 @@ test "dense array writer readers retain their semantic guard class" {
         .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".fastArraySlotAssumeCapacity(index).* = value", .count = 1 },
         .{ .class = .prewalk_set, .source = object_ops_source, .needle = ".appendDenseArrayIndex(ctx.runtime,", .count = 1 },
         .{ .class = .already_walked_set, .source = object_source, .needle = "try self.defineOwnDataPropertyForSetKnownNoOwn(rt, atom_id, new_value);", .count = 1 },
-        .{ .class = .qjs_bulk_set, .source = array_ops_source, .needle = ".appendDenseArrayValues(ctx.runtime,", .count = 1 },
+        .{ .class = .qjs_bulk_set, .source = array_ops_source, .needle = ".appendFastArrayPushValues(rt,", .count = 1 },
         .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataPropertyUnchecked(ctx.runtime,", .count = 1 },
         .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
-        // shift, unshift and splice: the three dense bulk relocations that skip
-        // the per-index [[Set]]/[[Delete]] walk and therefore must prove the
-        // prototype chain carries no indexed property first.
-        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 3 },
+        // shift and unshift: dense bulk relocations that skip the per-index
+        // [[Set]]/[[Delete]] walk and therefore must prove the prototype chain
+        // carries no indexed property first. splice follows qjs
+        // js_array_splice (quickjs.c:43042-43047) and only consults
+        // can_extend_fast_array.
+        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 2 },
         .{ .class = .zjs_bulk_set, .source = object_source, .needle = "if (!arrayPrototypeChainAllowsBulkIndexedSet(proto))", .count = 3 },
     };
     for (readers) |reader| {

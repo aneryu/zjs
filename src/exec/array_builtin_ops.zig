@@ -177,7 +177,7 @@ pub const internal_entries = arrayEntries: {
         arrayEntry("copyWithin", 2, @intFromEnum(PrototypeMethod.copy_within)),
         arrayEntry("fill", 1, @intFromEnum(PrototypeMethod.fill)),
         arrayEntry("slice", 2, @intFromEnum(PrototypeMethod.slice)),
-        arrayEntry("splice", 2, @intFromEnum(PrototypeMethod.splice)),
+        arraySpliceEntry("splice", 2, @intFromEnum(PrototypeMethod.splice)),
         arrayEntry("join", 1, @intFromEnum(PrototypeMethod.join)),
         arrayEntry("concat", 1, @intFromEnum(PrototypeMethod.concat)),
         arrayEntry("reverse", 0, @intFromEnum(PrototypeMethod.reverse)),
@@ -199,11 +199,22 @@ fn arrayEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) 
 }
 
 fn arrayPushEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return arrayEntryWithHandler(name, length, id, &arrayPushCall);
+    var entry = arrayEntryWithHandler(name, length, id, &arrayPushCall);
+    // exec_direct: js_call_c_function (quickjs.c:17563) has no env
+    // side-channel. The NMFD assume terminal then blr's this ABI and
+    // skips TLS / typed-cproto / arrayPushCall (charCodeAt/apply shape).
+    entry.exec_direct = builtin_dispatch.execDirectFunction(&arrayPushDirect);
+    return entry;
 }
 
 fn arrayPopEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return arrayEntryWithHandler(name, length, id, &arrayPopCall);
+}
+
+fn arraySpliceEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    var entry = arrayEntryWithHandler(name, length, id, &arraySpliceCall);
+    entry.exec_direct = builtin_dispatch.execDirectFunction(&arraySpliceDirect);
+    return entry;
 }
 
 fn arrayEntryWithHandler(
@@ -231,12 +242,31 @@ fn genericMagicHandler(entry: core.host_function.InternalEntry) ?core.host_funct
 }
 
 test "Array.push has a dedicated native record handler" {
-    var push_call: ?core.host_function.NativeGenericMagicFn = null;
+    var found = false;
     for (internal_entries) |entry| {
-        if (entry.id == @intFromEnum(PrototypeMethod.push)) push_call = genericMagicHandler(entry);
+        if (entry.id != @intFromEnum(PrototypeMethod.push)) continue;
+        found = true;
+        try std.testing.expect(genericMagicHandler(entry).? == &arrayPushCall);
+        try std.testing.expect(entry.exec_direct != null);
+        try std.testing.expect(entry.exec_direct.? ==
+            builtin_dispatch.execDirectFunction(&arrayPushDirect));
+        try std.testing.expect(!entry.forwards_call);
     }
-    try std.testing.expect(push_call != null);
-    try std.testing.expect(push_call.? == &arrayPushCall);
+    try std.testing.expect(found);
+}
+
+test "Array.splice has a dedicated native record handler" {
+    var found = false;
+    for (internal_entries) |entry| {
+        if (entry.id != @intFromEnum(PrototypeMethod.splice)) continue;
+        found = true;
+        try std.testing.expect(genericMagicHandler(entry).? == &arraySpliceCall);
+        try std.testing.expect(entry.exec_direct != null);
+        try std.testing.expect(entry.exec_direct.? ==
+            builtin_dispatch.execDirectFunction(&arraySpliceDirect));
+        try std.testing.expect(!entry.forwards_call);
+    }
+    try std.testing.expect(found);
 }
 
 test "Array.pop has a dedicated native record handler" {
@@ -362,6 +392,107 @@ fn arrayPushCall(
         host_call.args,
         builtin_dispatch.callerBytecode(host_call),
         builtin_dispatch.callerFrame(host_call),
+    )) orelse error.TypeError;
+}
+
+fn arrayPushDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) builtin_dispatch.NativeBits {
+    // Hot arm returns NativeBits (x0+x1) like qjs JS_NewInt32. Miss/OOM
+    // falls through to the existing impl (ToObject + generic Set).
+    if (builtin_glue.qjsTryFastArrayPush(ctx.runtime, this_value, args)) |maybe_len| {
+        if (maybe_len) |new_len| return builtin_dispatch.nativeToBits(core.JSValue.int32(new_len));
+    } else |err| {
+        return builtin_dispatch.nativeFromHostError(ctx, global, err);
+    }
+    return builtin_dispatch.nativeFromHostResult(ctx, global, arrayPushDirectHost(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
+        caller_function,
+        caller_frame,
+    ));
+}
+
+fn arrayPushDirectHost(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    return (try builtin_glue.qjsArrayPushNativeRecord(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
+        caller_function,
+        caller_frame,
+    )) orelse error.TypeError;
+}
+
+fn arraySpliceCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
+    return (try builtin_glue.qjsArraySpliceNativeRecord(
+        host_call.ctx,
+        host_call.output,
+        realm.global,
+        host_call.this_value,
+        host_call.args,
+    )) orelse error.TypeError;
+}
+
+fn arraySpliceDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) builtin_dispatch.NativeBits {
+    _ = caller_function;
+    _ = caller_frame;
+    return builtin_dispatch.nativeFromHostResult(ctx, global, arraySpliceDirectHost(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
+    ));
+}
+
+fn arraySpliceDirectHost(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    return (try builtin_glue.qjsArraySpliceNativeRecord(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
     )) orelse error.TypeError;
 }
 

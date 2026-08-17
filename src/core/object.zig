@@ -10698,6 +10698,26 @@ pub const Object = extern struct {
         return true;
     }
 
+    /// qjs `js_array_push` store (quickjs.c:42776-42787). Caller already
+    /// proved `JS_CLASS_ARRAY && fast_array && can_extend_fast_array &&
+    /// length==count && writable` and `count + values.len <= INT32_MAX`.
+    /// No named-property scan: qjs writes `u.array.u.values` directly.
+    pub fn appendFastArrayPushValues(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
+        const added: u32 = @intCast(values.len);
+        const new_len = self.u.array.count + added;
+        if (new_len > self.u.array.capacity) {
+            try self.ensureArrayElementCapacity(rt, new_len);
+        }
+        var element_index: usize = @intCast(self.u.array.count);
+        for (values) |item| {
+            self.u.array.values[element_index] = item.dup();
+            element_index += 1;
+        }
+        self.setFastArrayCountAssumeCapacity(new_len);
+        if (new_len > self.u.array.length) self.u.array.length = new_len;
+        if (added != 0) self.markIndexedProperties(rt);
+    }
+
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
         std.debug.assert(self.isArray());
         std.debug.assert(self.u.array.count == 0);
