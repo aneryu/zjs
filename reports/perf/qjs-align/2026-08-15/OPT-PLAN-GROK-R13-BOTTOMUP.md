@@ -1175,3 +1175,11 @@ ba7e003e（段尾插入+45 腾槽墓碑）：EB 三 pad 同号 +0.48/+0.85/+0.84
 （红线解除）、四资产过、zlib cyc −110M；唯 mandreel pad3 −1.0% 单 pad 残留。
 按用户 pad 线封存令**不合**，归档为「基本过验收的现成布局刀」——重开布局线时
 仅需解决 mandreel pad3 一项。refill +12% 疑点保留（cyc/zoo 为尺）。
+
+## wave-46 裁决（2026-08-17，driver）：MERGED
+
+三刀包（fclosure 创建链 b33994d9+props 对齐 b4eb69dc+destroy 瘦尾 88a45d8e）。gate 全绿。
+三 pad：geomean +0.15/+0.19/+0.18% 同号；EB 1.0032-1.0089、splay 1.005-1.0082 双落后项
+三 pad 同号正；TS 平。**crypto 三 pad 同号 −0.16~−0.35%＝噪声地板擦碰**（余量 7pp），
+低于聚簇返工线一半，裁 MERGE 附终榜复核条款：官方榜 crypto <1.06 则做留一法拆账。
+TAKE 哨刀同日 REJECT（cyc 全平=OoO 吸收第四证）。
