@@ -1157,3 +1157,14 @@ w45R（纯 TA-as-proto [[Get]] 语义修）gate 全绿合入 main（与已测 d2
 三 pad 同号 +0.5~0.9pp 的实验记录封存候用（他日重开布局线时这是最佳起点）。
 火力集中布局无关单价刀族：出树创建链（pQ fclosure 刀候门+FW）+创建链二段
 （jsFunctionSetProperties/proto auto-init 对齐，pS 接）。
+
+## 十期开题：string 余量经济普查（2026-08-17，driver 收）
+
+命中率普查（concat-census 复活，全 zoo）：pdfjs 2.32M 独占追加、几何类仿真命中 99.11%、
+省 lhs 拷贝 6.85GB、上限 2.0-4.3G cyc≈本凳一半——**pdfjs 主矿定位**。splay 次矿 47.9%/~0.5G。
+关键发现：严格 rc==1 仅 20k 命中，池要求 rc≤3=z 追加路径 RC 编排多背瞬态引用（槽+dup），
+qjs add 编排先吃槽引用故天然 rc==1。刀形=①RC 编排对齐+②载荷几何类+原地臂（镜像 qjs
+malloc 余量经济；无 capacity 字段，H2 禁令维持；松弛定理改述为「slab 精确类生态」边界，
+字符串载荷单独改类不推翻该定理）。设计书派 pW。
+**Boyer 守恒同收**（98% 闭合）：可点名正桶=ctor 族 +160M（与 pW「Entry 税封条」相抵，
+派 pT 分解对账后定刀）+get_arg +35M；RC/GC z 信用 80-129M；其余全对位/地板。
