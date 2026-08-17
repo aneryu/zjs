@@ -123,3 +123,316 @@ deltablue 短 accessor 链（71% opcode）拿掉后两侧同 +85%，追平空间
 **解释台账已守恒闭合：赤字=分布式 dispatch/call 单位成本，无隐藏单点。**
 裁决材料 `DECISION-BRIEF-path-A-B.md` **携 R4 四表重呈（RE-SUBMITTED）**；
 裁决前唯一剩余路径 A 探针 = zlib per-opcode 分解（≤0.56pp，可选）。
+
+## 2026-08-15 战役日汇总（官方站位更新）
+
+实测 main@c2519a55（8 样 CPU19，absolute-c2519a55.json）：
+```
+geomean 0.9641（日初 0.9311 → +3.3pp）   达标 5/15
+```
+| 达标 | regexp 1.148 / code-load 1.115 / crypto 1.069 / **raytrace 1.068**（0.742→越线）/ navier 1.065 |
+|---|---|
+| 攻坚 | richards 0.981 / gbemu 0.974 / DB 0.952 / splay 0.944 / box2d 0.946 |
+| 深洞 | TS 0.886 / pdfjs 0.782 / EB 0.765 |
+| compute | zlib 0.925 / mandreel 0.933 |
+
+八包合入（w3 L1 群/w4 B+C/w5 L-1/w8 **S2=战役最大单刀**/w6b L1.2/w11 F1+K2/w12 F2+GC-mark）；
+七+包拒收皆有 insn 级归因（w7/w7b/w10/R16/B1/K1/w13）。
+机制定谳：compute=fetch fragmentation（architectural-with-mechanism，通道 #2 对症）；
+EB L1I=architectural-capacity（缩码勘察中）；⑦ teardown=architectural-final；
+pdfjs=rope 承重+入口形态双阻塞。
+**通道 #2 已开（用户裁）**：opcode-fusion v1 实施中（3 对，249-251）。
+现役工事：fusion v1／B2（终诊）／EB 三缝审计（hotcore-size/attach/TAKE-window）。
+
+## 2026-08-15 收官（终版实测 main@d9236521）
+
+```
+geomean 0.9711（日初 0.9311，单日 +4.0pp）   达标 6/15
+```
+达标：regexp 1.125 / code-load 1.109 / **raytrace 1.077**（0.742→越线带余量）/ navier 1.074 /
+crypto 1.067 / **richards 1.005**（v1b 送过线）。
+贴线：**DB 0.994**（差 0.6pp，明日第一目标）。
+全日 11 包合入 / 13 线拒收或收档（全程 insn 级归因）。
+通道 #2 opcode-fusion 两连胜（五对落袋：mandreel +2.5/DB +3.8/richards +2.4 三 pad 铁证）；
+!T 战役收官（W1+W3）；负定理群定案（Entry 几何/布局/teardown/capacity）。
+**明日纲要**：①DB 过线小刀；②融合扩展（槽位政策先裁：254-255 储备 vs using_* 回收）；
+③对冲模型续航评估（融合干涸后再议 IC——追平型 vs 超越型之辨已明确，IC 非必需品）；
+④明牌天花板三项（EB/pdfjs/splay）待完整实现型路线裁决。
+
+## 2026-08-15 夜间矿脉战役追账（终版 main@b784d81c）
+
+```
+geomean 0.9734（全日 0.9311→0.9734 = +4.2pp，十三包）  达标 6/15
+```
+夜间新增：wave-19（普查双刀：get_array_el2+putarr-append→gbemu +1.5/pdfjs +0.35）、
+wave-18b（shape 常量+add 溢出族→**splay +2.9/EB +2.2/TS +1.5**）。
+矿脉方法论定案：用户两次纠偏（挖 qjs 策略/真因）→穷尽分解（密度证伪/热臂更短/胶水更短/
+慢道单价平）→**命中率普查=产刀机**（5 刀 2 破案 1 排除）。
+X-89 REJECTED-REWORK 在途（折叠正确但 tail handler 未接现代快叶→7M 调用改道减速——
+接好即赢，明日头号）。冲刺带 DB 0.989/gbemu 0.987/splay 0.975 = 明日三过线候选。
+- wave-20 X-89 v2（7aacae4d）：接线修复成功（DB/richards 减速归零）、折叠零增益
+  （性能假设证伪：282M 收益系 qjs 形态自有）→ **按对齐价值合入，发射器 parity 100% 收官**。
+
+## 2026-08-15 最终收官（main@6a61951e，十五包）
+
+```
+geomean 0.9737（全日 0.9311→0.9737 = +4.3pp）   达标 7/15
+```
+三项当日越线：raytrace 1.056（晨 0.742）/richards 1.009/**gbemu 1.0015**（wave-21d 送线）。
+贴线：DB 0.9927。融合通道三连胜收官（六对在产：249-253+245/246/247）；
+wave-21 系列=归因互纠范本（driver 判 245、pQ 隔离矩阵翻案 247、v2.1b 修复 richards
+−3.1%→+0.7% 完全反转）。
+夜間追账：15 包合入/9 线拒收档（每案 insn 级归因）。
+明日：DB 0.7pp 过线（第 8 项）→splay/box2d/mandreel 融合延伸→EB/TS 守恒残段→
+pdfjs/zlib 结构裁决（用户）。
+
+## 2026-08-16 用户路线裁决（pdfjs / EB 两深沟）
+
+- **pdfjs 0.788：先 scoping spike**（3-5 天，只设计不动产线；必答四题=qjs 赢钱来源/
+  rope 消费者清单/资产哨矩阵/分段方案；负方案书也是合格产出）。简报
+  /tmp/lanes/BRIEF-PDFJS-SPIKE.md，首个空闲 lane 接。spike 报告回来用户终拍全面动工与否。
+- **EB 0.783：不开缩码战役**。容量墙（热体 426KB vs L1I 64KB，diet 天花板 50-70KB 不可闭）
+  诚实入账为结构阻塞；融合通道+通用刀群（P6-GROW/K-ret-slim 等）连带啃食，顶预估 ~0.85；
+  其余项清完后复盘。
+15/15 语义澄清：EB 现无已知 faithful 路线到 1.0——此项挂「结构阻塞待复盘」，
+战线主力转 DB/splay/box2d/mandreel/zlib/TS 六项可达段。
+
+## 2026-08-16 用户终拍：pdfjs 负方案书批准
+
+spike（pV）四题答案链采信：qjs 在 pdfjs 赢钱=native 前言 +121M（周期型，nexec 0/3 已证
+insn 不兑现）+分派地板；表示层仅部分解释 +53M；删绳/推迟建绳损 crypto、停 P1 反伤 pdfjs。
+**裁定：不存在资产安全的表示层全面对齐——pdfjs 与 EB 同列结构阻塞档**
+（预估顶 pdfjs ~0.79 / EB ~0.85）。资源全押六项可达段：DB/splay/box2d/mandreel/zlib/TS。
+通用刀（边界去帧族等）连带收益继续惠及两档案项。附：松弛定理升宪（concat+P6 两案）——
+qjs 靠 malloc bin 松弛的就地优化在 zjs slab 生态一律不可移植。
+
+## 2026-08-16 夜战收官（main@40e83160，十八包）
+
+```
+geomean 0.9801（0.9737→0.9801 = +0.64pp）   达标 8/15（DB 1.0018 越线）
+```
+三包连击：w22R fusion v3R（DB/splay 放置纪律）→ w24 shape 四刀+GC-ACCT（EB/TS/raytrace
+退税）→ w25 fusion v4R（**zlib +4.2pp 单夜最大**、mandreel +1.3）。gbemu 0.9990 擦线滑出
+（噪声距离，两次读数均在 ±0.15pp 带内）。融合通道五包在产；矩阵审判法两连功；
+「岛几何家族」五证据定形（放置/墓碑/克隆三防线入宪 #8/#9）。
+七攻坚位次：gbemu 0.10pp→splay 2.2→zlib 2.9→mandreel 3.7→box2d 4.7→TS 8.0→档案两项。
+
+## 2026-08-16 战役阶段收官（main@e17517f8，十九包）
+
+```
+geomean 0.9863（两夜 0.9737→0.9863 = +1.26pp）   达标 8/15（gbemu 回线归队）
+```
+本轮四包：w22R/w24/w25/w28 合入，w23/w26/w26R/w27 拒案全数入册。
+**两大终局裁决**：①融合通道六包收官（zlib 累计 +6pp 峰值，通道 #2 全程零违宪）；
+②去帧族负定理定案（四形证据链：边界 unusual 内联体=局部性承重墙）→
+**TS call+return 10.6G、box2d cyc 税正式归架构层**。
+七攻坚终分类：可达段=zlib 1.1pp/splay 1.7pp/mandreel 2.2pp；
+架构段=box2d/TS（faithful 刀不可达，需通道 #3 级新机制申报才可再攻）；
+档案段=EB/pdfjs（用户已裁）。15/15 需用户重定义或新机制通道。
+
+## 2026-08-16 用户裁决：目标重定义
+
+**新目标=可达段全过线：geomean ≥1.0 且 zlib/splay/mandreel 过线（含现有 8 项=11/15）。**
+架构段（box2d/TS）负定理封档长线保留；档案段（EB/pdfjs）维持原裁。
+终段部署：三项各派残差审计（zlib→pQ/splay→pW/mandreel→pT），审计→刀→wave 节奏。
+
+## 2026-08-16 用户终裁：战役收官
+
+三审计终局采信（splay 固有/mandreel IPC 弥散/zlib 半刀）：**faithful 域已开采至极限**，
+三项共同病根=分派密度弥散（musttail 每 op 一跳预测正确分支税，外提路负定理已封）。
+**裁定：zlib 末刀（leftover 链扩展）3-pad 合入后跑终版计分板定稿归档**；
+战役以 geomean ≈0.988、8-9/15 达标收官；负定理群/档案/审计全册留存；
+舰队转维护态；通道 #3（分派密度机制）保留重启权。
+
+## 🏁 2026-08-16 战役定稿（main@296a8c89，第二十包，faithful 战役收官）
+
+```
+终版：geomean 0.9852   达标 8/15
+deltablue 1.0024 / gbemu 1.0045 / richards 1.0061 / crypto 1.0593 / navier 1.0615 /
+raytrace 1.0757 / code-load 1.1102 / regexp 1.1218
+攻坚终位：zlib 0.9943（距线 0.57pp 历史最近）/ splay 0.9806 / mandreel 0.9801 /
+box2d 0.9471 / TS 0.9217 / EB 0.7929 / pdfjs 0.7926
+```
+全役跨度：0.9311/4 项（08-15 晨）→ 0.9852/8 项，**二十包合入、十余案拒收全数 insn 级归因**。
+资产：融合通道六包（zlib +6.6pp 累计）、shape/GC/put 刀群、放置纪律+墓碑宪法、
+负定理群（局部性承重墙四形/松弛定理两案/融合物理下限）、三终审计（splay 固有/
+mandreel IPC 弥散/zlib 半刀兑现）、deliberate non-align 首例、cyc 级守恒范式。
+**faithful 前沿宣告到达。** 重启点：通道 #3（分派密度机制）申报权保留。舰队维护态。
+
+## 2026-08-16 用户令：TAILCALL-DEEP 战役开启（深挖 tail-call，以此往上）
+
+触发=用户质疑「tail call 不应比单体差」+文献支持（CPython3.14/upb/wasm3 tail-call ≥
+computed-goto）+自有疑点（zlib 2.762G 分派 vs 2.576G 多余 br≈每 op 一条，仅 23% 点名）。
+**「架构段」三判（box2d/TS/mandreel+zlib 残）暂缓生效，待逐跳普查裁决翻案与否。**
+四线：pQ 预算模型（静态跳数×频次 vs 实测差）/pT 逐 op 双侧 disasm 走账/
+pW qjs 无跳惯用式审计（csel/ccmp）/pV 分派胶水解剖+musttail 寄存器预算。
+
+## 2026-08-16 TAILCALL-DEEP 首胜入账（main@fc29648d，第廿一包）
+
+```
+geomean 0.9874   达标 9/15（zlib 1.0273 过线=第 9 项）
+```
+用户「tail call 不应比单体差」质疑开启的翻案战役：胶水/repr 双洗清、preserve_none 缺口
+双实证收档（toolchain 前沿）、预算模型点名 gae/TA 主块→TA-GET 刀过线兑现。
+「zlib 残差=架构」原判部分推翻：class 分发缺失是可对齐项。wave-31（TA-PUT 三合一：
+写侧+GET 同形+navier 回收）候裁中——预计 zlib 冲 1.05/gbemu 加厚/navier 归位。
+
+## 2026-08-16 TAILCALL-DEEP 两连胜（main@8d6ae58c，第廿二包）
+
+```
+geomean 0.9994（距 1.0 = 0.06pp）   达标 9/15（DB 0.9990 抖动带）
+zlib 1.0817 / gbemu 1.0507 / mandreel 1.0471（新越线）
+```
+TA-GET+TA-PUT 两刀：class 分发对齐把三个「架构段」项打成厚资产——原「zlib/mandreel 残差
+=分派密度地板」判决大面积翻案（真相=数组 class 分发形未对齐）。用户质疑「tail call 不应
+比单体差」全面兑现。TA 残余普查在途（破 1.0 之刀候选）。
+
+## 🏆 2026-08-16 里程碑：10/15（main@c7770616，第廿四包）
+
+```
+geomean 0.9962（0.996-0.999 噪声带）   达标 10/15（DB 1.0045 回线）
+TAILCALL-DEEP 四刀四中：TA-GET（zlib 过线）/TA-PUT（mandreel 过线+本役最大单包）/
+ALIGN-ENTRIES（box2d/gbemu）/F-RETRIAL（box2d +2/TS +0.8/DB 回线，wave-6 灭链推翻）
+```
+用户四次纠偏全部兑现（挖 qjs 策略/真因非取巧/底优上劣/tail-call 不应更差）。
+战役自 0.9311/4 项起：**廿四包、达标 4→10、geomean +6.5pp**。
+剩余：box2d 4.3pp（G 帧域）/splay 2.3pp（⑦ 固有）/TS 7.4pp（call/return）/档案两项。
+守卫族卫星（add join +1×215M/get_var_ref0 TDZ+1×152M/put_array_el+2×71M）=下一捆候选。
+
+## 2026-08-16 用户令：三期 TAILCALL-COMPLETE（tail-call 彻底化）
+
+论点（用户「实现不彻底」）：zjs 仅 op 分派层 tail-call，调用边界仍原生递归
+（op_call bl 嵌套/op_return ret 回卷）+热径 bl→ret helper 往返——「架构段」全部命名税
+（G 0x3f0/TS call+return 10.6G/空调用 +17.7/call1 0x1c0）皆源于此。
+彻底形=全迭代：调用/返回=musttail 续行，VM 帧承载深度语义，原生递归仅留 native↔JS 边界。
+负定理不阻此路（非外提 unusual 体，是拆递归结构）。
+三线：P1 bl/ret 违纪普查（pS）；P2 平坦调用设计 spike（pQ，帧生命周期硬门全程）；
+P3 helper 续行形 spike（pV，upb fallback 链）。pT box2d 账/pW DB 账继续作输入。
+
+## 🏆 2026-08-16 历史性里程碑：geomean 首破 1.0（main@0778ca47，第廿九包）
+
+```
+geomean 1.0011   达标 9/15（DB 0.9969 抖动带）
+EB 0.806（hasinst +1.5pp）/pdfjs 0.813（K 捆 +0.7pp）——档案两项被正面刀撬动
+```
+全役自 0.9311 至今：廿九包、geomean +7.0pp、达标 4→9(10)。四期三包连落
+（w36 钉线捆/w37 EB 主矿/w38 pdfjs 首刀）。w39 捆池（trace+array+cmp-eq）候齐——
+TS/DB 双标的。
+
+## 2026-08-16 第三十包（main@45f8af29）：geomean 1.0050 新高
+
+w39 TS 三刀捆广谱兑现（navier 1.105/zlib 1.101 新高、richards 1.021、TS+DB 回升）。
+攻坚终位：DB 0.9993 抖动带/splay 1.85pp/box2d 4pp/TS 7.6pp/档案 EB 0.798+pdfjs 0.801。
+四期机器持续：L 捆（pdfjs ②二刀）候立、EB 几何回吐待收、TS 残段续走。
+
+## 2026-08-17 用户裁决：五期路线＝AB 并行
+
+A=通道 #3 分派形态机制（热路径超块/特化类通用机制，spike 先行、四条件逐审）——
+最大杠杆（box2d/TS/EB/残项同标的），负定理群为设计约束；
+B=native 协议瘦层（simple builtin ABI 分层重设计，设计书先行、分段落地）——pdfjs 心脏。
+C（preserve_none）维持封存；D 不采。w42 双尾刀并行收官 faithful 域。
+
+## 2026-08-17 用户裁决：EB 容量墙 = S3-B 关墙
+
+pS 材料（EB-CAPACITY-SCOPING）判明「容量墙」本体=L1I 工作集墙（handler 岛 185.7KB+助手 vs
+qjs JS_CallInternal 38.5KB 单体；refill 21.6×=139.8M vs 6.5M；FE +339M 为本墙周期上限）。
+布局三轮（L-1 合/L-1.5 拒/L-2 闭)已证只重排不缩体积无效。诚实预期：S3-A 密度战役满打
++3~5pp（0.83–0.85），叠形税残余 faithful 硬顶 ~0.87。
+**用户裁：S3-B 关墙**——architectural-capacity 入档，不立项、不平行刀、不把 22× 再当
+handler-section 缺口；EB 过线问题并入稍后「目标可达性」总裁决（候肥 op scoping 材料齐）。
+H2/P6 禁区重申：完整实现不得借 String capacity 字段或 adopt/reloc 就地扩当本墙刀形。
+
+## 2026-08-17 用户裁决：六期宪章 = IC 大额对冲立项
+
+五期收束：五落后项 faithful 封条齐（pdfjs 壳密度/EB L1I 墙/TS call-return/box2d BIN-IPC/
+splay ⑦ 固有），全 15≥1.0 现框不可达；对冲模型前提「融合通道先干涸」成立（#2 收官/#3 归档）。
+**用户裁：立项 inline-cache 类通用机制（大额对冲）**——JSC/V8 先例、qjs 无此机制、
+走 PERF-MECHANISM-LEDGER 四条件申报、spike 先行。属性访问同时打五落后项，是唯一
+能整体抬升的杠杆。「IC 超越型非必需」旧判语的适用前提（追平可由忠实域达成）已被
+五封条推翻，特此改判：IC 现为达标必需机制。
+纪律不变：不 bypass 用户可见语义（cache 只免查找不免语义、guard 必验 shape）、
+工作集纪律（EB L1I 墙教训：命中路径必须极短且不胀岛）、254/255 仍保全（优先位点表
+非 opcode 改写）、验收 3-pad cyc 主尺+资产哨。
+
+## 2026-08-17 用户裁决：七期宪章 = 自底向上分层差分・新机制候选普查
+
+IC 否证后用户裁「挖新机制候选」+「从底层往上对比」。七期=按层差分 z vs q 地基，
+每层产出「qjs 没有的机制」候选（四条件预筛+所需杀数据），driver 汇总排序递用户。
+筛选器（IC 尸检定理）：**候选必须缩短已有主路径或消灭既有税，禁止「旁挂带 miss 税的
+新路径」**（IC 死因=快臂已 2-3 cyc、差价付不起 miss/mega 税）。
+分层：L0 分配/局部性（pW）、L1 值表示（pQ，含 NaN-box 旧「红鲱鱼」判语复审——原判
+限定 apply/arguments 定价语境）、L2 对象模型/属性几何（pS，含 JSC 式 inline-slots 先例）、
+L3 RC/帧机器（pT，RC 流量普查+emit 期借用消除候选）。负定理群全数继续约束。
+
+## 2026-08-17 用户裁决：暂停「qjs 没有的新机制」；七期改向=自底向上忠实差异审计
+
+对冲/超越型机制候选全部暂停（IC 否证后用户令）。四层对比保留但产出改为：
+**每层 z vs q 实现级差异+税量化+对齐可行性**（对齐 qjs=忠实刀）。重点改向：
+L1 值表示——qjs 引用件实为 NaN-boxing uint64 走 x0（pdfjs 壳 walk 已证），z 是 16B tagged
+＝**代码实现级忠实偏离**，「repr 对齐」属忠实域非新机制（旧「红鲱鱼」判语限定语境待复审）；
+L2 改为 z vs q 属性存储几何差异（JSC inline-slots 暂停）；L0 局部性=q malloc 序 vs z slab 序
+的堆图局部性差（对齐分配序=忠实）；L3 RC 流量=z 比 q 多付的 RC 对（qjs borrow 纪律对齐=忠实）。
+
+## 2026-08-17 用户裁决：十期宪章 = string 余量经济对齐（全套批准）
+
+**松弛定理改述（宪法级）**：原「qjs malloc 松弛在 zjs slab 一律不可移植」收窄至证据边界
+——对象/Shape 精确类不可移植（P6-B 实验）；String 载荷（allocAlignedBytes 路径）单独改
+几何请求+usable 查询合法。H2 禁令（capacity 字段）维持——余量为分配隐式产物与 qjs 同形。
+三期：P1 RC 编排对齐 q（add_loc 借槽不 Dup，杀门=census rc1 24k→≥2.0M）→P2 String 几何类
++usable/destroy/记账（w24 条款：入出同式；对象 slab 哨=P6 官方 insn 不回退）→P3 原地臂
+镜像 JS_ConcatStringInPlace(4671)@add_loc(19770)。申报 pdfjs 1-2G cyc（上限 4.3G 不作承诺）。
+技术裁定（driver）：rc==1 严格禁 rc≤3；hash 就地后清零（超 qjs 一处防脏哈希，注记）；
+P1 独立可合。设计=/tmp/lanes/STRING-SLACK-DESIGN.md（pW）。
+
+## 2026-08-17 十期终局：string-slack REJECT-ARCHIVE（对称成本定理）
+
+QPIN 实证：pdfjs 2.32M 追加位点双引擎同 emit（get_loc+add+put_loc；add_loc 133=133），
+q 的 ConcatStringInPlace 在此形同样 rc≥2 不命中——**拷贝为对称成本，q 并未占优**。
+普查上限 2-4.3G 作废（仿真「若有余量」≠「q 实际赢」——镜像刀首问的又一判例：
+命中率普查必须同时验证 q 侧真实兑现）。P2/P3 REJECT；P1（RC 编排 q 形对齐，门绿零效）
+连同金丝雀留支 grok/string-slack@fad30cea 归档不合。松弛定理改述（String 载荷合法性）
+保留为宪法结论——只是本案无付款面。pdfjs 残差终归位：壳地板（491M 已钉）+IPC 弥散
++对称字符串成本（非差距项）。
+
+## 2026-08-17 收尾终章（main@9fdc0e23，官方 8 样本）
+
+**终榜：geomean 1.0141；达标 9/15（DB 0.9954 骑线摆动，历史带 0.997-1.005）。**
+五落后项终位：pdfjs 0.8141 / EB **0.8153**（日内 +1.7pp）/ TS 0.9443 / box2d 0.9668 /
+splay **0.9952**（日内 +1.2pp，destroy 瘦尾主受益）。crypto 1.0760（w46 复核条款过，
+无需留一法）。
+
+**九/十期战绩：** 合入 w42/43/44/45R/46 五波+两正确性修（Proxy [[Set]]/TA proto [[Get]]）；
+EB 重归因（出树 70%/Boyer 30%，99.6% 闭合）产刀三把落袋（fclosure 链/props 对齐/destroy
+瘦尾）；杀刀五把（instanceof/TYPED×2/TAKE/聚簇首刀）各附定理。
+**新定理入册：** IC 尸检（快臂 2-3 cyc 旁挂缓存必亏）；不可达定理（肥 op 窗）；对称成本
+定理（pdfjs 字符串拷贝 q 同付，普查须配 q 兑现验证）；单态副本=定价资产；OoO 吸收第四证；
+Entry→TAKE 归属改判；松弛定理改述（String 载荷合法）。
+**封存资产：** 聚簇刀 a5772141/ba7e003e（EB 三 pad +0.5~0.9pp，差 mandreel 单 pad）；
+string-slack P1 fad30cea（RC 编排 q 形）；preserve_none 前沿档。
+**剩余明牌（全持实验封条）：** pdfjs 壳地板+IPC；TS call/return；box2d BIN-IPC；
+splay ⑦（余 0.5pp 骑线）；EB 出树发数+H3 桩+精确 GC 根。全 15≥1.0 于现宪法框架无路径。
+
+## 2026-08-17 收尾清理记录（driver）
+
+**文档归档：** 46 份战役报告（归因/设计/封条/普查/刀报）自 /tmp/lanes 入库
+reports/perf/qjs-align/2026-08-17/；测量合同增补第 16 条（收益普查必须验证 q 侧真实兑现）。
+**worktree：** 267→1（全部过期战役现场移除+prune，dirty 者为七月已收官实验按令强制清）。
+**分支：** 236 删（162 已并入+40 死实验 grok/+34 integration·perf 过期线）；保留 13：
+main+四封存资产（grok/earley-cluster 聚簇刀/grok/string-slack P1/grok/eb-s1-hygiene 反证/
+grok/ic-p1-v2-archive IC 证据树）+八条早期谱系（ablate·archive·audit·diag·fix·compiler-v2-qjs）。
+**/tmp：** 流水线目录、pad 二进制、普查原始件全清（报告已入库，原始件过期）。
+仓库终态：main@干净、单 worktree、账本三册（PARITY/OPT-PLAN/MECHANISM）+合同 16 条完整。
+**stash：** 2 条 r11-closure 时代 WIP（k1b/k2）已清——该战线由 w46 fclosure 链刀正式取代。
+
+## 2026-08-17 二次清理记录（driver 亲执，grill-me 逐项裁决）
+
+**本地分支：** 12 条全数保留（用户裁决，含 fix/correctness-batch 三修复待验证——
+git cherry 证 main 无等价补丁：parser yield/await 重合法化/tail-call 栈预算/GC 重入门）。
+**远端：** 删 7——grok/align-fix、perf/qjs-align-phase-7（ahead=0 已全并入）+
+worktree-wf_* ×5（07-25 workflow 列车现场，VARREF-V3 ⛔no-go 在案；删前逐条打
+archive/worktree-wf_* 本地 tag，对象零丢失）。保留 wip/p6-04d2c、perf/call-cycle-final。
+**误提交物：** 仓库根 4MB aarch64 ELF `test`（06-21 随 40637676 扫入，无引用）git rm，
+.gitignore 锚定 `/test`；历史不重写（保 SHA 稳定）。
+**杂项：** __pycache__ ×4、.antigravitycli、.devin、.migration 残留配置清除；git gc 收缩。
+**明示不动：** .zig-cache/zig-out（用户留缓存）、.scratch、reports 归档、wip 与
+call-cycle-final 两远端。

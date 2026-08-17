@@ -3433,8 +3433,12 @@ test "js_function_set_properties publishes configurable length then name" {
         \\function namedPair(a, b) { return a; }
         \\var dlen = Object.getOwnPropertyDescriptor(namedPair, "length");
         \\var dname = Object.getOwnPropertyDescriptor(namedPair, "name");
+        \\var dproto = Object.getOwnPropertyDescriptor(namedPair, "prototype");
+        \\var dctor = Object.getOwnPropertyDescriptor(dproto.value, "constructor");
         \\globalThis.__r11_name_ok = (dlen.value === 2 && dlen.writable === false && dlen.enumerable === false && dlen.configurable === true
-        \\  && dname.value === "namedPair" && dname.writable === false && dname.enumerable === false && dname.configurable === true) ? 1 : 0;
+        \\  && dname.value === "namedPair" && dname.writable === false && dname.enumerable === false && dname.configurable === true
+        \\  && dproto.writable === true && dproto.enumerable === false && dproto.configurable === false
+        \\  && dctor.value === namedPair && dctor.writable === true && dctor.enumerable === false && dctor.configurable === true) ? 1 : 0;
     );
     setup.free(js.runtime);
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
@@ -5848,6 +5852,29 @@ test "typed array integer get uses class-id arm and qjs tag shape" {
         \\detached[0] = 9;
         \\detached.buffer.transfer();
         \\assert.sameValue(detached[0], undefined);
+    );
+    _ = result;
+}
+
+test "typed array prototype chain get reads canonical numeric indices" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // S1: TA-as-proto [[Get]] (PROTO-WALK-EXOTIC-AUDIT). qjs
+    // JS_GetPropertyInternal (quickjs.c:8296-8303) consults is_exotic+fast_array
+    // at every proto link, not only when the receiver is the TypedArray.
+    const result = try js.eval(
+        \\const ta = new Uint8Array([7, 8]);
+        \\const o = Object.create(ta);
+        \\assert.sameValue(o[0], 7);
+        \\assert.sameValue(o["0"], 7);
+        \\assert.sameValue(o[1], 8);
+        \\assert.sameValue(o[2], undefined);
+        \\assert.sameValue(0 in o, true);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(o, "0"), false);
+        \\assert.sameValue([7, 8][0], 7);
+        \\const fromArray = Object.create([7, 8]);
+        \\assert.sameValue(fromArray[0], 7);
     );
     _ = result;
 }
@@ -12013,6 +12040,46 @@ test "ordinary script entry points do not run full-heap cycle collection on exit
     try std.testing.expectEqual(@as(?i32, 3), canonical.asInt32());
     canonical.free(js.runtime);
     try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
+}
+
+test "IC-R1: delete then get_field is undefined after a prior hit" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function read(o) { return o.x; }
+        \\var o = { x: 1 };
+        \\var a = read(o);
+        \\var d = delete o.x;
+        \\var b = read(o);
+        \\o.x = 2;
+        \\var c = read(o);
+        \\print([a, d, typeof b, b, c].join("/"));
+    , &stream);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1/true/undefined//2\n", stream.buffered());
+}
+
+test "IC-P1: OrdinarySet forwards to a Proxy proto [[Set]] trap" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var called = false;
+        \\var recv;
+        \\var p = new Proxy({}, { set: function (t, k, v, r) { called = true; recv = r; return true; } });
+        \\var o = Object.create(p);
+        \\o.x = 1;
+        \\print([called, o === recv, Object.prototype.hasOwnProperty.call(o, "x")].join("/"));
+    , &stream);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true/true/false\n", stream.buffered());
 }
 
 test "Engine eval executes simple variable assignment and print" {

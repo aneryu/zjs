@@ -249,6 +249,28 @@ test "first named property allocates initial_prop_size slots" {
     object.value().free(rt);
 }
 
+test "plain object destroy slim frees two data slots and the value buffer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const car = try rt.internAtom("car");
+    defer rt.atoms.free(car);
+    const cdr = try rt.internAtom("cdr");
+    defer rt.atoms.free(cdr);
+
+    const baseline_objects = rt.gc.liveCount();
+    const pair = try core.Object.create(rt, core.class.ids.object, null);
+    try pair.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, car, core.JSValue.int32(1));
+    try pair.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, cdr, core.JSValue.int32(2));
+    try std.testing.expectEqual(@as(u32, 2), pair.shape_ref.prop_count);
+    try std.testing.expectEqual(core.class.ids.object, pair.class_id);
+    try std.testing.expectEqual(core.class.PayloadKind.none, pair.flags.class_payload_kind);
+    try std.testing.expectEqual(@as(u32, 0), pair.weakref_count);
+
+    pair.value().free(rt);
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
 test "proven object release preserves generic JSValue ownership semantics" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2962,6 +2984,44 @@ test "ordinary property delete publishes absence before synchronous finalizer re
     const after = try object.getProperty(key);
     defer after.free(rt);
     try std.testing.expect(after.isUndefined());
+}
+
+test "IC-R1: in-place delete mutates the shape Property word" {
+    // Guard load-bearing: IC compares the 8-byte Property record. In-place
+    // delete (unique shape, rc==1) must change that word without replacing
+    // shape*. Shared shapes clone first (shape* changes) — also a miss.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    defer object.value().free(rt);
+    const key = try rt.internAtom("ic_r1_field");
+    defer rt.atoms.free(key);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+
+    const index = object.findProperty(key) orelse return error.TestUnexpectedResult;
+    const shape_before = object.shape_ref;
+    const word_before: u64 = @bitCast(shape_before.props()[index]);
+    try std.testing.expect(shape_before.props()[index].atom_id == key);
+    try std.testing.expect(word_before != 0);
+
+    const unique = shape_before.header.meta().rc == 1;
+    try std.testing.expect(object.deleteProperty(rt, key));
+    try std.testing.expect(object.findProperty(key) == null);
+
+    const shape_after = object.shape_ref;
+    if (unique) {
+        try std.testing.expectEqual(shape_before, shape_after);
+        const word_after: u64 = @bitCast(shape_after.props()[index]);
+        try std.testing.expect(word_before != word_after);
+        try std.testing.expectEqual(core.atom.null_atom, shape_after.props()[index].atom_id);
+    } else {
+        try std.testing.expect(shape_before != shape_after);
+    }
+
+    const got = try object.getProperty(key);
+    defer got.free(rt);
+    try std.testing.expect(got.isUndefined());
 }
 
 test "regexp lastIndex set publishes replacement before synchronous finalizer reentry" {

@@ -82,3 +82,40 @@
 预计:      L1+L2 诚实中位 ~+0.5pp（2.53M×~150cyc≈0.38G，raytrace 0.777→0.82-0.90）。
 状态:      APPROVED-DESIGN；实施排队（EB 双刀+v11 之后）；前置=K 数据+D8 规格
 ```
+
+## 条目 #2：opcode-fusion（高频相邻 opcode 融合）— 2026-08-15 用户批准立项
+
+**动机**：取指碎片化墙（STALL-TAXONOMY §6：zlib/mandreel/box2d/gbemu br/insn +29~37%、
+FE stall 79%、五假设收敛）+ EB ⑤ 350M。faithful 镜像不可达（qjs 长 CASE 直线段是其形态红利）。
+
+**四条件申报**：
+1. **通用机制**：JSC/V8 均有先例（superinstruction/融合字节码）；qjs 自身有 get_field2 等
+   emit 期融合——本机制是同一思想的一般化。按**全 zoo 并集频次**选融合对（禁单基准拟合，
+   同 L-1.5 名单纪律）；融合对语义=顺序执行两 op，无形态特判。
+2. **用户码必执行**：融合不跳过任何用户可见操作，仅合并解释器分派边界。
+3. **可观察等价**：poll/interrupt 点保持（融合对内不得跨越 qjs 会 poll 的边界）；
+   异常/栈迹/调试行为逐位；test262 全量 + difftest 为 oracle。
+4. **zoo 验收**：三 pad（或 >2% 单 pad）常规流程；compute 四件套 + EB 为主判读，
+   全场无同号负为过线条件。
+
+**状态**：设计简报阶段（pQ）。opcode 槽位预算为设计第一约束（248 已用）。
+
+## 条目 #3：property-load-ic（2026-08-17 立项，六期宪章）
+
+先例：JSC get_by_id IC / V8 feedback / SM PIC；qjs 无对应物。四条件申报文=/tmp/lanes/IC-SPIKE.md
+（通用=全位点全 shape 禁基准拟合；用户码必执行=只免查找不免语义、guard 三比较每发必验；
+可观察等价=getter/proxy/exotic/delete/原型变更全走失效协议、own 数据 only、不缓存 JSValue；
+zoo 验收=3-pad cyc 主尺+四资产哨）。选型=内嵌 u16 site_id（get_field 5→7B）+FB 侧 32B 槽表，
+quickening 排除（254/255 保全）、pc sidecar 不取（命中路径更长）。命中臂目标 22/硬顶 28 insn
+（今日 47/qjs 51）、零 bl、零帧、岛体积不增（活代码缩短+墓碑填回 0x340）、walk 单份出岛表跳。
+可行性（pT 普查）：TS get_field mono 80.4%/box2d 94.1%/EB 100%、表 1.32MB、纸面 TS ~337M cyc。
+P0 主尺过；P1 金丝雀获批（driver 2026-08-17）。
+
+### 条目 #3 终局（2026-08-17）：REJECTED-ARCHIVE（实验否证）
+
+两发实施（首发 44/48 insn；瘦身 33 insn 含 cont=目标形已接）。终门 TS FW B/A=1.0123
+（A max<B min 区间不重叠）FAIL。根因非实现瑕疵而是经济结构：zjs 属性快臂已单探哈希
+≈2-3 cyc（F 刀信用、短于 qjs CASE），IC 命中差价太薄；miss/first-learn/mega 税+walk
+迁岛尾的远跳净负。纸面「10 cyc/hit 省」高估一档=本案主教训（纸面奖金必须用实测快臂
+单价折算，不用教科书中位）。证据树 grok/ic-p1-v2-archive@12611468。254/255 全程未占。
+抢救件：Proxy [[Set]] proto 走趟语义修复（main 既有洞）+IC-R1 delete 语义测试，独立合入。

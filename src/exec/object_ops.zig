@@ -422,20 +422,17 @@ inline fn resolveNestedClosureCell(
     cv: bytecode.function_bytecode.BytecodeClosureVar,
 ) !*core.VarRef {
     return switch (cv.closureType()) {
-        .local => blk: {
-            if (cv.var_idx >= frame.locals.len) return error.InvalidBytecode;
-            break :blk try frame.captureLocal(ctx.runtime, cv.var_idx);
-        },
-        .arg => blk: {
-            if (cv.var_idx >= frame.args.len) return error.InvalidBytecode;
-            break :blk try frame.captureArg(ctx.runtime, cv.var_idx);
-        },
+        // qjs js_closure2 LOCAL/ARG/REF/GLOBAL_REF (quickjs.c:17313-17325):
+        // direct `get_var_ref` / `cur_var_refs[idx]` with `ref_count++`. No
+        // production bounds return — finalize sized the windows.
+        .local => try frame.captureLocal(ctx.runtime, cv.var_idx),
+        .arg => try frame.captureArg(ctx.runtime, cv.var_idx),
         .ref => blk: {
-            try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
+            std.debug.assert(cv.var_idx < frame.var_refs.len);
             break :blk frame.var_refs[cv.var_idx].retain();
         },
         .global_ref => blk: {
-            if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
+            std.debug.assert(cv.var_idx < frame.var_refs.len);
             break :blk frame.var_refs[cv.var_idx].retain();
         },
         .global, .global_decl => try createGlobalClosureVarRef(ctx, global, cv),
@@ -510,13 +507,14 @@ fn createBytecodeFunctionObjectInternal(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     const fb = functionBytecodeFromValue(rooted_value) orelse return error.InvalidBytecode;
-    // Every callable created through this production choke point must carry a
-    // finalized, non-empty self-owned code view and its published extension.
-    // Structural fixtures may still attach through the lower-level Object API,
-    // but they are not valid executable artifacts.
-    if (!fb.hasExtension() or fb.byte_code == null or fb.byte_code_len <= 0) return error.InvalidBytecode;
-    const realm = fb.realmContext() orelse return error.InvalidBytecode;
-    if (realm != ctx or realm.global != global or ctx.global != global) return error.InvalidBytecode;
+    // qjs `js_closure` (quickjs.c:17369-17417) does not re-validate the
+    // finalized bytecode or Realm identity: `JS_VALUE_GET_PTR` +
+    // `JS_NewObjectClass(func_kind_to_class_id[b->func_kind])`. Finalize
+    // already published the extension and bound the Realm; Debug/Safe still
+    // assert so a fixture cannot silently enter the production object.
+    std.debug.assert(fb.hasExtension() and fb.byte_code != null and fb.byte_code_len > 0);
+    const realm = fb.realmContext().?;
+    std.debug.assert(realm == ctx and realm.global == global and ctx.global == global);
     const class_id = bytecodeFunctionClassId(fb);
     const function_prototype = try bytecodeFunctionPrototypeForRealm(ctx, realm, class_id, fb.functionKind());
     // length + name (+ lazy prototype later). qjs NewObjectClass then
@@ -531,39 +529,44 @@ fn createBytecodeFunctionObjectInternal(
     try object.setFunctionBytecodeValue(ctx.runtime, owned_bytecode);
     try attachFunctionCaptures(ctx, global, fb, object, capture_source);
 
-    // qjs js_closure publishes ordinary function properties only after
-    // js_closure2 has attached the complete capture array (qjs:17391-17392).
-    const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
+    // qjs js_closure (17388-17392): `name_atom = b->func_name;` then
+    // `if (name_atom == JS_ATOM_NULL) name_atom = JS_ATOM_empty_string;` —
+    // no atom-table `kind()` probe on the create hot path.
+    const effective_name = if (fb.func_name != core.atom.ids.empty_string)
         fb.func_name
-    else if (ctx.runtime.atoms.kind(name_fallback) != null)
-        name_fallback
     else
-        core.atom.ids.empty_string;
+        name_fallback;
     try jsFunctionSetProperties(ctx.runtime, object, effective_name, fb.defined_arg_count);
 
     return object.value();
 }
 
-/// qjs `js_function_set_properties` (quickjs.c:5853-5861): length then name,
-/// both CONFIGURABLE only. Fresh bytecode function — assume-new, no
-/// objectHasNonEmptyName probe.
+/// qjs `js_function_set_properties` (quickjs.c:5853-5861):
+/// `JS_DefinePropertyValue(length, NewInt32, CONFIGURABLE)` then
+/// `JS_DefinePropertyValue(name, JS_AtomToString, CONFIGURABLE)`.
+/// Fresh bytecode function — CreateProperty miss → add_property, no
+/// Descriptor round-trip and no objectHasNonEmptyName probe.
 fn jsFunctionSetProperties(
     rt: *core.JSRuntime,
     object: *core.Object,
     name_atom: core.Atom,
     length: i32,
 ) HostError!void {
-    try object.defineOwnPropertyAssumingNew(
+    const configurable = comptime core.property.Flags.data(false, false, true);
+    try object.defineOwnDataValueAssumingNew(
         rt,
         core.atom.ids.length,
-        core.Descriptor.data(core.JSValue.int32(length), false, false, true),
+        core.JSValue.int32(length),
+        configurable,
     );
-    const name_value = try functionNameValueFromAtom(rt, name_atom, null);
-    defer name_value.free(rt);
-    try object.defineOwnPropertyAssumingNew(
+    // qjs JS_AtomToString: dup the atom's string body. Prefix / public-Symbol
+    // composition is JS_DefineObjectName, not this helper.
+    const name_value = try rt.atoms.toStringValueForPush(rt, name_atom);
+    try object.defineOwnDataValueAssumingNew(
         rt,
         core.atom.ids.name,
-        core.Descriptor.data(name_value, false, false, true),
+        name_value,
+        configurable,
     );
 }
 
@@ -585,7 +588,15 @@ fn installOrdinaryFunctionPrototype(
         // placeholder; the prototype object + its `constructor` back-ref are
         // materialized only when `.prototype` is first observed or the
         // function is constructed.
-        try object.defineFunctionPrototypeAutoInit(ctx.runtime, core.property.Flags.data(true, false, false));
+        // qjs js_closure (17312-17415): JS_SetConstructorBit then
+        // JS_DefineAutoInitProperty(PROTOTYPE, WRITABLE) with the creating
+        // ctx. zjs constructability is FB hasPrototype∧normal (no object
+        // bit); the autoinit install still dups that same ctx as realm.
+        try object.defineFunctionPrototypeAutoInit(
+            ctx.runtime,
+            ctx,
+            comptime core.property.Flags.data(true, false, false),
+        );
         return;
     }
 
@@ -3984,6 +3995,16 @@ noinline fn getSlowPropertyValueFromObject(
     if (object.class_id == core.class.ids.proxy) {
         return try getProxyProperty(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
     }
+    // qjs JS_GetPropertyInternal after find_own miss: `is_exotic && fast_array`
+    // (quickjs.c:8296-8316). TypedArray elements never occupy a shape slot, so
+    // this arm is independent of whether `object` is the original receiver —
+    // a proto-chain TypedArray must still answer canonical numeric indices
+    // (in-range load, OOB / non-canonical numeric → undefined) before the
+    // walk continues. Receiver-side `getValueProperty` already has the same
+    // call; HAS's proto walk has `typedArrayCanonicalHas`.
+    if (core.object.isTypedArrayObject(object)) {
+        if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
+    }
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
@@ -4020,6 +4041,12 @@ pub fn getSuperPropertyValue(
                 .data => return desc.value.dup(),
                 .generic => {},
             }
+        }
+        // Same GetInternal exotic arm as `getSlowPropertyValueFromObject`
+        // (quickjs.c:8296-8316): super starts the walk at the home proto, so
+        // a TypedArray on that chain must still supply canonical indices.
+        if (core.object.isTypedArrayObject(object)) {
+            if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
         }
         current = object.getPrototype();
     }

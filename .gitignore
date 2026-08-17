@@ -1,5 +1,8 @@
 .zig-cache/
 zig-out/
+# Stray root-level test binary (accidentally committed once; root-anchored so
+# test262/ and tests/ are unaffected)
+/test
 .DS_Store
 parsers/
 .devin/

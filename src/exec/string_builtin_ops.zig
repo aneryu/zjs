@@ -88,7 +88,7 @@ pub const internal_entries = stringEntries: {
         stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end)),
         stringEntry("split", 2, @intFromEnum(PrototypeMethod.split)),
         stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of)),
-        stringDirectEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall),
+        stringExecDirectEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall, &stringCharCodeAtDirect),
         stringDirectEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall),
         stringDirectEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall),
         stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice)),
@@ -159,6 +159,20 @@ fn genericMagicHandler(entry: core.host_function.InternalEntry) ?core.host_funct
         .generic_magic => |handler| handler,
         else => null,
     };
+}
+
+test "String.charCodeAt uses exec_direct and a dedicated handler" {
+    var found = false;
+    for (internal_entries) |entry| {
+        if (entry.id != @intFromEnum(PrototypeMethod.char_code_at)) continue;
+        found = true;
+        try std.testing.expect(genericMagicHandler(entry).? == &stringCharCodeAtCall);
+        try std.testing.expect(entry.exec_direct != null);
+        try std.testing.expect(entry.exec_direct.? ==
+            builtin_dispatch.execDirectFunction(&stringCharCodeAtDirect));
+        try std.testing.expect(!entry.forwards_call);
+    }
+    try std.testing.expect(found);
 }
 
 test "String.fromCharCode uses exec_direct and a dedicated handler" {
@@ -351,11 +365,14 @@ fn stringFromCharCodeDirect(
     args: []const core.JSValue,
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
-) HostError!core.JSValue {
+) builtin_dispatch.NativeBits {
     _ = this_value;
     _ = caller_function;
     _ = caller_frame;
-    return string_ops.qjsStringFromCharCode(ctx, output, global, args) catch |err| return @as(HostError, @errorCast(err));
+    const result = string_ops.qjsStringFromCharCode(ctx, output, global, args) catch |err| {
+        return builtin_dispatch.nativeFromHostError(ctx, global, @as(HostError, @errorCast(err)));
+    };
+    return builtin_dispatch.nativeToBits(result);
 }
 
 fn stringFromCharCodeCall(
@@ -371,6 +388,79 @@ fn stringFromCharCodeCall(
         break :blk realm.global;
     } else host_call.global orelse return error.TypeError;
     return string_ops.qjsStringFromCharCode(host_call.ctx, host_call.output, global, host_call.args) catch |err| return @as(HostError, @errorCast(err));
+}
+
+fn stringCharCodeAtDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) builtin_dispatch.NativeBits {
+    return builtin_dispatch.nativeFromHostResult(ctx, global, stringCharCodeAtDirectHost(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
+        caller_function,
+        caller_frame,
+    ));
+}
+
+inline fn stringCharCodeAtDirectHost(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    const host_call = NativeCall{
+        .ctx = ctx,
+        .callable_realm = null,
+        .output = output,
+        .global = global,
+        .globals = &.{},
+        .func_obj = null,
+        .this_value = this_value,
+        .args = args,
+        .magic = @intFromEnum(PrototypeMethod.char_code_at),
+        .is_constructor = false,
+        .new_target = null,
+        .caller_function = caller_function,
+        .caller_frame = caller_frame,
+    };
+    if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
+    // Do not bounce through `qjsStringPrototypeMethod` / `callStringBody`:
+    // that re-enters this record's exec_direct with a null func_obj and
+    // raises InvalidBuiltinRegistry. Coerce with the explicit ABI instead.
+    const string_value = string_ops.toStringCheckObject(
+        ctx,
+        output,
+        global,
+        this_value,
+        caller_function,
+        caller_frame,
+    ) catch |err| return @as(HostError, @errorCast(err));
+    defer if (!this_value.isString()) string_value.free(ctx.runtime);
+    if (string_value.ropeBody()) |node| {
+        _ = node.flatten() catch |err| return @as(HostError, @errorCast(err));
+    }
+    const idx: i64 = if (args.len == 0)
+        0
+    else if (stringPrimitiveInt32Sat(args[0])) |index|
+        index
+    else blk: {
+        const numeric = builtin_glue.toNumberLikeArgument(ctx, output, global, args[0]) catch |err| return @as(HostError, @errorCast(err));
+        break :blk stringPrimitiveInt32Sat(numeric) orelse return error.TypeError;
+    };
+    const len: i64 = @intCast(core.string.stringValueLenUnchecked(string_value));
+    if (idx < 0 or idx >= len) return core.JSValue.float64(std.math.nan(f64));
+    return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx)));
 }
 
 fn stringCharCodeAtCall(

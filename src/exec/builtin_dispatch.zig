@@ -18,6 +18,59 @@ const HostError = exceptions.HostError;
 
 var empty_realm_globals: [0]core.global_slots.Slot = .{};
 
+/// Native-chain return. 16B, AAPCS64 x0+x1. Failure iff tag==exception
+/// and rt.current_exception is set (throwValue already does both).
+/// Mirrors qjs JS_EXCEPTION / JS_IsException (quickjs.c:294).
+pub const NativeValue = core.JSValue;
+
+/// Integer overlay for the noinline assume terminal. Zig's auto ABI srets
+/// the 16B extern `JSValue`; a same-width unsigned int returns in x0+x1.
+pub const NativeBits = std.meta.Int(.unsigned, @bitSizeOf(core.JSValue));
+
+pub inline fn nativeToBits(v: NativeValue) NativeBits {
+    return @bitCast(v);
+}
+
+pub inline fn nativeFromBits(b: NativeBits) NativeValue {
+    return @bitCast(b);
+}
+
+pub inline fn nativeOk(v: core.JSValue) NativeValue {
+    return v;
+}
+
+pub inline fn nativeExc() NativeValue {
+    return core.JSValue.exception();
+}
+
+/// Debug/ReleaseSafe: isException() iff ctx.hasException().
+pub inline fn nativeIsExc(ctx: *core.JSContext, v: NativeValue) bool {
+    const exc = v.isException();
+    std.debug.assert(exc == ctx.hasException());
+    return exc;
+}
+
+/// Leaf/helper-boundary adapter only. Must not appear as the NMFD↔assume ABI.
+/// Returns NativeBits so the caller does not allocate a JSValue sret slot.
+/// noinline: keep materialize / Error construction out of the assume prologue.
+pub noinline fn nativeFromHostError(ctx: *core.JSContext, global: ?*core.Object, err: anytype) NativeBits {
+    materializeRuntimeError(ctx, global, err) catch {};
+    return nativeToBits(nativeExc());
+}
+
+/// Reconstruct the host sentinel at a !JSValue receive. Uncatchable interrupt
+/// keeps `error.Interrupted` (materialize already left the prebuilt pending
+/// InternalError); every other native failure is `error.JSException`.
+pub inline fn nativeHostError(ctx: *core.JSContext) HostError {
+    if (ctx.exceptionIsUncatchable()) return error.Interrupted;
+    return error.JSException;
+}
+
+inline fn nativeAsHostResult(ctx: *core.JSContext, v: NativeValue) HostError!core.JSValue {
+    if (nativeIsExc(ctx, v)) return nativeHostError(ctx);
+    return v;
+}
+
 pub const Bytecode = bytecode.FunctionBytecode;
 pub const Frame = frame_mod.Frame;
 
@@ -141,7 +194,17 @@ pub const ExecDirectCallFn = *const fn (
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
-) HostError!core.JSValue;
+) NativeBits;
+
+/// Leaf-boundary adapter: HostError!JSValue → NativeBits (x0+x1).
+pub inline fn nativeFromHostResult(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    result: HostError!core.JSValue,
+) NativeBits {
+    const value = result catch |err| return nativeFromHostError(ctx, global, err);
+    return nativeToBits(value);
+}
 
 /// Registration-side eraser for `InternalEntry.exec_direct`: taking the
 /// pointer through this helper is the only sanctioned way to populate the
@@ -387,16 +450,30 @@ pub inline fn callInternalRecordDirectAssumeCFunction(
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
-) HostError!core.JSValue {
-    try preflightCFunctionCallAssumeCFunction(ctx, global, func_obj, record.length);
-    const realm = func_obj.nativeFunctionRealmAssumeCFunction() orelse return error.InvalidBuiltinRegistry;
-    const realm_global = realm.global orelse return error.InvalidBuiltinRegistry;
-    return callInternalRecordDirectWithEnvironment(.{
+) NativeValue {
+    preflightCFunctionCallAssumeCFunction(ctx, global, func_obj, record.length) catch |err| {
+        return nativeFromBits(nativeFromHostError(ctx, global, err));
+    };
+    const realm = func_obj.nativeFunctionRealmAssumeCFunction() orelse
+        return nativeFromBits(nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry));
+    const realm_global = realm.global orelse
+        return nativeFromBits(nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry));
+    const view: FinalCallEnvironment = .{
         .ctx = realm,
         .global = realm_global,
         .globals = empty_realm_globals[0..],
         .callable_realm = .{ .realm = realm, .global = realm_global },
-    }, output, func_obj, this_value, record, args, caller_function, caller_frame);
+    };
+    // Stay on NativeValue through the exec_direct terminal so assume does not
+    // re-wrap a 24B error union for NMFD (qjs js_call_c_function returns
+    // JSValue in x0+x1). The typed/env path is not the NMFD hot arm.
+    if (record.exec_direct) |direct_ptr| {
+        return callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
+    }
+    const result = callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame) catch |err| {
+        return nativeFromBits(nativeFromHostError(view.ctx, view.global, err));
+    };
+    return nativeOk(result);
 }
 
 /// Final C-function terminal for a dispatcher that already loaded the record
@@ -439,7 +516,10 @@ inline fn callInternalRecordDirectWithEnvironment(
     // establishes its own environment first, so the skipped restore cannot
     // leak a stale view.
     if (record.exec_direct) |direct_ptr| {
-        return callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
+        return nativeAsHostResult(
+            view.ctx,
+            callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame),
+        );
     }
     // QuickJS links a JSStackFrame around every C function call. Use the same
     // active-frame chain as bytecode invocations so an error created inside a
@@ -491,7 +571,10 @@ pub fn callResolvedExecDirect(
 ) HostError!core.JSValue {
     try preflightCFunctionCall(ctx, global, func_obj, formal_length);
     const view = try finalCallEnvironment(ctx, global, empty_realm_globals[0..], func_obj);
-    return callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
+    return nativeAsHostResult(
+        view.ctx,
+        callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame),
+    );
 }
 
 /// Direct-ABI record terminal: same native backtrace frame and error
@@ -506,15 +589,12 @@ inline fn callExecDirectRecord(
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
-) HostError!core.JSValue {
+) NativeValue {
     var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
     native_scope.push();
     defer native_scope.deinit();
 
-    return invokeExecDirectRecord(view, output, this_value, direct_ptr, args, caller_function, caller_frame) catch |err| {
-        try materializeRuntimeError(view.ctx, view.global, err);
-        return err;
-    };
+    return invokeExecDirectRecord(view, output, this_value, direct_ptr, args, caller_function, caller_frame);
 }
 
 inline fn invokeExecDirectRecord(
@@ -525,13 +605,15 @@ inline fn invokeExecDirectRecord(
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
-) HostError!core.JSValue {
+) NativeValue {
     // Same authority gate as `callableRealm`: a synthetic invocation without
     // a callable carrier reports the identical registry error the env-path
     // handler would raise after its `nativeCall` recovery.
-    const realm_view = view.callable_realm orelse return error.InvalidBuiltinRegistry;
+    // Leaves return NativeBits (x0+x1). Registry miss still adapts here.
+    const realm_view = view.callable_realm orelse
+        return nativeFromBits(nativeFromHostError(view.ctx, view.global, error.InvalidBuiltinRegistry));
     const direct: ExecDirectCallFn = @ptrCast(@alignCast(direct_ptr));
-    return direct(realm_view.realm, output, realm_view.global, this_value, args, caller_function, caller_frame);
+    return nativeFromBits(direct(realm_view.realm, output, realm_view.global, this_value, args, caller_function, caller_frame));
 }
 
 inline fn invokeResolvedInternalRecord(
