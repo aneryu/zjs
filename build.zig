@@ -151,7 +151,7 @@ pub fn build(b: *std.Build) void {
     // Pinned Debug: internal_dev_mod (zjs-dev, run-test262-dev).
     const engine_options_dev = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
 
-    const engine_mod = b.addModule("quickjs_zig_engine", .{
+    const engine_mod = b.addModule("zjs", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -888,7 +888,6 @@ pub fn build(b: *std.Build) void {
     const scoped_test_options = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
     scoped_test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
     scoped_test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
-    unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
     const run_unified_tests = b.addRunArtifact(unified_tests);
