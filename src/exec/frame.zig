@@ -696,16 +696,23 @@ pub const Frame = struct {
         table.closeAll(rt);
     }
 
-    /// qjs `get_var_ref` (quickjs.c:17021-17025): if this frame already has an
-    /// open cell for the captured slot, `ref_count++` and return it. Only the
-    /// first capture of a given local/arg walks `createOpen`.
+    /// qjs `get_var_ref` (quickjs.c:16997-17039): `assert(vd->is_captured)`,
+    /// `assert(var_ref_idx < b->var_ref_count)`, then reuse `sf->var_refs[i]`
+    /// or `js_malloc` a new open cell. Production qjs (NDEBUG) has no bounds
+    /// returns; keep the same contract so fclosure fill is not a three-check
+    /// error path per capture.
     pub fn captureLocal(self: *Frame, rt: anytype, local_idx: usize) !*core.VarRef {
-        if (local_idx >= self.locals.len or local_idx >= self.function.varDefs().len) return error.InvalidBytecode;
+        std.debug.assert(local_idx < self.locals.len);
+        std.debug.assert(local_idx < self.function.varDefs().len);
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             if (core.VarRef.fromValue(self.locals[local_idx]) != null) return error.InvalidBytecode;
         }
-        const binding_idx = self.function.localOpenBindingIndex(local_idx) orelse return error.InvalidBytecode;
+        const binding_idx = self.function.localOpenBindingIndex(local_idx).?;
         const index: usize = binding_idx;
+        // Mapped-arguments / fixture frames may be shorter than the captured
+        // slot's var_ref_idx (exec.zig "missing open-ref storage"). qjs
+        // get_var_ref asserts this; zjs must still fail closed as
+        // InvalidBytecode so the slot is not cellified.
         if (index >= self.open_var_refs.len) return error.InvalidBytecode;
         if (self.open_var_refs[index]) |cell| {
             if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
@@ -723,12 +730,14 @@ pub const Frame = struct {
     }
 
     pub fn captureArg(self: *Frame, rt: anytype, arg_idx: usize) !*core.VarRef {
-        if (arg_idx >= self.args.len) return error.InvalidBytecode;
+        std.debug.assert(arg_idx < self.args.len);
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             if (core.VarRef.fromValue(self.args[arg_idx]) != null) return error.InvalidBytecode;
         }
-        const binding_idx = self.function.argOpenBindingIndex(arg_idx) orelse return error.InvalidBytecode;
+        const binding_idx = self.function.argOpenBindingIndex(arg_idx).?;
         const index: usize = binding_idx;
+        // See captureLocal: arguments-object construction rejects a missing
+        // open-ref window instead of asserting (exec.zig mapped-args fixture).
         if (index >= self.open_var_refs.len) return error.InvalidBytecode;
         if (self.open_var_refs[index]) |cell| {
             if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
