@@ -731,6 +731,47 @@ pub const JSValue = extern struct {
         }
     }
 
+    /// Property-slot release from `Object.destroyPlainObjectFast`.
+    ///
+    /// The caller has already proved `gc.phase` is neither `.deinit` nor
+    /// `.remove_cycles` (the fast-arm gate in `destroyFromHeader`). That
+    /// matches `free_property` → `JS_FreeValueRT` (quickjs.c:6111 / 697-704):
+    /// the decrement does not reload phase. An object last-ref goes straight
+    /// to the zero-ref queue (`__JS_FreeValueRT` 6471-6483) instead of hopping
+    /// through `JSValue.destroyZeroRef` + `gc.destroyZeroRef`.
+    pub inline fn freeFromPlainObjectDestroy(self: JSValue, rt: anytype) void {
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
+            const hdr = self.refCountWordAssumeRefCounted();
+            std.debug.assert(hdr.rc > 0);
+            hdr.rc -= 1;
+            if (hdr.rc != 0) return;
+            if (p == NanBox.prefixOf(Tag.object)) {
+                // Keep the queue/drain body out of destroyFromHeader
+                // (qjs __JS_FreeValueRT is a separate symbol, 6432).
+                @call(.never_inline, gc.Registry.enqueueZeroRef, .{
+                    &rt.gc, rt, self.refHeaderAssumeObject(),
+                });
+                return;
+            }
+            self.destroyZeroRef(rt);
+            return;
+        }
+        if (!self.requiresRefCount()) return;
+        const hdr = self.refCountWordAssumeRefCounted();
+        std.debug.assert(hdr.rc > 0);
+        hdr.rc -= 1;
+        if (hdr.rc != 0) return;
+        if (self.tagOf() == Tag.object) {
+            @call(.never_inline, gc.Registry.enqueueZeroRef, .{
+                &rt.gc, rt, self.refHeaderAssumeObject(),
+            });
+            return;
+        }
+        self.destroyZeroRef(rt);
+    }
+
     /// Read a 16-byte JSValue slot as two 64-bit integer loads (identity under
     /// the nan-boxed 8-byte repr). Hot property/operand slots are written and
     /// read across handlers as 64-bit integer halves; letting LLVM lower either

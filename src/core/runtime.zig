@@ -1425,7 +1425,13 @@ pub const JSRuntime = struct {
     /// Thread ownership is a safe-build assertion only, mirroring the register
     /// side (qjs `remove_gc_object` has no thread check either).
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
-        std.debug.assert(self.isOwnerThread());
+        // qjs remove_gc_object (quickjs.c:6548) has no thread check. The
+        // comment above says this is a safe-build assertion only;
+        // `std.debug.assert(self.isOwnerThread())` still evaluates gettid
+        // in ReleaseFast because the syscall is not pure. Gate the call.
+        if (comptime std.debug.runtime_safety) {
+            std.debug.assert(self.isOwnerThread());
+        }
         if (builtin.mode == .Debug) {
             // Catch any future payload finalizer that re-registers mid-teardown.
             if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);

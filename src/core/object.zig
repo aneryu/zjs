@@ -3272,18 +3272,24 @@ pub const Object = extern struct {
         const old_shape_props = object_shape.props()[0..@min(object_shape.prop_count, old_properties.len)];
         self.prop_values = @ptrFromInt(@alignOf(property.Entry));
         for (old_properties, 0..) |entry, index| {
-            const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
-            if (entry_flags.isData()) {
-                entry.slot.data.free(rt);
+            // qjs free_property (quickjs.c:6097-6113): data arm is !TMASK.
+            // kind==data && !deleted is bits 3..5 == 0 (TMASK in 3-4, deleted in 5).
+            const raw_flags: u6 = if (index < old_shape_props.len) old_shape_props[index].flags else 0;
+            if (raw_flags & 0b111000 == 0) {
+                entry.slot.data.freeFromPlainObjectDestroy(rt);
                 continue;
             }
+            const entry_flags = property.Flags.fromBits(raw_flags);
             if (entry_flags.deleted) continue;
             const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
-        @call(.never_inline, shape.Registry.release, .{ &rt.shapes, object_shape });
-        self.shape_ref = finalizingShape();
+        // js_free_shape (quickjs.c:5320-5325): --rc, last-ref outlined.
+        rt.shapes.release(object_shape);
+        // No finalizer on this arm (qjs 6365-6367 is NULL for JS_CLASS_OBJECT).
+        // qjs still writes shape=NULL as a fail-safe before the callback; the
+        // allocation is about to be freed, so the tombstone would be a dead store.
         if (rt.cached_iterator_next_entries.len != 0) {
             @call(.never_inline, Object.clearCachedIteratorNext, .{ self, rt });
         }
