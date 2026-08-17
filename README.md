@@ -1,232 +1,96 @@
 # zjs
 
-`zjs` is a source-aligned Zig rewrite of QuickJS. QuickJS remains the semantic
-reference, while this repository keeps the active validation profile in the
-root `test262` checkout and fixture snapshots under `tests/fixtures/`.
+A Zig-native JavaScript engine, source-aligned with QuickJS.
+Embed JS in Zig with an explicit runtime, context, and value API.
 
-This is a Production v1 Candidate. It has reached production-grade maturity for
-its targeted validation profile and Zig-native embedded runtime use cases, but
-it is not a general-purpose drop-in replacement for Node.js, Deno, or the
-QuickJS C API outside its specified API surface.
+## Highlights
 
-## Status
+**Zig-first embedding.** Create a runtime, eval a script, free the result:
 
-Authoritative status (test262, performance, and gates) is in STATUS.md and COMPATIBILITY.md.
+```zig
+const zjs = @import("zjs");
 
-```sh
-zig build test262-gate --seed 0 --summary all
+const rt = try zjs.JSRuntime.create(allocator);
+defer rt.destroy();
+const ctx = try zjs.JSContext.create(rt);
+defer ctx.destroy();
+const result = try ctx.eval("let x = 1 + 2; x;", .{});
+defer result.free(rt);
 ```
 
-The gate uses `test262.conf` and writes the latest bucket/failure reports under
-`reports/test262-latest/`. Skips and excludes in that config are part of the
-current compatibility boundary.
+See [docs/embedding-cookbook.md](docs/embedding-cookbook.md) for host functions,
+handles, and modules.
 
-For day-to-day optimization and repair work, prefer the fast tier:
+**test262.** The checked 2026-08-05 gate recorded **44,581 passes**, **0 known
+failures**, and 5,194 feature skips (Intl, Temporal, ShadowRealm, and other
+groups listed in `test262.conf`), out of 49,775 prepared cases. Details:
+[COMPATIBILITY.md](COMPATIBILITY.md).
 
-```sh
-mise run quick-check
-```
+**Performance.** **1.01× Bellard QuickJS** on our 15-benchmark zoo (geomean,
+2026-08-17). That is geomean parity, not 15/15. Per-benchmark numbers:
+[docs/perf/zoo-status.md](docs/perf/zoo-status.md).
 
-`quick-check` builds the Debug `zjs-dev` and runs the CLI smoke fixtures. Add a
-focused Zig test or test262 slice for the changed semantic area. The checkpoint
-gate adds the unified Debug suite, architecture checks, and `test262-smoke`;
-neither iteration tier replaces the full release gates.
+Authoritative rolling status (gates, latest reports, reproduction commands):
+[STATUS.md](STATUS.md).
 
-`zig build engine-production-gate --seed 0 --summary all` is the engine
-semantic and architecture gate. A Production v1 release requires this gate to
-pass from a clean checkout; the full release checklist also requires
-ReleaseSafe testing, diff hygiene, and performance evidence when
-runtime-sensitive code changed.
+## Getting Started
 
-## Requirements
-
-- Zig 0.16.0
-- mise, for the stable-seed quick/checkpoint/watch task wrappers
-- A POSIX-like shell for helper scripts
-- Bun, only for the optional multi-case performance self-baseline workflow
-
-## Build
+Requires [Zig 0.16.0](https://ziglang.org/download/).
 
 ```sh
-zig build zjs --seed 0 --summary all
 zig build zjs-dev --seed 0 --summary all
-zig build run-test262 --seed 0 --summary all
-zig build run-test262-dev --seed 0 --summary all
+zig-out/bin/zjs-dev -e "console.log(1 + 2)"
 ```
 
-The ReleaseFast CLI is installed as `zig-out/bin/zjs`, its Debug inner-loop
-counterpart as `zig-out/bin/zjs-dev`, and the test262 runners as
-`zig-out/bin/run-test262` (ReleaseFast) and `zig-out/bin/run-test262-dev`
-(Debug smoke/checkpoint runner).
-
-Useful build steps:
-
-```sh
-mise run quick-check
-mise run checkpoint-check
-zig build test --seed 0 --summary all
-zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
-zig build smoke-dev --seed 0 --summary all
-zig build smoke --seed 0 --summary all
-zig build test262-smoke --seed 0 --summary all
-zig build test-oom --seed 0 --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
-zig build test -Dzjs_force_gc=true --seed 0 --summary all
-zig build test -Dzjs_ownership_audit=true --seed 0 --summary all # atom 所有权审计档（一格槽位隔离区，ASAN 那一档；默认关、不进 ReleaseFast）/ atom-ownership audit tier (one-slot quarantine; ASAN-class, default off, never ReleaseFast) — docs/borrowed_atom_audit.md §7
-zig build perf-self-check --seed 0 --summary all
-zig build engine-production-gate --seed 0 --summary all
-zig build config-signature-check --seed 0 # 构建产物自报配置签名并与构建图请求比对 / the built zjs states its own configuration signature and it is compared against what the build graph requested
-```
-
-### Compiler configuration
-
-Compiler-v2 is the only compiler. Its final bytecode layout remains selectable
-for diagnostics; **the production configuration uses the short layout and is
-the default:**
-
-```
-zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
-```
-
-```sh
-zig build test --seed 0 --summary all                        # production default: v2 + short
-zig build test -Dzjs_v2_layout=plain --seed 0 --summary all  # A/B diagnostic layout
-```
-
-The legacy Phase 1/2/3 passes, `-Dzjs_compiler`, and the dual comparator have
-been removed. QCP-1B was accepted only after deletion bisection isolated its
-former crypto regression to an unused pointer-sized `CompileContext` field:
-removing that word perturbed Zig 0.16 whole-program native layout while emitted
-bytecode and allocation streams stayed identical. The same-sized reserved-word
-control proved the trigger but is not part of the shipped implementation.
-Explicit non-inlined boundaries around V2 lowering and the stack-size walk keep
-those compiler stages out of the packed finalizer and remove the sensitivity.
-See `docs/qcp1_switch_decision.md` §9.
-
-Those settings, plus the JSValue representation, the optimize mode, force-GC and
-the ownership audit, form the build's **configuration signature**
-(`zig-out/bin/zjs --print-config-signature`). It is derived from the
-declarations the engine consumes, and every engine-bearing artifact asserts it
-at compile time, so a gate states which configuration its green belongs to and
-a Debug artifact cannot be mistaken for a ReleaseFast one. `zig build
-config-drift-gate` proves the assertion can still fail. See
-`docs/qcp1_switch_decision.md` §0.1.4, §0.1.9, and §9.
-
-Focused subsystem steps are available as `test-core`, `test-parser`,
-`test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`, and
-`test-runner`. For an edit/rebuild loop, `mise run quick-watch` keeps the Debug
-quick-check compiler alive with Zig incremental compilation enabled.
-
-The one-shot commands above pin CLI `--seed 0` so Zig 0.16 build-runner
-traversal stays reproducible and cacheable. Zig test runners also use seed `0`
-by default; pass `-Dzjs_test_seed=<u32>` for an explicit randomized validation
-run.
-
-Property opcodes use direct shape/property fast paths. The former shape-keyed
-inline cache and its `zjs_enable_ic` build option have been removed to stay
-aligned with QuickJS.
+Engine contributors: [CONTRIBUTING.md](CONTRIBUTING.md). Validation commands:
+[GUIDE.md](GUIDE.md) Part B.6.
 
 ## CLI
 
 ```sh
 zig-out/bin/zjs -e "console.log(1 + 2)"
 zig-out/bin/zjs path/to/file.js
-zig-out/bin/zjs --leak-check -e "let x = { ok: true }"
-zig-out/bin/zjs --perf-json path/to/file.js 2> perf.json
 zig-out/bin/zjs --print-config-signature
 ```
 
 Missing or invalid arguments print usage and exit non-zero.
 
+The ReleaseFast CLI is `zig-out/bin/zjs`; the Debug inner-loop binary is
+`zig-out/bin/zjs-dev`. Production default:
+
+```
+zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+```
+
 ## Documentation
 
-Read [docs/README.md](docs/README.md) for the active documentation map.
-Completed roadmaps, snapshot ledgers, and one-off audits are intentionally not
-kept in the active tree; recover them from git history when needed.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to change the engine.
+- [GUIDE.md](GUIDE.md): Zig engineering rules and the validation command ladder.
+- [docs/README.md](docs/README.md): documentation map.
+- [docs/architecture.md](docs/architecture.md): current source tour.
+- [COMPATIBILITY.md](COMPATIBILITY.md) / [LIMITATIONS.md](LIMITATIONS.md):
+  validation and product boundaries.
+- [docs/public-api-contract.md](docs/public-api-contract.md): public Zig API.
 
-Key authorities:
+## Compatibility And Ownership
 
-- [GUIDE.md](GUIDE.md): engineering rules and validation workflow.
-- [COMPATIBILITY.md](COMPATIBILITY.md): current validation boundary.
-- [LIMITATIONS.md](LIMITATIONS.md): runtime and product-scope limitations.
-- [docs/architecture.md](docs/architecture.md): current architecture snapshot.
-- [docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md](docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md):
-  source-, behavior-, test-, and measurement-backed subsystem comparison with
-  the pinned QuickJS checkout.
-- [docs/public-api-contract.md](docs/public-api-contract.md): public Zig API
-  contract.
-- [docs/embedding-cookbook.md](docs/embedding-cookbook.md): Zig-native
-  embedding examples.
+Compatibility is the local `test262.conf` profile plus focused Zig and smoke
+tests. zjs is not a Node.js, Deno, or `libquickjs` C API replacement.
 
-## Compatibility
-
-Read [COMPATIBILITY.md](COMPATIBILITY.md) for the current validation boundary
-and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
-
-The full direct test262 invocation is:
-
-```sh
-./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
-```
-
-For parser, runner, execution, or semantic changes, run
-`zig build test262-smoke --seed 0 --summary all` plus a focused test262 slice
-before the full gate.
-
-## Garbage Collection And Host Ownership
-
-zjs uses non-atomic reference counting for immediate lifetime management and a
-cycle-removal pass for `Object` and `FunctionBytecode` graphs. The runtime is
-single-threaded; JS values must not be shared across threads.
-
-Every host-owned `JSValue` must either remain inside an active
-`JSValue.Scope` / local handle for the duration of a call, or be stored in a
-`JSValue.Persistent` handle when it crosses callbacks, ticks, or host object
-state. Persistent handles duplicate the value, register nested symbol roots,
-and must be destroyed before `JSRuntime.destroy`.
-
-GC may run only at audited safe points where VM temporaries are rooted.
-Low-level allocation marks GC as pending but does not directly collect.
-
-Each FinalizationRegistry owns its construction RealmRef. Cleanup work enters
-the runtime's unified ECMAScript FIFO with that Realm; invoking the callback
-may then switch to the callback function's own Realm. Cleanup is never silently
-dropped on allocation failure: cells remain pending in stable order and a later
-GC pass retries them without duplicating already-published jobs.
-
-## Performance
-
-The repeatable performance gate is a ZJS self-baseline regression check, which
-does not require a C QuickJS binary:
-
-```sh
-zig build perf-self-check --seed 0 --summary all
-```
-
-See [docs/perf/README.md](docs/perf/README.md) for performance workflow details.
-A smaller single-script diagnostic benchmark is also available:
-
-```sh
-zig build perf-benchmark --seed 0 --summary all
-```
+The runtime is single-threaded. Host-owned `JSValue`s must stay in a
+`JSValue.Scope` / local handle for the duration of a call, or in a
+`JSValue.Persistent` handle across callbacks and ticks. See
+[docs/architecture.md](docs/architecture.md).
 
 ## Repository Layout
 
-- `src/root.zig`: public engine entrypoint.
-- `src/core/`: values, runtime/context, atoms, strings, objects,
-  properties, arrays, GC, and core ownership.
-- `src/parser.zig`: lexer, parser, source positions, and compile entry.
-- `src/bytecode.zig`: bytecode, constants, scopes, module metadata,
-  `FunctionBytecode` packing, and pipeline passes.
-- `src/exec/`: bytecode execution, standard-global bootstrap and built-in
-  behavior, calls, eval, exceptions, modules, promises, VM opcode shards, and
-  job queue.
-- `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
-  module file graphs, plugins, and buffer operations.
-- `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
-- `src/cli/`: `zjs` and test262 CLI entrypoints.
-- `src/tests/`: Zig unit and integration test entrypoints.
-- `test262/`: local test262 checkout used by the gate.
-- `tests/fixtures/`: vendored fixture snapshots used by opcode and runner
-  tests.
+- `src/root.zig`: public embedder entry.
+- `src/core/`: values, runtime, objects, GC.
+- `src/parser.zig`: lexer, parser, TypeScript erasure.
+- `src/compiler_v2/`: the compiler (labels, builder, resolve, layout).
+- `src/bytecode.zig`: bytecode carrier and packing.
+- `src/exec/`: VM, builtins, calls, modules, promises.
+- `src/runtime/`: event loop and native plugins.
+- `src/binding/`: public adapters and FFI descriptors.
 
-See [GUIDE.md](GUIDE.md) for engineering rules and validation workflow details.
+The source tour is [docs/architecture.md](docs/architecture.md).

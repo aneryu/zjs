@@ -75,10 +75,13 @@ module loading are not supported.
 
 ## Performance
 
-Performance is uneven by subsystem. The checked performance gate is a ZJS
-self-baseline regression check, and single-script/runtime-profile artifacts are
-diagnostic. Do not treat external-process microbench timings as a semantic
-compatibility signal.
+The public QuickJS comparison is the 15-benchmark zoo geomean in
+[docs/perf/zoo-status.md](docs/perf/zoo-status.md). That headline is geomean
+parity, not every-benchmark parity.
+
+The checked performance gate is a ZJS self-baseline regression check, and
+single-script/runtime-profile artifacts are diagnostic. Do not treat
+external-process microbench timings as a semantic compatibility signal.
 
 Per-opcode profiling is currently unavailable: the build/CLI options remain,
 but the VM dispatcher does not populate opcode counts or timings. Historical

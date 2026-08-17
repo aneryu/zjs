@@ -4,7 +4,7 @@
 QuickJS on the [javascript-zoo](https://github.com/) vendored Octane 2.0 suite.
 It exists so this comparison is reproducible rather than re-improvised, and so
 it carries the same discipline as the whole-process microbench contract
-(`reports/perf/qjs-align/measurement-contracts.md`).
+in `tools/compare/measurement_policy.json`.
 
 ## Direction of the number
 
@@ -30,7 +30,7 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
     --qjs /home/aneryu/quickjs/qjs \
     --samples 4 \
     --cpu 19 \
-    --output reports/perf/qjs-align/<date>/zoo-compare.json
+    --output /tmp/zoo-compare.json
 ```
 
 Build `zjs` first — a stale binary has produced wrong campaign conclusions
@@ -50,7 +50,7 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 5-9,15-19 \
     --qjs /home/aneryu/quickjs/qjs \
     --samples 4 \
     --parallel-clusters 5-9 15-19 \
-    --output reports/perf/qjs-align/<date>/zoo-compare-parallel.json
+    --output /tmp/zoo-compare-parallel.json
 ```
 
 The lists must be disjoint and the same width. Their order defines paired
@@ -83,7 +83,7 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
     --cpu 19 \
     --pmu armv8_pmuv3_1 \
     --iteration-divisor 4 \
-    --output reports/perf/qjs-align/<date>/zoo-fixed-pmu.json
+    --output /tmp/zoo-fixed-pmu.json
 ```
 
 The runner makes temporary benchmark copies that set Octane's

@@ -41,7 +41,7 @@ python3 tools/perf/layout_lineage/run_lineage.py \
     --pads 0 3 7 \
     --benches regexp \
     --samples 4 --cpu 6 \
-    --output reports/perf/qjs-align/<date>/<name>-lineage.json
+    --output /tmp/<name>-lineage.json
 ```
 
 Each pad value gets its own build cache and prefix, so lineages never share objects.

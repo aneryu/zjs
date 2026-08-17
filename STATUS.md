@@ -23,10 +23,12 @@ measurement; there is no independent reproduction yet.
 - 落后项代表值：pdfjs 0.8141、earley-boyer 0.8153、typescript 0.9443、box2d 0.9668、splay 0.9952
 - 机器：ARM Cortex-X925（3.9 GHz 大核，绑核），Linux 6.17；测量协议见仓库测量合同文档
 - QuickJS 对照 pin：commit `04be246`，upstream Makefile 默认 release 构建（GCC 13.3.0，aarch64）
-- 终榜结论在 `reports/perf/qjs-align/PARITY-LEDGER.md` 的『2026-08-17 收尾终章』节（main@9fdc0e23，官方 8 样本）；战役归因报告在 `reports/perf/qjs-align/2026-08-17/`。原始采样文件已按收尾清理令清除，复测需按测量合同重新执行。
+- 终榜结论（main@9fdc0e23，官方 8 样本）见 `docs/perf/zoo-status.md`。战役账本与归因报告（PARITY-LEDGER 及 46 份 2026-08-17 报告）已移出活树，可在 tag `v0.1.0` 的 `reports/perf/qjs-align/` 或 git 历史中恢复。原始采样文件已按收尾清理令清除，复测需按测量合同重新执行。
 
-Measurement contract: `reports/perf/qjs-align/measurement-contracts.md` and
-`tools/compare/measurement_contract.js`.
+Measurement contract: `tools/compare/measurement_contract.js` with
+`tools/compare/measurement_policy.json`; the prose incident register
+(16 clauses) is preserved at tag `v0.1.0` under
+`reports/perf/qjs-align/measurement-contracts.md`.
 
 ## 门禁
 
