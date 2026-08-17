@@ -422,20 +422,17 @@ inline fn resolveNestedClosureCell(
     cv: bytecode.function_bytecode.BytecodeClosureVar,
 ) !*core.VarRef {
     return switch (cv.closureType()) {
-        .local => blk: {
-            if (cv.var_idx >= frame.locals.len) return error.InvalidBytecode;
-            break :blk try frame.captureLocal(ctx.runtime, cv.var_idx);
-        },
-        .arg => blk: {
-            if (cv.var_idx >= frame.args.len) return error.InvalidBytecode;
-            break :blk try frame.captureArg(ctx.runtime, cv.var_idx);
-        },
+        // qjs js_closure2 LOCAL/ARG/REF/GLOBAL_REF (quickjs.c:17313-17325):
+        // direct `get_var_ref` / `cur_var_refs[idx]` with `ref_count++`. No
+        // production bounds return — finalize sized the windows.
+        .local => try frame.captureLocal(ctx.runtime, cv.var_idx),
+        .arg => try frame.captureArg(ctx.runtime, cv.var_idx),
         .ref => blk: {
-            try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
+            std.debug.assert(cv.var_idx < frame.var_refs.len);
             break :blk frame.var_refs[cv.var_idx].retain();
         },
         .global_ref => blk: {
-            if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
+            std.debug.assert(cv.var_idx < frame.var_refs.len);
             break :blk frame.var_refs[cv.var_idx].retain();
         },
         .global, .global_decl => try createGlobalClosureVarRef(ctx, global, cv),
@@ -510,13 +507,14 @@ fn createBytecodeFunctionObjectInternal(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     const fb = functionBytecodeFromValue(rooted_value) orelse return error.InvalidBytecode;
-    // Every callable created through this production choke point must carry a
-    // finalized, non-empty self-owned code view and its published extension.
-    // Structural fixtures may still attach through the lower-level Object API,
-    // but they are not valid executable artifacts.
-    if (!fb.hasExtension() or fb.byte_code == null or fb.byte_code_len <= 0) return error.InvalidBytecode;
-    const realm = fb.realmContext() orelse return error.InvalidBytecode;
-    if (realm != ctx or realm.global != global or ctx.global != global) return error.InvalidBytecode;
+    // qjs `js_closure` (quickjs.c:17369-17417) does not re-validate the
+    // finalized bytecode or Realm identity: `JS_VALUE_GET_PTR` +
+    // `JS_NewObjectClass(func_kind_to_class_id[b->func_kind])`. Finalize
+    // already published the extension and bound the Realm; Debug/Safe still
+    // assert so a fixture cannot silently enter the production object.
+    std.debug.assert(fb.hasExtension() and fb.byte_code != null and fb.byte_code_len > 0);
+    const realm = fb.realmContext().?;
+    std.debug.assert(realm == ctx and realm.global == global and ctx.global == global);
     const class_id = bytecodeFunctionClassId(fb);
     const function_prototype = try bytecodeFunctionPrototypeForRealm(ctx, realm, class_id, fb.functionKind());
     // length + name (+ lazy prototype later). qjs NewObjectClass then
@@ -531,14 +529,13 @@ fn createBytecodeFunctionObjectInternal(
     try object.setFunctionBytecodeValue(ctx.runtime, owned_bytecode);
     try attachFunctionCaptures(ctx, global, fb, object, capture_source);
 
-    // qjs js_closure publishes ordinary function properties only after
-    // js_closure2 has attached the complete capture array (qjs:17391-17392).
-    const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
+    // qjs js_closure (17388-17392): `name_atom = b->func_name;` then
+    // `if (name_atom == JS_ATOM_NULL) name_atom = JS_ATOM_empty_string;` —
+    // no atom-table `kind()` probe on the create hot path.
+    const effective_name = if (fb.func_name != core.atom.ids.empty_string)
         fb.func_name
-    else if (ctx.runtime.atoms.kind(name_fallback) != null)
-        name_fallback
     else
-        core.atom.ids.empty_string;
+        name_fallback;
     try jsFunctionSetProperties(ctx.runtime, object, effective_name, fb.defined_arg_count);
 
     return object.value();
