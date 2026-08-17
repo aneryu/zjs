@@ -33,6 +33,7 @@ zjs.context.callFunction
 zjs.context.globalObject
 zjs.default_gc_threshold
 zjs.default_stack_size
+zjs.dumpSmallInlineProbe
 zjs.error
 zjs.error.Info
 zjs.error.Kind
