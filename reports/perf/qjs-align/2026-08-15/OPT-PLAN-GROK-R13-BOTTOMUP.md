@@ -1025,3 +1025,15 @@ grok/ic-p1@e1a7432f 合入 main：Proxy [[Set]] proto 拒走修复（main 既有
 setOrDefine 原型走对 Proxy proto 缺 isProxy 检查）+IC-R1 delete 语义测试两条。
 全 gate 绿：480/480、夹具 7/7 IDENTICAL、Proxy 三案转 PASS、test262 0/49775
 （passed 44581=+3）、RS 绿。语义件无 3-pad。IC 战役物质遗产至此全部处置完毕。
+
+## 七期 L1 裁决（2026-08-17，driver）：repr 无缺口 + NATIVE-RET-ABI 刀立项
+
+L1-REPR-DIVERGENCE ACCEPT：04be2460 引用件=16B tagged（DWARF line229/ldp×381/lsr#32×0/
+FreeValue tag@x2 四签名），z tagged 已镜像引用件——repr 忠实缺口不存在；nanbox 属新偏离
+且杀门预判全红（dup 16>12/get_field 0x344 址漂/D12 串惩 10>3/sret 不灭），永闭。
+**更正 PDFJS-SHELL-UNITCOST §0 一处归因**：「q 是 NaN-boxing uint64 走 x0」误——实为
+x0+x1 双寄存器 16B 返回；107M sret 税真身=z 的 Zig HostError!JSValue 错误联合逼 sret，
+vs q 的 JSValue 直返+JS_EXCEPTION 哨兵 tag。壳封条该行改判为**可攻**：镜像 qjs 错误
+模型=忠实域。立刀 NATIVE-RET-ABI（pW）：native 调用链（NMFD↔assume↔终端）返回值改
+JSValue 直返+异常哨兵 tag，设计先行分期落地，预算 107M（≥30M 门宽裕），0x1c0/0x7b4/
+0x3f0 几何宪照守。
