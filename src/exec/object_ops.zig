@@ -3984,6 +3984,16 @@ noinline fn getSlowPropertyValueFromObject(
     if (object.class_id == core.class.ids.proxy) {
         return try getProxyProperty(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
     }
+    // qjs JS_GetPropertyInternal after find_own miss: `is_exotic && fast_array`
+    // (quickjs.c:8296-8316). TypedArray elements never occupy a shape slot, so
+    // this arm is independent of whether `object` is the original receiver —
+    // a proto-chain TypedArray must still answer canonical numeric indices
+    // (in-range load, OOB / non-canonical numeric → undefined) before the
+    // walk continues. Receiver-side `getValueProperty` already has the same
+    // call; HAS's proto walk has `typedArrayCanonicalHas`.
+    if (core.object.isTypedArrayObject(object)) {
+        if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
+    }
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
@@ -4020,6 +4030,12 @@ pub fn getSuperPropertyValue(
                 .data => return desc.value.dup(),
                 .generic => {},
             }
+        }
+        // Same GetInternal exotic arm as `getSlowPropertyValueFromObject`
+        // (quickjs.c:8296-8316): super starts the walk at the home proto, so
+        // a TypedArray on that chain must still supply canonical indices.
+        if (core.object.isTypedArrayObject(object)) {
+            if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
         }
         current = object.getPrototype();
     }
