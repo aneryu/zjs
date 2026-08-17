@@ -1057,3 +1057,11 @@ NMFD 帧 0xd0→0xa0、assume 体 0x320→0x2d8、0x7b4 墓碑垫回（0x2a8→0
 test-exec 480/480（Interrupted 金丝雀首轮 3 红已修=nativeHostError 还原）。NativeBits=
 u128 bitcast 破 Zig 16B extern sret，AAPCS64 合同内。raytrace 哨 +129.5M cyc/−130M br
 分数重叠记噪声，w44 三 pad 终判。批 PR-2 叶面（五叶去 mov x19,x8）。
+
+## wave-44 裁决（2026-08-17，driver）：MERGED
+
+NATIVE-RET-ABI 两段（P1 链内三环 a65ed5c9+P2 五叶 7f905d35）合入 main（与已测 rev
+00302c38 引擎码逐字节同，base 差仅 docs）。gate 全绿（480/480+test262 0/49775+RS 不扩）。
+三 pad 同号：geomean +0.35/+0.41/+0.43%，pdfjs 1.0113–1.0158 主标的兑现，raytrace
+0.9989–1.0055 哨清白，DB/regexp/mandreel 皆正，资产零负。七期唯一存活刀落袋：
+sret 汇合口 196M 忠实回收（镜像 qjs JS_EXCEPTION 错误模型）。
