@@ -4508,8 +4508,11 @@ fn opCompareEq(comptime opc: u8) Handler {
 }
 
 /// No-`bl` mixed body. Int leaf and leftover `eq_if_false8` still `b`
-/// `zjs_cmp_*_mixed` (硬门 #9). Both-string `b`s the framed export
-/// (flatStringsEq / compareStringValues). Last-ref is detected by the
+/// `zjs_cmp_*_mixed` (硬门 #9). Flat×flat same-width string is qjs
+/// `js_strict_eq2` 15799-15801 / `js_string_eq` 4605-4613: length,
+/// identity, then an in-leaf unit scan — no new frame. Rope or
+/// cross-width `b`s the framed export (`js_string_rope_compare` /
+/// mixed-width `js_string_memcmp`). Last-ref is detected by the
 /// existing NeedsDestroy dec (no extra peek): lhs last-ref `b`s framed
 /// with the stack intact; rhs last-ref stores the result then `b`s the
 /// shared destroy sibling. Those `bl`s cannot fold back (export).
@@ -4521,11 +4524,21 @@ fn opCompareEqFast(comptime opc: u8) Handler {
             const lhs = (sp - 2)[0];
             const rhs = (sp - 1)[0];
 
-            if (lhs.isString() and rhs.isString()) {
-                return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
-            }
-
             const resolved: ?bool = blk: {
+                // qjs OP_CMP_STRICT_EQ / OP_CMP_EQ string arm (quickjs.c:20382-20386
+                // and 15794-15801): JS_TAG_STRING × JS_TAG_STRING calls
+                // js_string_eq in the dispatch loop. A rope carries
+                // JS_TAG_STRING_ROPE and never reaches that leaf.
+                if (lhs.tagOf() == core.Tag.string and rhs.tagOf() == core.Tag.string) {
+                    break :blk core.string.flatStringsEqNear(
+                        core.string.String.fromHeader(lhs.stringHeaderAssumeStringLike()),
+                        core.string.String.fromHeader(rhs.stringHeaderAssumeStringLike()),
+                    ) orelse
+                        return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
+                }
+                if (lhs.isString() and rhs.isString()) {
+                    return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
+                }
                 if (lhs.asInt32()) |a| {
                     if (rhs.asFloat64()) |d2| break :blk @as(f64, @floatFromInt(a)) == d2;
                     break :blk if (comptime strict) false else null;

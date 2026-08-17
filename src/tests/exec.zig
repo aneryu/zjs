@@ -22490,3 +22490,32 @@ test "small-function-inlining L1: replaced Function.prototype.apply misses take"
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
+
+test "flat string strict-eq matches content across distinct objects" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function check(cond) { if (!cond) throw new Error("streq"); }
+        \\var lit = "k0";
+        \\var made = "k" + 0;
+        \\var other = "k32";
+        \\var empty_a = "";
+        \\var empty_b = "" + "";
+        \\check(lit === made);
+        \\check(made === "k0");
+        \\check(!(lit === other));
+        \\check(lit !== other);
+        \\check(empty_a === empty_b);
+        \\check(!("" === "k0"));
+        \\check(("α" + "") === "α");
+        \\var acc = 0;
+        \\var i = 0;
+        \\while (i < 64) {
+        \\    if (("k" + i) === "k32") acc = acc + 1;
+        \\    i = i + 1;
+        \\}
+        \\check(acc === 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}

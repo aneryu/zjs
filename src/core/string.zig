@@ -705,7 +705,7 @@ pub const String = struct {
 
     /// Inline character pointer, computed from the byte immediately after the
     /// struct (QuickJS `u.str8`/`u.str16`). Only valid for a flat string.
-    inline fn inlineBytesPtr(self: *const String) [*]const u8 {
+    pub inline fn inlineBytesPtr(self: *const String) [*]const u8 {
         const base: [*]const u8 = @ptrCast(self);
         return base + payload_offset;
     }
@@ -1065,20 +1065,42 @@ pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
 /// `StringValueIterator` pair for the rope case before it can even test the
 /// lengths, which is the cost this bypasses for the flat-flat majority.
 pub fn flatStringsEq(a: *const String, b: *const String) bool {
+    return flatStringsEqNear(a, b) orelse flatStringsEqMixedWidth(a, b);
+}
+
+/// qjs `js_string_eq` (quickjs.c:4605-4613) for a same-width flat pair:
+/// length, pointer identity, then one body scan. Returns `null` when the
+/// encodings differ so the caller can keep the framed mixed-width helper
+/// (qjs `js_string_memcmp` 4586-4599) off the leftover leaf.
+pub inline fn flatStringsEqNear(a: *const String, b: *const String) ?bool {
     if (a.len_meta.len != b.len_meta.len) return false; // qjs:4607
     if (a == b) return true; // qjs:4609
-    if (a.len_meta.is_wide == b.len_meta.is_wide) {
-        // qjs `memcmp` / `memcmp16` legs (quickjs.c:4593, 4600). Equality only,
-        // so a single scan settles it -- no ordering pass is needed.
-        if (a.len_meta.is_wide) return std.mem.eql(u16, a.utf16(), b.utf16());
-        return std.mem.eql(u8, a.latin1(), b.latin1());
+    if (a.len_meta.is_wide != b.len_meta.is_wide) return null;
+    // Same-width scan in place of `memcmp` / `memcmp16` (quickjs.c:4593, 4600).
+    // A libcall here would open a frame on the leftover mixed leaf (硬门 #9).
+    const n: u32 = a.len_meta.len;
+    const pa = a.inlineBytesPtr();
+    const pb = b.inlineBytesPtr();
+    var i: u32 = 0;
+    if (a.len_meta.is_wide) {
+        const ua: [*]const u16 = @ptrCast(@alignCast(pa));
+        const ub: [*]const u16 = @ptrCast(@alignCast(pb));
+        while (i < n) : (i += 1) {
+            if (ua[i] != ub[i]) return false;
+        }
+        return true;
     }
-    // Mixed width: qjs's cross-width leg widens the 8-bit side per unit
-    // (quickjs.c:4586-4599).
+    while (i < n) : (i += 1) {
+        if (pa[i] != pb[i]) return false;
+    }
+    return true;
+}
+
+fn flatStringsEqMixedWidth(a: *const String, b: *const String) bool {
     const narrow = if (a.len_meta.is_wide) b else a;
     const wide = if (a.len_meta.is_wide) a else b;
-    for (narrow.latin1(), wide.utf16()) |n, w| {
-        if (n != w) return false;
+    for (narrow.latin1(), wide.utf16()) |unit_n, unit_w| {
+        if (unit_n != unit_w) return false;
     }
     return true;
 }
@@ -1765,6 +1787,37 @@ test "string compare uses code-unit ordering for same and mixed width strings" {
     const latin_single_value = latin_single.value();
     defer latin_single_value.free(rt);
     try std.testing.expectEqual(@as(i32, 0), latin_single.compare(wide_slice));
+}
+
+test "flatStringsEqNear matches js_string_eq on same-width flats" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const a = try String.createUtf8(rt, "k0");
+    defer a.value().free(rt);
+    const b = try String.createUtf8(rt, "k0");
+    defer b.value().free(rt);
+    const c = try String.createUtf8(rt, "k32");
+    defer c.value().free(rt);
+    const empty_a = try String.createUtf8(rt, "");
+    defer empty_a.value().free(rt);
+    const empty_b = try String.createUtf8(rt, "");
+    defer empty_b.value().free(rt);
+    const wide_a = try String.createUtf16(rt, &[_]u16{ 0x3b1, 0x3b2 });
+    defer wide_a.value().free(rt);
+    const wide_b = try String.createUtf16(rt, &[_]u16{ 0x3b1, 0x3b2 });
+    defer wide_b.value().free(rt);
+    const wide_c = try String.createUtf16(rt, &[_]u16{ 0x3b1, 0x3b3 });
+    defer wide_c.value().free(rt);
+
+    try std.testing.expectEqual(true, flatStringsEqNear(a, a).?);
+    try std.testing.expectEqual(true, flatStringsEqNear(a, b).?);
+    try std.testing.expectEqual(false, flatStringsEqNear(a, c).?);
+    try std.testing.expectEqual(true, flatStringsEqNear(empty_a, empty_b).?);
+    try std.testing.expectEqual(true, flatStringsEqNear(wide_a, wide_b).?);
+    try std.testing.expectEqual(false, flatStringsEqNear(wide_a, wide_c).?);
+    try std.testing.expect(flatStringsEq(a, b));
+    try std.testing.expect(!flatStringsEq(a, c));
 }
 
 test "string compare short-circuits equal interned atom ids" {
