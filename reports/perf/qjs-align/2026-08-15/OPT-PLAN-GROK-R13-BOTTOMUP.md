@@ -1134,3 +1134,11 @@ ensureVarRefsCapacity 空调用）、instanceof publish+noinline、ctor 入帧�
 单价刀有效**（上限受 H3 桩+精确 GC 根+发数约束）。
 首刀（闭包创建链对齐 js_closure/js_closure2）已落 grok/earley-trees，closure 27/27，
 候全门+FW。后继刀=instanceof 热臂 publish 集对齐（7.9M 发）派 pW。
+
+## INSTANCEOF-PRICE 裁决（2026-08-17，driver）：REJECT-ARCHIVE
+
+q 形收尾落地后 earley-only ABBA n=4：Δinsn −25.5M 方向稳但 Δcyc +11.2M（主尺反向）
++岛体 +36B/帧 0x1c0→0x1d0——insn 赢 cyc 不赢+几何反向，杀。勘察入档：①z publish 比 q
+多写的 top_ptr 是承重差异（精确 GC 扫运行栈 vs q 置空 cur_sp——GC 契约不同，必留）；
+②出岛跳合宪必要（0x1c0 宪同类）。**instanceof 单价判定已在忠实地板。** 出树族单价
+残余=创建链刀（pQ 在途）+发数本身（固有）。
