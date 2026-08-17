@@ -1049,3 +1049,11 @@ z 的 props-first 序对 z 访问构成经济正确，分叉=合理适配非缺�
 0.82–1.03；splay ⑦/TS ④a=帧字段占用非 RC 对盈余。emit 借用消除停（q 无对应形）。
 **L4 算术**：int 门/overflow/−0/规范化同构；box2d +30M=符号边界记账不对称+IPC 弥散。
 **梯子总结论：z 在 L0-L4 与 qjs 实现级已齐平或更优；全部候选净收窄至 NATIVE-RET-ABI 一刀。**
+
+## NATIVE-RET-ABI PR-1 裁决（2026-08-17，driver）：立刀 ACCEPT
+
+pdfjs FW Δcyc −180.2M（门 −30M，全样本 P1<全样本 BASE）；汇合口 str q0,[x19] 消失；
+NMFD 帧 0xd0→0xa0、assume 体 0x320→0x2d8、0x7b4 墓碑垫回（0x2a8→0x294）、0x3f0 不涨；
+test-exec 480/480（Interrupted 金丝雀首轮 3 红已修=nativeHostError 还原）。NativeBits=
+u128 bitcast 破 Zig 16B extern sret，AAPCS64 合同内。raytrace 哨 +129.5M cyc/−130M br
+分数重叠记噪声，w44 三 pad 终判。批 PR-2 叶面（五叶去 mov x19,x8）。
