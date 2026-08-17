@@ -1,0 +1,53 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+# Performance gates are never run in CI. The measurement contract forbids
+# publishing performance numbers from shared runners.
+
+jobs:
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build engine-production-gate --seed 0 --summary all
+      - run: zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
+
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    # advisory until first green run on x86-64 (never executed on this arch before); driver flips to required
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build engine-production-gate --seed 0 --summary all
+      - run: zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
+
+  macos-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # advisory until first green run on macOS (never executed on this arch before); driver flips to required
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build zjs --seed 0 --summary all
+      - run: zig build smoke --seed 0 --summary all

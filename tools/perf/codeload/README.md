@@ -1,7 +1,7 @@
 # CodeLoad compile-throughput micro
 
-Fixed paired A/B harness for the code-load optimization campaign
-(reports/perf/qjs-align/2026-07-31/). The macro arbiter remains
+Fixed paired A/B harness for the code-load optimization campaign.
+The macro arbiter remains
 `tools/perf/zoo/run_zoo_compare.py --benches code-load`; this micro exists so
 each cut can be adjudicated on a deterministic fixed workload with
 instructions as the primary (layout-immune) metric.
@@ -40,7 +40,7 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
   python3 tools/perf/codeload/run_codeload_micro.py \
     --a /path/to/zjs-baseline --b zig-out/bin/zjs \
     --mode compile --samples 8 --cpu 19 \
-    --output reports/perf/qjs-align/<date>/<cut>/micro-compile.json
+    --output /tmp/micro-compile.json
 ```
 
 Ratio is `b/a`: below 1.0 means the candidate does less work. Instructions

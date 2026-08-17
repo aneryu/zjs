@@ -7705,8 +7705,8 @@ pub const Object = extern struct {
             // BigInt is trial-decref'd and can come back rc 0→1 while never
             // having been linked. Membership is the cyclic list itself (the
             // former in_cycle_list bit): unlinked nodes have prev == null.
-            // list_del on those is SEGV — test262
-            // built-ins/Array/fromAsync/asyncitems-arraylike-promise.js.
+            // list_del on those is SEGV — the Array.fromAsync
+            // asyncitems-arraylike-promise conformance fixture.
             h.meta().rc += 1;
             if (h.meta().rc != 1) return;
             if (h.prev == null) return;

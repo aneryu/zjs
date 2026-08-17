@@ -1,7 +1,7 @@
 .{
-    .name = .quickjs_zig,
-    .version = "0.1.0-alpha.1",
-    .fingerprint = 0xd9a29aff87e5b3a8,
+    .name = .zjs,
+    .version = "0.1.0",
+    .fingerprint = 0xf039973f87e5b3a8,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
@@ -13,7 +13,6 @@
         "build.zig",
         "build.zig.zon",
         "docs",
-        "quickjs",
         "src",
         "tests",
         "tools",
