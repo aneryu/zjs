@@ -5852,6 +5852,29 @@ test "typed array integer get uses class-id arm and qjs tag shape" {
     _ = result;
 }
 
+test "typed array prototype chain get reads canonical numeric indices" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // S1: TA-as-proto [[Get]] (PROTO-WALK-EXOTIC-AUDIT). qjs
+    // JS_GetPropertyInternal (quickjs.c:8296-8303) consults is_exotic+fast_array
+    // at every proto link, not only when the receiver is the TypedArray.
+    const result = try js.eval(
+        \\const ta = new Uint8Array([7, 8]);
+        \\const o = Object.create(ta);
+        \\assert.sameValue(o[0], 7);
+        \\assert.sameValue(o["0"], 7);
+        \\assert.sameValue(o[1], 8);
+        \\assert.sameValue(o[2], undefined);
+        \\assert.sameValue(0 in o, true);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(o, "0"), false);
+        \\assert.sameValue([7, 8][0], 7);
+        \\const fromArray = Object.create([7, 8]);
+        \\assert.sameValue(fromArray[0], 7);
+    );
+    _ = result;
+}
+
 test "typed array integer put uses class-id arm" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
