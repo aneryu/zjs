@@ -1065,3 +1065,12 @@ NATIVE-RET-ABI 两段（P1 链内三环 a65ed5c9+P2 五叶 7f905d35）合入 mai
 三 pad 同号：geomean +0.35/+0.41/+0.43%，pdfjs 1.0113–1.0158 主标的兑现，raytrace
 0.9989–1.0055 哨清白，DB/regexp/mandreel 皆正，资产零负。七期唯一存活刀落袋：
 sret 汇合口 196M 忠实回收（镜像 qjs JS_EXCEPTION 错误模型）。
+
+## EB-S1-HYGIENE 裁决（2026-08-17，driver）：刀 REJECT，负结果入归因账
+
+塌副本实测（grok/eb-s1-hygiene@bc2e9ddb，未合，留作反证）：traceChildren 2→1（−20.6KB）
++MemoryAccount 28/13→1，正确性全绿，但 EB Δcyc +72.2M、refill **+22%**（预期反向）、
+TS +249M/splay +79M insn 双哨回退。根因=单态副本内含常量折叠+直跳，合一后付间接 visit
++共享 malloc 参数税。**定理追加：单态副本=定价资产非免费膨胀**（与热体外提四连败/
+FAM 翻序 REJECT 同族——「特化是承重」第三证）。瘦身工程 A3 最廉子刀死；主路径收窄为
+A1 冷叶出岛（纯迁冷体不动热形）。
