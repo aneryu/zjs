@@ -234,18 +234,23 @@ pub const Handler = *const fn (pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
 /// (opcodes 33–70) into the address span between `drop` (14) and
 /// `if_false8` (232) and blow the R6-F 27-op page budget. Frequency
 /// order is L-2 and is not approved.
-const op_handler_section = switch (builtin.target.ofmt) {
-    .elf => ".text.zjs.op_handlers",
-    .macho => "__TEXT,__text",
-    else => ".text",
-};
+// Zig rejects empty `linksection`. ELF keeps the custom pin; other
+// formats use their default text section so the function is unpinned
+// (Mach-O LLVM rejects ELF-style `.text`).
+const op_handler_section = if (builtin.target.ofmt == .elf)
+    ".text.zjs.op_handlers"
+else if (builtin.target.ofmt == .macho)
+    "__TEXT,__text"
+else
+    ".text";
 /// Wave-22: new handlers append here so LLVM cannot interleave them into
 /// the established island (ld script KEEP(.op_handlers) then KEEP(.op_handlers.*)).
-const op_handler_section_tail = switch (builtin.target.ofmt) {
-    .elf => ".text.zjs.op_handlers.tail",
-    .macho => "__TEXT,__text",
-    else => ".text",
-};
+const op_handler_section_tail = if (builtin.target.ofmt == .elf)
+    ".text.zjs.op_handlers.tail"
+else if (builtin.target.ofmt == .macho)
+    "__TEXT,__text"
+else
+    ".text";
 
 /// In-hole tombstone (w22R/w26R). Export so LTO cannot fold the keep
 /// flag or DCE the pad. Live hit predicts not-taken (`cbnz`). Tune

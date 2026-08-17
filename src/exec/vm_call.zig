@@ -769,10 +769,15 @@ export const zjs_nmfd_tombstone: *const anyopaque = @ptrCast(&nativeMethodFastDi
 /// `noinline` keeps NativeCallEnvironment / exec_direct spills out of the
 /// NMFD prologue (0x1c0→0x1d0 constitution lesson). Cold section so this
 /// 0x334 body is not an NMFD neighbor (w35 13-member packing).
-const nmfd_term_section = switch (builtin.target.ofmt) {
-    .elf => ".text.zjs.nmfd_term",
-    else => ".text",
-};
+// Zig rejects empty `linksection`. ELF keeps the custom pin; other
+// formats use their default text section so the function is unpinned
+// (Mach-O LLVM rejects ELF-style `.text`).
+const nmfd_term_section = if (builtin.target.ofmt == .elf)
+    ".text.zjs.nmfd_term"
+else if (builtin.target.ofmt == .macho)
+    "__TEXT,__text"
+else
+    ".text";
 
 noinline fn callResolvedNativeMethodAssumeCFunction(
     ctx: *core.JSContext,
