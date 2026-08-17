@@ -1037,3 +1037,15 @@ vs q 的 JSValue 直返+JS_EXCEPTION 哨兵 tag。壳封条该行改判为**可�
 模型=忠实域。立刀 NATIVE-RET-ABI（pW）：native 调用链（NMFD↔assume↔终端）返回值改
 JSValue 直返+异常哨兵 tag，设计先行分期落地，预算 107M（≥30M 门宽裕），0x1c0/0x7b4/
 0x3f0 几何宪照守。
+
+## 七期五层收官（2026-08-17，driver 裁）
+
+自底向上忠实差异审计全梯完成，五层封条：
+**L0 局部性**：z 堆图不劣于 q（splay walk z≤q、TS L2/LL 更好），无 d-side 税。
+**L1 值表示**：引用件=16B tagged，z 已镜像；nanbox 永闭；产出 NATIVE-RET-ABI 刀（107M）。
+**L2 属性几何**：唯一分叉（FAM 段序）实测翻序 REJECT（TS insn +1.3G/EB 哨同号差）——
+z 的 props-first 序对 z 访问构成经济正确，分叉=合理适配非缺陷。刀支归档。
+**L3 RC 纪律**：十四惯用法全镜像（12 条税 0/I12 q 多付/I13-14 噪声级）；五案 RC 次数比
+0.82–1.03；splay ⑦/TS ④a=帧字段占用非 RC 对盈余。emit 借用消除停（q 无对应形）。
+**L4 算术**：int 门/overflow/−0/规范化同构；box2d +30M=符号边界记账不对称+IPC 弥散。
+**梯子总结论：z 在 L0-L4 与 qjs 实现级已齐平或更优；全部候选净收窄至 NATIVE-RET-ABI 一刀。**
