@@ -1123,3 +1123,14 @@ q 侧函数账（pV，x23=b 映射 91% JCI 覆盖）交叉印证：Earley 热=sc
 正确性附产：TA-as-proto [[Get]] 姐妹洞（pT，修复在途）。
 用户「需要重新归因与定位」第四次应验。下一刀方向（候讨论）：出树闭包族的多 insn
 （勿再对 get_field 热臂或 L1I 岛重讲）。
+
+## EARLEY-TREES-INSN 锁源裁决（2026-08-17，driver）：emit 无罪，单价可刀
+
+字节码逐条对账（同 JS 双引擎 dump）：出树族执行序列与 q 同形（helpers 逐条相同；
+dump 差=H3 return 桩 ~1.9M 发 ~150M insn+fusion 首字节影子，不构成 25%）。
+**Earley +25% insn=同 op 的原生展开**：fclosure 创建链（生产校验/atoms.kind 双探/
+ensureVarRefsCapacity 空调用）、instanceof publish+noinline、ctor 入帧、get_var_ref
+发数。**订正 EB-FUNC-ATTRIB「瘦 handler 削不掉」——op 数对齐则超额全是单价，忠实
+单价刀有效**（上限受 H3 桩+精确 GC 根+发数约束）。
+首刀（闭包创建链对齐 js_closure/js_closure2）已落 grok/earley-trees，closure 27/27，
+候全门+FW。后继刀=instanceof 热臂 publish 集对齐（7.9M 发）派 pW。
