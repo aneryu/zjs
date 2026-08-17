@@ -3237,6 +3237,62 @@ pub const Object = extern struct {
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) align(16) void {
         const self: *Object = @alignCast(@fieldParentPtr("header", header));
+        // qjs free_object (quickjs.c:6340-6391) for a plain JS Object: mark,
+        // free slots, free prop[], js_free_shape, remove_gc_object, js_free.
+        // Guards match K1: class_id==object, payload .none, no weakrefs,
+        // not cycle/deinit. Extra has_weak_id / borrowed bits fall back so
+        // this arm never skips table cleanup the general path still owns.
+        // The general teardown is outlined — leaving it in this function
+        // would keep the 0xf0 prologue on every sc_Pair.
+        if (self.class_id == class.ids.object and
+            self.flags.class_payload_kind == .none and
+            self.weakref_count == 0 and
+            !self.flags.has_weak_id and
+            !self.flags.is_borrowed_reference_holder)
+        {
+            const phase = rt.gc.phase;
+            if (phase != .remove_cycles and phase != .deinit) {
+                @branchHint(.likely);
+                destroyPlainObjectFast(rt, self);
+                return;
+            }
+        }
+        destroyFromHeaderSlow(rt, header);
+    }
+
+    /// qjs free_object 6340-6391 ordinary-object arm. Inlined into
+    /// `destroyFromHeader` so the hot symbol stays the same.
+    inline fn destroyPlainObjectFast(rt: *JSRuntime, self: *Object) void {
+        self.header.meta().flags.mark = true;
+        self.header.meta().flags.finalizing = true;
+
+        const object_shape = self.shape_ref;
+        const old_properties = self.propertyEntries();
+        const old_property_capacity = self.propertyStorageCapacity();
+        const old_shape_props = object_shape.props()[0..@min(object_shape.prop_count, old_properties.len)];
+        self.prop_values = @ptrFromInt(@alignOf(property.Entry));
+        for (old_properties, 0..) |entry, index| {
+            const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
+            if (entry_flags.isData()) {
+                entry.slot.data.free(rt);
+                continue;
+            }
+            if (entry_flags.deleted) continue;
+            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
+            destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
+        }
+        if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
+        @call(.never_inline, shape.Registry.release, .{ &rt.shapes, object_shape });
+        self.shape_ref = finalizingShape();
+        if (rt.cached_iterator_next_entries.len != 0) {
+            @call(.never_inline, Object.clearCachedIteratorNext, .{ self, rt });
+        }
+        rt.unregisterObjectWithBytes(self, @sizeOf(Object));
+        rt.memory.destroy(Object, self);
+    }
+
+    noinline fn destroyFromHeaderSlow(rt: *JSRuntime, header: *gc.Header) void {
+        const self: *Object = @alignCast(@fieldParentPtr("header", header));
         // qjs marks an object "about to be freed" before its zero-refcount free
         // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479), and
         // js_weakref_free tests that mark (quickjs.c:51728-51735) so releasing
@@ -9798,13 +9854,62 @@ pub const Object = extern struct {
         return prototype.value();
     }
 
-    /// Install the lazy `function.prototype` auto-init placeholder on a freshly
-    /// created function object. Shares the single interned descriptor so the
-    /// no descriptor allocation occurs per function.
-    pub fn defineFunctionPrototypeAutoInit(self: *Object, rt: *JSRuntime, flags: property.Flags) !void {
-        const realm = try self.autoInitRealmForDefinition(rt, null);
+    /// qjs `JS_DefineAutoInitProperty` (quickjs.c:10648-10675) on a freshly
+    /// created function: `find_own_property` is a miss (abort if present), then
+    /// `add_property(flags & C_W_E | AUTOINIT)` and
+    /// `pr->u.init.realm_and_id = JS_DupContext(ctx) | JS_AUTOINIT_ID_PROTOTYPE`,
+    /// `opaque = NULL`. `realm` is the creating context — qjs dups `ctx`, it
+    /// does not walk bytecode/native/global to rediscover it.
+    ///
+    /// `prototype` is a predefined atom and not an array index, so the append
+    /// is the named add_property arm (no atom-dup guard, no `atomIsArrayIndex`).
+    pub fn defineFunctionPrototypeAutoInit(
+        self: *Object,
+        rt: *JSRuntime,
+        realm: *context_mod.RealmContext,
+        flags: property.Flags,
+    ) !void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.flags.extensible);
         const slot = property.AutoInitSlot.retainPrototype(&realm.header);
-        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags.withKind(.auto_init), .{ .auto_init = slot });
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            true,
+            rt,
+            atom.ids.prototype,
+            flags.withKind(.auto_init),
+            .{ .auto_init = slot },
+        );
+    }
+
+    /// qjs `JS_DefinePropertyValue` → `JS_CreateProperty` data arm on a
+    /// known-new ordinary object (quickjs.c:10215-10266):
+    /// `prop_flags = flags & JS_PROP_C_W_E`, `add_property`, then
+    /// `pr->u.value = JS_DupValue(ctx, val)` (the wrapper then frees `val`).
+    /// The caller hands over a freshly created value; this path consumes it
+    /// into the slot (dup+free of a temp is a no-op on the end state).
+    ///
+    /// `atom_id` must be a predefined non-index atom (`length` / `name`).
+    pub fn defineOwnDataValueAssumingNew(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        data_value: JSValue,
+        flags: property.Flags,
+    ) !void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.flags.extensible);
+        std.debug.assert(flags.kind == .data);
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            true,
+            rt,
+            atom_id,
+            flags,
+            .{ .data = data_value },
+        );
     }
 
     fn arrayPrototypeValueForAutoInit(realm: *context_mod.RealmContext) !JSValue {
