@@ -411,3 +411,14 @@ Entry→TAKE 归属改判；松弛定理改述（String 载荷合法）。
 string-slack P1 fad30cea（RC 编排 q 形）；preserve_none 前沿档。
 **剩余明牌（全持实验封条）：** pdfjs 壳地板+IPC；TS call/return；box2d BIN-IPC；
 splay ⑦（余 0.5pp 骑线）；EB 出树发数+H3 桩+精确 GC 根。全 15≥1.0 于现宪法框架无路径。
+
+## 2026-08-17 收尾清理记录（driver）
+
+**文档归档：** 46 份战役报告（归因/设计/封条/普查/刀报）自 /tmp/lanes 入库
+reports/perf/qjs-align/2026-08-17/；测量合同增补第 16 条（收益普查必须验证 q 侧真实兑现）。
+**worktree：** 267→1（全部过期战役现场移除+prune，dirty 者为七月已收官实验按令强制清）。
+**分支：** 236 删（162 已并入+40 死实验 grok/+34 integration·perf 过期线）；保留 13：
+main+四封存资产（grok/earley-cluster 聚簇刀/grok/string-slack P1/grok/eb-s1-hygiene 反证/
+grok/ic-p1-v2-archive IC 证据树）+八条早期谱系（ablate·archive·audit·diag·fix·compiler-v2-qjs）。
+**/tmp：** 流水线目录、pad 二进制、普查原始件全清（报告已入库，原始件过期）。
+仓库终态：main@干净、单 worktree、账本三册（PARITY/OPT-PLAN/MECHANISM）+合同 16 条完整。
