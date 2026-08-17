@@ -71,8 +71,44 @@ fn functionHasInstanceDirect(
     args: []const core.JSValue,
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
-) HostError!core.JSValue {
-    return call_runtime.qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
+) builtin_dispatch.NativeBits {
+    return builtin_dispatch.nativeFromHostResult(
+        ctx,
+        global,
+        call_runtime.qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame),
+    );
+}
+
+fn functionCallDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) builtin_dispatch.NativeBits {
+    return builtin_dispatch.nativeFromHostResult(
+        ctx,
+        global,
+        call_runtime.qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame),
+    );
+}
+
+fn functionApplyDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) builtin_dispatch.NativeBits {
+    return builtin_dispatch.nativeFromHostResult(
+        ctx,
+        global,
+        call_runtime.qjsFunctionApplyCall(ctx, output, global, this_value, args, caller_function, caller_frame),
+    );
 }
 
 /// qjs:41379 `js_function_hasInstance` -> `JS_OrdinaryIsInstanceOf(ctx,
@@ -121,7 +157,7 @@ fn functionCallEntry() core.host_function.InternalEntry {
         // NB2-B: same shape as apply — the body consumes only the direct-ABI
         // parameter set, so the non-forwarding dispatch paths (e.g.
         // `fastNativeMethodCall`) skip the environment round-trip too.
-        .exec_direct = builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionCallCall),
+        .exec_direct = builtin_dispatch.execDirectFunction(&functionCallDirect),
     };
 }
 
@@ -146,7 +182,7 @@ fn functionApplyEntry() core.host_function.InternalEntry {
         // hot record dispatch skips the NativeCallEnvironment stores and the
         // `active_native_call` save/set/restore. `functionApplyRecord` stays
         // as the env-path shim for any dispatcher that still owns one.
-        .exec_direct = builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionApplyCall),
+        .exec_direct = builtin_dispatch.execDirectFunction(&functionApplyDirect),
     };
 }
 
@@ -195,7 +231,7 @@ test "Function.apply has a dedicated non-forwarding native record handler" {
             // apply body.
             try std.testing.expect(entry.exec_direct != null);
             try std.testing.expect(entry.exec_direct.? ==
-                builtin_dispatch.execDirectFunction(&call_runtime.qjsFunctionApplyCall));
+                builtin_dispatch.execDirectFunction(&functionApplyDirect));
             return;
         }
     }

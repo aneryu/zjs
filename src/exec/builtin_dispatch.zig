@@ -194,7 +194,17 @@ pub const ExecDirectCallFn = *const fn (
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
-) HostError!core.JSValue;
+) NativeBits;
+
+/// Leaf-boundary adapter: HostError!JSValue → NativeBits (x0+x1).
+pub inline fn nativeFromHostResult(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    result: HostError!core.JSValue,
+) NativeBits {
+    const value = result catch |err| return nativeFromHostError(ctx, global, err);
+    return nativeToBits(value);
+}
 
 /// Registration-side eraser for `InternalEntry.exec_direct`: taking the
 /// pointer through this helper is the only sanctioned way to populate the
@@ -599,15 +609,11 @@ inline fn invokeExecDirectRecord(
     // Same authority gate as `callableRealm`: a synthetic invocation without
     // a callable carrier reports the identical registry error the env-path
     // handler would raise after its `nativeCall` recovery.
-    // Adapter lives only at this leaf boundary (P1: ExecDirectCallFn is still
-    // HostError!JSValue). Bare `return error.*` is forbidden above this point.
+    // Leaves return NativeBits (x0+x1). Registry miss still adapts here.
     const realm_view = view.callable_realm orelse
         return nativeFromBits(nativeFromHostError(view.ctx, view.global, error.InvalidBuiltinRegistry));
     const direct: ExecDirectCallFn = @ptrCast(@alignCast(direct_ptr));
-    const result = direct(realm_view.realm, output, realm_view.global, this_value, args, caller_function, caller_frame) catch |err| {
-        return nativeFromBits(nativeFromHostError(view.ctx, view.global, err));
-    };
-    return nativeOk(result);
+    return nativeFromBits(direct(realm_view.realm, output, realm_view.global, this_value, args, caller_function, caller_frame));
 }
 
 inline fn invokeResolvedInternalRecord(
