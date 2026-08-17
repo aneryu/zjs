@@ -52,6 +52,7 @@ the active tree; recover them from git history when needed.
   compile/atom workload and multi-build verdict protocol for the code-load
   campaign.
 - [Release Checklist](release-checklist.md): Production v1 release checklist.
+- [Refactor Tax Policy](refactor-policy.md): no dedicated split-file campaigns; hot-path moves need a 15-item zoo A/B.
 
 ## Reports
 
