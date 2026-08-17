@@ -541,26 +541,32 @@ fn createBytecodeFunctionObjectInternal(
     return object.value();
 }
 
-/// qjs `js_function_set_properties` (quickjs.c:5853-5861): length then name,
-/// both CONFIGURABLE only. Fresh bytecode function — assume-new, no
-/// objectHasNonEmptyName probe.
+/// qjs `js_function_set_properties` (quickjs.c:5853-5861):
+/// `JS_DefinePropertyValue(length, NewInt32, CONFIGURABLE)` then
+/// `JS_DefinePropertyValue(name, JS_AtomToString, CONFIGURABLE)`.
+/// Fresh bytecode function — CreateProperty miss → add_property, no
+/// Descriptor round-trip and no objectHasNonEmptyName probe.
 fn jsFunctionSetProperties(
     rt: *core.JSRuntime,
     object: *core.Object,
     name_atom: core.Atom,
     length: i32,
 ) HostError!void {
-    try object.defineOwnPropertyAssumingNew(
+    const configurable = comptime core.property.Flags.data(false, false, true);
+    try object.defineOwnDataValueAssumingNew(
         rt,
         core.atom.ids.length,
-        core.Descriptor.data(core.JSValue.int32(length), false, false, true),
+        core.JSValue.int32(length),
+        configurable,
     );
-    const name_value = try functionNameValueFromAtom(rt, name_atom, null);
-    defer name_value.free(rt);
-    try object.defineOwnPropertyAssumingNew(
+    // qjs JS_AtomToString: dup the atom's string body. Prefix / public-Symbol
+    // composition is JS_DefineObjectName, not this helper.
+    const name_value = try rt.atoms.toStringValueForPush(rt, name_atom);
+    try object.defineOwnDataValueAssumingNew(
         rt,
         core.atom.ids.name,
-        core.Descriptor.data(name_value, false, false, true),
+        name_value,
+        configurable,
     );
 }
 
@@ -582,7 +588,15 @@ fn installOrdinaryFunctionPrototype(
         // placeholder; the prototype object + its `constructor` back-ref are
         // materialized only when `.prototype` is first observed or the
         // function is constructed.
-        try object.defineFunctionPrototypeAutoInit(ctx.runtime, core.property.Flags.data(true, false, false));
+        // qjs js_closure (17312-17415): JS_SetConstructorBit then
+        // JS_DefineAutoInitProperty(PROTOTYPE, WRITABLE) with the creating
+        // ctx. zjs constructability is FB hasPrototype∧normal (no object
+        // bit); the autoinit install still dups that same ctx as realm.
+        try object.defineFunctionPrototypeAutoInit(
+            ctx.runtime,
+            ctx,
+            comptime core.property.Flags.data(true, false, false),
+        );
         return;
     }
 

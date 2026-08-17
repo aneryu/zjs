@@ -9798,13 +9798,62 @@ pub const Object = extern struct {
         return prototype.value();
     }
 
-    /// Install the lazy `function.prototype` auto-init placeholder on a freshly
-    /// created function object. Shares the single interned descriptor so the
-    /// no descriptor allocation occurs per function.
-    pub fn defineFunctionPrototypeAutoInit(self: *Object, rt: *JSRuntime, flags: property.Flags) !void {
-        const realm = try self.autoInitRealmForDefinition(rt, null);
+    /// qjs `JS_DefineAutoInitProperty` (quickjs.c:10648-10675) on a freshly
+    /// created function: `find_own_property` is a miss (abort if present), then
+    /// `add_property(flags & C_W_E | AUTOINIT)` and
+    /// `pr->u.init.realm_and_id = JS_DupContext(ctx) | JS_AUTOINIT_ID_PROTOTYPE`,
+    /// `opaque = NULL`. `realm` is the creating context — qjs dups `ctx`, it
+    /// does not walk bytecode/native/global to rediscover it.
+    ///
+    /// `prototype` is a predefined atom and not an array index, so the append
+    /// is the named add_property arm (no atom-dup guard, no `atomIsArrayIndex`).
+    pub fn defineFunctionPrototypeAutoInit(
+        self: *Object,
+        rt: *JSRuntime,
+        realm: *context_mod.RealmContext,
+        flags: property.Flags,
+    ) !void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.flags.extensible);
         const slot = property.AutoInitSlot.retainPrototype(&realm.header);
-        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags.withKind(.auto_init), .{ .auto_init = slot });
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            true,
+            rt,
+            atom.ids.prototype,
+            flags.withKind(.auto_init),
+            .{ .auto_init = slot },
+        );
+    }
+
+    /// qjs `JS_DefinePropertyValue` → `JS_CreateProperty` data arm on a
+    /// known-new ordinary object (quickjs.c:10215-10266):
+    /// `prop_flags = flags & JS_PROP_C_W_E`, `add_property`, then
+    /// `pr->u.value = JS_DupValue(ctx, val)` (the wrapper then frees `val`).
+    /// The caller hands over a freshly created value; this path consumes it
+    /// into the slot (dup+free of a temp is a no-op on the end state).
+    ///
+    /// `atom_id` must be a predefined non-index atom (`length` / `name`).
+    pub fn defineOwnDataValueAssumingNew(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        data_value: JSValue,
+        flags: property.Flags,
+    ) !void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.flags.extensible);
+        std.debug.assert(flags.kind == .data);
+        try self.appendPreparedPropertyEntryImpl(
+            true,
+            false,
+            true,
+            rt,
+            atom_id,
+            flags,
+            .{ .data = data_value },
+        );
     }
 
     fn arrayPrototypeValueForAutoInit(realm: *context_mod.RealmContext) !JSValue {

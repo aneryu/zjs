@@ -3433,8 +3433,12 @@ test "js_function_set_properties publishes configurable length then name" {
         \\function namedPair(a, b) { return a; }
         \\var dlen = Object.getOwnPropertyDescriptor(namedPair, "length");
         \\var dname = Object.getOwnPropertyDescriptor(namedPair, "name");
+        \\var dproto = Object.getOwnPropertyDescriptor(namedPair, "prototype");
+        \\var dctor = Object.getOwnPropertyDescriptor(dproto.value, "constructor");
         \\globalThis.__r11_name_ok = (dlen.value === 2 && dlen.writable === false && dlen.enumerable === false && dlen.configurable === true
-        \\  && dname.value === "namedPair" && dname.writable === false && dname.enumerable === false && dname.configurable === true) ? 1 : 0;
+        \\  && dname.value === "namedPair" && dname.writable === false && dname.enumerable === false && dname.configurable === true
+        \\  && dproto.writable === true && dproto.enumerable === false && dproto.configurable === false
+        \\  && dctor.value === namedPair && dctor.writable === true && dctor.enumerable === false && dctor.configurable === true) ? 1 : 0;
     );
     setup.free(js.runtime);
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
