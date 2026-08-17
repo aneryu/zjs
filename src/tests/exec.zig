@@ -18709,6 +18709,28 @@ test "started generator resumes preserve unmapped arguments from parked locals" 
     try std.testing.expect(result.isUndefined());
 }
 
+test "array named proto field uses ordinary lookup; length and index stay exotic" {
+    // qjs GET_FIELD_INLINE (quickjs.c:19135-19138): Array exotic is index +
+    // length. A named atom such as `push` must resolve on Array.prototype
+    // without changing `length` or dense-element reads.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\const a = [7];
+        \\assert.sameValue(a.push, Array.prototype.push);
+        \\assert.sameValue(a.noSuchNamed, undefined);
+        \\assert.sameValue(a.length, 1);
+        \\assert.sameValue(a[0], 7);
+        \\const mid = Object.create(Array.prototype);
+        \\const b = [];
+        \\Object.setPrototypeOf(b, mid);
+        \\assert.sameValue(b.pop, Array.prototype.pop);
+        \\assert.sameValue(b.length, 0);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "iterator results use ordinary transitions without a sixth realm shape" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

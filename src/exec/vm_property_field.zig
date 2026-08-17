@@ -483,6 +483,19 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
                 };
                 continue;
             }
+            // qjs GET_FIELD_INLINE (quickjs.c:19135-19138): `is_exotic` after
+            // own miss, with an XXX to keep arrays off the slow path when
+            // `prop` is not numeric. Array/Arguments exotic [[Get]] is index
+            // + `length` only; a named non-index atom (bytecode `.push`) is
+            // ordinary lookup, so keep the fast proto walk and stay
+            // absence-authoritative. TypedArray / Proxy / String stay slow.
+            if (namedAtomUsesOrdinaryWalkOnIndexExotic(object.class_id, atom_id)) {
+                object = object.getPrototype() orelse {
+                    absent.* = true;
+                    return null;
+                };
+                continue;
+            }
             // Non-authoritative link: it may still hold or inherit the property,
             // so keep walking — but absence can no longer be concluded from here
             // on, which is precisely phase 2's two-state contract.
@@ -500,9 +513,27 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
         var slow_property = false;
         if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
         if (slow_property) return null;
+        if (namedAtomUsesOrdinaryWalkOnIndexExotic(object.class_id, atom_id)) {
+            object = object.getPrototype() orelse return null;
+            continue;
+        }
         if (object.needsSlowPropertyAccess()) return null;
         object = object.getPrototype() orelse return null;
     }
+}
+
+/// Array / unmapped Arguments / mapped Arguments are exotic only for
+/// canonical numeric indices and `length` (quickjs.c:19135-19138). A
+/// named non-index atom cannot be an element or the length slot, so the
+/// GET_FIELD_INLINE proto walk is semantically the same as for a plain
+/// object. Tagged-int atoms cover the interned 0..2^31-1 index window;
+/// `length` stays on the slow arm so the dense-array length scalar is
+/// not skipped. TypedArray / Proxy / String objects are not included.
+inline fn namedAtomUsesOrdinaryWalkOnIndexExotic(class_id: core.class.ClassId, atom_id: core.Atom) bool {
+    if (core.atom.isTaggedInt(atom_id) or atom_id == core.atom.ids.length) return false;
+    return class_id == core.class.ids.array or
+        class_id == core.class.ids.arguments or
+        class_id == core.class.ids.mapped_arguments;
 }
 
 /// Hot-handler variant: returns the BORROWED own/prototype data slot address
