@@ -393,3 +393,21 @@ q 的 ConcatStringInPlace 在此形同样 rc≥2 不命中——**拷贝为对�
 连同金丝雀留支 grok/string-slack@fad30cea 归档不合。松弛定理改述（String 载荷合法性）
 保留为宪法结论——只是本案无付款面。pdfjs 残差终归位：壳地板（491M 已钉）+IPC 弥散
 +对称字符串成本（非差距项）。
+
+## 2026-08-17 收尾终章（main@9fdc0e23，官方 8 样本）
+
+**终榜：geomean 1.0141；达标 9/15（DB 0.9954 骑线摆动，历史带 0.997-1.005）。**
+五落后项终位：pdfjs 0.8141 / EB **0.8153**（日内 +1.7pp）/ TS 0.9443 / box2d 0.9668 /
+splay **0.9952**（日内 +1.2pp，destroy 瘦尾主受益）。crypto 1.0760（w46 复核条款过，
+无需留一法）。
+
+**九/十期战绩：** 合入 w42/43/44/45R/46 五波+两正确性修（Proxy [[Set]]/TA proto [[Get]]）；
+EB 重归因（出树 70%/Boyer 30%，99.6% 闭合）产刀三把落袋（fclosure 链/props 对齐/destroy
+瘦尾）；杀刀五把（instanceof/TYPED×2/TAKE/聚簇首刀）各附定理。
+**新定理入册：** IC 尸检（快臂 2-3 cyc 旁挂缓存必亏）；不可达定理（肥 op 窗）；对称成本
+定理（pdfjs 字符串拷贝 q 同付，普查须配 q 兑现验证）；单态副本=定价资产；OoO 吸收第四证；
+Entry→TAKE 归属改判；松弛定理改述（String 载荷合法）。
+**封存资产：** 聚簇刀 a5772141/ba7e003e（EB 三 pad +0.5~0.9pp，差 mandreel 单 pad）；
+string-slack P1 fad30cea（RC 编排 q 形）；preserve_none 前沿档。
+**剩余明牌（全持实验封条）：** pdfjs 壳地板+IPC；TS call/return；box2d BIN-IPC；
+splay ⑦（余 0.5pp 骑线）；EB 出树发数+H3 桩+精确 GC 根。全 15≥1.0 于现宪法框架无路径。
