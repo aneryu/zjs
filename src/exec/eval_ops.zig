@@ -347,8 +347,14 @@ pub fn execDirectEval(
         .values = &root_values,
         .slices = &root_slices,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const result = if (isContextIntrinsicEval(ctx, func))
         directEval(ctx, output, global, rooted_args, function, frame, eval_scope_head, caller_eval_global_var_bindings) catch |err| {
@@ -397,8 +403,14 @@ pub fn execApplyEval(
         .previous = ctx.runtime.active_value_roots,
         .values = &value_roots,
     };
-    ctx.runtime.active_value_roots = &value_root_frame;
-    defer ctx.runtime.active_value_roots = value_root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &value_root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = value_root_frame.previous;
+        }
+    }
 
     var args = try argsFromArray(ctx.runtime, arg_array);
     defer freeArgs(ctx.runtime, args);
@@ -511,8 +523,14 @@ pub fn directEval(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const eval_function_object = objectFromValue(eval_function_value) orelse return error.InvalidBytecode;
     const function_value = eval_function_object.functionBytecode() orelse return error.InvalidBytecode;

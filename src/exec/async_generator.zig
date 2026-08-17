@@ -138,8 +138,14 @@ fn settleHead(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
     const settle_fn = if (is_reject) req.reject else req.resolve;
     const call_result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle_fn, &.{rooted_result}, null, null);
     call_result.free(ctx.runtime);

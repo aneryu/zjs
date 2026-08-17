@@ -492,8 +492,14 @@ pub fn constructLiteral(rt: *core.JSRuntime, pattern: []const u8, flags: []const
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer source_val.free(rt);
 
@@ -544,8 +550,14 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer source_val.free(rt);
     defer flags_val.free(rt);
@@ -681,8 +693,14 @@ fn constructCompiled(rt: *core.JSRuntime, realm_global: ?*core.Object, source: c
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try createRegExpObject(rt, realm_global, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);

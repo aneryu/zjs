@@ -348,8 +348,14 @@ pub fn aggregateErrorsIterableToArray(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer iterator_method.free(ctx.runtime);
     defer iterator_value.free(ctx.runtime);
@@ -661,8 +667,14 @@ pub fn qjsTypedArrayConstructArrayLikeVm(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer result_value.free(ctx.runtime);
     defer item.free(ctx.runtime);
@@ -734,8 +746,14 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
     defer item.free(ctx.runtime);
     defer coerced.free(ctx.runtime);
 
@@ -880,8 +898,14 @@ pub fn qjsTypedArrayConstructFromIterable(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer iterator.free(ctx.runtime);
     defer values_value.free(ctx.runtime);
@@ -1870,8 +1894,14 @@ pub fn qjsTypedArrayMapFilter(
         .previous = ctx.runtime.active_value_roots,
         .slices = &root_slices,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     var kept_count: usize = 0;
     errdefer {
@@ -2513,8 +2543,14 @@ pub fn qjsArraySliceCall(
                 .previous = ctx.runtime.active_value_roots,
                 .values = &root_values,
             };
-            ctx.runtime.active_value_roots = &root_frame;
-            defer ctx.runtime.active_value_roots = root_frame.previous;
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = &root_frame;
+            }
+            defer {
+                if (comptime core.runtime.value_root_frames_enabled) {
+                    ctx.runtime.active_value_roots = root_frame.previous;
+                }
+            }
 
             if (count > 0) {
                 const elements = try ctx.runtime.memory.alloc(core.JSValue, count);
@@ -2761,8 +2797,14 @@ fn qjsFastDenseArraySplice(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     if (actual_delete_count > 0) {
         const elements = try rt.memory.alloc(core.JSValue, actual_delete_count);
@@ -4206,8 +4248,14 @@ fn fromAsyncStart(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
     defer state_val.free(rt);
 
     try fromAsyncStateSet(rt, state, "resolve", resolve);
@@ -4361,8 +4409,14 @@ pub fn qjsArrayFromAsyncContinuationCall(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
     defer state_val.free(rt);
     const state = objectFromValue(state_val) orelse return error.TypeError;
     const rejected = blk: {
@@ -6291,12 +6345,16 @@ pub const ValueSliceRoot = struct {
             .previous = rt.active_value_roots,
             .slices = &self.slices,
         };
-        rt.active_value_roots = &self.frame;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = &self.frame;
+        }
     }
 
     pub fn deinit(self: *ValueSliceRoot) void {
         const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = self.frame.previous;
+        }
         self.rt = null;
     }
 };
@@ -6315,12 +6373,16 @@ pub const CellSliceRoot = struct {
             .previous = rt.active_value_roots,
             .slices = &self.slices,
         };
-        rt.active_value_roots = &self.frame;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = &self.frame;
+        }
     }
 
     pub fn deinit(self: *CellSliceRoot) void {
         const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = self.frame.previous;
+        }
         self.rt = null;
     }
 };
@@ -6645,8 +6707,14 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
         .previous = rt.active_value_roots,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const array = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &array.header);
@@ -6964,8 +7032,14 @@ pub fn qjsObjectEntryArrayValue(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     value = try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame);
 

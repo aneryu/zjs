@@ -168,8 +168,14 @@ pub fn callValueWithThisGlobalsAndGlobal(
         .values = &root_values,
         .slices = &root_slices,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     if (thisObject(callee)) |proxy| {
         if (proxy.proxyTarget() != null and object_ops.proxyTargetIsCallable(callee)) {
@@ -812,8 +818,14 @@ fn createPromiseCapability(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer promise_val.free(ctx.runtime);
     defer resolve_val.free(ctx.runtime);
@@ -1134,8 +1146,14 @@ fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: c
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -1215,8 +1233,14 @@ fn createPromiseCombinatorState(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &state.header);
@@ -2085,8 +2109,14 @@ pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, prim
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -2198,8 +2228,14 @@ fn createBoundFunction(
         .values = &root_values,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const target_object = thisObject(rooted_target) orelse return error.TypeError;
     const length_value = if (try hasOwnPropertyProxyAware(ctx, output, global, globals, target_object, core.atom.ids.length)) blk: {
@@ -2983,8 +3019,14 @@ fn descriptorObject(rt: *core.JSRuntime, desc: core.Descriptor) !core.JSValue {
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -3257,8 +3299,14 @@ pub fn qjsEvalGlobalScriptSource(
             .previous = ctx.runtime.active_value_roots,
             .values = &root_values,
         };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = root_frame.previous;
+            }
+        }
         const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
         const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
         const function = call_runtime.functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
@@ -3292,8 +3340,14 @@ pub fn qjsEvalGlobalScriptSource(
             .previous = ctx.runtime.active_value_roots,
             .values = &root_values,
         };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = root_frame.previous;
+            }
+        }
         try restoreEvalGlobalLexicals(ctx, global, saved_lexicals, keep_active_lexicals);
         return rooted_result;
     }

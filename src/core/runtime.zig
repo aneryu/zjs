@@ -398,6 +398,10 @@ pub const ObjectRootValue = struct {
     object: *?*Object,
 };
 
+/// Precise ValueRootFrame linking is test-only. Production trial-deletion
+/// GC does not consume the chain; native locals already hold refcounts.
+pub const value_root_frames_enabled = builtin.is_test;
+
 pub const ValueRootFrame = struct {
     previous: ?*const ValueRootFrame = null,
     slices: []const ValueRootSlice = &.{},

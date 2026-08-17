@@ -2993,8 +2993,14 @@ pub fn constructDynamicFunctionFromSource(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
     const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
     const root_bytecode_value = root_function_object.functionBytecode() orelse return error.InvalidBytecode;
     const function = functionBytecodeFromValue(root_bytecode_value) orelse return error.InvalidBytecode;
@@ -5015,8 +5021,14 @@ pub fn indirectEval(
             .previous = ctx.runtime.active_value_roots,
             .values = &root_values,
         };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = root_frame.previous;
+            }
+        }
         const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
         const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
         const function = functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
@@ -5052,8 +5064,14 @@ pub fn indirectEval(
             .previous = ctx.runtime.active_value_roots,
             .values = &root_values,
         };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = root_frame.previous;
+            }
+        }
         try restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals, keep_active_lexicals);
         return rooted_result;
     }
@@ -6406,8 +6424,14 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const iterator_object = object_ops.objectFromValue(rooted_iterator) orelse return error.TypeError;
     const prototype = try object_ops.wrapForValidIteratorPrototype(ctx.runtime, global);
@@ -6620,8 +6644,14 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, 
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     // QuickJS's js_create_iterator_result uses an ordinary object followed by
     // the `value` and `done` transitions; iterator results are not one of the

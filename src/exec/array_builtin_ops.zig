@@ -428,8 +428,14 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
         .previous = rt.active_value_roots,
         .values = rooted.roots,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try core.Object.createArray(rt, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -659,8 +665,14 @@ fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JS
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &result.header);
@@ -1031,8 +1043,14 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const removed = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &removed.header);
@@ -1173,15 +1191,27 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
         .previous = rt.active_value_roots,
         .values = &receiver_root_values,
     };
-    rt.active_value_roots = &receiver_root_frame;
-    defer rt.active_value_roots = receiver_root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &receiver_root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = receiver_root_frame.previous;
+        }
+    }
 
     const args_root_frame = core.runtime.ValueRootFrame{
         .previous = rt.active_value_roots,
         .values = rooted_args.roots,
     };
-    rt.active_value_roots = &args_root_frame;
-    defer rt.active_value_roots = args_root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &args_root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = args_root_frame.previous;
+        }
+    }
 
     const out = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &out.header);

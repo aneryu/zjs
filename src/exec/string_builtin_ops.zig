@@ -644,8 +644,14 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
         .slices = &root_slices,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
     data_value = if (rooted_args.len >= 1)
@@ -1043,8 +1049,14 @@ fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
         .slices = &root_slices,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const out = try core.Object.createArray(rt, null);
     out_value = out.value();
@@ -1112,8 +1124,14 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
         .slices = &root_slices,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     if (stringValueFromReceiver(rooted_receiver)) |string_value| {
         try string_value.ensureFlat(rt);
@@ -1197,8 +1215,14 @@ fn match(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
         .slices = &root_slices,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     var needle = std.ArrayList(u8).empty;
     defer needle.deinit(rt.memory.allocator);
@@ -1264,8 +1288,14 @@ fn defineStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, by
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const value = try createStringValue(rt, bytes);
     try defineValueElement(rt, object, index, value);
@@ -1280,8 +1310,14 @@ fn defineStringSliceElement(rt: *core.JSRuntime, object: *core.Object, index: u3
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const value = (try core.string.String.createSlice(rt, string_value, start, slice_len)).value();
     try defineValueElement(rt, object, index, value);
@@ -1298,8 +1334,14 @@ fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, val
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer rooted_value.free(rt);
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(rooted_value, true, true, true));
@@ -1314,8 +1356,14 @@ fn defineStringIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const value = try createStringValue(rt, bytes);
     defer value.free(rt);
@@ -1331,8 +1379,14 @@ fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, inde
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const units: [1]u16 = .{unit};
     const string = try core.string.String.createUtf16(rt, &units);
@@ -2060,8 +2114,14 @@ fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JS
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &result.header);
@@ -2180,8 +2240,14 @@ fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
@@ -2197,8 +2263,14 @@ fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);

@@ -380,8 +380,14 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
         .previous = rt.active_value_roots,
         .values = rooted.roots,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -460,8 +466,14 @@ fn entryArrayValue(rt: *core.JSRuntime, key: core.Atom, value: core.JSValue) !co
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const array = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &array.header);

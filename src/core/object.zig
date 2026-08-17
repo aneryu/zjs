@@ -4328,8 +4328,14 @@ pub const Object = extern struct {
             .previous = rt.active_value_roots,
             .values = &root_values,
         };
-        rt.active_value_roots = &root_frame;
-        defer rt.active_value_roots = root_frame.previous;
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime runtime_mod.value_root_frames_enabled) {
+                rt.active_value_roots = root_frame.previous;
+            }
+        }
 
         const target_identity = try weakIdentityFromValue(rt, rooted_target);
         const unregister_token_identity = try weakIdentityFromValue(rt, rooted_unregister_token);
@@ -5184,8 +5190,14 @@ pub const Object = extern struct {
             .previous = rt.active_value_roots,
             .values = &root_values,
         };
-        rt.active_value_roots = &root_frame;
-        defer rt.active_value_roots = root_frame.previous;
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime runtime_mod.value_root_frames_enabled) {
+                rt.active_value_roots = root_frame.previous;
+            }
+        }
 
         const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
         try rt.registerBorrowedReferenceHolder(self);
@@ -12996,8 +13008,14 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime runtime_mod.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const arr = try Object.createArray(rt, prototype);
     errdefer Object.destroyFromHeader(rt, &arr.header);
@@ -13027,8 +13045,14 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime runtime_mod.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try ownEntriesExpectObject(rooted_value);
     const owned_keys = try object.ownKeys(rt);
@@ -13129,8 +13153,14 @@ pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValu
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime runtime_mod.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     target = try stringIteratorPrimitiveValue(rooted_receiver);
     defer target.free(rt);

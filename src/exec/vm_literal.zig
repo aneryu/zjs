@@ -242,8 +242,14 @@ pub noinline fn defineField(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const target = try property_ops.expectObject(obj);
     if (target.isArray() and atom_id == core.atom.ids.length and
@@ -327,8 +333,14 @@ pub noinline fn defineArrayEl(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object_value = property_ops.expectObject(rooted_array) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
@@ -411,8 +423,14 @@ pub noinline fn copyDataProperties(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     // qjs JS_CopyDataProperties (quickjs.c:16912-16913) skips EVERY non-object
     // source — `{...5}`, `{...true}`, `{..."ab"}`, `{...Symbol()}` all yield no
@@ -492,8 +510,14 @@ pub noinline fn copyDataProperties(
                 .previous = rt.active_value_roots,
                 .values = &value_root_values,
             };
-            rt.active_value_roots = &value_root_frame;
-            defer rt.active_value_roots = value_root_frame.previous;
+            if (comptime core.runtime.value_root_frames_enabled) {
+                rt.active_value_roots = &value_root_frame;
+            }
+            defer {
+                if (comptime core.runtime.value_root_frames_enabled) {
+                    rt.active_value_roots = value_root_frame.previous;
+                }
+            }
             property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
                 return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         }
@@ -520,8 +544,14 @@ pub noinline fn copyDataProperties(
             .previous = rt.active_value_roots,
             .values = &value_root_values,
         };
-        rt.active_value_roots = &value_root_frame;
-        defer rt.active_value_roots = value_root_frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = &value_root_frame;
+        }
+        defer {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                rt.active_value_roots = value_root_frame.previous;
+            }
+        }
         property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     }
@@ -623,8 +653,14 @@ pub noinline fn rest(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     errdefer {
         const failed_array = array_value;

@@ -173,8 +173,14 @@ pub fn createAsyncFromSyncIterator(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     rooted_next_method = try iteratorNextMethod(ctx, output, global, rooted_sync_iterator, function, frame, getValueProperty);
     owns_next_method = true;
@@ -1027,8 +1033,14 @@ fn forInPrepareProtoChainEnum(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &value_root_frame;
-    defer rt.active_value_roots = value_root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &value_root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = value_root_frame.previous;
+        }
+    }
     defer obj1_val.free(rt);
 
     var has_enumerable = false;
@@ -1186,8 +1198,14 @@ pub fn arrayIteratorMethod(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try property_ops.expectObject(rooted_object);
     if (array_ops.isTypedArrayPrototypeMethod(ctx.runtime, function_object)) {
@@ -1262,8 +1280,14 @@ pub fn arrayIteratorValue(
                 .previous = ctx.runtime.active_value_roots,
                 .values = &root_values,
             };
-            ctx.runtime.active_value_roots = &root_frame;
-            defer ctx.runtime.active_value_roots = root_frame.previous;
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = &root_frame;
+            }
+            defer {
+                if (comptime core.runtime.value_root_frames_enabled) {
+                    ctx.runtime.active_value_roots = root_frame.previous;
+                }
+            }
             defer value.free(ctx.runtime);
 
             const pair = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
@@ -1541,8 +1565,14 @@ pub fn qjsIteratorConcatCall(
         .previous = ctx.runtime.active_value_roots,
         .values = &records_root_values,
     };
-    ctx.runtime.active_value_roots = &records_root_frame;
-    defer ctx.runtime.active_value_roots = records_root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &records_root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = records_root_frame.previous;
+        }
+    }
 
     for (args, 0..) |item, index| {
         var rooted_item = item;
@@ -1556,8 +1586,14 @@ pub fn qjsIteratorConcatCall(
             .previous = ctx.runtime.active_value_roots,
             .values = &loop_root_values,
         };
-        ctx.runtime.active_value_roots = &loop_root_frame;
-        defer ctx.runtime.active_value_roots = loop_root_frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = &loop_root_frame;
+        }
+        defer {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = loop_root_frame.previous;
+            }
+        }
 
         _ = property_ops.expectObject(rooted_item) catch return error.TypeError;
         rooted_iterator_method = try getIteratorMethod(ctx, output, global, rooted_item);
@@ -1763,8 +1799,14 @@ pub fn qjsIteratorZipCall(
         .values = &root_values,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     if (rooted_args.len < 1) return error.TypeError;
     const iterables = rooted_args[0];
@@ -2113,8 +2155,14 @@ pub fn qjsIteratorZipCreateHelper(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const prototype = try qjsIteratorHelperPrototype(rt, global);
     const helper = try core.Object.create(rt, core.class.ids.iterator_helper, prototype);
@@ -2149,8 +2197,14 @@ pub fn qjsIteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(rooted_value, true, true, true));
 }
@@ -2238,8 +2292,14 @@ pub fn qjsIteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: 
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     try object.setProperty(rt, core.atom.atomFromUInt32(@intCast(index)), rooted_value);
 }
@@ -2752,8 +2812,14 @@ fn qjsIteratorCreateHelper(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const iterator = objectFromValue(rooted_receiver) orelse return error.TypeError;
     const next_key = try ctx.runtime.internAtom("next");
