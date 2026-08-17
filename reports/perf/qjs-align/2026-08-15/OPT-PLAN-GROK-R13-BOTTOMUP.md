@@ -1108,3 +1108,18 @@ Earley 热叶，特化承重再获交叉印证。**
 原 S3-A（岛密度）方案的立项理由被本普查逐段拆除；可能的替代假设（候函数账后议）：
 ①按 Earley 79 符/131KB 真热集聚簇（修正版 L-1.5，聚对集合）；②Earley 构图/GC 助手
 的工作量本身（allocation 压力→GC 取指热）。全部候 pQ/pV 函数级账定量后合并讨论。
+
+## 八期 EB 重归因收官（2026-08-17，driver 裁）：ACCEPT，旧账大改
+
+逐函数消融（99.6% 闭合）：**出树 deriv-trees 闭包族 824.5M=69.9%**（Earley insn z/q
+1.252=多执行 25% 指令；fclosure8 640k×800ns/get_var_ref 7.2M/new sc_Pair 4.7M/
+instanceof 7.9M）+ **Boyer rewrite/unify 350.9M=29.7%**（insn 1.064≈单价性质）。
+分侧 z/q：Earley 1.351 / Boyer 1.129。超额构成=⅔ 多指令+⅓ 单价/IPC。
+**旧三分账改判：形税/闭包坐实并定位（出树）；L1I 墙降级为弱/局部（Boyer 取指干净、
+Earley 主因是多 insn 非墙）；RC=出树伴随（q 侧 Earley 同样 GC 重：mark 7.2%+malloc/free
+10.6%）。瘦身工程上限重估 ~385M（超额 ⅓）——原 S3-A 立项理由坍塌。**
+q 侧函数账（pV，x23=b 映射 91% JCI 覆盖）交叉印证：Earley 热=sc_list/loop2/loop3/sc_Pair
+（列表树构造 52.5%）；Boyer 热=unify 33.6%+rewrite 30.9%+sc_Pair 15.3%。
+正确性附产：TA-as-proto [[Get]] 姐妹洞（pT，修复在途）。
+用户「需要重新归因与定位」第四次应验。下一刀方向（候讨论）：出树闭包族的多 insn
+（勿再对 get_field 热臂或 L1I 岛重讲）。
