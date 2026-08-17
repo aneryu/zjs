@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build zjs --seed 0 --summary all
+      - run: zig build test --seed 0 --summary all
+      - run: zig build architecture-check --seed 0 --summary all
+      - run: zig build test262-smoke --seed 0 --summary all
+      - run: zig build config-drift-gate --seed 0 --summary all
+
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # advisory until first green run on x86-64 (never executed on this arch before); driver flips to required
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build zjs --seed 0 --summary all
+      - run: zig build test --seed 0 --summary all
+      - run: zig build architecture-check --seed 0 --summary all
+      - run: zig build test262-smoke --seed 0 --summary all
+      - run: zig build config-drift-gate --seed 0 --summary all
+
+  macos-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # advisory until first green run on macOS (never executed on this arch before); driver flips to required
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build zjs --seed 0 --summary all
+      - run: zig build smoke --seed 0 --summary all
