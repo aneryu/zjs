@@ -12,7 +12,7 @@
 
 ## Validation
 
-- [ ] `zig build quick-check --summary all` for a focused change, **or** `zig build checkpoint-check --summary all` for a non-trivial code-bearing change.
+- [ ] `mise run quick-check` for a focused change, **or** `mise run checkpoint-check` for a non-trivial code-bearing change. See GUIDE.md Part B.6.
 - [ ] `git diff --check`
 - [ ] Relevant test262 slice:
 - [ ] `zig build engine-production-gate --summary all` for phase-close semantic/bytecode evidence.

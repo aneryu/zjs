@@ -1,7 +1,7 @@
 // Whole-process measurement contract.
 //
 // Every rule in this module exists because a violation of it already produced a
-// wrong answer in this campaign; see reports/perf/qjs-align/measurement-contracts.md
+// wrong answer in this campaign; see tools/compare/measurement_policy.json
 // for the incident register. The module is deliberately dependency-free and
 // side-effect-free so the contract tests can drive it directly.
 //

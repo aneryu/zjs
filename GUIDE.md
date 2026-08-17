@@ -1,21 +1,18 @@
 # GUIDE.md — Project Development Guide
 
-Last updated: 2026-05-27
+Last updated: 2026-08-17
 
-This guide consolidates the stable engineering rules for this repository: the
-C -> Zig 0.16.0 migration specification (formerly `SPEX.md`) and the validation
-workflow for the QuickJS convergence effort. Historical plans, ledgers, and
-decision logs have been removed from the active tree and remain available in
-git history when needed.
+This guide is the engineering rulebook: Zig style, ownership, errors, and the
+validation command ladder. Historical plans and campaign ledgers live in git
+history.
 
-`AGENTS.md` remains the operational rulebook (no shortcuts, build commands,
-pre-commit checklist). This guide is the engineering rulebook. Current runtime
-limitations and compatibility boundaries live in `LIMITATIONS.md` and
-`COMPATIBILITY.md`.
+`AGENTS.md` is the operational rulebook (no shortcuts, change discipline).
+Contribution workflow is in `CONTRIBUTING.md`. Compatibility and product
+limits live in `COMPATIBILITY.md` and `LIMITATIONS.md`.
 
 ---
 
-## Part A. C → Zig 0.16.0 Migration Specification
+## Part A. Zig Engineering Rules
 
 Goals:
 
@@ -424,10 +421,10 @@ correctness first, then performance.
 
 ```bash
 zig fmt .
-zig build quick-check --seed 0 --summary all
+mise run quick-check
 zig build test --seed 0 --summary all
-# 阶段收口档位 / phase-close tier:
-# zig build test-oom --seed 0 --summary all (OOM 注入门禁：corpus×注入+恢复金丝雀 / OOM injection gate: corpus x injection + recovery canaries)
+# phase-close tier:
+# zig build test-oom --seed 0 --summary all
 ```
 
 ### A.11 Conclusion
@@ -638,6 +635,7 @@ been retired:
 ### B.9 Cross-References
 
 - Operational rules: `AGENTS.md`.
+- Contribution workflow: `CONTRIBUTING.md`.
 - Compatibility boundary: `COMPATIBILITY.md`.
 - Runtime limitations: `LIMITATIONS.md`.
 - Test262 compatibility boundary: `test262.conf` and `test262/`.
