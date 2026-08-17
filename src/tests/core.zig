@@ -249,6 +249,28 @@ test "first named property allocates initial_prop_size slots" {
     object.value().free(rt);
 }
 
+test "plain object destroy slim frees two data slots and the value buffer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const car = try rt.internAtom("car");
+    defer rt.atoms.free(car);
+    const cdr = try rt.internAtom("cdr");
+    defer rt.atoms.free(cdr);
+
+    const baseline_objects = rt.gc.liveCount();
+    const pair = try core.Object.create(rt, core.class.ids.object, null);
+    try pair.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, car, core.JSValue.int32(1));
+    try pair.defineOwnDataPropertyAssumingNewFromRootedAtom(rt, cdr, core.JSValue.int32(2));
+    try std.testing.expectEqual(@as(u32, 2), pair.shape_ref.prop_count);
+    try std.testing.expectEqual(core.class.ids.object, pair.class_id);
+    try std.testing.expectEqual(core.class.PayloadKind.none, pair.flags.class_payload_kind);
+    try std.testing.expectEqual(@as(u32, 0), pair.weakref_count);
+
+    pair.value().free(rt);
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
 test "proven object release preserves generic JSValue ownership semantics" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
