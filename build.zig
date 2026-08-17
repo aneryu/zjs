@@ -184,6 +184,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .root_module = runtime_plugin_fixture_mod,
     });
+    forceLlvmBackendOnDebug(runtime_plugin_fixture);
     const install_runtime_plugin_fixture = b.addInstallArtifact(runtime_plugin_fixture, .{
         .dest_dir = .{ .override = .lib },
     });
@@ -201,6 +202,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .root_module = runtime_empty_plugin_fixture_mod,
     });
+    forceLlvmBackendOnDebug(runtime_empty_plugin_fixture);
     const install_runtime_empty_plugin_fixture = b.addInstallArtifact(runtime_empty_plugin_fixture, .{
         .dest_dir = .{ .override = .lib },
     });
@@ -226,6 +228,7 @@ pub fn build(b: *std.Build) void {
         .name = "zjs",
         .root_module = zjs_cli_mod,
     });
+    forceLlvmBackendOnDebug(zjs_exe);
     // L-1: gather every dispatch Handler into `.text.zjs.op_handlers`
     // (source order). The retired get_arg0..3 pin lived in this same
     // script and sat a megabyte from the loc/arith bodies. Other
@@ -268,6 +271,7 @@ pub fn build(b: *std.Build) void {
         .name = "zjs-profile",
         .root_module = zjs_profile_cli_mod,
     });
+    forceLlvmBackendOnDebug(zjs_profile_exe);
     // Same L-1 island as production zjs. The retired table-wrapper lived
     // in `.op_handlers` and slid every handler; keep the profile artifact
     // on the same script so leftover-ladder disassembly matches prod.
@@ -301,6 +305,7 @@ pub fn build(b: *std.Build) void {
         .name = "zjs-dev",
         .root_module = zjs_dev_cli_mod,
     });
+    forceLlvmBackendOnDebug(zjs_dev_exe);
     const install_zjs_dev = b.addInstallArtifact(zjs_dev_exe, .{});
     const zjs_dev_step = b.step("zjs-dev", "Build and install the Debug zjs used by inner-loop checks");
     zjs_dev_step.dependOn(&install_zjs_dev.step);
@@ -317,6 +322,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    forceLlvmBackendOnDebug(run_test262_exe);
     const install_run_test262 = b.addInstallArtifact(run_test262_exe, .{});
     const run_test262_step = b.step("run-test262", "Build and install run-test262");
     run_test262_step.dependOn(&install_run_test262.step);
@@ -333,6 +339,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    forceLlvmBackendOnDebug(run_test262_dev_exe);
     const install_run_test262_dev = b.addInstallArtifact(run_test262_dev_exe, .{});
     const run_test262_dev_step = b.step("run-test262-dev", "Build and install the Debug test262 runner used by checkpoint checks");
     run_test262_dev_step.dependOn(&install_run_test262_dev.step);
@@ -817,6 +824,7 @@ pub fn build(b: *std.Build) void {
         .name = "check-public-api",
         .root_module = architecture_public_api_mod,
     });
+    forceLlvmBackendOnDebug(architecture_public_api);
     const run_architecture_public_api = b.addRunArtifact(architecture_public_api);
     run_architecture_public_api.addArg("reports/api/public-symbols.txt");
 
@@ -874,6 +882,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    forceLlvmBackendOnDebug(unified_tests);
     unified_tests.test_runner = .{
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
@@ -909,6 +918,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    forceLlvmBackendOnDebug(smoke_tests);
     smoke_tests.test_runner = .{
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
@@ -957,6 +967,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    forceLlvmBackendOnDebug(smoke_dev_tests);
     smoke_dev_tests.test_runner = .{
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
@@ -1017,6 +1028,7 @@ pub fn build(b: *std.Build) void {
             .root_module = scoped_root,
             .filters = &.{config.filter},
         });
+        forceLlvmBackendOnDebug(scoped_tests);
         scoped_tests.test_runner = .{
             .path = b.path("tools/timing_test_runner.zig"),
             .mode = .simple,
@@ -1074,6 +1086,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    forceLlvmBackendOnDebug(oom_tests);
     oom_tests.test_runner = .{
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
@@ -1278,6 +1291,7 @@ pub fn build(b: *std.Build) void {
         .name = "zjs-same-runtime",
         .root_module = same_runtime_mod,
     });
+    forceLlvmBackendOnDebug(same_runtime_exe);
     const install_same_runtime = b.addInstallArtifact(same_runtime_exe, .{});
     const same_runtime_step = b.step("perf-same-runtime", "Build and install the ReleaseFast same-runtime benchmark harness");
     same_runtime_step.dependOn(&install_same_runtime.step);
@@ -1310,6 +1324,7 @@ pub fn build(b: *std.Build) void {
         .name = "zjs-direct-bench",
         .root_module = perf_direct_zjs_mod,
     });
+    forceLlvmBackendOnDebug(perf_direct_zjs_exe);
     const install_perf_direct_zjs = b.addInstallArtifact(perf_direct_zjs_exe, .{});
     const perf_direct_build_step = b.step("perf-direct-build", "Build and install the zjs direct/core benchmark harness");
     perf_direct_build_step.dependOn(&install_perf_direct_zjs.step);
@@ -1435,4 +1450,13 @@ fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.Optio
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
     options.addOption(usize, "zjs_dossier_layout_pad", in.dossier_layout_pad);
     return options;
+}
+
+/// stage2 backends cannot lower `@call(.always_tail)` or the NMFD `.space`
+/// tombstone. Force LLVM on every Debug artifact. Leave Release* unset
+/// (those already default to LLVM). This also defends aarch64: if Zig later
+/// defaults aarch64 Debug to a self-hosted backend, local always_tail would
+/// break silently.
+fn forceLlvmBackendOnDebug(compile: *std.Build.Step.Compile) void {
+    if (compile.root_module.optimize == .Debug) compile.use_llvm = true;
 }
