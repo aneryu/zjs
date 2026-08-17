@@ -422,3 +422,4 @@ main+四封存资产（grok/earley-cluster 聚簇刀/grok/string-slack P1/grok/e
 grok/ic-p1-v2-archive IC 证据树）+八条早期谱系（ablate·archive·audit·diag·fix·compiler-v2-qjs）。
 **/tmp：** 流水线目录、pad 二进制、普查原始件全清（报告已入库，原始件过期）。
 仓库终态：main@干净、单 worktree、账本三册（PARITY/OPT-PLAN/MECHANISM）+合同 16 条完整。
+**stash：** 2 条 r11-closure 时代 WIP（k1b/k2）已清——该战线由 w46 fclosure 链刀正式取代。
