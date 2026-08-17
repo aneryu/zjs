@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.0 - 2026-08-17
+
+First real release, replacing 0.1.0-alpha.1 and 0.1.0-alpha.2. The checked
+test262 profile reports zero failures (44,581 pass). The 15-item javascript-zoo
+geomean is 1.0141 vs QuickJS. Trusted-code embedding positioning is unchanged:
+`zjs` is not an in-process sandbox for hostile JavaScript.
+
 - Completed QCP-1B: removed the legacy Phase 1/2/3 compiler, dual comparator,
   and `-Dzjs_compiler` option. Deletion bisection traced the former crypto
   regression to shrinking `CompileContext` by one unused pointer, which
