@@ -19,8 +19,8 @@ host      →  src/runtime/  (event loop, plugins)
 ```
 
 `src/core/` must not depend on CLI policy, test262 glue, plugins, or the event
-loop. `zig build architecture-check` enforces that boundary and the public
-symbol snapshot in `reports/api/public-symbols.txt`.
+loop. `tools/architecture/check_deps.js` enforces that boundary. Checkpoint
+and the production gate both run it.
 
 ## Public entry — `src/root.zig`
 

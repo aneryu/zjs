@@ -21,8 +21,7 @@
 //!     legacy production path was deleted; with a single backend there is no
 //!     longer a decision to read, so the component records identity rather
 //!     than a choice. It is retained because a build artifact must still state
-//!     which compiler produced it, and because the negative drift gate needs
-//!     a component whose falsification it can prove.
+//!     which compiler produced it.
 //!   * `layout` is `resolve_labels.default_layout` — the exact comptime
 //!     constant `compiler_v2.compileFunctionV2` hands to `resolve_labels.run`
 //!     (compiler_v2/root.zig).

@@ -19,8 +19,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - run: zig build engine-production-gate --seed 0 --summary all
-      - run: zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
+      - run: zig build engine-production-gate --summary all
+      - run: zig build test -Doptimize=ReleaseSafe --summary all
 
   linux-x86_64:
     runs-on: ubuntu-24.04
@@ -34,8 +34,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - run: zig build engine-production-gate --seed 0 --summary all
-      - run: zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
+      - run: zig build engine-production-gate --summary all
+      - run: zig build test -Doptimize=ReleaseSafe --summary all
 
   macos-smoke:
     runs-on: macos-latest
@@ -49,5 +49,5 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --seed 0 --summary all
-      - run: zig build smoke --seed 0 --summary all
+      - run: zig build zjs --summary all
+      - run: zig build smoke --summary all

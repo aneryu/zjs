@@ -112,8 +112,8 @@ shape/hash fast-path hit or a slow/exotic path, never as an IC hit.
 Start with the narrowest changed-area target:
 
 ```sh
-zig build test-core --seed 0 --summary all
-zig build test-exec --seed 0 --summary all
+zig build test-core --summary all
+zig build test-exec --summary all
 mise run quick-check
 git diff --check
 ```

@@ -33,6 +33,9 @@ flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
     --output /tmp/zoo-compare.json
 ```
 
+Dated json dumps are gitignored; markdown notes stay trackable. Older dumps
+through 2026-08-15 remain in git history.
+
 Build `zjs` first — a stale binary has produced wrong campaign conclusions
 before.
 

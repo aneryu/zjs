@@ -13,7 +13,7 @@ prints is per-operation cost, not per-process.
 ## Running
 
 ```bash
-zig build zjs --seed 0                        # never measure a stale binary
+zig build zjs                                 # never measure a stale binary
 tools/perf/callshapes/sample.sh 8 \
     zjs=./zig-out/bin/zjs qjs=/path/to/qjs > /tmp/cs.csv
 python3 tools/perf/callshapes/report.py /tmp/cs.csv

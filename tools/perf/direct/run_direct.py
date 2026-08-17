@@ -209,8 +209,6 @@ def build_harnesses(
                 args.zig,
                 "build",
                 "perf-direct-build",
-                "--seed",
-                "0",
                 "--summary",
                 "all",
             ],

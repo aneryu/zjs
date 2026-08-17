@@ -422,9 +422,9 @@ correctness first, then performance.
 ```bash
 zig fmt .
 mise run quick-check
-zig build test --seed 0 --summary all
+# handoff: mise run checkpoint-check
 # phase-close tier:
-# zig build test-oom --seed 0 --summary all
+# zig build test-oom --summary all
 ```
 
 ### A.11 Conclusion
@@ -550,7 +550,7 @@ or direct reproducer. For example, replace `core` below with the matching
 subsystem:
 
 ```bash
-zig build test-core --seed 0 --summary all
+zig build test-core --summary all
 git diff --check
 ```
 
@@ -566,10 +566,9 @@ coverage. For several consecutive edits that all need CLI smoke feedback,
 escalating to a broader gate. `quick-check` intentionally does not compile the
 separate test262 runner.
 
-Pass CLI `--seed 0` to direct one-shot `zig build` commands. Zig 0.16
-randomizes dependency traversal by default, which can produce duplicate cache
-artifacts for an otherwise unchanged build; the `mise` commands above include
-the stable seed.
+`build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
+stays cacheable. CLI `--seed` is not required. Pass `-Dzjs_test_seed=<u32>`
+for an explicit randomized validation run.
 
 **Checkpoint.** Use this before handing off a non-trivial code-bearing change:
 
@@ -577,22 +576,26 @@ the stable seed.
 mise run checkpoint-check
 ```
 
-This includes the unified Debug suite, Debug CLI smoke, architecture checks,
-and `test262-smoke`. Add the relevant focused test262 directory or file set;
-do not run `quick-check` first because checkpoint already supersedes it.
+This includes the unified Debug suite, Debug CLI smoke, and source-side
+architecture checks. It does not compile ReleaseFast `zjs`; the
+compiler-stage `nm` check stays on the production gate. Add the relevant focused
+test262 directory or file set; do not run `quick-check` first because
+checkpoint already supersedes it.
 
 **Phase close / release.** Use this only for final confirmation, release
 evidence, or CI gates:
 
 ```bash
-zig build engine-production-gate --seed 0 --summary all
-zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
+zig build engine-production-gate --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
 ```
 
-Run `zig build test-altrepr --seed 0 --summary all` when value representation
-semantics changed, `zig build test-oom --seed 0 --summary all` when allocator/OOM
-behavior changed, and the performance gate when runtime-sensitive performance
-changed.
+Run `zig build test-altrepr --summary all` when value representation
+semantics changed, `zig build test-oom --summary all` when allocator/OOM
+behavior changed, `zig build test -Dzjs_force_gc=true` when GC timing changed,
+`zig build test -Dzjs_ownership_audit=true` when atom ownership changed, and
+the performance gate when runtime-sensitive performance changed. Do not treat
+these as checkpoint prerequisites.
 
 ### B.7 Durable Lessons
 

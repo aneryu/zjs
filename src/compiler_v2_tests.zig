@@ -6,10 +6,7 @@
 //! to reach compiler_v2 through the unified all_tests root.
 
 // QCP-1: this artifact proves its OWN effective configuration at compile time
-// (src/config_signature.zig). It is also the artifact `zig build
-// config-drift-gate` compiles, because its attestation covers both components
-// that gate is required to drift-test: the compiler backend and the final
-// bytecode layout.
+// (src/config_signature.zig).
 // Imported relatively, not through the `zjs` module: this root already spans
 // the engine subtree by relative path, and pulling in the same files a second
 // time under a module name is a "file exists in two modules" error.

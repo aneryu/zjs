@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Assemble `P7-61-results.json` from the raw collector payloads."""
+"""Assemble `P7-61-results.json` from the raw collector payloads.
+
+The 2026-07-30 raw payloads were removed from the active tree; check out
+that dated folder from git history before replaying this assembler.
+"""
 
 import hashlib
 import json

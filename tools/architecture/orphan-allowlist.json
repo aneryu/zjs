@@ -1,7 +1,1 @@
-[
-  {
-    "module": "src/regexp_direct_bench.zig",
-    "reason": "Standalone libregexp comparison harness compiled directly by tools/regexp-direct-demo/run.sh, outside build.zig; reachability solving only sees build roots.",
-    "exit_milestone": "Fold the regexp-direct demo into a build.zig step or retire the demo."
-  }
-]
+[]

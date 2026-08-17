@@ -449,9 +449,9 @@ CI、fuzzing、回归复现专用。**默认关，永远不进 ReleaseFast，不
 ### 7.3 怎么跑
 
 ```bash
-zig build test        --seed 0 --summary all -Dzjs_ownership_audit=true   # 统一套件
-zig build test-parser --seed 0               -Dzjs_ownership_audit=true   # 单子树，失败定位更快
-zig build test-oom    --seed 0 --summary all -Dzjs_ownership_audit=true
+zig build test        --summary all -Dzjs_ownership_audit=true   # 统一套件
+zig build test-parser               -Dzjs_ownership_audit=true   # 单子树，失败定位更快
+zig build test-oom    --summary all -Dzjs_ownership_audit=true
 zig build zjs-dev                            -Dzjs_ownership_audit=true   # 手工语料复现
 zig build run-test262-dev                    -Dzjs_ownership_audit=true   # test262 子树
 ./zig-out/bin/run-test262-dev -c test262.conf -d test262/test/language/module-code
@@ -504,8 +504,9 @@ src/tests/parser.zig:4814:42      in test.W5: generator parameter boundary emits
 
 落地位置：`tools/architecture/check_borrowed_atoms.js` +
 `tools/architecture/borrowed-atoms-allowlist.json`，挂在
-`zig build architecture-check` 上（与 `check_deps.js` / `check_oom_panics.js`
-同一层，同一套 allowlist 形状）。扫描范围 `src/**.zig`（不含 `src/tests/`）。
+`checkpoint-check` 和 `engine-production-gate` 上（与 `check_deps.js` /
+`check_oom_panics.js` 同一层，同一套 allowlist 形状）。扫描范围
+`src/**.zig`（不含 `src/tests/`）。
 
 ### 8.1 为什么需要它——它和 §7 各管一半
 
@@ -662,7 +663,7 @@ Borrowed-atom rule violations:
 ### 8.5 怎么跑
 
 ```bash
-zig build architecture-check                             # 门禁（含本规则）
+mise run checkpoint-check                                # 门禁（含本规则）
 node tools/architecture/check_borrowed_atoms.js          # 只跑这一条
 node tools/architecture/check_borrowed_atoms.js --list   # 逐条列出 finding + 借用 helper 集合
 ```

@@ -40,13 +40,12 @@ kept as current status; recover them from git history when needed.
 
 ## Reports (gate snapshots)
 
-These paths are build-graph inputs or the latest test262 write-out. Do not
-delete them without changing `build.zig`.
+These paths are build-graph inputs or local write-outs.
 
-- `reports/api/public-symbols.txt`: public API symbol snapshot.
-- `reports/test262-latest/`: latest local test262 bucket and failure reports.
 - `reports/perf/baseline/microbench-zjs-releasefast.json`: self-baseline gate.
-- `reports/perf/current/`: checked runtime-profile scripts and artifacts.
+- `reports/perf/current/scripts/`: source scripts for optional
+  `perf-*-profile` steps. Profile JSON is written under `.zig-cache/perf/`.
+- `reports/test262-latest/`: local test262-gate write-out (gitignored).
 
 ## Historical / campaign notes
 
@@ -65,7 +64,8 @@ Not current status. Read only when you need the original evidence.
 - [Zig build bistability 2026-07](perf/ZIG-BUILD-BISTABILITY-2026-07.md)
 
 Dated `reports/perf/qjs-align/` campaign trees were removed from the active
-tree. Recover them from git history.
+tree. Recover them from git history. New dated dirs keep markdown notes;
+json/stdout dumps there are gitignored.
 
 ## Documentation Rules
 

@@ -12,18 +12,17 @@ Active configuration:
 - Harness: `test262/harness`
 - Tests: `test262/test`
 - Known-error file: `test262_errors.txt`
-- Latest report directory: `reports/test262-latest/`
 
 Run the gate through Zig:
 
 ```sh
-zig build test262-gate --seed 0 --summary all
+zig build test262-gate --summary all
 ```
 
 Or invoke the runner directly:
 
 ```sh
-zig build run-test262 --seed 0 --summary all
+zig build run-test262 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
@@ -31,9 +30,9 @@ The checked 2026-08-05 report has 44,581 passes, 0 checked-in known failures,
 0 unexpected failures, and 5,194 feature skips, out of 49,775 prepared cases.
 It was recorded under the production default
 (`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`);
-compiler-v2 is the only compiler. The checked report under
-`reports/test262-latest/` records the bucket, per-directory, feature-skip, and
-failure details.
+compiler-v2 is the only compiler. `zig build test262-gate` writes local
+bucket, per-directory, feature-skip, and failure reports under
+`reports/test262-latest/` (gitignored).
 
 `test262_errors.txt` is empty: there is no remaining checked-in known-failure
 set, so the gate has no tolerated-failure surface at all and any non-zero error
@@ -113,8 +112,8 @@ comparison.
 Common checks:
 
 ```sh
-zig build test --seed 0 --summary all
-zig build smoke --seed 0 --summary all
+zig build test --summary all
+zig build smoke --summary all
 git diff --check
 ```
 
@@ -135,16 +134,16 @@ The engine-only Production v1 compatibility target is QuickJS parity within the
 repository validation profile. Required gates from a clean checkout:
 
 ```sh
-zig build test --seed 0 --summary all
-zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
-zig build test262-gate --seed 0 --summary all
-zig build engine-production-gate --seed 0 --summary all
+zig build test --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
+zig build test262-gate --summary all
+zig build engine-production-gate --summary all
 git diff --check
 ```
 
 The `engine-production-gate` build step is the engine semantic and architecture
 gate and must pass before cutting a Production v1 release. Its sub-gates include
-semantic tests, smoke coverage, test262, public API snapshot validation, and
-architecture dependency checks; a failure in any sub-gate is release-blocking.
+semantic tests, smoke coverage, test262, and architecture dependency checks;
+a failure in any sub-gate is release-blocking.
 The complete release decision also requires the other commands listed above,
 including ReleaseSafe testing and diff hygiene.

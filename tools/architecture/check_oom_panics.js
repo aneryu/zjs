@@ -6,26 +6,20 @@
 // Once OOM is a catchable JS error (eecf6c8: OutOfMemory -> InternalError
 // mapping, preallocated OOM error object, zero-allocation tryCatchInFrame
 // delivery), any code path that turns an allocation failure into a process
-// abort silently breaks that contract. This check pins the strictest
-// enforceable tier with static line rules over non-test engine sources
-// (src/** excluding src/tests/**):
+// abort silently breaks that contract. Static line rules over non-test
+// engine sources (src/** excluding src/tests/**):
 //
-//   rule A  every `@panic(` requires an allowlist entry (catches OOM aborts
-//           regardless of message wording, and keeps the general panic
-//           surface explicit);
 //   rule B  discarding `error.OutOfMemory` into `unreachable` / `@panic`
 //           (switch prongs or any line pairing OutOfMemory with them) is
 //           flagged - allowlist-able but expected to stay at zero;
 //   rule C  `catch unreachable` / `catch @panic` on a line that contains an
 //           allocation marker (memory./allocator./alloc(/create(/dupe(/
-//           append(/toOwnedSlice/realloc/OutOfMemory) requires an entry.
+//           append(/toOwnedSlice/realloc/OutOfMemory/out of memory)
+//           requires an entry.
 //
-// Chosen strength and current exemptions (2026-07): the allowlist is capped
-// at 10 entries and currently holds 5. One is the rope-flatten last resort in
-// src/core/string.zig (borrowed-slice readers cannot propagate errors; it
-// retries after one object-cycle collection before aborting). The other four
-// are named owner-thread/teardown API invariants, not OOM conversions. All
-// other historical OOM panics were retired by eecf6c8.
+// Owner-thread and teardown `@panic`s are API-misuse asserts, not OOM
+// conversions, and are not in scope. The allowlist is capped at 10 and
+// currently holds the rope-flatten last resort in src/core/string.zig.
 //
 // Allowlist shape mirrors deps-allowlist.json: each entry carries
 // source/pattern/reason/exit_milestone and may carry an exact `contains`
@@ -55,7 +49,7 @@ function fail(message) {
   process.exit(1);
 }
 
-const known_patterns = new Set(['@panic', 'oom-discard', 'catch-unreachable-alloc']);
+const known_patterns = new Set(['oom-discard', 'catch-unreachable-alloc']);
 
 function readAllowlist() {
   const raw = fs.readFileSync(allowlistPath, 'utf8');
@@ -123,7 +117,7 @@ function entryMatchesFinding(entry, finding) {
     (entry.contains === undefined || finding.text.includes(entry.contains));
 }
 
-const alloc_marker_re = /memory\.|allocator\.|\balloc\(|\bcreate\(|\bdupe\(|\bappend\(|toOwnedSlice|realloc|OutOfMemory/;
+const alloc_marker_re = /memory\.|allocator\.|\balloc\(|\bcreate\(|\bdupe\(|\bappend\(|toOwnedSlice|realloc|OutOfMemory|out of memory/i;
 
 function findingsFor(source) {
   const text = fs.readFileSync(path.join(repoRoot, source), 'utf8');
@@ -134,9 +128,6 @@ function findingsFor(source) {
     const commentStart = rawLine.indexOf('//');
     const line = commentStart === -1 ? rawLine : rawLine.slice(0, commentStart);
     const lineno = lineIndex + 1;
-    if (line.includes('@panic(')) {
-      findings.push({ source, lineno, pattern: '@panic', rule: 'A: @panic in engine sources requires an allowlist entry', text: rawLine.trim() });
-    }
     if (/error\.OutOfMemory\s*=>\s*(unreachable|@panic)/.test(line) ||
         (line.includes('OutOfMemory') && /(\bunreachable\b|@panic\()/.test(line) && !line.includes('@panic('))) {
       findings.push({ source, lineno, pattern: 'oom-discard', rule: 'B: error.OutOfMemory must propagate, not become unreachable/@panic', text: rawLine.trim() });

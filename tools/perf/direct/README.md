@@ -4,13 +4,13 @@ This harness bypasses JavaScript parsing, bytecode dispatch, and the VM for the
 measured kernel loops. Run the complete pinned comparison with:
 
 ```sh
-zig build perf-direct --seed 0
+zig build perf-direct
 ```
 
 Driver options are passed after `--`, for example:
 
 ```sh
-zig build perf-direct --seed 0 -- \
+zig build perf-direct -- \
   --cpu 19 --samples 6 --iterations 200000 --warmup 10000 \
   --output .zig-cache/perf/qjs-align/direct/manual.json
 ```

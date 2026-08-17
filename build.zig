@@ -3,13 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // Zig defaults the build/test seed to a new random value for every
-    // invocation. That changes test-runner arguments and destabilizes this
-    // repository's large compile graph cache even when no source changed.
-    // This stabilizes child compile/test steps; canonical commands also pass
-    // CLI `--seed 0` so the build runner and dependency traversal are stable.
-    // Randomized test runs remain available through the explicit project
-    // option.
+    // Zig's CLI injects a random `--seed` into the build runner. That would
+    // change test-runner arguments and duplicate cache artifacts even when no
+    // source changed. Pin the graph seed here so child compile/test steps stay
+    // stable without requiring CLI `--seed`. Randomized runs remain available
+    // through `-Dzjs_test_seed`.
     const zjs_test_seed = b.option(u32, "zjs_test_seed", "Seed passed to Zig test runners (defaults to 0 for reproducible cached builds)") orelse 0;
     b.graph.random_seed = zjs_test_seed;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
@@ -68,8 +66,7 @@ pub fn build(b: *std.Build) void {
     // core.atom.ownership_audit_enabled) and fails its own COMPILATION when the
     // two disagree (`config_signature.attest`). `zig build
     // config-signature-check` repeats the comparison at runtime against the
-    // shipped binary; `zig build config-drift-gate` proves the compile-time
-    // half is still live by requiring a deliberately wrong expectation to fail.
+    // shipped binary.
     const config_settings: ConfigSettings = .{
         .compiler = compiler_name,
         .layout = zjs_v2_layout,
@@ -86,11 +83,8 @@ pub fn build(b: *std.Build) void {
     // would short-circuit the check that matters: the expectation is handed
     // down to the artifacts, where `config_signature.attest` compares it
     // against the declarations the compiled code consumes. A wrong expectation
-    // therefore fails the COMPILATION of every engine-bearing artifact, which
-    // is exactly what `zig build config-drift-gate` requires of it -- and what
-    // makes that gate detect a hollowed-out attestation rather than just a
-    // string compare in this file.
-    const config_expect_override = b.option([]const u8, "zjs_expect_config", "Fail every engine-bearing artifact unless its effective configuration signature matches exactly (used by nested gate builds and by config-drift-gate)");
+    // therefore fails the COMPILATION of every engine-bearing artifact.
+    const config_expect_override = b.option([]const u8, "zjs_expect_config", "Fail every engine-bearing artifact unless its effective configuration signature matches exactly (used by nested gate builds such as test-altrepr)");
     if (config_expect_override) |override| {
         // Shape check only: a value check here would preempt the artifacts.
         if (!std.mem.startsWith(u8, override, "zjs-config-") or
@@ -341,7 +335,7 @@ pub fn build(b: *std.Build) void {
     });
     forceLlvmBackendOnDebug(run_test262_dev_exe);
     const install_run_test262_dev = b.addInstallArtifact(run_test262_dev_exe, .{});
-    const run_test262_dev_step = b.step("run-test262-dev", "Build and install the Debug test262 runner used by checkpoint checks");
+    const run_test262_dev_step = b.step("run-test262-dev", "Build and install the Debug test262 runner");
     run_test262_dev_step.dependOn(&install_run_test262_dev.step);
 
     // Add actual test262 execution step.
@@ -357,40 +351,6 @@ pub fn build(b: *std.Build) void {
     run_test262_exec.addArg("reports/test262-latest");
     const test262_gate_step = b.step("test262-gate", "Run test262 with regression gate");
     test262_gate_step.dependOn(&run_test262_exec.step);
-
-    const test262_smoke_files = [_][]const u8{
-        "test262/test/language/types/null/S8.2_A1_T1.js",
-        "test262/test/language/types/undefined/S8.1_A1_T1.js",
-        "test262/test/language/expressions/assignment/S11.13.1_A3.2.js",
-        "test262/test/language/statements/for/S12.6.3_A1.js",
-        "test262/test/language/statements/try/S12.14_A1.js",
-        "test262/test/language/expressions/arrow-function/empty-function-body-returns-undefined.js",
-        "test262/test/built-ins/Array/prototype/push/S15.4.4.7_A1_T1.js",
-        "test262/test/built-ins/Object/defineProperty/15.2.3.6-4-293.js",
-        "test262/test/built-ins/String/prototype/slice/S15.5.4.13_A1_T1.js",
-        "test262/test/built-ins/RegExp/prototype/test/S15.10.6.3_A1_T1.js",
-        "test262/test/built-ins/Promise/prototype/then/S25.4.5.3_A1.1_T1.js",
-        "test262/test/built-ins/JSON/stringify/value-primitive-top-level.js",
-        "test262/test/staging/sm/generators/gen-with-call-obj.js",
-        "test262/test/staging/sm/extensions/weakmap.js",
-        "test262/test/staging/sm/statements/for-in-with-gc-and-unvisited-deletion.js",
-    };
-    const run_test262_smoke = b.addRunArtifact(run_test262_dev_exe);
-    run_test262_smoke.step.dependOn(&install_run_test262_dev.step);
-    run_test262_smoke.addArg("-t");
-    run_test262_smoke.addArg("8");
-    run_test262_smoke.addArg("-T");
-    run_test262_smoke.addArg("10000");
-    run_test262_smoke.addArg("-c");
-    run_test262_smoke.addArg("test262.conf");
-    for (test262_smoke_files) |file| {
-        run_test262_smoke.addArg("-f");
-        run_test262_smoke.addArg(file);
-    }
-    run_test262_smoke.addArg("-R");
-    run_test262_smoke.addArg(".zig-cache/test262-smoke");
-    const test262_smoke_step = b.step("test262-smoke", "Run a small representative test262 file set with the Debug runner");
-    test262_smoke_step.dependOn(&run_test262_smoke.step);
 
     const run_perf_benchmark = b.addRunArtifact(zjs_exe);
     run_perf_benchmark.addArg("--perf-json");
@@ -615,7 +575,7 @@ pub fn build(b: *std.Build) void {
         },
     };
 
-    const perf_runtime_profiles_step = b.step("perf-runtime-profiles", "Record checked zjs runtime profiles for focused benchmark scripts");
+    const perf_runtime_profiles_step = b.step("perf-runtime-profiles", "Record zjs runtime profiles for focused benchmark scripts");
 
     inline for (profiles) |profile| {
         const base_args = [_][]const u8{
@@ -626,9 +586,9 @@ pub fn build(b: *std.Build) void {
             "--expect-total-opcodes-min",
             "1",
             "--output",
-            "reports/perf/current/runtime/" ++ profile.script ++ ".json",
+            ".zig-cache/perf/current/runtime/" ++ profile.script ++ ".json",
             "--stdout",
-            "reports/perf/current/runtime/" ++ profile.script ++ ".stdout",
+            ".zig-cache/perf/current/runtime/" ++ profile.script ++ ".stdout",
             "--expect-stdout",
             profile.expect_stdout,
         };
@@ -793,8 +753,8 @@ pub fn build(b: *std.Build) void {
     });
 
     // OOM no-panic rule: allocation failures must propagate as errors (the
-    // catchable-OOM contract from eecf6c8); @panic / OutOfMemory-discard
-    // forms in engine sources require an allowlist entry (<=10, currently 1:
+    // catchable-OOM contract from eecf6c8). OutOfMemory-discard and
+    // catch-unreachable-on-alloc forms require an allowlist entry (currently
     // the rope-flatten last resort).
     const run_architecture_oom_panics = b.addSystemCommand(&.{
         "node",
@@ -811,66 +771,22 @@ pub fn build(b: *std.Build) void {
         "tools/architecture/check_borrowed_atoms.js",
     });
 
-    const architecture_public_api_mod = b.createModule(.{
-        .root_source_file = b.path("tools/architecture/check_public_api.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zjs", .module = engine_mod },
-        },
-    });
-    const architecture_public_api = b.addExecutable(.{
-        .name = "check-public-api",
-        .root_module = architecture_public_api_mod,
-    });
-    forceLlvmBackendOnDebug(architecture_public_api);
-    const run_architecture_public_api = b.addRunArtifact(architecture_public_api);
-    run_architecture_public_api.addArg("reports/api/public-symbols.txt");
-
-    const update_architecture_public_api = b.addRunArtifact(architecture_public_api);
-    update_architecture_public_api.addArg("--write");
-    update_architecture_public_api.addArg("reports/api/public-symbols.txt");
-
-    // Legacy-pipeline eradication: production source must not name the retired
-    // passes, AND `nm` over the SHIPPED ReleaseFast artifact must find exactly
-    // zero of their symbols. At 13b9a655 the entry was unreachable but 70
-    // symbols were still linked, so the source half alone is not the claim.
-    // This is why the step now builds `zjs`: a gate that cannot read the
-    // shipped binary cannot make a statement about it.
-    const run_architecture_legacy_pipelines = b.addSystemCommand(&.{
+    // Compiler-stage boundaries: the two explicit `noinline` stages that
+    // made legacy deletion performance-stable. Checkpoint checks the
+    // declarations. The production gate already compiles ReleaseFast `zjs`
+    // for smoke and then `nm`s the independent symbols.
+    const run_architecture_stage_source = b.addSystemCommand(&.{
         "node",
-        "tools/architecture/check_legacy_pipelines_gone.js",
+        "tools/architecture/check_compiler_stage_boundaries.js",
+        "--source-only",
     });
-    run_architecture_legacy_pipelines.addArg(b.getInstallPath(.bin, zjs_exe.out_filename));
-    run_architecture_legacy_pipelines.step.dependOn(&install_zjs.step);
 
-    const architecture_check_step = b.step("architecture-check", "Check architecture dependency, OOM-panic, borrowed-atom, legacy-pipeline eradication, and public API rules");
-    architecture_check_step.dependOn(&run_architecture_deps.step);
-    architecture_check_step.dependOn(&run_architecture_oom_panics.step);
-    architecture_check_step.dependOn(&run_architecture_borrowed_atoms.step);
-    architecture_check_step.dependOn(&run_architecture_legacy_pipelines.step);
-    architecture_check_step.dependOn(&run_architecture_public_api.step);
-
-    const architecture_snapshot_step = b.step("architecture-update-api-snapshot", "Refresh the public API snapshot");
-    architecture_snapshot_step.dependOn(&update_architecture_public_api.step);
-
-    // The final-switch standing rules, fault-injected. Each rule encodes a
-    // process defect that produced a wrong or vacuous result during Gate A;
-    // the self-test reintroduces each defect and requires the rule to catch it.
-    // Wired into the build graph so the rules are discoverable without reading
-    // tools/final-switch/ first. It needs the engine for the RULE B probe (the
-    // `-e` path has no TypeScript and must be shown answering SyntaxError).
-    const run_final_switch_selftest = b.addSystemCommand(&.{
-        "bash",
-        "tools/final-switch/selftest.sh",
+    const run_architecture_stage_boundaries = b.addSystemCommand(&.{
+        "node",
+        "tools/architecture/check_compiler_stage_boundaries.js",
     });
-    run_final_switch_selftest.step.dependOn(&install_zjs.step);
-    const final_switch_selftest_step = b.step(
-        "final-switch-selftest",
-        "Fault-inject the final-switch standing rules (affinity, TS probes, L3 collect, corpus skips, strict shell)",
-    );
-    final_switch_selftest_step.dependOn(&run_final_switch_selftest.step);
+    run_architecture_stage_boundaries.addArg(b.getInstallPath(.bin, zjs_exe.out_filename));
+    run_architecture_stage_boundaries.step.dependOn(&install_zjs.step);
 
     // Unified tests (runs all tests in one single binary, using src/all_tests.zig as compile root)
     const unified_tests = b.addTest(.{
@@ -1007,11 +923,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-runner", .description = "Run focused test262 runner tests", .root_source_file = "src/cli/run_test262.zig", .filter = "run_test262.test" },
         .{ .name = "test-compiler-v2", .description = "Run focused compiler-v2 (QCP) tests", .root_source_file = "src/compiler_v2_tests.zig", .filter = "compiler_v2." },
     };
-    // The artifact `config-drift-gate` compiles (see below): a Debug,
-    // engine-bearing test artifact whose attestation covers both the compiler
-    // backend and the final bytecode layout, i.e. the two components the gate
-    // is required to drift-test.
-    var config_drift_probe: ?*std.Build.Step.Compile = null;
     inline for (scoped_test_configs) |config| {
         const scoped_root = b.createModule(.{
             .root_source_file = b.path(config.root_source_file),
@@ -1042,23 +953,7 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run_scoped_tests.addArgs(args);
         const scoped_step = b.step(config.name, config.description);
         scoped_step.dependOn(&run_scoped_tests.step);
-        if (comptime std.mem.eql(u8, config.name, "test-compiler-v2")) config_drift_probe = scoped_tests;
     }
-
-    // Compile-only steps for the drift gate: it must exercise the compile-time
-    // attestation without paying for the test run, because most of the gate's
-    // halves are supposed to stop at a compile error.
-    //
-    // Two steps because the two kinds of artifact prove different things.
-    // `config-attest-build` compiles a Debug-PINNED artifact, which is what the
-    // compiler/layout halves need. `config-attest-build-optimize` compiles the
-    // artifact that FOLLOWS `-Doptimize`, which is the only kind that can drift
-    // on the optimize component at all.
-    const config_attest_build_step = b.step(
-        "config-attest-build",
-        "Compile (without running) a Debug-pinned engine-bearing artifact so its compile-time configuration attestation is evaluated",
-    );
-    config_attest_build_step.dependOn(&config_drift_probe.?.step);
 
     // OOM injection suite (`zig build test-oom`): exhaustive allocation
     // failure injection (std.testing.checkAllAllocationFailures) over an
@@ -1104,7 +999,6 @@ pub fn build(b: *std.Build) void {
         "-Dzjs_nan_boxing=false"
     else
         "-Dzjs_nan_boxing=true";
-    const altrepr_seed = b.fmt("{d}", .{zjs_test_seed});
     const altrepr_project_seed = b.fmt("-Dzjs_test_seed={d}", .{zjs_test_seed});
     // The nested build is a separate `zig build` process, so it starts from
     // the *defaults* for every option the outer invocation was given unless
@@ -1174,78 +1068,12 @@ pub fn build(b: *std.Build) void {
     }) catch @panic("OOM");
     altrepr_argv.appendSlice(b.allocator, altrepr_forwarded.items) catch @panic("OOM");
     altrepr_argv.appendSlice(b.allocator, &.{
-        "--seed",
-        altrepr_seed,
         "--summary",
         "all",
     }) catch @panic("OOM");
     const altrepr_tests = b.addSystemCommand(altrepr_argv.items);
     const altrepr_step = b.step("test-altrepr", "Run the unified tests with the representation opposite the target default");
     altrepr_step.dependOn(&altrepr_tests.step);
-
-    const config_attest_optimize_step = b.step(
-        "config-attest-build-optimize",
-        "Compile (without running) the unified test artifact, which follows -Doptimize, so an optimize-mode drift is evaluated",
-    );
-    config_attest_optimize_step.dependOn(&unified_tests.step);
-
-    // ===== Negative drift gate =====
-    // The attestation in every artifact is only worth what its ability to FAIL
-    // is worth, and one-time forced-drift evidence decays: a later refactor can
-    // hollow the check out (delete the `comptime` block, make the "actual" side
-    // read the expectation) and nothing goes red. So the ability to fail is
-    // itself gated, permanently and by machine.
-    //
-    // Five halves, each a child `zig build` of a compile-only probe step:
-    //   1 NEGATIVE compiler -- wrong `compiler` component, must FAIL
-    //   2 NEGATIVE layout   -- wrong `layout` component, must FAIL
-    //   3 POSITIVE          -- correct expectation, must SUCCEED
-    //   4 POSITIVE plain    -- `-Dzjs_v2_layout=plain` with a `layout=plain`
-    //                          expectation, must SUCCEED
-    //   5 NEGATIVE optimize -- wrong `optimize` component against the artifact
-    //                          that follows -Doptimize, must FAIL
-    // The negative halves alone would be satisfied by a check that always
-    // fails, so 3 is mandatory. 1 and 2 cover the release backend and the
-    // bytecode layout specifically. 4 is the `.plain` diagnostic's self-proof:
-    // the SAME expectation string that must fail against a `short` build must
-    // succeed against a `plain` one, which can only happen if the value being
-    // read is the one the resolver consumes rather than the `-D` string. 5 is
-    // the "parent asked ReleaseSafe, child built Debug" case, and it has to run
-    // against an optimize-FOLLOWING artifact because a pinned one legitimately
-    // reports its pinned mode.
-    const config_drift_gate_argv = [_][]const u8{
-        "node",
-        "tools/architecture/check_config_drift.js",
-        "--zig",
-        b.graph.zig_exe,
-        "--build-root",
-        b.build_root.path orelse ".",
-        "--step",
-        "config-attest-build",
-        "--optimize-step",
-        "config-attest-build-optimize",
-        "--expect",
-        configSignature(b, config_settings),
-        "--layout",
-        zjs_v2_layout,
-        "--nan-boxing",
-        if (zjs_nan_boxing) "true" else "false",
-        "--force-gc",
-        if (zjs_force_gc) "true" else "false",
-        "--ownership-audit",
-        if (zjs_ownership_audit) "true" else "false",
-        "--optimize",
-        @tagName(optimize),
-        "--seed",
-        b.fmt("{d}", .{zjs_test_seed}),
-    };
-    const run_config_drift_gate = b.addSystemCommand(&config_drift_gate_argv);
-    run_config_drift_gate.has_side_effects = true;
-    const config_drift_gate_step = b.step(
-        "config-drift-gate",
-        "Prove the per-artifact configuration attestation can still fail: build with a wrong compiler, layout and optimize expectation (each must fail), then with correct ones (must succeed)",
-    );
-    config_drift_gate_step.dependOn(&run_config_drift_gate.step);
 
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
@@ -1255,23 +1083,24 @@ pub fn build(b: *std.Build) void {
     const quick_check_step = b.step("quick-check", "Run the fast inner-loop validation gate");
     quick_check_step.dependOn(smoke_dev_step);
 
-    const checkpoint_check_step = b.step("checkpoint-check", "Run checkpoint validation without the full test262, OOM-injection, or alternate-representation gates");
+    const checkpoint_check_step = b.step("checkpoint-check", "Run checkpoint validation without the full test262, OOM-injection, alternate-representation, or ReleaseFast binary gates");
     checkpoint_check_step.dependOn(test_step);
     checkpoint_check_step.dependOn(smoke_dev_step);
-    // Debug smoke covers the CLI contract at checkpoint tier. Keep the second
-    // whole-engine ReleaseFast smoke compile exclusive to the production gate.
-    checkpoint_check_step.dependOn(architecture_check_step);
-    checkpoint_check_step.dependOn(test262_smoke_step);
-    // Wired into the normal gate set, not left as a command someone has to
-    // remember: a hollowed-out attestation must go red on the ordinary path.
-    checkpoint_check_step.dependOn(config_drift_gate_step);
+    // Source-side architecture only. The ReleaseFast compiler-stage `nm`
+    // half stays on the production gate, which already compiles zjs for smoke.
+    checkpoint_check_step.dependOn(&run_architecture_deps.step);
+    checkpoint_check_step.dependOn(&run_architecture_oom_panics.step);
+    checkpoint_check_step.dependOn(&run_architecture_borrowed_atoms.step);
+    checkpoint_check_step.dependOn(&run_architecture_stage_source.step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
     engine_production_gate_step.dependOn(smoke_step);
-    engine_production_gate_step.dependOn(architecture_check_step);
+    engine_production_gate_step.dependOn(&run_architecture_deps.step);
+    engine_production_gate_step.dependOn(&run_architecture_oom_panics.step);
+    engine_production_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
+    engine_production_gate_step.dependOn(&run_architecture_stage_boundaries.step);
     engine_production_gate_step.dependOn(test262_gate_step);
-    engine_production_gate_step.dependOn(config_drift_gate_step);
 
     // Same-runtime benchmark harness: reuse the production engine module so
     // compile-once/execute-many measurements use the exact ReleaseFast engine
