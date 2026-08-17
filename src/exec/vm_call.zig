@@ -718,8 +718,8 @@ pub noinline fn nativeMethodFastDispatch(
     argc: u16,
 ) align(32) !NativeFastDispatchResult {
     if (zjs_nmfd_tombstone_keep != 0) {
-        // 0x2a8: first pad 0x420 overshot to 0x92c; 0x92c-0x178=0x7b4.
-        asm volatile (".space 0x2a8");
+        // Live 0x520 after NativeValue (was 0x50c). 0x520+0x294=0x7b4.
+        asm volatile (".space 0x294");
         unreachable;
     }
     const total: usize = @as(usize, argc) + 2;
@@ -738,7 +738,7 @@ pub noinline fn nativeMethodFastDispatch(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .caught;
         return err;
     };
-    const result = callResolvedNativeMethodAssumeCFunction(
+    const result = builtin_dispatch.nativeFromBits(callResolvedNativeMethodAssumeCFunction(
         ctx,
         output,
         global,
@@ -748,11 +748,13 @@ pub noinline fn nativeMethodFastDispatch(
         args,
         function,
         frame,
-    ) catch |err| {
+    ));
+    if (builtin_dispatch.nativeIsExc(ctx, result)) {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        const err = builtin_dispatch.nativeHostError(ctx);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .caught;
         return err;
-    };
+    }
     call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
     if (dropUnusedCallResult(ctx, function, frame, result)) return .hit;
     stack.pushOwnedAssumeCapacity(result);
@@ -782,8 +784,8 @@ noinline fn callResolvedNativeMethodAssumeCFunction(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) linksection(nmfd_term_section) !core.JSValue {
-    return builtin_dispatch.callInternalRecordDirectAssumeCFunction(
+) linksection(nmfd_term_section) builtin_dispatch.NativeBits {
+    return builtin_dispatch.nativeToBits(builtin_dispatch.callInternalRecordDirectAssumeCFunction(
         ctx,
         output,
         global,
@@ -793,7 +795,7 @@ noinline fn callResolvedNativeMethodAssumeCFunction(
         args,
         caller_function,
         caller_frame,
-    );
+    ));
 }
 
 pub noinline fn callMethod(
