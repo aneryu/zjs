@@ -1099,3 +1099,12 @@ capture*/arguments/get_array_el 独有热）；Boyer 90%=30 符/44KB 岛 67%，*
 **改写：瘦身工程若立项，标的收窄为 Earley 工作集；Boyer 差距属执行侧账（候 pQ 分侧
 z/q 比值定量）。GC 机器在 Earley 取指热（23%）——S1 反证的两份 traceChildren 正是
 Earley 热叶，特化承重再获交叉印证。**
+
+## EB-HOT-RESIDENCY 收口（2026-08-17，driver 收）：A1 也救不了 Earley
+
+冷迁账终版：两侧都冷 239 符/108KB、纯冷页 88KB、搬完岛剩 61KB；但 **Earley 独热岛叶
+仅 7KB——冷叶出岛清的是岛，吃不到 Earley 的 miss 源**（岛外构图助手 37%+GC 机器 23%
+取指，散 286KB 并集）。墙叙事三改：整岛过大→Earley 独墙→Earley 岛外助手碎片墙。
+原 S3-A（岛密度）方案的立项理由被本普查逐段拆除；可能的替代假设（候函数账后议）：
+①按 Earley 79 符/131KB 真热集聚簇（修正版 L-1.5，聚对集合）；②Earley 构图/GC 助手
+的工作量本身（allocation 压力→GC 取指热）。全部候 pQ/pV 函数级账定量后合并讨论。
