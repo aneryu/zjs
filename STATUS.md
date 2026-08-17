@@ -32,8 +32,8 @@ Measurement contract: `reports/perf/qjs-align/measurement-contracts.md` and
 
 | Gate | What it covers | This lane |
 |------|----------------|-----------|
-| `zig build engine-production-gate --seed 0 --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture checks, OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: recorded at close-out |
-| `zig build test -Doptimize=ReleaseSafe --seed 0 --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: recorded at close-out |
+| `zig build engine-production-gate --seed 0 --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture checks, OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-gate: `0/49775 errors, passed 44581`. smoke, architecture-check, config-drift-gate all success. |
+| `zig build test -Doptimize=ReleaseSafe --seed 0 --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 9/9 steps succeeded. 2266 passed / 1 skipped / 0 failed. |
 | `zig build test-oom --seed 0 --summary all` | corpus × allocation-failure injection plus same-runtime recovery canaries | phase-close tier; not re-run in this packaging lane |
 | `zig build architecture-check --seed 0 --summary all` | dependency rules, public API snapshot, related static checks | included in `engine-production-gate` |
 | `zig build config-drift-gate --seed 0 --summary all` | configuration-signature attestation can still fail | included in `engine-production-gate` |
