@@ -383,3 +383,13 @@ L2 改为 z vs q 属性存储几何差异（JSC inline-slots 暂停）；L0 局�
 镜像 JS_ConcatStringInPlace(4671)@add_loc(19770)。申报 pdfjs 1-2G cyc（上限 4.3G 不作承诺）。
 技术裁定（driver）：rc==1 严格禁 rc≤3；hash 就地后清零（超 qjs 一处防脏哈希，注记）；
 P1 独立可合。设计=/tmp/lanes/STRING-SLACK-DESIGN.md（pW）。
+
+## 2026-08-17 十期终局：string-slack REJECT-ARCHIVE（对称成本定理）
+
+QPIN 实证：pdfjs 2.32M 追加位点双引擎同 emit（get_loc+add+put_loc；add_loc 133=133），
+q 的 ConcatStringInPlace 在此形同样 rc≥2 不命中——**拷贝为对称成本，q 并未占优**。
+普查上限 2-4.3G 作废（仿真「若有余量」≠「q 实际赢」——镜像刀首问的又一判例：
+命中率普查必须同时验证 q 侧真实兑现）。P2/P3 REJECT；P1（RC 编排 q 形对齐，门绿零效）
+连同金丝雀留支 grok/string-slack@fad30cea 归档不合。松弛定理改述（String 载荷合法性）
+保留为宪法结论——只是本案无付款面。pdfjs 残差终归位：壳地板（491M 已钉）+IPC 弥散
++对称字符串成本（非差距项）。
