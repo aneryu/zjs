@@ -372,3 +372,14 @@ L1 值表示——qjs 引用件实为 NaN-boxing uint64 走 x0（pdfjs 壳 walk 
 ＝**代码实现级忠实偏离**，「repr 对齐」属忠实域非新机制（旧「红鲱鱼」判语限定语境待复审）；
 L2 改为 z vs q 属性存储几何差异（JSC inline-slots 暂停）；L0 局部性=q malloc 序 vs z slab 序
 的堆图局部性差（对齐分配序=忠实）；L3 RC 流量=z 比 q 多付的 RC 对（qjs borrow 纪律对齐=忠实）。
+
+## 2026-08-17 用户裁决：十期宪章 = string 余量经济对齐（全套批准）
+
+**松弛定理改述（宪法级）**：原「qjs malloc 松弛在 zjs slab 一律不可移植」收窄至证据边界
+——对象/Shape 精确类不可移植（P6-B 实验）；String 载荷（allocAlignedBytes 路径）单独改
+几何请求+usable 查询合法。H2 禁令（capacity 字段）维持——余量为分配隐式产物与 qjs 同形。
+三期：P1 RC 编排对齐 q（add_loc 借槽不 Dup，杀门=census rc1 24k→≥2.0M）→P2 String 几何类
++usable/destroy/记账（w24 条款：入出同式；对象 slab 哨=P6 官方 insn 不回退）→P3 原地臂
+镜像 JS_ConcatStringInPlace(4671)@add_loc(19770)。申报 pdfjs 1-2G cyc（上限 4.3G 不作承诺）。
+技术裁定（driver）：rc==1 严格禁 rc≤3；hash 就地后清零（超 qjs 一处防脏哈希，注记）；
+P1 独立可合。设计=/tmp/lanes/STRING-SLACK-DESIGN.md（pW）。
