@@ -423,3 +423,16 @@ grok/ic-p1-v2-archive IC 证据树）+八条早期谱系（ablate·archive·audi
 **/tmp：** 流水线目录、pad 二进制、普查原始件全清（报告已入库，原始件过期）。
 仓库终态：main@干净、单 worktree、账本三册（PARITY/OPT-PLAN/MECHANISM）+合同 16 条完整。
 **stash：** 2 条 r11-closure 时代 WIP（k1b/k2）已清——该战线由 w46 fclosure 链刀正式取代。
+
+## 2026-08-17 二次清理记录（driver 亲执，grill-me 逐项裁决）
+
+**本地分支：** 12 条全数保留（用户裁决，含 fix/correctness-batch 三修复待验证——
+git cherry 证 main 无等价补丁：parser yield/await 重合法化/tail-call 栈预算/GC 重入门）。
+**远端：** 删 7——grok/align-fix、perf/qjs-align-phase-7（ahead=0 已全并入）+
+worktree-wf_* ×5（07-25 workflow 列车现场，VARREF-V3 ⛔no-go 在案；删前逐条打
+archive/worktree-wf_* 本地 tag，对象零丢失）。保留 wip/p6-04d2c、perf/call-cycle-final。
+**误提交物：** 仓库根 4MB aarch64 ELF `test`（06-21 随 40637676 扫入，无引用）git rm，
+.gitignore 锚定 `/test`；历史不重写（保 SHA 稳定）。
+**杂项：** __pycache__ ×4、.antigravitycli、.devin、.migration 残留配置清除；git gc 收缩。
+**明示不动：** .zig-cache/zig-out（用户留缓存）、.scratch、reports 归档、wip 与
+call-cycle-final 两远端。
