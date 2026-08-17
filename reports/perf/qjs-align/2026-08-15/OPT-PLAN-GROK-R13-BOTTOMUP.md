@@ -1149,3 +1149,11 @@ q 形收尾落地后 earley-only ABBA n=4：Δinsn −25.5M 方向稳但 Δcyc +
 zoo 因果，按「最终看 zoo 评分」杀。geomean 正数系 regexp 离群。RET-ABI-TYPED 二度
 REJECT-ARCHIVE（首否=探针 NO-GO 族里 −48M 曾是孤测）。TA 洞修无辜（慢路语义件），
 拆包 w45R 纯 TA 走 gate 链合入。
+
+## w45R 合入 + 用户裁「pad 之外的优化」（2026-08-17，driver）
+
+w45R（纯 TA-as-proto [[Get]] 语义修）gate 全绿合入 main（与已测 d2734a2b 引擎码同）。
+**用户裁：布局/pad 线先放下**——聚簇 REWORK 中止，grok/earley-cluster@a5772141 连同
+三 pad 同号 +0.5~0.9pp 的实验记录封存候用（他日重开布局线时这是最佳起点）。
+火力集中布局无关单价刀族：出树创建链（pQ fclosure 刀候门+FW）+创建链二段
+（jsFunctionSetProperties/proto auto-init 对齐，pS 接）。
