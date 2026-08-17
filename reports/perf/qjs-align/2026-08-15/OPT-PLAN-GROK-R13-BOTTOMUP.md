@@ -1142,3 +1142,10 @@ q 形收尾落地后 earley-only ABBA n=4：Δinsn −25.5M 方向稳但 Δcyc +
 多写的 top_ptr 是承重差异（精确 GC 扫运行栈 vs q 置空 cur_sp——GC 契约不同，必留）；
 ②出岛跳合宪必要（0x1c0 宪同类）。**instanceof 单价判定已在忠实地板。** 出树族单价
 残余=创建链刀（pQ 在途）+发数本身（固有）。
+
+## w45 裁决（2026-08-17，driver）：TYPED 刀 REJECT，拆包重跑
+
+三 pad：pdfjs 0.9985/0.9951/0.9980 主标的同号负——TYPED 刀 FW（−48/−29.6M 两测）未兑现
+zoo 因果，按「最终看 zoo 评分」杀。geomean 正数系 regexp 离群。RET-ABI-TYPED 二度
+REJECT-ARCHIVE（首否=探针 NO-GO 族里 −48M 曾是孤测）。TA 洞修无辜（慢路语义件），
+拆包 w45R 纯 TA 走 gate 链合入。
