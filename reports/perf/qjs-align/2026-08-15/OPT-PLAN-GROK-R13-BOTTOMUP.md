@@ -1018,3 +1018,10 @@ Proxy 修复+IC-R1 测试；产品 IC 全剥；试验树另存 archive 支）。
 7775-7800 窗 SIGSEGV（终门已死未深挖，产品已剥无此路径）。抢救件=object.zig +4 行
 proto.isProxy() 拒走（对齐兄弟函数既有 proxyTarget 检查）+3 条 test262 转绿+单测，
 派执行官走 gate 链合入。六期对冲实验闭幕：五封条+IC 否证=全 15≥1.0 无已知路径，递用户终裁。
+
+## w43 抢救件合入（2026-08-17，driver）
+
+grok/ic-p1@e1a7432f 合入 main：Proxy [[Set]] proto 拒走修复（main 既有语义洞，
+setOrDefine 原型走对 Proxy proto 缺 isProxy 检查）+IC-R1 delete 语义测试两条。
+全 gate 绿：480/480、夹具 7/7 IDENTICAL、Proxy 三案转 PASS、test262 0/49775
+（passed 44581=+3）、RS 绿。语义件无 3-pad。IC 战役物质遗产至此全部处置完毕。
