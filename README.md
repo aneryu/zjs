@@ -11,11 +11,7 @@ QuickJS C API outside its specified API surface.
 
 ## Status
 
-The active local test262 gate is expected to pass with no unexpected errors.
-The 2026-07-27 checked report has 44,541 passes, 25 checked-in known failures,
-and 5,209 feature skips. All 25 known files also fail when the same runner and
-harness use the pinned QuickJS binary, so they are test262 compatibility debt,
-not demonstrated zjs-to-QuickJS regressions.
+Authoritative status (test262, performance, and gates) is in STATUS.md and COMPATIBILITY.md.
 
 ```sh
 zig build test262-gate --seed 0 --summary all
