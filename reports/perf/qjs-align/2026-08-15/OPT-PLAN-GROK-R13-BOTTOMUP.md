@@ -1089,3 +1089,13 @@ A1 冷叶出岛（纯迁冷体不动热形）。
 pW 改令前在途件：typed TLS 臂 NativeBits 延伸实测 pdfjs −48M（过 30M 门）。按「只归因
 不优化」阶段令：**分支冻结不合**，列归因后方案讨论首位候选。归因交付=post-w44 壳新账：
 ② 壳残 NMFD 288M+assume 175M+typed 28M≈491M（656M 起点已收 196M）。
+
+## EB 分侧驻留（2026-08-17，driver 收）：容量墙=Earley 墙
+
+Earley refill/cyc 0.0224 vs Boyer 0.00338（6.6×），周期近对半。Earley 90% 热集
+79 符/131KB 且碎（岛 37%+助手 37%+GC 23%，traceChildren×2/destroyRuntimeCycles/
+capture*/arguments/get_array_el 独有热）；Boyer 90%=30 符/44KB 岛 67%，**进 1×L1I，
+取指无病**，get_field 占用 14%（Earley 仅 2.5%）。Jaccard 0.37。
+**改写：瘦身工程若立项，标的收窄为 Earley 工作集；Boyer 差距属执行侧账（候 pQ 分侧
+z/q 比值定量）。GC 机器在 Earley 取指热（23%）——S1 反证的两份 traceChildren 正是
+Earley 热叶，特化承重再获交叉印证。**
