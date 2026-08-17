@@ -365,11 +365,14 @@ fn stringFromCharCodeDirect(
     args: []const core.JSValue,
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
-) HostError!core.JSValue {
+) builtin_dispatch.NativeBits {
     _ = this_value;
     _ = caller_function;
     _ = caller_frame;
-    return string_ops.qjsStringFromCharCode(ctx, output, global, args) catch |err| return @as(HostError, @errorCast(err));
+    const result = string_ops.qjsStringFromCharCode(ctx, output, global, args) catch |err| {
+        return builtin_dispatch.nativeFromHostError(ctx, global, @as(HostError, @errorCast(err)));
+    };
+    return builtin_dispatch.nativeToBits(result);
 }
 
 fn stringFromCharCodeCall(
@@ -388,6 +391,26 @@ fn stringFromCharCodeCall(
 }
 
 fn stringCharCodeAtDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) builtin_dispatch.NativeBits {
+    return builtin_dispatch.nativeFromHostResult(ctx, global, stringCharCodeAtDirectHost(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
+        caller_function,
+        caller_frame,
+    ));
+}
+
+inline fn stringCharCodeAtDirectHost(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
