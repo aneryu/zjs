@@ -5297,9 +5297,17 @@ pub const Object = extern struct {
     /// noinline: this is the rarest of the indexed-read arms, and letting it
     /// inline into `fastDenseArrayElementValue` grew that hot helper enough to
     /// cost 26% cycles on a plain-call benchmark that never touches arguments
-    /// (instructions unchanged — pure layout). Keeping it out of line restores
-    /// the dense arm's code shape.
+    /// (instructions unchanged — pure layout). The hot `OP_get_array_el`
+    /// handler uses `mappedArgumentsIntElementDup` directly (qjs
+    /// JS_GetPropertyValue JS_CLASS_MAPPED_ARGUMENTS, quickjs.c:9047-9049).
     pub noinline fn mappedArgumentsElementDup(self: *const Object, index: u32) ?JSValue {
+        return mappedArgumentsIntElementDup(self, index);
+    }
+
+    /// qjs JS_GetPropertyValue mapped arm (quickjs.c:9047-9049):
+    /// `JS_DupValue(ctx, *p->u.array.u.var_refs[idx]->pvalue)` after
+    /// `idx >= count` reject. Inlined into `op_get_array_el` only.
+    pub inline fn mappedArgumentsIntElementDup(self: *const Object, index: u32) ?JSValue {
         if (self.class_id != class.ids.mapped_arguments) return null;
         const refs = self.argumentsVarRefs();
         if (index >= refs.len) return null;

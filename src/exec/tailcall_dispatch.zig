@@ -4120,6 +4120,22 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                 @branchHint(.likely);
             } else if (key.isInt() and core.class.isNumericTypedArrayClass(object.class_id)) {
                 return @call(.always_tail, zjs_op_get_array_el_ta, .{ pc, sp, var_buf, vm });
+            } else if (key.isInt() and object.class_id == core.class.ids.mapped_arguments) {
+                // qjs JS_GetPropertyValue (quickjs.c:9047-9049): class switch
+                // sits beside ARRAY/ARGUMENTS. Mapped slots live in var-ref
+                // cells, so the dense JSValue arm cannot serve them.
+                if (key.asInt32()) |idx| {
+                    if (idx >= 0) {
+                        if (object.mappedArgumentsIntElementDup(@intCast(idx))) |el| {
+                            if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+                                (sp - 1)[0] = el;
+                                return @call(.always_tail, zjs_op_get_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                            }
+                            (sp - 2)[0] = el;
+                            return cont(pc + 1, sp - 1, var_buf, vm);
+                        }
+                    }
+                }
             }
         }
     }
@@ -4151,7 +4167,9 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // 0x90 tuned after 0xb0 overshot +0x20 (live body 0x1f0 without the
     // in-island release tail).
     if (zjs_f_tombstone_keep != 0) {
-        asm volatile (".space 0x90");
+        // Mapped-arguments arm spent the previous 0x90 pad; keep a stub so
+        // a later shrink cannot slide neighboring island symbols.
+        asm volatile (".space 0x20");
         unreachable;
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -4220,6 +4238,24 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         value.freeDuringActiveBytecode(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
+    }
+    // arguments.length / mappedArguments.length is an own data int32
+    // (ctx->mapped_arguments_shape, quickjs.c:16225). GET_FIELD_INLINE hits
+    // find_own_property before is_exotic (quickjs.c:19123-19134). A dedicated
+    // class gate keeps Arguments off the exotic tail that
+    // classNeedsSlowPropertyAccess would otherwise force after a miss.
+    if (object_ops.objectFromValueTrustedExpression(value)) |object| {
+        if (object.class_id == core.class.ids.mapped_arguments or
+            object.class_id == core.class.ids.arguments)
+        {
+            var slow_property = false;
+            if (object.findOwnDataSlotFast(core.atom.ids.length, &slow_property)) |slot| {
+                const len_val = slot.*;
+                value.freeDuringActiveBytecode(vm.ctx.runtime);
+                (sp - 1)[0] = len_val;
+                return cont(pc + 1, sp, var_buf, vm);
+            }
+        }
     }
     // qjs OP_get_length is the ordinary GET_FIELD_INLINE macro with a constant
     // `length` atom: an Arguments object (and any other ordinary object with an

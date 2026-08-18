@@ -5823,6 +5823,38 @@ test "mapped arguments named field skips binding alias; computed index stays ali
     _ = result;
 }
 
+test "mapped arguments rest-style 0-formal length and index (sc_list)" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function sc_list() {
+        \\  var a = arguments;
+        \\  assert.sameValue(a.length, 2);
+        \\  assert.sameValue(a[0], "x");
+        \\  assert.sameValue(a[1], 9);
+        \\  a[0] = "y";
+        \\  assert.sameValue(a[0], "y");
+        \\  assert.sameValue(a[2], undefined);
+        \\  return a.length + a[1];
+        \\}
+        \\assert.sameValue(sc_list("x", 9), 11);
+        \\function g(a, b) {
+        \\  assert.sameValue(arguments[0], 1);
+        \\  assert.sameValue(arguments[1], 2);
+        \\  arguments[0] = 3;
+        \\  assert.sameValue(a, 3);
+        \\  a = 4;
+        \\  assert.sameValue(arguments[0], 4);
+        \\  delete arguments[1];
+        \\  assert.sameValue(arguments[1], undefined);
+        \\  assert.sameValue(b, 2);
+        \\}
+        \\g(1, 2);
+    );
+    _ = result;
+}
+
 test "typed array integer get uses class-id arm and qjs tag shape" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

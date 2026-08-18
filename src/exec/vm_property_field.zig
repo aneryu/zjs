@@ -1103,6 +1103,15 @@ pub noinline fn getArrayElement(
                 };
                 unreachable;
             }
+            // Mapped-arguments first: an integer key used to intern as an
+            // atom and fall into getValueProperty (full resolver) before the
+            // var-ref arm below could run. qjs JS_GetPropertyValue switches
+            // on class_id first (quickjs.c:9047-9049).
+            if (fastMappedArgumentsElementValue(obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
+            }
             if (existingPropertyKeyAtomForFastPath(key)) |atom_id| {
                 // String.atom_id is a weak cache, while a symbol value carries
                 // its atom id in the live body. A Proxy/getter can re-enter;
@@ -1123,19 +1132,6 @@ pub noinline fn getArrayElement(
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
-                try stack.pushOwned(value);
-                return .done;
-            }
-            // Mapped-arguments element: qjs's JS_GetPropertyValue reaches its
-            // JS_CLASS_MAPPED_ARGUMENTS case through an O(1) switch on class_id
-            // (quickjs.c:9047-9049), so the arm costs it nothing wherever it
-            // sits. zjs probes in sequence, and this is the rarest indexed
-            // class, so it lives here on the cold VM path rather than in the
-            // threaded OP_get_array_el handler -- growing that handler cost
-            // navier -5.5%, mandreel -3.3% and crypto -3.2% on zoo for a class
-            // those benchmarks never read.
-            if (fastMappedArgumentsElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
