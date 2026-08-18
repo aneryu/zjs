@@ -5117,22 +5117,50 @@ noinline fn completeInstanceofSlow(vm: *Vm, has_instance: JSValue) InternalMetho
     return .completed;
 }
 
-/// qjs `JS_OrdinaryIsInstanceOf` walk (quickjs.c:8059-8125) for the default
-/// `Function.prototype[@@hasInstance]` record (qjs:41395 / 41379-41383
-/// `js_function_hasInstance`). Ordinary objects read `shape->proto` with no
-/// GetPrototypeOf trap; Proxy / throw-type-error / non-object `.prototype`
-/// (TypeError at 8078-8084) return null so the caller can publish and take
-/// the existing `completeOrdinaryInstanceof` path.
-inline fn tryFastOrdinaryInstanceof(lhs: JSValue, rhs: JSValue, ctor: *core.Object) ?bool {
+/// qjs `JS_IsInstanceOf` probe (quickjs.c:8133-8146 `JS_GetProperty` of
+/// `Symbol.hasInstance`) plus Ordinary walk (8059-8125) when the method is
+/// the realm default `Function.prototype[@@hasInstance]` (41395 / 41379-41383).
+///
+/// q's GetProperty on a function is `find_own_property` miss + one
+/// `p->shape->proto` hop + hit on Function.prototype (8210-8294). z mirrors
+/// that: own-hash miss, one proto hop, slot vs default record. No generic
+/// probe loop, no `isCallableValue` / `getOwnDataObjectBorrowed` (those
+/// `findProperty` outcalls were the leftover ~160 insn). Own or intermediate
+/// custom `@@hasInstance` returns null so the published remainder Calls.
+inline fn tryFastDefaultInstanceof(lhs: JSValue, ctor: *core.Object, vm: *Vm) ?bool {
     if (ctor.isProxy()) return null;
     if (ctor.class_id == core.class.ids.bound_function) return null;
-    if (!call_runtime.isCallableValue(rhs)) return false;
-    const proto = ctor.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
+
+    const has_instance_atom = comptime core.atom.predefinedId("Symbol.hasInstance", .symbol).?;
+    var slow = false;
+    const method_slot: *const JSValue = blk: {
+        if (ctor.findOwnDataSlotFast(has_instance_atom, &slow)) |slot| break :blk slot;
+        if (slow or ctor.flags.has_exotic_methods) return null;
+        const proto = ctor.getPrototype() orelse return null;
+        if (proto.flags.has_exotic_methods) return null;
+        slow = false;
+        break :blk proto.findOwnDataSlotFast(has_instance_atom, &slow) orelse return null;
+    };
+    if (slow) return null;
+
+    const method_object = class_vm.objectFromValue(loadValueAsIntPair(method_slot)) orelse return null;
+    if (method_object.class_id != core.class.ids.c_function) return null;
+    const record = method_object.nativeRecordAssumeCFunction() orelse
+        call_vm.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_object) orelse return null;
+    if (!function_ops.recordIsDefaultHasInstance(record)) return null;
+
+    // qjs:8068 `JS_IsFunction` then 8078 `JS_GetProperty(prototype)`.
+    if (!call_runtime.isFunctionLikeClass(ctor.class_id)) return false;
+    var proto_slow = false;
+    const proto_slot = ctor.findOwnDataSlotFast(core.atom.ids.prototype, &proto_slow) orelse return null;
+    if (proto_slow) return null;
+    const proto = class_vm.objectFromValue(loadValueAsIntPair(proto_slot)) orelse return null;
+
     const start = class_vm.objectFromValue(lhs) orelse return false;
-    if (start.isProxy() or class_vm.isThrowTypeErrorIntrinsicObject(start)) return null;
+    if (start.isProxy()) return null;
     var walk = start.getPrototype();
     while (walk) |parent| {
-        if (parent.isProxy() or class_vm.isThrowTypeErrorIntrinsicObject(parent)) return null;
+        if (parent.isProxy()) return null;
         if (parent == proto) return true;
         walk = parent.getPrototype();
     }
@@ -5221,25 +5249,14 @@ pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     const rhs = loadValueAsIntPair(&(sp - 1)[0]);
     const rhs_object = class_vm.objectFromValue(rhs) orelse
         return @call(.always_tail, op_instanceof_published, .{ pc, sp, var_buf, vm });
-    const has_instance_atom = comptime core.atom.predefinedId("Symbol.hasInstance", .symbol).?;
-    const fast_method = class_vm.probePublicNamedDataPropertyFromObject(rhs_object, has_instance_atom);
-    if (fast_method.slot) |slot| {
-        const has_instance = loadValueAsIntPair(slot);
-        if (class_vm.objectFromValue(has_instance)) |method_object| {
-            if (call_vm.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
-                if (function_ops.isDefaultHasInstanceRecord(vm.ctx.runtime, record)) {
-                    if (tryFastOrdinaryInstanceof((sp - 2)[0], rhs, rhs_object)) |hit| {
-                        const lhs = (sp - 2)[0];
-                        const nsp = sp - 1;
-                        (sp - 2)[0] = JSValue.boolean(hit);
-                        vm.stack.setTopPtr(nsp);
-                        lhs.freeDuringActiveBytecode(vm.rt);
-                        rhs.freeDuringActiveBytecode(vm.rt);
-                        return cont(pc + 1, nsp, var_buf, vm);
-                    }
-                }
-            }
-        }
+    if (tryFastDefaultInstanceof((sp - 2)[0], rhs_object, vm)) |hit| {
+        const lhs = (sp - 2)[0];
+        const nsp = sp - 1;
+        (sp - 2)[0] = JSValue.boolean(hit);
+        vm.stack.setTopPtr(nsp);
+        lhs.freeDuringActiveBytecode(vm.rt);
+        rhs.freeDuringActiveBytecode(vm.rt);
+        return cont(pc + 1, nsp, var_buf, vm);
     }
     return @call(.always_tail, op_instanceof_published, .{ pc, sp, var_buf, vm });
 }
