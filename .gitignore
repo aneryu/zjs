@@ -5,7 +5,6 @@ zig-out/
 /test
 .DS_Store
 parsers/
-.devin/
 .antigravitycli/
 quickjs/
 
