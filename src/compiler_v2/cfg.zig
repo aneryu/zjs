@@ -282,7 +282,7 @@ pub fn resetFanoutCensus() void {
     @atomicStore(u64, &boundary_fanout_census.final_address_hops, 0, .monotonic);
 }
 
-/// F3 anchor-split classification (docs/anchor_split_classification.md).
+/// F3 (anchor-split classification, 2026 campaign report in git history).
 ///
 /// The uniqueness oracle counted the anchoring exposure; it did not say what
 /// kind of exposure each contested position is. The ruling's partition:
@@ -2999,7 +2999,7 @@ pub fn auditBoundaryUniqueness(
     // builder.SourceSlot carries no anchor_label and OptimizationBoundary
     // carries no replacement_label; the unanchored / contested counters live
     // in classifyAnchorSplits below, which also decides what KIND of exposure
-    // each of them is (F3, docs/anchor_split_classification.md).
+    // each of them is (F3, anchor-split classification, 2026 campaign report in git history).
     const role_masks: []u8 = if (comptime audit_oracles)
         memory.alloc(u8, product_labels.len) catch return error.OutOfMemory
     else

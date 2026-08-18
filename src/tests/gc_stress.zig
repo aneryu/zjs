@@ -7,26 +7,8 @@ const bytecode = zjs.bytecode;
 const core = zjs.core;
 
 const Rng = std.Random.DefaultPrng;
-
-fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void {
-    const key_identity = (try core.Object.weakIdentityFromValue(rt, key.value())) orelse unreachable;
-    rt.retainWeakIdentity(key_identity);
-    errdefer rt.releaseWeakIdentity(key_identity);
-    const entries_slot = collection.weakCollectionEntriesSlot();
-    const index = entries_slot.*.len;
-    const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
-    try rt.registerBorrowedReferenceHolder(collection);
-    errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(collection);
-    try collection.ensureWeakCollectionEntryCapacity(rt, index + 1);
-    const refreshed_entries = collection.weakCollectionEntriesSlot();
-    refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
-    errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-    refreshed_entries.*[index] = .{
-        .key_identity = key_identity,
-        .value = value.dup(),
-    };
-    try rt.registerBorrowedReferenceHolder(collection);
-}
+const helpers = @import("helpers.zig");
+const appendWeakCollectionEntry = helpers.appendWeakCollectionEntry;
 
 test "gc stress deterministic object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0001);

@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+Target 0.2.0. Maintainability campaign (2026-08-18): breaking public-API
+cleanup is approved for this cycle; hot-path structural refactors are
+deferred to `docs/maintainability-backlog.md` and land only under the
+refactor-policy gates.
+
+- Architecture `check_deps.js` now enforces compiler_v2 layering and scans
+  `tools/` / `tests/` files that import the `zjs` module. The duplicate
+  core-does-not-import-runtime Zig test is gone; the JS linter is the authority.
+- Renamed `quick-check` → `quick-gate`, `checkpoint-check` → `checkpoint-gate`,
+  and `test262-gate` → `test262-check`. Old names remain as deprecated aliases
+  until the next release. See `docs/testing-graph.md`.
+- Package `build.zig.zon` now ships COMPATIBILITY/LIMITATIONS/CONTRIBUTING/
+  STATUS and `test262.conf`. mise pins node 24 and bun 1. Linux CI jobs
+  install Node (checkpoint and production-gate invoke it via the build graph).
+- Unified tests now compile through `internal_root` and assert they are a
+  declared superset of it (Object is the only type fork). The previously
+  dormant internal Object-identity test is collected (+2 unified tests).
+- Scoped test targets now share one `src/<area>_tests.zig` shell ×
+  `tests.<area>.` filter convention. Test names gained a `tests.` prefix
+  (e.g. `core.test.foo` → `tests.core.test.foo`); counts are unchanged.
+  New `test-embedding` target compiles the public `zjs` module.
+- Extracted the shared exec/builtins test harness to `src/tests/helpers.zig`.
+  `test-builtins` no longer compiles `src/tests/exec.zig`.
+- Split `build.zig` into `build/{config,profiles,artifacts,tests,perf,gates}.zig`.
+  Option order, step names, and the shipped `zjs` binary are unchanged.
+- Refactor policy updated: maintainability work proceeds by risk zone;
+  mechanical identity gates (binary-identical / .text-identical) may
+  substitute for the zoo A/B where machine code provably does not change.
 - Trimmed remaining local report write-outs: disconnected opcode-profile
   snapshots and `reports/test262-latest/` are gitignored. Dated `qjs-align`
   dumps stay in git history; new dated dirs keep markdown notes.

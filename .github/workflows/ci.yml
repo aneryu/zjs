@@ -20,8 +20,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - run: zig build zjs --summary all
-      - run: zig build checkpoint-check --summary all
+      - run: zig build checkpoint-gate --summary all
       - run: node tools/architecture/check_compiler_stage_boundaries.js zig-out/bin/zjs
 
   linux-x86_64:
@@ -36,8 +39,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - run: zig build zjs --summary all
-      - run: zig build checkpoint-check --summary all
+      - run: zig build checkpoint-gate --summary all
       - run: node tools/architecture/check_compiler_stage_boundaries.js zig-out/bin/zjs
 
   macos-smoke:

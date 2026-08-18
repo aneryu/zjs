@@ -287,13 +287,15 @@ noinline fn resumeExecutionStateRaw(
     // Resume installs generator-owned heap buffers into the stack; the stack
     // must not be an arena window (its deinit would skip freeing them).
     std.debug.assert(!stack.isArenaWindow());
-    // ESCAPE CONTRACT (docs/v2_escape_audit.md §5.4): `state.pc` is a bare
-    // compiler-assigned offset with no provenance token, and `function` arrives
-    // as a parameter independent of `generator`. Every production resume derives
-    // the callee from the continuation itself; pin that here so a future caller
-    // cannot index one function's parked pc into another's bytecode. Null-tolerant
-    // by design: module continuations carry no current_function, and an internal
-    // self-referential fixture resolves to none.
+    // ESCAPE CONTRACT (v2 escape audit §5.4, git history): `state.pc` is a bare
+    // compiler-assigned offset — not a tagged pointer and not a
+    // (function, offset) pair — so it has no provenance of its own. `function`
+    // arrives as a parameter independent of `generator`. Resume must pin the
+    // callee to the continuation's own function: indexing one function's parked
+    // pc into another's bytecode is forbidden. Every production resume derives
+    // the callee from the continuation itself. Null-tolerant by design: module
+    // continuations carry no current_function, and an internal self-referential
+    // fixture resolves to none.
     if (generator.generatorFunctionBytecode()) |retained| {
         std.debug.assert(call_runtime.functionBytecodeFromValue(retained) == function);
     }

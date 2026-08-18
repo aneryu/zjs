@@ -1,3 +1,9 @@
+//! Object model monolith (QuickJS `JSObject` shape). Payload types occupy the
+//! first stretch of this file; `Object` itself is a 64-byte `extern struct`
+//! with the class methods below. For property behavior start at `shape.zig`
+//! and `property.zig`, then the call site in `src/exec/` — do not read this
+//! file from the first line.
+
 const array = @import("array.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
@@ -28,6 +34,8 @@ const ObjectVisitSet = std.AutoHashMap(usize, void);
 const ObjectIncomingMap = std.AutoHashMap(usize, usize);
 const ObjectGraphError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 const OwnKeysError = std.mem.Allocator.Error;
+
+// ===== Payload types (QuickJS-style flattened class data) =====
 
 /// Process-lifetime empty shape exposed only while a class finalizer inspects
 /// an object whose own property buffer and original shape have already been
@@ -1894,6 +1902,7 @@ pub const Object = extern struct {
     /// `array_length >= array_count` for arrays. Unmapped arguments keep it
     /// equal to `array_count` solely as dense-storage metadata; their visible
     /// `length` remains an ordinary own property in the shared arguments shape.
+    // ===== create / construction =====
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
         if (!val.isObject()) return error.TypeError;
@@ -3235,6 +3244,7 @@ pub const Object = extern struct {
         };
     }
 
+    // ===== destroy / teardown =====
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) align(16) void {
         const self: *Object = @alignCast(@fieldParentPtr("header", header));
         // qjs free_object (quickjs.c:6340-6391) for a plain JS Object: mark,
@@ -3821,6 +3831,7 @@ pub const Object = extern struct {
         std.debug.assert(@sizeOf(Object) <= post_a_object_size_baseline / 2);
     }
 
+    // ===== iterator* =====
     pub fn iteratorTargetSlot(self: *Object) *?JSValue {
         if (self.iteratorPayload()) |payload| return &payload.target;
         std.debug.assert(self.flags.class_payload_kind == .iterator);
@@ -4052,6 +4063,7 @@ pub const Object = extern struct {
         if (old_target) |stored| stored.free(rt);
     }
 
+    // ===== collection* / weak* =====
     pub fn collectionEntriesSlot(self: *Object) *[]CollectionEntry {
         if (self.collectionPayload()) |payload| return &payload.entries;
         std.debug.assert(self.flags.class_payload_kind == .collection);
@@ -4655,6 +4667,7 @@ pub const Object = extern struct {
         unreachable;
     }
 
+    // ===== typed* / byte storage =====
     pub fn ensureTypedArrayPayload(self: *Object, rt: *JSRuntime) !void {
         if (self.typedArrayPayload() != null) return;
         const payload = try rt.createRuntime(TypedArrayPayload);
@@ -5234,6 +5247,7 @@ pub const Object = extern struct {
         return target.value().dup();
     }
 
+    // ===== fast* array paths =====
     pub fn arrayElementStorageMode(self: *const Object) ArrayStorageMode {
         return if (self.flags.fast_array) .dense else .sparse;
     }
@@ -5597,6 +5611,7 @@ pub const Object = extern struct {
         return self.setFastArrayElementDup(rt, index, new_value);
     }
 
+    // ===== promise* =====
     pub fn promiseResultSlot(self: *Object) *?JSValue {
         if (self.promisePayload()) |payload| return &payload.result;
         std.debug.assert(self.flags.class_payload_kind == .promise);
@@ -5712,6 +5727,7 @@ pub const Object = extern struct {
         }
     }
 
+    // ===== generator* =====
     pub fn generatorThisSlot(self: *Object) *JSValue {
         return &self.generatorLiveExecution().this_value;
     }
@@ -6003,6 +6019,7 @@ pub const Object = extern struct {
         unreachable;
     }
 
+    // ===== function* =====
     pub fn functionSourceSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
         return &(try self.ensureFunctionRarePayload(rt)).source;
     }
@@ -7593,6 +7610,7 @@ pub const Object = extern struct {
         rt.memory.destroy(FunctionPayload, payload);
     }
 
+    // ===== visit* / cycle GC =====
     pub fn destroyRuntimeCycles(rt: *JSRuntime) usize {
         return rt.runObjectCycleRemoval();
     }
@@ -9948,6 +9966,7 @@ pub const Object = extern struct {
     ///
     /// `prototype` is a predefined atom and not an array index, so the append
     /// is the named add_property arm (no atom-dup guard, no `atomIsArrayIndex`).
+    // ===== define* properties =====
     pub fn defineFunctionPrototypeAutoInit(
         self: *Object,
         rt: *JSRuntime,
@@ -11101,6 +11120,7 @@ pub const Object = extern struct {
         if (!appended) old.free(rt);
     }
 
+    // ===== set* properties =====
     pub fn setProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !void {
         if (self.class_id == class.ids.module_ns) return error.ReadOnly;
         if (self.isArray() and atom_id == atom.ids.length) {

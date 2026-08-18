@@ -65,6 +65,8 @@ scope.
 Issues and PRDs live under `.scratch/<feature>/`. See
 `docs/agents/issue-tracker.md` and `docs/agents/triage-labels.md`.
 Domain notes: `docs/agents/domain.md`.
+Cross-session project lessons and evidence rules:
+`docs/agents/project-experience.md`.
 
 ## Repository Layout
 

@@ -7,9 +7,10 @@
 //! The 3 hottest values (pc/sp/var_buf) ride in argument registers; everything else
 //! is bundled behind the `*Vm` pointer (x3). Because each handler is a separate
 //! function, its JSValue temporaries live in ITS frame and die at ITS return — so the
-//! dispatchLoop's stack frame collapses from `sum(per-arm spills)` (3504B, additive
+//! former switch-dispatcher frame collapsed from `sum(per-arm spills)` (3504B, additive
 //! non-coalescing, proven by comptime-delete bisection) to `max single handler`
-//! (~80-150B) + the driver.
+//! (~80-150B) + the driver. `zjs_vm.zig` only prepares the frame, then
+//! `return tailcall_dispatch.run(&vm)`.
 //!
 //! CRITICAL INVARIANT — a handler makes ZERO non-tail calls *on its own frame*. The
 //! op's real work is an OUTLINED helper (vm_*.zig, unchanged) invoked as the action
@@ -18,8 +19,10 @@
 //! frame-zero fast paths: get_loc/put_loc/get_arg/push_*/dup/swap/int32 arith) inline
 //! their fast path; cold handlers publish + call their helper + tail-dispatch.
 //!
-//! NO `op_cold` big-switch fallback — that would keep the monolithic frame. The cold
-//! ops are individual handlers via the §6 template.
+//! NO `op_cold` big-switch fallback — that would keep the monolithic frame. Cold
+//! ops are individual `coldStd`-wrapped handlers: publish, call the outlined
+//! helper, then tail-dispatch. There is no leftover template document; that
+//! shape is the contract.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,7 +40,7 @@ const object_ops = @import("object_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
-// Op-helper modules (same aliases as zjs_vm.zig's dispatchLoop).
+// Op-helper modules (same aliases the VM used when dispatch lived in zjs_vm.zig).
 const value_vm = @import("vm_value.zig");
 const arith_vm = @import("vm_arith.zig");
 const control_vm = @import("vm_control.zig");
@@ -378,7 +381,7 @@ pub fn coldGen(comptime body: fn (vm: *Vm, pc: [*]const u8) HostError!?JSValue) 
     }.h;
 }
 
-// ---- d==0 entry-guard accessors (mirror the dispatchLoop `(if depth==0 ...)`) ----
+// ---- d==0 entry-guard accessors (mirror the former `(if depth==0 ...)` guards) ----
 pub inline fn isEvalCode(vm: *Vm) bool {
     return if (vm.machine.depth == 0) vm.machine.l0.is_eval_code else false;
 }
@@ -2422,11 +2425,12 @@ const h_await = coldGen(struct {
 // ===========================================================================
 // Hot fast-path handlers — the op's work inlined on the register-resident
 // sp/var_buf, advancing pc + tail-dispatching via `next` with NO
-// publish/helper/coldNext. Mirrors dispatchLoop's `if (comptime thread_dispatch)`
-// threaded arms (zjs_vm.zig). On a guard miss (TDZ / non-int operand / generator
-// stop boundary) the handler tail-calls its COLD counterpart with the
-// ORIGINAL pc/sp so the cold `publish` syncs stack.values/frame.pc from the live
-// sp — exactly dispatchLoop's reg_sp/reg_ip-with-lazy-syncDown model.
+// publish/helper/coldNext. Mirrors the former threaded `if (comptime
+// thread_dispatch)` arms that used to live in zjs_vm.zig. On a guard miss
+// (TDZ / non-int operand / generator stop boundary) the handler tail-calls
+// its COLD counterpart with the ORIGINAL pc/sp so the cold `publish` syncs
+// stack.values/frame.pc from the live sp — the same reg_sp/reg_ip-with-lazy-
+// syncDown model, now owned entirely by this file.
 // ===========================================================================
 const value_ops = @import("value_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
@@ -5383,7 +5387,7 @@ pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) al
 }
 
 // Control flow (8-bit displacement). The displacement is relative to the operand
-// byte (pc+1), matching dispatchLoop's `operand_pc = reg_ip - code.ptr`. Branch
+// byte (pc+1), matching the former `operand_pc = reg_ip - code.ptr` convention. Branch
 // targets never reach code_end: the jump-aware epilogues terminate every
 // branch-to-end path with a real return op, and finalize rejects reachable
 // falloff — so no bounds test is needed here. Boolean/plain-object fast paths
@@ -6218,8 +6222,9 @@ const resident_tail_table = [3]Handler{
 };
 
 // ===========================================================================
-// Driver — the Outcome loop. Replaces dispatchLoop's switch; reuses the Machine +
-// the existing per-frame reload (reloadInlineTopFrame's arithmetic, inlined).
+// Driver — the Outcome loop. `zjs_vm.zig` only prepares the frame, then
+// `return tailcall_dispatch.run(&vm)`. Reuses the Machine + the existing
+// per-frame reload (reloadInlineTopFrame's arithmetic, inlined).
 // ===========================================================================
 
 fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) void {
@@ -6341,7 +6346,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 } else {
                     vm.stack.setLen(req.region_base);
                     _ = vm.machine.pushCall(vm.global, vm.stack, &req.target, vm.stack.topPtr(), req.argc, req.layout) catch |err| {
-                        // op.call's `catch |err|` leg (the old dispatchLoop's
+                        // op.call's `catch |err|` leg (the old switch-dispatcher's
                         // push-failure path): close a pending for-of iterator,
                         // then convert a setup failure (OOM-class) into a
                         // JS-catchable error in the CALLER frame — qjs delivers

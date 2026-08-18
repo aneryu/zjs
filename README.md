@@ -26,9 +26,10 @@ failures**, and 5,194 feature skips (Intl, Temporal, ShadowRealm, and other
 groups listed in `test262.conf`), out of 49,775 prepared cases. Details:
 [COMPATIBILITY.md](COMPATIBILITY.md).
 
-**Performance.** **1.01× Bellard QuickJS** on our 15-benchmark zoo (geomean,
-2026-08-17). That is geomean parity, not 15/15. Per-benchmark numbers:
-[docs/perf/zoo-status.md](docs/perf/zoo-status.md).
+**Performance.** **1.0335× Bellard QuickJS** on our 15-benchmark zoo
+(geomean, 2026-08-18; 11/15 at or above 1.0). That is geomean parity, not
+15/15. See [docs/perf/zoo-status.md](docs/perf/zoo-status.md) for the
+authoritative, current figure.
 
 Authoritative rolling status (gates, latest reports, reproduction commands):
 [STATUS.md](STATUS.md).

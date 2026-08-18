@@ -14,6 +14,7 @@ kept as current status; recover them from git history when needed.
 ## Architecture And API
 
 - [Architecture](architecture.md): current source tour.
+- [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.
 - [API Boundary](api-boundary.md): public API, core, runtime, bindings, CLI.
 - [Public API Contract](public-api-contract.md): Zig API surface.
 - [Compiler-v2 Contract](compiler_v2_contract.md): current compiler identity rules.
@@ -33,10 +34,10 @@ kept as current status; recover them from git history when needed.
 - [Zoo status vs QuickJS](perf/zoo-status.md): public 15-bench geomean claim.
 - [Performance Workflow](perf/README.md): self-baseline gate and profiling.
 - [Object And Shape Implementation](perf/object-shape-design.md).
-- [Retired Inline Cache Note](perf/inline-cache-design.md).
 - [Shared VM Decomposition](perf/shared-vm-decomposition.md).
 - [Release Checklist](release-checklist.md).
-- [Refactor Tax Policy](refactor-policy.md): no dedicated split-file campaigns; hot-path moves need a 15-item zoo A/B.
+- [Refactor Tax Policy](refactor-policy.md): risk zones, identity gates; hot-path moves need a 15-item zoo A/B.
+- [Maintainability Backlog](maintainability-backlog.md): priced HOT-zone refactor queue.
 
 ## Reports (gate snapshots)
 
@@ -47,25 +48,22 @@ These paths are build-graph inputs or local write-outs.
   `perf-*-profile` steps. Profile JSON is written under `.zig-cache/perf/`.
 - `reports/test262-latest/`: local test262-gate write-out (gitignored).
 
+## Agent workflow
+
+- [Project experience](agents/project-experience.md): cross-session lessons.
+- [Domain notes](agents/domain.md), [issue tracker](agents/issue-tracker.md),
+  [triage labels](agents/triage-labels.md): agent conventions.
+
 ## Historical / campaign notes
 
 Not current status. Read only when you need the original evidence.
 
 - [zjs / QuickJS Subsystem Difference Baseline](qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
-- [Code-level comparison 2026-08-07](qjs-align/CODE-LEVEL-COMPARISON-2026-08-07.md)
-- [QCP-1 architecture scorecard](qcp1_architecture_scorecard.md)
-- [QCP-1 dual-divergence closure](qcp1_dual_divergence_closure.md)
-- [C2 scorecard](c2_scorecard.md)
-- [V2 builder lifetime](v2_builder_lifetime.md)
-- [V2 escape audit](v2_escape_audit.md)
-- [V2 emission coverage](v2_emission_coverage.md)
-- [V2 test262 gap](v2_test262_gap.md)
-- [Anchor split classification](anchor_split_classification.md)
-- [Zig build bistability 2026-07](perf/ZIG-BUILD-BISTABILITY-2026-07.md)
+  (frozen measurement baseline, referenced by the performance workflow).
 
-Dated `reports/perf/qjs-align/` campaign trees were removed from the active
-tree. Recover them from git history. New dated dirs keep markdown notes;
-json/stdout dumps there are gitignored.
+All other campaign reports (QCP-1 scorecards, V2 audits, anchor-split
+classification, dated comparisons) were removed from the active tree on
+2026-08-18; recover them from git history.
 
 ## Documentation Rules
 

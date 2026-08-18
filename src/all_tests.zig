@@ -1,18 +1,72 @@
 const std = @import("std");
 
-const kernel_api = @import("root.zig");
+const internal = @import("internal_root.zig");
 
-pub const public_api = kernel_api;
-pub const binding_root = @import("binding/root.zig");
-pub const core = @import("core/root.zig");
-pub const parser = @import("parser.zig");
-pub const simple_token = @import("simple_token.zig");
-pub const bytecode = @import("bytecode.zig");
-pub const exec = @import("exec/root.zig");
-pub const libs = @import("libs/root.zig");
-pub const runtime = @import("runtime/root.zig");
-pub const compiler_v2 = @import("compiler_v2/root.zig");
-pub const config_signature = @import("config_signature.zig");
+pub const public_api = internal.public_api;
+pub const binding_root = internal.binding_root;
+pub const core = internal.core;
+pub const parser = internal.parser;
+pub const simple_token = internal.simple_token;
+pub const bytecode = internal.bytecode;
+pub const exec = internal.exec;
+pub const libs = internal.libs;
+pub const runtime = internal.runtime;
+pub const compiler_v2 = internal.compiler_v2;
+pub const config_signature = internal.config_signature;
+
+pub const RuntimeError = internal.RuntimeError;
+pub const HostError = internal.HostError;
+pub const JSRuntime = internal.JSRuntime;
+pub const JSContext = internal.JSContext;
+pub const JSValue = internal.JSValue;
+pub const Descriptor = internal.Descriptor;
+pub const Atom = internal.Atom;
+pub const JSValueHandle = internal.JSValueHandle;
+pub const LocalHandle = internal.LocalHandle;
+pub const HandleScope = internal.HandleScope;
+pub const WeakPersistent = internal.WeakPersistent;
+pub const WeakPersistentValue = internal.WeakPersistentValue;
+pub const NativePin = internal.NativePin;
+pub const RuntimeMemoryUsage = internal.RuntimeMemoryUsage;
+pub const PropNameID = internal.PropNameID;
+pub const JSString = internal.JSString;
+pub const JSBytes = internal.JSBytes;
+pub const binding = internal.binding;
+pub const ffi = internal.ffi;
+pub const GCPolicy = internal.GCPolicy;
+pub const GCStats = internal.GCStats;
+pub const EvalOptions = internal.EvalOptions;
+pub const EvalTiming = internal.EvalTiming;
+pub const DataPropertyOptions = internal.DataPropertyOptions;
+pub const ExternalFunctionOptions = internal.ExternalFunctionOptions;
+pub const ExternalHostCall = internal.ExternalHostCall;
+pub const ExternalHostCallFn = internal.ExternalHostCallFn;
+pub const ExternalHostFinalizer = internal.ExternalHostFinalizer;
+
+// PUBLIC-SURFACE MIRROR: names that exist only on the unified root, or that
+// intentionally disagree with internal_root (see the exception table below).
+pub const Object = internal.public_api.object.Object;
+pub const RuntimeOptions = internal.public_api.RuntimeOptions;
+pub const ContextOptions = internal.public_api.context.Options;
+pub const EvalMode = internal.public_api.context.EvalMode;
+pub const PropertyAccessOptions = internal.public_api.context.PropertyAccessOptions;
+pub const PropertyDescriptor = internal.public_api.context.PropertyDescriptor;
+pub const FunctionCallOptions = internal.public_api.context.FunctionCallOptions;
+pub const ErrorOptions = internal.public_api.context.ErrorOptions;
+pub const ScriptEvalOptions = internal.public_api.context.ScriptEvalOptions;
+pub const SharedArrayBufferRef = internal.public_api.object.SharedArrayBufferRef;
+pub const OpcodeProfile = internal.public_api.OpcodeProfile;
+pub const default_stack_size = internal.public_api.default_stack_size;
+pub const default_gc_threshold = internal.public_api.default_gc_threshold;
+pub const activateOpcodeProfile = internal.public_api.activateOpcodeProfile;
+pub const value = internal.public_api.value;
+pub const host = internal.public_api.host;
+pub const object = internal.public_api.object;
+pub const context = internal.public_api.context;
+pub const module = internal.public_api.module;
+pub const compile = internal.public_api.compile;
+pub const @"error" = internal.public_api.@"error";
+pub const job = internal.public_api.job;
 
 // QCP-1: the unified suite proves its OWN effective configuration at compile
 // time. It follows -Doptimize, so `zig build test` reports `optimize=Debug`
@@ -21,54 +75,6 @@ pub const config_signature = @import("config_signature.zig");
 comptime {
     config_signature.attest("unified-tests (src/all_tests.zig)");
 }
-pub const RuntimeError = exec.exceptions.RuntimeError;
-pub const HostError = exec.exceptions.HostError;
-pub const JSRuntime = kernel_api.JSRuntime;
-pub const JSContext = kernel_api.JSContext;
-pub const Object = kernel_api.object.Object;
-pub const JSValue = kernel_api.JSValue;
-pub const JSValueHandle = kernel_api.value.Persistent;
-pub const LocalHandle = kernel_api.value.Local;
-pub const HandleScope = kernel_api.value.Scope;
-pub const WeakPersistent = kernel_api.value.Weak;
-pub const WeakPersistentValue = kernel_api.value.Weak;
-pub const NativePin = core.NativePin;
-pub const RuntimeOptions = kernel_api.RuntimeOptions;
-pub const RuntimeMemoryUsage = kernel_api.RuntimeMemoryUsage;
-pub const ContextOptions = kernel_api.context.Options;
-pub const GCPolicy = core.GCPolicy;
-pub const GCStats = core.GCStats;
-pub const EvalOptions = kernel_api.context.EvalOptions;
-pub const EvalMode = kernel_api.context.EvalMode;
-pub const EvalTiming = kernel_api.context.EvalTiming;
-pub const DataPropertyOptions = kernel_api.context.DataPropertyOptions;
-pub const PropertyAccessOptions = kernel_api.context.PropertyAccessOptions;
-pub const PropertyDescriptor = kernel_api.context.PropertyDescriptor;
-pub const ExternalFunctionOptions = kernel_api.host.FunctionOptions;
-pub const FunctionCallOptions = kernel_api.context.FunctionCallOptions;
-pub const ErrorOptions = kernel_api.context.ErrorOptions;
-pub const ScriptEvalOptions = kernel_api.context.ScriptEvalOptions;
-pub const SharedArrayBufferRef = kernel_api.object.SharedArrayBufferRef;
-pub const ExternalHostCall = kernel_api.host.Call;
-pub const ExternalHostCallFn = kernel_api.host.Function;
-pub const ExternalHostFinalizer = kernel_api.host.Finalizer;
-pub const OpcodeProfile = kernel_api.OpcodeProfile;
-pub const default_stack_size = kernel_api.default_stack_size;
-pub const default_gc_threshold = kernel_api.default_gc_threshold;
-pub const PropNameID = kernel_api.host.PropName;
-pub const JSString = kernel_api.value.String;
-pub const JSBytes = kernel_api.value.Bytes;
-pub const binding = kernel_api.host.NativeBinding;
-pub const ffi = kernel_api.ffi;
-pub const activateOpcodeProfile = kernel_api.activateOpcodeProfile;
-pub const value = kernel_api.value;
-pub const host = kernel_api.host;
-pub const object = kernel_api.object;
-pub const context = kernel_api.context;
-pub const module = kernel_api.module;
-pub const compile = kernel_api.compile;
-pub const @"error" = kernel_api.@"error";
-pub const job = kernel_api.job;
 
 fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) void {
     @setEvalBranchQuota(200000);
@@ -102,8 +108,35 @@ fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) voi
     }
 }
 
+/// Names on both roots that are allowed to be different types. Start with
+/// Object; any other identity failure found in implementation is recorded
+/// here with its cause rather than forced onto the internal spelling.
+const internal_decl_exceptions = [_][]const u8{
+    "Object", // public Object is an opaque facade; internal Object has create
+};
+
+fn isInternalDeclException(comptime name: []const u8) bool {
+    inline for (internal_decl_exceptions) |exception| {
+        if (std.mem.eql(u8, exception, name)) return true;
+    }
+    return false;
+}
+
+test "all_tests is a superset of internal_root" {
+    const all = @This();
+    inline for (@typeInfo(internal).@"struct".decls) |decl| {
+        try std.testing.expect(@hasDecl(all, decl.name));
+        if (comptime isInternalDeclException(decl.name)) {
+            try std.testing.expect(@TypeOf(@field(all, decl.name)) != @TypeOf(@field(internal, decl.name)) or
+                @field(all, decl.name) != @field(internal, decl.name));
+        } else {
+            try std.testing.expect(@field(all, decl.name) == @field(internal, decl.name));
+        }
+    }
+}
+
 test {
-    refAllDeclsRecursive(kernel_api, .{});
+    refAllDeclsRecursive(internal.public_api, .{});
     std.testing.refAllDecls(@import("tests/engine_production.zig"));
     std.testing.refAllDecls(@import("tests/oom_cap.zig"));
     std.testing.refAllDecls(@import("tests/embedding_examples.zig"));

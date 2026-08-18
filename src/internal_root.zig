@@ -1,3 +1,8 @@
+//! Internal engine root. Middle of the compile-root chain
+//! `src/root.zig` ⊂ `src/internal_root.zig` ⊂ `src/all_tests.zig`.
+//! CLI, scoped tests, and ReleaseFast artifacts compile against this file.
+//! The unified suite imports it and adds the public-surface mirrors.
+
 comptime {
     _ = @import("dossier_pad.zig");
 }

@@ -1,5 +1,9 @@
 # QCP-1 switch decision packet
 
+*Historical decision record (2026-08). The `-Dzjs_compiler` option described
+below has since been retired; the v2 compiler is the only compiler. Command
+lines quoting it no longer run.*
+
 Branch `compiler-v2-qjs`, tip `a1eed054` (the switch-trampoline divergence
 closure). Measurement and documentation only.
 
@@ -616,7 +620,7 @@ was passed explicitly, and `n/a` where the row builds no engine at all.
 | dual corpus | `mc.js`, `ma.js` under v2 and under dual | 240/240 on all four runs; **0 `ZJS-DUAL-MISMATCH` lines** | `explicit-v2` / `explicit-dual` |
 | L3 emission (v2) | `ZJS_V2_EMISSION_COLLECT=1 zjs-dev` on `mc.js` / `ma.js` | `v2_construct_emitted=4487085/4487162  legacy_construct_emitted=241  legacy_in_v2_scope=0  legacy_in_v2_unallowed=0  sites_dropped=0` | `explicit-v2` — the `zjs-dev` binary was built with `-Dzjs_compiler=v2`; the counters are meaningless otherwise, which is what makes this row self-checking |
 | L3 allowlist | `src/compiler_v2/coverage.zig:25` | `pub const legacy_allowlist = [_]AllowlistEntry{};` — **empty**, and `LegacyConstruct` has only `none` | `n/a` — source inspection |
-| escape audit | `docs/v2_escape_audit.md` | 3 EXPLICIT / 2 IMPLICIT-BUT-SOUND / **0 UNCLEAR**; its three pinned tests run inside the suites above | `n/a` — document; the pinned tests inherit the provenance of the suite that runs them |
+| escape audit | v2 escape audit report (git history) | 3 EXPLICIT / 2 IMPLICIT-BUT-SOUND / **0 UNCLEAR**; its three pinned tests run inside the suites above | `n/a` — document; the pinned tests inherit the provenance of the suite that runs them |
 
 ### 3.1 The divergence closure, and what it proved
 
@@ -697,7 +701,7 @@ Debug.
 
 ## 4. ARCHITECTURE SCORECARD (final)
 
-Same mechanical ruler as `docs/qcp1_architecture_scorecard.md` §0, re-run at
+Same mechanical ruler as the QCP-1 architecture scorecard §0 (git history), re-run at
 this tip. That ruler reproduces the S6 figures it was calibrated against to
 within 0.4%.
 
@@ -746,7 +750,7 @@ code but absent or materially incomplete in the normative contract**
 `docs/compiler_v2_contract.md`, which still records the older audited tip
 `6d0c69dd`. The contract document is behind the code.
 
-### 4.2 C2 — three dimensions (closed; from `docs/c2_scorecard.md`)
+### 4.2 C2 — three dimensions (closed; from the C2 scorecard, git history)
 
 | | question | measurement | verdict |
 | --- | --- | --- | --- |

@@ -1,107 +1,133 @@
 # Borrowed-Atom Ownership Audit (parser / compiler side)
 
-审计基线 commit：`3d869065`（`main`，紧随 `8c8787cd` "release identifier and
-private-name token atoms" 与 `693c2997`）。审计范围：`src/parser.zig` 全文，加上
-parser 交付 atom 的下游 sink（`src/bytecode.zig` 的 `FunctionDef` / 模块 `Record`
-/ atom-operand 流，`src/core/module.zig`）。
+Audit baseline commit: `3d869065` (`main`, immediately after `8c8787cd`
+"release identifier and private-name token atoms" and `693c2997`). Scope:
+all of `src/parser.zig`, plus the downstream sinks that receive atoms from
+the parser (`FunctionDef` / module `Record` / atom-operand flow in
+`src/bytecode.zig`, and `src/core/module.zig`).
 
-本文是「先审计后修改」的书面产物：先枚举并分类每一个 **borrowed atom** 站点，
-再对 class C 站点做可达性举证，最后只修 class C。
-
----
-
-## 1. 为什么现在必须审计
-
-`8c8787cd` 之前 `Lexer.freeToken` 只释放 token 的字符串 payload，从不释放
-`next()` 为 `.ident` payload 内插的 atom。也就是说**每一个标识符 token 泄漏
-一次 retain**，源码内插出来的 atom 永远到不了 refcount 0。在那个世界里，
-「从 token 借一个 atom，然后 `advance()`，然后继续用」是安全的——因为被借的
-条目不可能死。
-
-`8c8787cd` 补上了 `.ident` 的释放臂（qjs `free_token`，quickjs.c:22190-22208），
-泄漏消失，于是所有原本被泄漏掩盖的所有权隐患一次性变成真隐患。该 commit 已经
-修掉了它当时识别出的一批（`dupToken` / 声明名 / 类名 / label / 对象属性名 /
-参数名 / 模块 import-export 名 / TS enum + namespace）。本文是把剩下的账**记完**。
-
-### 1.1 危害机制（这是判定 class C 的依据）
-
-`src/core/atom.zig`：
-
-- `free()` 递减 `ref_count`；归零调用 `finalizeDeadEntry`（atom.zig:1519）。
-- `finalizeDeadEntry` 做三件事：把条目从 `string_index` 摘掉（`unindexEntry`）、
-  释放 `entry.bytes` 并置空、把槽位下标压进 **LIFO** 自由链 `free_slot_head`。
-- `internDynamic`（atom.zig:1398）在 hash 未命中时**优先弹出自由链头**，并且
-  复用槽位保持同一个 id（`entry.id == idx + first_dynamic_atom`）。
-
-推论：一个刚死的 atom id 并不会变成永久无效值，它会被**下一次新字符串内插**
-重新绑定。于是：
-
-1. 若紧接着重新内插的正好是同一个字符串（例如 lookahead 之后原地重新词法分析
-   同一个标识符），槽位被同一个名字取回，stale id 又「活」了——**代码看起来是对的**。
-2. 若中间夹进任何一次别的新字符串内插，stale id 就指向**另一个字符串**，
-   `dup()` 会静默 retain 错误的条目。
-3. 若 stale id 指向的槽位还没被复用，`dup()` 会命中
-   `std.debug.assert(entry.hasLiveValue())`（atom.zig:1037），Debug/ReleaseSafe
-   直接 panic；ReleaseFast 里它会把一个已经在自由链上的死条目 `ref_count` 拉回 1，
-   随后同一个槽位会被二次 `finalizeDeadEntry` 压链——自由链出现重复项，
-   之后两次 intern 拿到同一个 id。
-
-情形 1 就是本文所说的**「靠槽位回收的运气」**：不是契约，是巧合。
+This document is the written product of "audit first, then patch": first
+enumerate and classify every **borrowed atom** site, then prove
+reachability for class C sites, and finally fix only class C.
 
 ---
 
-## 2. 分类口径
+## 1. Why this audit had to happen now
 
-- **A = SAFE**：在 token 被释放之前代码自己 `dup` 出了一份 owner；或该 atom 本就
-  是 predefined / tagged-int 常量；或读取与使用都发生在同一个 token 存活区间内
-  （纯比较、纯读名）。
-- **B = NEEDS EXPLICIT OWNERSHIP**：当下正确，但**只是碰巧**——存活靠的是某个
-  与本站点无关的第三方 owner（`defineVar` 顺手 dup 出来的 `var_name`、外层的
-  一份 dup、scope var 行……），代码本身没有表达这份所有权。改动那个第三方，
-  或者调换语句顺序，就会静默破。
-- **C = WRONG**：借用跨过了 owner 的释放点，atom 可以在使用点之前 refcount 归零。
+Before `8c8787cd`, `Lexer.freeToken` released only the token's string
+payload; it never released the atom that `next()` interned into a `.ident`
+payload. That means **every identifier token leaked one retain**, and an
+atom interned from source could never reach refcount 0. In that world,
+"borrow an atom from the token, then `advance()`, then keep using it" was
+safe — the borrowed entry could not die.
 
-对 B 的口径刻意比「能跑就是对」更严：ruling 要的是**契约写在代码里**。
-（并行的 codex 独立扫描把本文的多数 B 判成 A，理由是「事实上有 owner」。
-两者对事实无分歧，只对「incidental 是否算 B」有分歧；本文采用严口径。）
+`8c8787cd` added the `.ident` free arm (qjs `free_token`,
+quickjs.c:22190-22208). The leak disappeared, and every ownership hazard
+that the leak had been hiding became real at once. That commit already
+fixed the batch it had identified (`dupToken` / declaration names / class
+names / labels / object property names / parameter names / module
+import-export names / TS enum + namespace). This document finishes the
+remaining ledger.
+
+### 1.1 Failure mechanism (the class C criterion)
+
+`src/core/atom.zig`:
+
+- `free()` decrements `ref_count`; at zero it calls `finalizeDeadEntry`
+  (atom.zig:1519).
+- `finalizeDeadEntry` does three things: unlinks the entry from
+  `string_index` (`unindexEntry`), frees `entry.bytes` and clears it, and
+  pushes the slot index onto the **LIFO** free list `free_slot_head`.
+- `internDynamic` (atom.zig:1398) **pops the free-list head first** on a
+  hash miss, and reuses the slot while keeping the same id
+  (`entry.id == idx + first_dynamic_atom`).
+
+Consequence: a just-dead atom id does not become permanently invalid; the
+**next new-string intern** rebinds it. Then:
+
+1. If the immediately following intern is the same string (for example,
+   re-lexing the same identifier after lookahead), the slot is taken back
+   by the same name and the stale id looks "live" again — **the code looks
+   correct**.
+2. If any other new-string intern happens in between, the stale id now
+   points at **another string**, and `dup()` silently retains the wrong
+   entry.
+3. If the stale id's slot has not been reused yet, `dup()` hits
+   `std.debug.assert(entry.hasLiveValue())` (atom.zig:1037): Debug /
+   ReleaseSafe panic immediately. In ReleaseFast it pulls a dead entry
+   that is already on the free list back to `ref_count` 1, after which
+   the same slot is `finalizeDeadEntry`'d a second time and pushed onto
+   the free list again — the free list now has a duplicate, and two later
+   interns receive the same id.
+
+Case 1 is what this document calls **"luck of slot reuse"**: not a
+contract, a coincidence.
 
 ---
 
-## 3. 站点清单
+## 2. Classification
 
-`fn` 位置按基线 `3d869065` 的行号。六字段缩写：
-**src** = atom 来源，**own** = token owner，**rel** = owner 释放点，
-**use** = 使用区间，**dup** = 是否 dup，**xfer** = 是否所有权转移。
+- **A = SAFE**: the code itself `dup`s an owner before the token is
+  released; or the atom is already a predefined / tagged-int constant; or
+  the read and the use both fall inside the same token lifetime (pure
+  compare, pure name read).
+- **B = NEEDS EXPLICIT OWNERSHIP**: correct today, but **only by
+  accident** — liveness depends on some third-party owner unrelated to
+  this site (`var_name` that `defineVar` happened to dup, an outer dup, a
+  scope var row…). The code itself does not express that ownership.
+  Changing that third party, or swapping statement order, silently
+  breaks.
+- **C = WRONG**: the borrow crosses the owner's release point; the atom
+  can reach refcount 0 before the use site.
 
-### 3.1 Class C（借用越过 owner）
+The B bar is deliberately stricter than "it runs, so it is correct": the
+ruling wants **the contract written in the code**. (A parallel Codex
+scan classified most of this document's B sites as A, on the grounds that
+"there is in fact an owner". There is no disagreement about the facts,
+only about whether incidental ownership counts as B; this document uses
+the strict bar.)
 
-#### C-1 `exportDefaultFunctionName` — src/parser.zig:18011（`*` 分支）、18014（普通分支）
+---
 
-1. **src**：本函数自己 `s.lex.next()` 词法分析出来的 lookahead token，`next()` 为
-   `.ident` payload 内插了名字。
-2. **own**：这个局部 lookahead token（`first` / `second`），parser 的 `s.token`
-   完全没参与。
-3. **rel**：本函数自己的 `defer s.lex.freeToken(&first)` /
-   `defer s.lex.freeToken(&second)`——**在 `return` 表达式求值之后、控制权交回
-   调用方之前**。所以返回值在返回的那一刻就已经悬空。
-4. **use**：调用方拿到后先跑完整个 `parseFunctionDecl`（连函数体），再传给
-   `addModuleExportName` → `Record.addExport` → `atoms.dup(...)`。
-5. **dup**：无。
-6. **xfer**：无。`Record.addExport`（bytecode.zig:1150）会自己 dup，但它 dup 的
-   是一个**已经死掉的 id**，救不了。
+## 3. Site list
 
-**CLASS: C**（已举证，见 §4）
+`fn` locations use line numbers from baseline `3d869065`. Six-field
+abbreviations: **src** = atom source, **own** = token owner, **rel** =
+owner release point, **use** = use interval, **dup** = whether dup'd,
+**xfer** = whether ownership is transferred.
+
+### 3.1 Class C (borrow crosses the owner)
+
+#### C-1 `exportDefaultFunctionName` — src/parser.zig:18011 (`*` arm), 18014 (ordinary arm)
+
+1. **src**: a lookahead token this function itself obtained from
+   `s.lex.next()`; `next()` interned the name into the `.ident` payload.
+2. **own**: that local lookahead token (`first` / `second`); the parser's
+   `s.token` is not involved at all.
+3. **rel**: this function's own `defer s.lex.freeToken(&first)` /
+   `defer s.lex.freeToken(&second)` — **after the `return` expression is
+   evaluated and before control returns to the caller**. So the return
+   value is already dangling at the moment of return.
+4. **use**: the caller finishes the entire `parseFunctionDecl` (including
+   the body) before passing it to `addModuleExportName` →
+   `Record.addExport` → `atoms.dup(...)`.
+5. **dup**: none.
+6. **xfer**: none. `Record.addExport` (bytecode.zig:1150) will dup, but
+   it dups an **already-dead id**, which does not save it.
+
+**CLASS: C** (proven; see §4)
 
 #### C-2 `exportDefaultClassName` — src/parser.zig:18035
 
-与 C-1 同构：同一个 save/restore + `defer freeToken` 形状，返回
-`name.payload.ident.atom`；调用方跑完 `parseClass(s, true)` 之后才使用。
+Same shape as C-1: the same save/restore + `defer freeToken` pattern,
+returning `name.payload.ident.atom`; the caller uses it only after
+`parseClass(s, true)` returns.
 
-**CLASS: C**（已举证，见 §4）
+**CLASS: C** (proven; see §4)
 
-C-1 / C-2 的调用点共 5 处（全部在 `parseExport`）：
+C-1 / C-2 have five call sites (all in `parseExport`):
 
-| 调用点 | 源码形态 |
+| Call site | Source shape |
 |---|---|
 | 17796 | `export default class C {}` |
 | 17815 | `export default function f() {}` |
@@ -109,133 +135,150 @@ C-1 / C-2 的调用点共 5 处（全部在 `parseExport`）：
 | 17961 | `export function f() {}` / `export function* f() {}` |
 | 17981 | `export async function f() {}` |
 
-今天之所以不炸，是因为 `parseFunctionDecl` / `parseClass` 的**第一次**内插正好
-就是同一个名字：`advance()` 释放的是 `function` / `class` 关键字 token
-（predefined atom，`free` 直接 return，不进自由链），紧接着 `lex.next()` 内插名字，
-弹出的正是刚被压进去的那个槽。中间只要多一次别的新字符串内插，链头就不是它了。
+It does not blow up today because the **first** intern inside
+`parseFunctionDecl` / `parseClass` is exactly the same name: `advance()`
+releases the `function` / `class` keyword token (a predefined atom;
+`free` returns immediately and does not enter the free list), then
+`lex.next()` interns the name and pops the slot that was just pushed.
+One extra new-string intern in between and the free-list head is no
+longer that slot.
 
-#### C-3 `parseDeleteSuperReference` — src/parser.zig:8176 —— **形状为 C，但不可达**
+#### C-3 `parseDeleteSuperReference` — src/parser.zig:8176 — **C-shaped, but unreachable**
 
-1. **src**：`s.token.payload.ident.atom`（当前 token）。
-2. **own**：`s.token`。
-3. **rel**：紧跟其后的 `try s.advance()`（advance 先 `freeToken(&self.token)`）。
-4. **use**：`advance()` 之后的
-   `try s.emitOpAtom(opcode.op.push_atom_value, name)` → `appendAtomOperand`
-   → `atoms.dup(name)`。
-5. **dup**：无（它的两个同族活路径 `parseMemberChain`:8794 和
-   `parseNewCalleeMemberAccess`:8748 都 dup 了，只有它漏了）。
-6. **xfer**：无。
+1. **src**: `s.token.payload.ident.atom` (the current token).
+2. **own**: `s.token`.
+3. **rel**: the immediately following `try s.advance()` (`advance` first
+   `freeToken(&self.token)`).
+4. **use**: after `advance()`,
+   `try s.emitOpAtom(opcode.op.push_atom_value, name)` →
+   `appendAtomOperand` → `atoms.dup(name)`.
+5. **dup**: none (its two live sibling paths `parseMemberChain`:8794 and
+   `parseNewCalleeMemberAccess`:8748 both dup; only this one missed it).
+6. **xfer**: none.
 
-更糟的是这里连槽位回收的运气都没有：`advance()` 之后内插的下一个 token 是 `(`，
-是标点、不内插任何字符串，所以名字的槽位会**一直空着**，`dup` 会直接撞
-`hasLiveValue` 断言。
+Worse, there is not even slot-reuse luck here: the next token interned
+after `advance()` is `(`, punctuation that interns no string, so the
+name's slot stays **empty** and `dup` hits the `hasLiveValue` assert
+directly.
 
-**但是**：`parseDeleteSuperReference` 和 `isDeleteSuperReference` 在整个仓库里
-**没有任何调用者**（`grep -rn "DeleteSuperReference" src/` 只有这两个定义行）。
-Zig 不会对未被引用的 struct 成员函数做语义分析，所以这段代码既跑不到、也没被
-类型检查过。按 ruling 的证据规则，无法演示的危害必须降级：
+**However**: `parseDeleteSuperReference` and `isDeleteSuperReference`
+have **no callers** anywhere in the tree (`grep -rn "DeleteSuperReference"
+src/` finds only those two definition lines). Zig does not semantically
+analyze unreferenced struct methods, so this code is neither reachable
+nor type-checked. Under the ruling's evidence rules, an undemonstrable
+hazard must be downgraded:
 
-**CLASS: C-shape / UNREACHABLE**（无法从任何 JS 源码触达；仍按同族活路径的
-写法补齐了 owner，理由见 §5.2）
+**CLASS: C-shape / UNREACHABLE** (not reachable from any JS source; the
+owner was still filled in to match the live sibling paths; see §5.2)
 
-### 3.2 Class B（正确但不是契约）
+### 3.2 Class B (correct, but not a contract)
 
 #### B-1 `identifierLikeAtom` — src/parser.zig:9982
 
-**src** 当前 token / keyword；**own** `s.token`；**rel** 下一次 `advance()`；
-**use** 由调用方决定；**dup** 由调用方负责；**xfer** 无。
-函数名和签名都没有说「这是借的」。今天所有调用方（`parseVar`:13061、
-`parseFunctionDecl`:13692、`parseFunctionExpr`:13750、break/continue label:12083、
-enum member:11386、各参数与 pattern 路径）**都**在 `advance()` 之前 dup 了，
-所以事实上安全；但这是 12 处调用方各自的自觉，不是这个 helper 的契约。
+**src** current token / keyword; **own** `s.token`; **rel** the next
+`advance()`; **use** decided by the caller; **dup** the caller's job;
+**xfer** none. Neither the function name nor the signature says "this is
+borrowed". Every caller today (`parseVar`:13061, `parseFunctionDecl`:13692,
+`parseFunctionExpr`:13750, break/continue label:12083, enum
+member:11386, and the parameter / pattern paths) **does** dup before
+`advance()`, so it is in fact safe; that is twelve call sites each being
+careful, not this helper's contract.
 
-#### B-2 catch 绑定 — src/parser.zig:12312
+#### B-2 catch binding — src/parser.zig:12312
 
-**src** 当前 token；**own** `s.token`；**rel** 12331 的 `advance()`；
-**use** 12332 的 `emitScopePutVar(catch_atom)`；**dup** 无（本地）；
-**xfer** 有——12330 的 `defineVar(catch_atom, .catch_)` 会经
-`FunctionDef.appendVar`（bytecode.zig:3300 `atoms.dup(var_def.var_name)`）留下一份
-retain，**恰好排在 `advance()` 之前**。
-成立完全依赖「defineVar 先于 advance」这个语句顺序 + 「defineVar 会 dup」这个
-下游实现细节，本地没有任何 owner。
+**src** current token; **own** `s.token`; **rel** the `advance()` at
+12331; **use** `emitScopePutVar(catch_atom)` at 12332; **dup** none
+(local); **xfer** yes — `defineVar(catch_atom, .catch_)` at 12330 leaves
+a retain via `FunctionDef.appendVar` (bytecode.zig:3300
+`atoms.dup(var_def.var_name)`), **exactly before `advance()`**. It holds
+only because of that statement order ("defineVar before advance") plus
+the downstream detail that `defineVar` dups; there is no local owner.
 
-#### B-3 TS `enum` 名 — src/parser.zig:11359；B-4 TS `namespace` 名 — src/parser.zig:11472
+#### B-3 TS `enum` name — src/parser.zig:11359; B-4 TS `namespace` name — src/parser.zig:11472
 
-同 B-2 的形状，而且源码里已经用注释写明了意图
-（"Acquire the declaration owner before advance releases the token's identifier
-retain"）。owner 是 `addScopeVar` 建出来的 var 行；本地依然没有 retain。
-派生的 `s.last_declared_atom`（11454 / 11513 / 11541）与
-`s.current_namespace_atom`（11498 / 11529）把这个借来的 id 存进 parser state，
-读取点在 11507 / 11515 / 13195 / 14672 / 17342，全程靠那一行 var 撑着。
+Same shape as B-2, and the source already comments the intent ("Acquire
+the declaration owner before advance releases the token's identifier
+retain"). The owner is the var row created by `addScopeVar`; there is
+still no local retain. Derived `s.last_declared_atom` (11454 / 11513 /
+11541) and `s.current_namespace_atom` (11498 / 11529) store this borrowed
+id into parser state; the read sites at 11507 / 11515 / 13195 / 14672 /
+17342 are kept alive entirely by that one var row.
 
 #### B-5 `State.last_class_decl_atom` — src/parser.zig:17155
 
-**src** `classNameAtom(s)` 返回的**借用** id；**own** `s.token`；
-**rel** 17156 的 `advance()`；**use** 17976（`export class C {}` 里
-`addModuleExportName(s, name_atom, name_atom)`，在 `parseClass` 已经返回之后）；
-**dup** 字段本身没有（同一处的 `class_name` 有一份 dup，但它被 `parseClass`
-出口的 defer 释放了）；**xfer** 无。
-存活链是**两段拼接**的：`parseClass` 内部靠局部 `class_name` 那份 dup，
-`parseClass` 返回之后靠类声明绑定的 `var_name` retain。字段自己是纯借用。
-探针实测使用点 refcount = 5（§4.3），确认当前活；但这是两个无关 owner 接力的结果。
+**src** the **borrowed** id returned by `classNameAtom(s)`; **own**
+`s.token`; **rel** the `advance()` at 17156; **use** 17976 (`export class
+C {}` calls `addModuleExportName(s, name_atom, name_atom)` after
+`parseClass` has already returned); **dup** none on the field itself
+(the sibling `class_name` has a dup, but `parseClass`'s exit `defer`
+releases it); **xfer** none. The liveness chain is **two spliced
+segments**: inside `parseClass` it rides the local `class_name` dup;
+after `parseClass` returns it rides the class-declaration binding's
+`var_name` retain. The field itself is a pure borrow. A probe measured
+refcount = 5 at the use site (§4.3), so it is live today; that is two
+unrelated owners handing off.
 
 #### B-6 `State.last_var_decl_atom` — src/parser.zig:13078
 
-只写不读：全仓库只有 4060 的声明、11708 的置 null 和 13078 的赋值，没有任何读取点。
-存的是 `parseVar` 那份 owned dup 的 id，而那份 dup 在声明子句结束时就被释放。
-今天无害（死字段），但它是一个随时可以被「加一个读取点」变成 class C 的陷阱。
+Write-only: the whole tree has only the declaration at 4060, a nulling
+at 11708, and the assignment at 13078; there is no read site. It stores
+the id of `parseVar`'s owned dup, and that dup is released when the
+declaration clause ends. Harmless today (dead field), but it is a trap
+that becomes class C the moment someone adds a read.
 
-### 3.3 Class A（安全）汇总
+### 3.3 Class A (safe) summary
 
-下列站点都在 token 释放前建立了独立 owner，或使用完全落在 token 存活区间内，
-或拿到的本来就是 predefined / 新内插的 owned atom。
+The following sites either establish an independent owner before the
+token is released, or keep the entire use inside the token lifetime, or
+receive a predefined / freshly interned owned atom.
 
-| 站点 | 位置 | 安全理由（六字段要点） |
+| Site | Location | Why it is safe (six-field gist) |
 |---|---|---|
-| `keywordAtom` | 191 | 返回 predefined 常量，`free`/`dup` 均为 no-op |
-| `LexerImpl.dupToken` | 412 | 明确复制 owner，注释即契约 |
-| `forHeadHasNoTopLevelSemicolon` 快照 | 5509 | `dupToken` 独立 owner，defer 交回 |
-| `takeParserSnapshot` / `restoreParserLexerSnapshot` | 15748 / 15775 | 同上 |
-| lookahead 家族（`checkArrowHead` / `checkAsync*ArrowHead` / `nextRegexpAwareLookaheadToken` / `peekNextKind*`） | 5399-5490, 6875-7030 | 只读 `token.val`，不碰 atom |
-| `peekNextIsOfToken` | 5443 | 借用只用于 `atomNameEquals`，在 defer 之前 |
-| `isIdent` / `isParameterModifier` | 5581 / 5590 | 当前 token 内的 `name()` 比较 |
-| `labelStartAtom` + 12083 break/continue label | 5269 / 12083 | 调用方 advance 前 dup（8c8787cd） |
-| 赋值 LHS / primary 标识符 | 7093 / 9304 | advance 前 dup |
+| `keywordAtom` | 191 | returns a predefined constant; `free`/`dup` are no-ops |
+| `LexerImpl.dupToken` | 412 | explicitly copies an owner; the comment is the contract |
+| `forHeadHasNoTopLevelSemicolon` snapshot | 5509 | `dupToken` independent owner, defer returns it |
+| `takeParserSnapshot` / `restoreParserLexerSnapshot` | 15748 / 15775 | same |
+| lookahead family (`checkArrowHead` / `checkAsync*ArrowHead` / `nextRegexpAwareLookaheadToken` / `peekNextKind*`) | 5399-5490, 6875-7030 | read-only `token.val`; never touch the atom |
+| `peekNextIsOfToken` | 5443 | borrow used only for `atomNameEquals`, before defer |
+| `isIdent` / `isParameterModifier` | 5581 / 5590 | `name()` compare inside the current token |
+| `labelStartAtom` + 12083 break/continue label | 5269 / 12083 | caller dups before advance (`8c8787cd`) |
+| assignment LHS / primary identifier | 7093 / 9304 | dup before advance |
 | private-name `in` | 7797 | `dup(private_atom)` + defer free |
-| `new.target` / `import.meta` / 转义保留字判定 | 8679 / 9206 / 9248-9261 | 当前 token 内的纯比较 |
-| `parseNewCalleeMemberAccess` / `parseMemberChain`（点号与可选链） | 8748 / 8794 / 8854 | `retained_name = dup(name)` + defer free |
-| `parseObjectPropertyName` | 9810 | `ObjectPropertyName.retained` 标记 owner |
-| `awaitUsingDeclarationStart` / `usingDeclarationStart` | 11022-11031 | 扫描 token 内比较 |
-| enum member 名 | 11386 | advance 前 dup + defer free |
-| `using` / for-of 绑定 / for 声明绑定 | 12421 / 13310 / 13361 | advance 前 dup |
-| `parseVar` 简单绑定 | 13061 | advance 前 dup + defer free（qjs js_parse_var） |
-| for-head `async of` 判定 | 13385 | 当前 token 内比较 |
-| `parseFunctionDecl` / `parseFunctionExpr` 名 | 13692 / 13750 | advance 前 dup + defer free |
-| 形参 / rest / arrow 形参 / pattern 绑定 | 13913, 14011, 14792, 14823, 14903, 15256 | `appendOwnedParserAtom` 或 advance 前 dup |
-| `PatternTarget.defaultName` | 15105 | 转发已 owned 的绑定名 |
-| class 私有存取器 / 私有字段方法 | 16081 / 16129 | `privateNameAtom` 返回 owned |
-| `privateSetterAtom` / `newClassPrivateAtom` / 计算字段临时 atom | 16319 / 16704 / 16716 | 新建 symbol，本来就 owned |
-| `classNameAtom` 的 `class_name` 用法 | 16357→17153 | advance 前 dup + defer free（qjs js_parse_class） |
-| `privateNameAtom` / `privateNameDeclarationAtom` / `findClassPrivateBoundName` | 16668 / 16676 / 16684 | 返回 owned 或列表持有 |
-| class 私有名预扫描 | 17037 | `privateNameDeclarationAtom` owned + defer free |
-| 模块 default / namespace / named import 名 | 17527 / 17554 / 17592 | advance 前 dup，`*_live` 标志管转移 |
-| `moduleStringAtom` / `moduleImportNameAtomOwned` | 17732 / 17744 | 返回 owned（8c8787cd） |
+| `new.target` / `import.meta` / escaped-reserved-word tests | 8679 / 9206 / 9248-9261 | pure compare inside the current token |
+| `parseNewCalleeMemberAccess` / `parseMemberChain` (dot and optional chain) | 8748 / 8794 / 8854 | `retained_name = dup(name)` + defer free |
+| `parseObjectPropertyName` | 9810 | `ObjectPropertyName.retained` marks the owner |
+| `awaitUsingDeclarationStart` / `usingDeclarationStart` | 11022-11031 | compare inside the scanned token |
+| enum member name | 11386 | dup before advance + defer free |
+| `using` / for-of binding / for declaration binding | 12421 / 13310 / 13361 | dup before advance |
+| `parseVar` simple binding | 13061 | dup before advance + defer free (qjs `js_parse_var`) |
+| for-head `async of` test | 13385 | compare inside the current token |
+| `parseFunctionDecl` / `parseFunctionExpr` name | 13692 / 13750 | dup before advance + defer free |
+| parameters / rest / arrow parameters / pattern bindings | 13913, 14011, 14792, 14823, 14903, 15256 | `appendOwnedParserAtom` or dup before advance |
+| `PatternTarget.defaultName` | 15105 | forwards an already-owned binding name |
+| class private accessors / private field methods | 16081 / 16129 | `privateNameAtom` returns owned |
+| `privateSetterAtom` / `newClassPrivateAtom` / computed-field temp atom | 16319 / 16704 / 16716 | newly created symbol; already owned |
+| `classNameAtom` used as `class_name` | 16357→17153 | dup before advance + defer free (qjs `js_parse_class`) |
+| `privateNameAtom` / `privateNameDeclarationAtom` / `findClassPrivateBoundName` | 16668 / 16676 / 16684 | returns owned or list-held |
+| class private-name prescan | 17037 | `privateNameDeclarationAtom` owned + defer free |
+| module default / namespace / named import names | 17527 / 17554 / 17592 | dup before advance; `*_live` flags manage transfer |
+| `moduleStringAtom` / `moduleImportNameAtomOwned` | 17732 / 17744 | returns owned (`8c8787cd`) |
 | import attribute key | 18073 | dup + defer free |
-| `pending_function_name` / `function_expr_name_binding` / `active_with_atom` / 各 label carrier | 4050 / 14157 / 13246 / 11612 | 存的是外层 owned dup，字段生命周期严格内含于该 dup |
-| `current_parameter_properties` / `class_private_elements` / `class_private_bound_names` | 4008 / 16282 / 16647 | 列表自持 retain，`deinitOwnedParserAtoms` 配平 |
-| sink：`FunctionDef.appendVar/appendArg/appendGlobalVar/addClosureVar/appendAtomOperand` | bytecode.zig:3300-3370 / 3472 | 一律 `atoms.dup` |
-| sink：模块 `Record.add*` | bytecode.zig:1121-1198 | 一律 `atoms.dup`（但救不了已死的输入） |
+| `pending_function_name` / `function_expr_name_binding` / `active_with_atom` / label carriers | 4050 / 14157 / 13246 / 11612 | store an outer owned dup; field lifetime is strictly inside that dup |
+| `current_parameter_properties` / `class_private_elements` / `class_private_bound_names` | 4008 / 16282 / 16647 | the list holds its own retain; `deinitOwnedParserAtoms` balances it |
+| sink: `FunctionDef.appendVar/appendArg/appendGlobalVar/addClosureVar/appendAtomOperand` | bytecode.zig:3300-3370 / 3472 | always `atoms.dup` |
+| sink: module `Record.add*` | bytecode.zig:1121-1198 | always `atoms.dup` (but that cannot save an already-dead input) |
 
 ---
 
-## 4. Class C 可达性举证
+## 4. Class C reachability evidence
 
-工具：`zig build zjs-dev`（Debug，`std.debug.assert` 生效）。
+Tool: `zig build zjs-dev` (Debug; `std.debug.assert` is live).
 
-### 4.1 探针：返回值在返回时就已经死了
+### 4.1 Probe: the return value is already dead at return
 
-在 `parseExport` 的调用点插入临时探针，打印
-`atoms.refCount(atom)` 与 `atoms.name(atom)`（探针不入库）：
+Temporary probes at the `parseExport` call sites printed
+`atoms.refCount(atom)` and `atoms.name(atom)` (probes were not checked
+in):
 
 ```
 $ ./zig-out/bin/zjs-dev /tmp/expdef.mjs        # export default function zzqqUniqueDefaultFn(){}
@@ -243,16 +286,18 @@ $ ./zig-out/bin/zjs-dev /tmp/expdef.mjs        # export default function zzqqUni
 [borrow-probe] exportDefaultFunctionName/afterParse: atom=710 refcount=2    name=zzqqUniqueDefaultFn
 ```
 
-`refcount=null` / `name=null` 表示条目已 `finalizeDeadEntry`：bytes 已释放、
-已从 `string_index` 摘除、槽位已在自由链上。第二行说明它是被
-`parseFunctionDecl` 重新内插同名字符串**取回**的。四个调用形态（`export default
-function` / `export default class` / `export function` / `export async function`）
-的返回时刻全部 `refcount=null`。
+`refcount=null` / `name=null` means the entry has already been
+`finalizeDeadEntry`'d: bytes freed, removed from `string_index`, slot on
+the free list. The second line shows it was **taken back** when
+`parseFunctionDecl` re-interned the same string. All four call shapes
+(`export default function` / `export default class` / `export function` /
+`export async function`) have `refcount=null` at the return moment.
 
-### 4.2 扰动：中间插一次别的内插，运气就没了
+### 4.2 Perturbation: one extra intern in between and the luck is gone
 
-同一个探针构建里，在 helper 返回之后、`parseFunctionDecl` 之前多内插一个字符串
-（`__zjs_borrow_wedge__`，env 开关控制）：
+In the same probed build, intern one extra string
+(`__zjs_borrow_wedge__`, env-gated) after the helper returns and before
+`parseFunctionDecl`:
 
 ```
 $ ZJS_BORROW_WEDGE=1 ./zig-out/bin/zjs-dev /tmp/expdef.mjs
@@ -262,33 +307,38 @@ $ ZJS_BORROW_WEDGE=1 ./zig-out/bin/zjs-dev /tmp/expdef.mjs
 SyntaxError: SYNTAX ERROR in /tmp/expdef.mjs:2:1 - UnexpectedToken
 ```
 
-atom 710 被 wedge 抢走并**改绑到另一个字符串**；`addModuleExportName` 于是把
-`export default` 的 local name 记成 `__zjs_borrow_wedge__`，
-`validateModuleLocalExports` 找不到该绑定，一个完全合法的模块被判成语法错误。
-`export default class` / `export function` / `export async function` 三个形态
-结果相同。
+Atom 710 is stolen by the wedge and **rebound to another string**;
+`addModuleExportName` then records `__zjs_borrow_wedge__` as the
+`export default` local name, `validateModuleLocalExports` cannot find
+that binding, and a fully legal module is reported as a syntax error.
+`export default class` / `export function` / `export async function`
+behave the same.
 
-### 4.3 对照：`export class C {}` 走的 `last_class_decl_atom` 路径不受影响
+### 4.3 Control: the `export class C {}` `last_class_decl_atom` path is unaffected
 
 ```
 [borrow-probe] lastClassDeclAtom/afterParseClass: atom=710 refcount=5 name=ZzqqUniqueExpCls
-[borrow-probe] lastClassDeclAtom/afterWedge:      atom=710 refcount=5 name=ZzqqUniqueExpCls   (wedge 拿到 atom=712)
+[borrow-probe] lastClassDeclAtom/afterWedge:      atom=710 refcount=5 name=ZzqqUniqueExpCls   (wedge received atom=712)
 ```
 
-使用点 refcount=5，wedge 拿不到它的槽位。这条是 B-5，不是 C。
+Use-site refcount = 5; the wedge cannot take its slot. This is B-5, not
+C.
 
-### 4.4 全局探测器：延后一拍的槽位回收
+### 4.4 Global detector: delay slot reuse by one death
 
-> 审计当时是临时补丁；现已产品化为 build option `-Dzjs_ownership_audit`，
-> 见 §7。
+> The audit-time form was a temporary patch; it is now the
+> `-Dzjs_ownership_audit` build option, see §7.
 
-为了不止于「已知嫌疑人」，给 `AtomTable` 加了一个**一格隔离区**（审计当时是
-临时补丁，不入库）：刚死的槽位先进隔离区，等下一次有别的槽位死掉才进自由链。这样
-「释放后立刻重新内插同一个字符串」再也拿不回自己的 id，任何 borrowed-atom
-use-after-free 都会撞 `dup` 的 `hasLiveValue` 断言。相对完全关闭回收，这个改法
-不改变表的规模，不影响 teardown 不变量。
+To go beyond known suspects, `AtomTable` gained a **one-slot quarantine**
+(audit-time: temporary, not checked in): a just-dead slot enters
+quarantine first and only joins the free list after another slot dies.
+"Free an atom, then immediately re-intern the same string" can no longer
+recover its own id, so any borrowed-atom use-after-free hits `dup`'s
+`hasLiveValue` assert. Unlike turning reuse off entirely, this does not
+change table size and does not disturb teardown invariants.
 
-修复前，探测器在**已入库的单元测试**里就直接命中：
+Before the fix, the detector hit **already-checked-in unit tests**
+directly:
 
 ```
 src/core/atom.zig: std.debug.assert(entry.hasLiveValue());   in dup
@@ -299,189 +349,235 @@ src/tests/parser.zig:4814  test "W5: generator parameter boundary ..."
     parseModuleStatement(&env, "export function* g(x = 1) { yield x; }")
 ```
 
-`export default class` 形态在探测器下不是 panic 而是**静默错值**：stale id 被
-隔离区放行后复用给了别的字符串，于是合法模块直接报
-`SyntaxError: UnexpectedToken`。
+The `export default class` shape is not a panic under the detector but a
+**silent wrong value**: the stale id is released from quarantine and
+reused for another string, so a legal module reports
+`SyntaxError: UnexpectedToken`.
 
-修复后，同一个探测器构建：
+After the fix, the same detector build:
 
-- `zig build test`：**2064 passed / 0 failed**。
-- 定制语料（delete-super、成员访问、私有名、全部声明形态、5 种 export 形态、
-  generator/async/arrow/static-block）：全绿。
-- test262 子树（Debug runner + 探测器）：`language/module-code` 599、
-  `language/statements` 9337、`language/expressions/class` 4059、`language/import` 127、
-  `language/function-code` 217、`language/identifiers` 268、`language/export` 3，
-  合计 **14611 个用例，0 errors**。
+- `zig build test`: **2064 passed / 0 failed**.
+- Custom corpus (delete-super, member access, private names, every
+  declaration shape, five export shapes, generator/async/arrow/static-
+  block): all green.
+- test262 subtrees (Debug runner + detector): `language/module-code` 599,
+  `language/statements` 9337, `language/expressions/class` 4059,
+  `language/import` 127, `language/function-code` 217,
+  `language/identifiers` 268, `language/export` 3, total **14,611 cases,
+  0 errors**.
 
-### 4.5 一个必须记下的负面结论
+### 4.5 A negative conclusion that must be recorded
 
-Debug 版 test262 runner 跑全量 49775 用例时会在约 7000 个用例处撞
-`src/core/runtime.zig:1294 assert(self.memory.allocation_count == 1)`。
-这是**既有问题、与本审计无关**：把探测器补丁完全撤掉、用纯净 `3d869065`
-重建 `run-test262-dev` 复跑，崩在同一处同一进度。因此 §4.4 的 test262 覆盖
-按子树切分执行，而不是全量一次跑完。（正式 `test262-gate` 走 ReleaseFast
-runner，断言本就编译掉了，对本审计不提供证据。）
-
----
-
-## 5. 修复（只动 class C）
-
-### 5.1 `export default` / `export` 名字 lookahead
-
-`exportDefaultFunctionName` → `exportDefaultFunctionNameOwned`，
-`exportDefaultClassName` → `exportDefaultClassNameOwned`：在 `return` 表达式里
-`s.function.atoms.dup(...)`。Zig 的 `return expr` 先求值再跑 defer，所以 dup
-发生在 token 释放之前。5 个调用点各自 `defer s.function.atoms.free(name_atom)`。
-
-命名与 `8c8787cd` 引入的 `moduleImportNameAtomOwned` 一致：`*Owned` 后缀即
-「调用方负责释放」的契约。
-
-### 5.2 `parseDeleteSuperReference`（不可达）
-
-按其两个活的同族路径（`parseMemberChain`、`parseNewCalleeMemberAccess`）补上
-`const retained_name = s.function.atoms.dup(name); defer ...free(retained_name);`，
-发射点改用 `retained_name`。因为 Zig 不分析无引用函数，这段修改用一次性
-`comptime { _ = &parseDeleteSuperReference; }` 强制编译验证过后再移除。
-
-**没有**在本次提交里删除这两个死函数——删死代码是另一件事，不属于所有权账本。
-
-### 5.3 为什么本次提交没有附带回归测试
-
-这个 bug 的观测前提就是打破槽位回收的运气，而 §3.1 已经论证：在当前解析顺序下，
-`exportDefault*Name` 释放名字之后、`parseFunctionDecl` / `parseClass` 重新内插
-同名字符串之前，**不存在任何可由 JS 源码控制的插入点**（中间只有 predefined
-关键字 token 的 no-op `free`）。因此写不出一个「修复前红、修复后绿」的黑盒
-回归测试；`8c8787cd` 那种 atom-table 收支平衡断言在修复前也是平的
-（死 atom 被同名重内插取回后，`addExport` 的 dup 与 record 的 free 依然配平）。
-
-能持续守住这条不变量的唯一办法是把 §4.4 的探测器产品化——现已落地为
-`-Dzjs_ownership_audit`，见 §7；§7.4 给出「撤销本次修复 → 审计构建当场 panic」
-的复现步骤，那就是这条修复的回归测试形态（黑盒仍然写不出来）。
-在那之前，本条修复由 §4.1/§4.2 的一次性探针实验和 §4.4 的探测器全绿背书。
-
-运行期探测器只在「测试恰好跑到那条路径」时才说话。把源码形态本身禁掉的那一半
-在 §8：`tools/architecture/check_borrowed_atoms.js`。两半合起来才是这个 bug 类
-可用的「回归测试」替代品。
+A full 49,775-case Debug test262 runner hits
+`src/core/runtime.zig:1294 assert(self.memory.allocation_count == 1)` at
+about 7,000 cases. This is a **pre-existing issue, unrelated to this
+audit**: removing the detector patch entirely and rebuilding
+`run-test262-dev` from clean `3d869065` crashes at the same place and
+the same progress. So §4.4's test262 coverage was run by subtree, not as
+one full pass. (The official `test262-gate` uses the ReleaseFast runner,
+where asserts are compiled out, and is not evidence for this audit.)
 
 ---
 
-## 6. 遗留项（follow-up，不在本次提交范围）
+## 5. The fix (class C only)
 
-按 ruling，class B 只在「小且显然正确」时就地转正。下面几条都不满足该条件，
-或者会牵动无关子系统，因此登记为 follow-up：
+### 5.1 `export default` / `export` name lookahead
 
-1. **B-5 `last_class_decl_atom` 转为 owned 字段**。需要在赋值处释放旧值、在
-   `State.deinit` 释放残值，触碰 parser 生命周期收尾路径。建议与「`parseClass`
-   直接返回类名 owner、取消这个跨函数状态字段」一起做。
-2. **B-6 `last_var_decl_atom` 删除**。只写不读的死字段，删掉即可，但属于清理
-   而非所有权修复。
-3. **B-1 `identifierLikeAtom` 契约显式化**。低风险改名为
-   `identifierLikeAtomBorrowed` + 文档注释，并可补一个 `...Owned` 伴生函数。
-   涉及 12 处调用点的机械改名，单独一刀更干净。
-4. **B-2 / B-3 / B-4 本地化 owner**。catch 绑定、TS enum、TS namespace 都改成
-   「先 `dup` + `defer free`，再 `defineVar` / `addScopeVar`」，把存活从
-   「下游 sink 顺手 dup」变成本地契约。TS 两条还牵连
-   `last_declared_atom` / `current_namespace_atom` 两个 state 字段，一起改才闭合。
-5. **死代码 `isDeleteSuperReference` / `parseDeleteSuperReference`**：无调用者，
-   Zig 也不做语义分析。要么接进 `delete` 解析路径，要么删除。
-6. ~~**可考虑把 §4.4 的隔离区探测器做成 build option**，让「借用越过 owner」
-   在 CI 里可持续检出，而不是只在人工审计时临时打补丁。~~
-   **已落地**：`-Dzjs_ownership_audit`，见 §7。
+`exportDefaultFunctionName` → `exportDefaultFunctionNameOwned`,
+`exportDefaultClassName` → `exportDefaultClassNameOwned`:
+`s.function.atoms.dup(...)` inside the `return` expression. Zig evaluates
+`return expr` before running `defer`, so the dup happens before the token
+is released. Each of the five call sites has
+`defer s.function.atoms.free(name_atom)`.
 
-上面 1-4 条现在**不再只写在这份文档里**：它们每一条都对应
-`tools/architecture/borrowed-atoms-allowlist.json` 的一条 entry，
-带 `reason` 与 `exit_milestone`（milestone 文字直接引用本节编号）。
-做完某一条就删掉对应 entry；不删的话 checker 会因为 entry 变 stale 而报红，
-所以「改完忘了销账」和「悄悄新增一个同形态站点」都会被门禁拦住。见 §8。
+The naming matches `moduleImportNameAtomOwned` from `8c8787cd`: the
+`*Owned` suffix is the "caller frees" contract.
+
+### 5.2 `parseDeleteSuperReference` (unreachable)
+
+Filled in `const retained_name = s.function.atoms.dup(name); defer
+...free(retained_name);` to match its two live sibling paths
+(`parseMemberChain`, `parseNewCalleeMemberAccess`), and the emit site
+now uses `retained_name`. Because Zig does not analyze unreferenced
+functions, this change was compile-checked once with
+`comptime { _ = &parseDeleteSuperReference; }` and then that pin was
+removed.
+
+These two dead functions were **not** deleted in that commit — deleting
+dead code is a different job, not part of the ownership ledger.
+
+### 5.3 Why that commit had no accompanying regression test
+
+Observing this bug requires breaking slot-reuse luck, and §3.1 already
+showed that under the current parse order there is **no JS-source-
+controlled insertion point** between `exportDefault*Name` releasing the
+name and `parseFunctionDecl` / `parseClass` re-interning the same string
+(only a predefined keyword token's no-op `free` sits in between). So a
+black-box regression that is red before the fix and green after cannot
+be written; the atom-table balance asserts of the `8c8787cd` kind also
+balance before the fix (the dead atom is taken back by the same-name
+re-intern, then `addExport`'s dup and the record's free still pair).
+
+The only durable way to keep this invariant is to productize the §4.4
+detector — now landed as `-Dzjs_ownership_audit`, see §7; §7.4 gives the
+"revert this fix → the audit build panics immediately" reproduction,
+which is this fix's regression-test shape (a black box still cannot be
+written). Until then, the fix is backed by the one-shot probe experiments
+in §4.1/§4.2 and the all-green detector run in §4.4.
+
+The runtime detector only speaks when a test actually reaches that path.
+The half that forbids the source shape itself is §8:
+`tools/architecture/check_borrowed_atoms.js`. Both halves together are
+the usable stand-in for a "regression test" for this bug class.
 
 ---
 
-## 7. 审计构建 `-Dzjs_ownership_audit`（§4.4 探测器的产品化形态）
+## 6. Follow-ups (out of that commit's scope)
 
-落地 commit 见本文件所在提交；实现在 `src/core/atom.zig`
-（`AtomTable.OwnershipAuditState` + `finalizeDeadEntry` 的回收臂），
-选项在 `build.zig`，与 `zjs_force_gc` / `zjs_nan_boxing` 走同一套 option 分发
-（`engine_options` / `plugin_fixture_options` / `profile_engine_options` /
-`test_options`）。
+Per the ruling, class B is promoted in place only when the change is
+"small and obviously correct". The items below do not meet that bar, or
+would drag in unrelated subsystems, so they are registered as follow-up:
 
-### 7.1 它做什么
+1. **B-5 turn `last_class_decl_atom` into an owned field.** Requires
+   releasing the old value on assign and releasing a leftover in
+   `State.deinit`, which touches parser-lifetime teardown. Prefer doing
+   it together with "have `parseClass` return the class-name owner
+   directly and drop this cross-function state field".
+2. **B-6 delete `last_var_decl_atom`.** Write-only dead field; deleting
+   it is cleanup, not an ownership fix.
+3. **B-1 make the `identifierLikeAtom` contract explicit.** Low-risk
+   rename to `identifierLikeAtomBorrowed` plus a doc comment, with an
+   optional `...Owned` companion. Twelve call-site mechanical renames;
+   cleaner as its own cut.
+4. **B-2 / B-3 / B-4 localize the owner.** Catch bindings, TS enum, and
+   TS namespace all become "dup + defer free first, then `defineVar` /
+   `addScopeVar`", so liveness is a local contract instead of "the
+   downstream sink happened to dup". The two TS items also involve
+   `last_declared_atom` / `current_namespace_atom`; they close only if
+   changed together.
+5. **Dead code `isDeleteSuperReference` / `parseDeleteSuperReference`**:
+   no callers, and Zig does not analyze them. Either wire them into the
+   `delete` parse path or delete them.
+6. ~~**Consider turning the §4.4 quarantine detector into a build
+   option** so "borrow crosses owner" stays detectable in CI instead of
+   only as a temporary audit patch.~~ **Landed**:
+   `-Dzjs_ownership_audit`, see §7.
 
-`finalizeDeadEntry` 释放的槽位先在**一格隔离区**里待一轮，等下一个槽位死掉才
-进自由链。于是「free 掉一个 atom，紧接着重新内插同一个字符串」再也拿不回同一个
-id，§1.1 情形 1 的「靠槽位回收的运气」被拆掉：一个借用越过 owner 的 stale id
-要么指向空槽（`dup` 撞 `hasLiveValue`，Debug / ReleaseSafe 直接 panic），
-要么在再下一次内插之后指向别的字符串（错值，由调用方自己的检查暴露）。
+Items 1-4 are **no longer only written in this document**: each has an
+entry in `tools/architecture/borrowed-atoms-allowlist.json` with a
+`reason` and `exit_milestone` (the milestone text cites this section's
+numbering). Finish an item, delete the matching entry; if you do not,
+the checker goes red because the entry went stale. So both "fixed it and
+forgot to close the ledger" and "quietly added another same-shape site"
+are blocked by the gate. See §8.
 
-**为什么是「一格」而不是「彻底关掉回收」**（这条写进了代码注释）：回收只是被
-推迟一次死亡，表的稳态规模只多出那一个被隔离的槽——`entries` 数量、`next_id`
-增长、`deinit` 的收尾不变量都还是默认构建的那一套。彻底关掉回收会让表随
-intern/free churn 单调增长，审计本身就可能把一个高 churn 的测试变成 OOM 或
-另一种表几何下的失败，那样查出来的东西就不可信了。
+---
 
-`src/tests/core.zig` 里配了一条 liveness 自检
-（`ownership audit quarantines the most recently freed atom slot`）：审计关时
-`SkipZigTest`，审计开时断言「刚死的槽位不会被下一次 intern 拿走，但在再死一个
-槽位之后会被回收」。把隔离区改回直接压链，这条测试当场红。没有它，审计档位可以
-被改瘸而每次 CI 还是全绿——那正是这个选项要消灭的那种静默。
+## 7. Audit build `-Dzjs_ownership_audit` (productized §4.4 detector)
 
-### 7.2 档位：ASAN / leak-checker 那一档
+The landing commit is the commit that added this file; the implementation
+is in `src/core/atom.zig` (`AtomTable.OwnershipAuditState` plus the reuse
+arm of `finalizeDeadEntry`), the option is in `build.zig`, and it uses
+the same option distribution as `zjs_force_gc` / `zjs_nan_boxing`
+(`engine_options` / `plugin_fixture_options` / `profile_engine_options` /
+`test_options`).
 
-CI、fuzzing、回归复现专用。**默认关，永远不进 ReleaseFast，不进生产路径。**
-关闭时整套机制 comptime 消失：`OwnershipAuditState` 退化成空结构体，字段、
-代码、连名字都不进二进制。
+### 7.1 What it does
 
-零生产代价的实测（2026-08-02，本树，`zig build zjs` 默认 ReleaseFast）：
+A slot freed by `finalizeDeadEntry` waits one round in a **one-slot
+quarantine** and only joins the free list after the next slot dies. So
+"free an atom, then immediately re-intern the same string" can no longer
+recover the same id, and §1.1 case 1's "luck of slot reuse" is gone: a
+stale id whose borrow crossed its owner either points at an empty slot
+(`dup` hits `hasLiveValue`; Debug / ReleaseSafe panic immediately) or,
+after one more intern, points at another string (wrong value, exposed by
+the caller's own checks).
 
-- `nm -a zig-out/bin/zjs | grep -i quarantin` 与
-  `strings -a zig-out/bin/zjs | grep -i quarantin` 均 0 命中
-  （二进制里只留下 build_options blob 里的选项名本身，和 `zjs_force_gc` 一样）；
-- 默认二进制的 `.text` 与「只往 `atom.zig` 加一行注释」的空对照构建**逐字节
-  相同**（`44c58c48…`，3851804 B），即本改动对默认构建的机器码零影响；整个
-  二进制的 sha 只差在 build_options 与调试信息上。（对照是必要的：任何一次
-  touch `atom.zig` 的重建都会相对冷构建产生一次布局位移，不做对照会把布局
-  彩票误读成代价。）
-- `tools/perf/codeload/run_codeload_micro.py --a <空对照> --b <本改动>
-  --samples 8 --cpu 19`：compile 模式 instructions median **1.00000**
-  MAD 0.00000（23,102,180,030 → 23,102,190,161）；atom 模式（专测 intern
-  miss + free-slot churn）instructions median **1.00000** MAD 0.00000
-  （24,351,531,576 → 24,351,501,514）。
+**Why one slot instead of turning reuse off** (this is also in the code
+comment): reuse is only delayed by one death, so the table's steady-state
+size grows by that one quarantined slot — `entries` count, `next_id`
+growth, and `deinit` teardown invariants stay the default-build ones.
+Turning reuse off entirely would let the table grow monotonically with
+intern/free churn; the audit itself could then turn a high-churn test
+into an OOM or a failure under a different table geometry, and what it
+found would not be trustworthy.
 
-### 7.3 怎么跑
+`src/tests/core.zig` has a liveness self-check (`ownership audit
+quarantines the most recently freed atom slot`): `SkipZigTest` when the
+audit is off; when it is on, it asserts "the just-dead slot is not taken
+by the next intern, but is reused after one more slot dies". Flip the
+quarantine back to a direct free-list push and this test goes red
+immediately. Without it, the audit mode can be broken while CI stays
+green — exactly the silence this option exists to kill.
+
+### 7.2 Mode: the ASAN / leak-checker tier
+
+For CI, fuzzing, and reproduction. **Off by default, never in
+ReleaseFast, never on a production path.** When off, the whole mechanism
+disappears at comptime: `OwnershipAuditState` collapses to an empty
+struct; fields, code, and even the names stay out of the binary.
+
+Measured zero production cost (2026-08-02, this tree, default
+`zig build zjs` ReleaseFast):
+
+- `nm -a zig-out/bin/zjs | grep -i quarantin` and
+  `strings -a zig-out/bin/zjs | grep -i quarantin` both 0 hits
+  (the binary only keeps the option name itself inside the
+  build_options blob, same as `zjs_force_gc`);
+- The default binary's `.text` is **byte-for-byte identical** to an
+  empty-control build that only adds one comment line to `atom.zig`
+  (`44c58c48…`, 3,851,804 B), so this change has zero effect on default-
+  build machine code; the whole-binary sha differs only in build_options
+  and debug info. (The control is required: any rebuild that touches
+  `atom.zig` will shift layout relative to a cold build, and without a
+  control that lottery is misread as cost.)
+- `tools/perf/codeload/run_codeload_micro.py --a <empty control> --b
+  <this change> --samples 8 --cpu 19`: compile-mode instructions median
+  **1.00000** MAD 0.00000 (23,102,180,030 → 23,102,190,161); atom mode
+  (intern miss + free-slot churn) instructions median **1.00000** MAD
+  0.00000 (24,351,531,576 → 24,351,501,514).
+
+### 7.3 How to run it
 
 ```bash
-zig build test        --summary all -Dzjs_ownership_audit=true   # 统一套件
-zig build test-parser               -Dzjs_ownership_audit=true   # 单子树，失败定位更快
+zig build test        --summary all -Dzjs_ownership_audit=true   # unified suite
+zig build test-parser               -Dzjs_ownership_audit=true   # one subtree, faster isolation
 zig build test-oom    --summary all -Dzjs_ownership_audit=true
-zig build zjs-dev                            -Dzjs_ownership_audit=true   # 手工语料复现
-zig build run-test262-dev                    -Dzjs_ownership_audit=true   # test262 子树
+zig build zjs-dev                            -Dzjs_ownership_audit=true   # hand corpus
+zig build run-test262-dev                    -Dzjs_ownership_audit=true   # test262 subtree
 ./zig-out/bin/run-test262-dev -c test262.conf -d test262/test/language/module-code
 ```
 
-断言只在 Debug / ReleaseSafe 生效（`std.debug.assert`）。在 ReleaseFast 下打开
-这个选项没有意义：`dup` 的断言被编译掉，隔离区只会白白改变槽位分配顺序。
+Asserts are live only in Debug / ReleaseSafe (`std.debug.assert`).
+Turning the option on under ReleaseFast is pointless: `dup`'s assert is
+compiled out, and quarantine would only scramble slot assignment for
+nothing.
 
-**test262 请按子树跑，不要一次跑全量。** Debug runner 在约 7000 个用例处会撞
-`src/core/runtime.zig:1294` 的
-`std.debug.assert(self.memory.allocation_count == 1)`。这是**既有问题、与本
-审计无关**：把审计补丁完全撤掉、用纯净 `3d869065` 重建 `run-test262-dev` 复跑，
-崩在同一处、同一进度（§4.5）。所以按 `-d test262/test/language/<子树>` 分段
-执行——§4.4 那 14611 个用例就是这么跑出来的。
+**Run test262 by subtree; do not run the full set in one go.** The Debug
+runner hits `src/core/runtime.zig:1294`
+`std.debug.assert(self.memory.allocation_count == 1)` at about 7,000
+cases. That is a **pre-existing issue, unrelated to this audit**: remove
+the audit patch entirely, rebuild `run-test262-dev` from clean
+`3d869065`, and it crashes at the same place and the same progress
+(§4.5). So run with `-d test262/test/language/<subtree>` — that is how
+the 14,611 cases in §4.4 were produced.
 
-### 7.4 它抓得住原始缺陷（可复现）
+### 7.4 It still catches the original defect (reproducible)
 
-把 `ada949be` 的 parser hunk 在工作区里临时撤销：
+Temporarily revert the `ada949be` parser hunk in the worktree:
 
 ```bash
 git show ada949be -- src/parser.zig | git apply -R --3way
-# exportDefaultClassName 一处会与 1906d45c（lexer 位置恢复先于可失败 peek）
-# 冲突：保留 1906d45c 的顺序，只把 dup 撤掉。
+# exportDefaultClassName conflicts with 1906d45c (lexer position restore
+# before a fallible peek): keep 1906d45c's order, only drop the dup.
 ```
 
-然后：
+Then:
 
-- `zig build test-parser --seed 0`（审计**关**）→ **474 passed / 0 failed**。
-  这正是 §5.3 说的掩蔽：黑盒测试看不见这个 use-after-free。
-- `zig build test-parser --seed 0 -Dzjs_ownership_audit=true` → SIGABRT：
+- `zig build test-parser --seed 0` (audit **off**) → **474 passed / 0
+  failed**. That is the masking §5.3 described: black-box tests cannot
+  see this use-after-free.
+- `zig build test-parser --seed 0 -Dzjs_ownership_audit=true` → SIGABRT:
 
 ```
 thread panic: reached unreachable code
@@ -494,92 +590,108 @@ src/tests/parser.zig:4814:42      in test.W5: generator parameter boundary emits
     var module = try parseModuleStatement(&env, "export function* g(x = 1) { yield x; }");
 ```
 
-`git checkout -- src/parser.zig` 恢复之后（即当前 main），同一条命令全绿。
-这就是这个 bug 类唯一可用的「红 → 绿」形态：不是黑盒回归测试，而是**已有测试
-在审计档位下的行为差**。
+`git checkout -- src/parser.zig` restores current main and the same
+command is all green. That is the only usable red → green shape for this
+bug class: not a black-box regression, but a **behavior delta of existing
+tests under the audit mode**.
 
 ---
 
-## 8. 静态规则 `check_borrowed_atoms.js`（把「借用外逃」的源码形态禁掉）
+## 8. Static rule `check_borrowed_atoms.js` (forbid the "borrow escapes" source shape)
 
-落地位置：`tools/architecture/check_borrowed_atoms.js` +
-`tools/architecture/borrowed-atoms-allowlist.json`，挂在
-`checkpoint-check` 和 `engine-production-gate` 上（与 `check_deps.js` /
-`check_oom_panics.js` 同一层，同一套 allowlist 形状）。扫描范围
-`src/**.zig`（不含 `src/tests/`）。
+Landing: `tools/architecture/check_borrowed_atoms.js` +
+`tools/architecture/borrowed-atoms-allowlist.json`, hung on
+`checkpoint-check` and `engine-production-gate` (same layer and allowlist
+shape as `check_deps.js` / `check_oom_panics.js`). Scan range
+`src/**.zig` (excluding `src/tests/`).
 
-### 8.1 为什么需要它——它和 §7 各管一半
+### 8.1 Why it is needed — it and §7 each cover half
 
-§5.3 论证了黑盒回归测试写不出来。剩下的两个手段各自只覆盖一半：
+§5.3 showed a black-box regression cannot be written. The two remaining
+tools each cover only half:
 
-| | `-Dzjs_ownership_audit`（§7） | `check_borrowed_atoms.js`（本节） |
+| | `-Dzjs_ownership_audit` (§7) | `check_borrowed_atoms.js` (this section) |
 |---|---|---|
-| 生效时机 | 运行时 | 评审 / CI 静态 |
-| 判据 | 槽位隔离一拍后，stale id 撞 `dup` 的 `hasLiveValue` 断言或读到错值 | 源码形态：借来的 atom 逃出 token 生命期 |
-| 抓得住 | 真正被执行到的越界借用，包括本文没想到的路径 | 一切新写出来的同形态代码，哪怕当前无测试覆盖 |
-| 抓不住 | 没有测试覆盖的路径；ReleaseFast（断言被编译掉）；不可达代码（如 C-3） | 运行期才成立的所有权（第三方 sink 顺手 dup），跨函数/跨文件传播，见 §8.6 |
+| When it fires | runtime | review / CI static |
+| Criterion | after one-slot quarantine, a stale id hits `dup`'s `hasLiveValue` assert or reads a wrong value | source shape: a borrowed atom escapes the token lifetime |
+| Catches | a crossed borrow that actually executed, including paths this document did not think of | every newly written same-shape site, even with no test coverage today |
+| Misses | paths with no test coverage; ReleaseFast (asserts compiled out); unreachable code (e.g. C-3) | ownership that only exists at runtime (a third-party sink happens to dup); cross-function / cross-file propagation; see §8.6 |
 
-`ada949be` 的 class C 正是「静态一眼可见、运行时靠运气看不见」的形状：
-`return <token>.payload.ident.atom` 加上函数出口的 `defer freeToken`。
-所以这条规则的第一性目标就是**让这个形状永远编不过门禁**。
+`ada949be`'s class C is exactly "statically obvious, runtime-invisible
+except by luck": `return <token>.payload.ident.atom` plus `defer
+freeToken` at function exit. So this rule's first-principles goal is
+**to make that shape unbuildable at the gate forever**.
 
-### 8.2 规则本体
+### 8.2 The rule itself
 
-**borrowed atom** 的三种来源：
+Three sources of a **borrowed atom**:
 
-1. `<token>.payload.<field>.atom` 且处于**值位置**——
-   `atomNameEquals(s, s.token.payload.ident.atom, "of")` 这种**实参位置**的读
-   是在 token 存活区间内消费掉的，不算借用（34 处 token-atom 读因此收敛到
-   10 处真借用，这是精度的主要来源）；`@as` / `@intCast` 这类 builtin 是透明的，
-   扫描会穿过去；
-2. 同文件内「自己就返回借用 atom」的 helper 的返回值——helper 集合按定点迭代
-   算出，当前是 `identifierLikeAtom` / `classNameAtom` / `labelStartAtom`；
-3. 绑定（`const` / `var`）或重新赋值（`nm = ...`）到上面两者的局部变量；
-   `const` 声明还会做一层局部传染（`const name = private_atom orelse raw_name;`）。
-   传染只走**保值表达式**：`const hit = nm == other;` 产出的是 bool，不是 atom，
-   顶层出现比较 / 布尔运算就断链。重新绑定到 owned 值（`nm = atoms.dup(nm);`）
-   会**关掉**这个借用点的窗口。
+1. `<token>.payload.<field>.atom` in a **value position** — a read in
+   **argument position** such as
+   `atomNameEquals(s, s.token.payload.ident.atom, "of")` is consumed
+   inside the token lifetime and is not a borrow (34 token-atom reads
+   therefore collapse to 10 true borrows; that is the main precision
+   win); builtins such as `@as` / `@intCast` are transparent and the
+   scan walks through them;
+2. the return value of a same-file helper that itself returns a borrowed
+   atom — the helper set is computed by fixed-point iteration and is
+   currently `identifierLikeAtom` / `classNameAtom` / `labelStartAtom`;
+3. a binding (`const` / `var`) or reassignment (`nm = ...`) of either of
+   the above; `const` declarations also do one layer of local contagion
+   (`const name = private_atom orelse raw_name;`). Contagion only
+   follows **value-preserving expressions**: `const hit = nm == other;`
+   produces a bool, not an atom, and a compare / boolean op at the top
+   level breaks the chain. Rebinding to an owned value
+   (`nm = atoms.dup(nm);`) **closes** that borrow site's window.
 
-所有权是**按位置**判定的，不是「这条语句里出现过 `dup`」：`.dup(x)` 把 `x` 放进
-实参位置，所以「duped 的读」压根就不是借用读。于是
-`return if (c) atoms.dup(a) else t.payload.ident.atom;` 里的 else 臂照样报红——
-整句粒度的「含有 dup 就放行」会漏掉它。
+Ownership is judged **by position**, not "this statement mentioned
+`dup`": `.dup(x)` puts `x` in argument position, so a "duped read" is
+not a borrowed read at all. Thus the else arm of
+`return if (c) atoms.dup(a) else t.payload.ident.atom;` still fails —
+a whole-statement "contains dup, so allow" rule would miss it.
 
-**四条 escape 规则**（一个借用点只报一次，取优先级最高的那条）：
+**Four escape rules** (one report per borrow site, highest-priority
+rule wins):
 
-| pattern | 禁止的形状 |
+| pattern | Forbidden shape |
 |---|---|
-| `borrowed-return` | 把借来的 atom `return` 出去（= `ada949be` 那个 bug） |
-| `borrowed-state-store` | 把借来的 atom 存进 `State` 的长命 atom 字段（字段活得比 token 长） |
-| `borrowed-use-after-release` | 在同一函数内、非 `defer` 的 `advance()` / `freeToken()` 之后再读它 |
-| `owned-escape-state-store` | 把「只由 `defer ...free(x)` 持有」的局部存进本函数不会 restore 的长命 atom 字段（= B-6 那个形状） |
+| `borrowed-return` | `return` a borrowed atom (= the `ada949be` bug) |
+| `borrowed-state-store` | store a borrowed atom into a long-lived `State` atom field (the field outlives the token) |
+| `borrowed-use-after-release` | read it in the same function after a non-`defer` `advance()` / `freeToken()` |
+| `owned-escape-state-store` | store a local held only by `defer ...free(x)` into a long-lived atom field that this function does not restore (= the B-6 shape) |
 
-「长命 atom 字段」不是硬编码列表：checker 从结构体作用域扫出所有
-`Atom` / `?Atom` 字段名（跳过函数体，所以多行参数表不会被当成字段），
-再要求接收者是本函数签名里绑定到 `*State` 的那个名字。于是以后新增一个同类
-字段当天就自动被覆盖，而隔壁结构体自己的 `self.<atom 字段>` 不会被误判。
+"Long-lived atom field" is not a hardcoded list: the checker scans the
+struct scope for every `Atom` / `?Atom` field name (skipping function
+bodies, so multi-line parameter lists are not treated as fields), then
+requires the receiver to be the name bound to `*State` in this
+function's signature. A newly added field of the same kind is covered
+the same day, and a neighboring struct's own `self.<atom field>` is not
+mis-fired.
 
-**三种合法写法**（推荐顺序）：
+**Three legal shapes** (preferred order):
 
-1. 在逃逸表达式里当场取所有权：`.dup(` / `.internString(` / `.newSymbol(` /
-   调用某个 `*Owned(`；
-2. 函数名以 `Owned` 结尾（既有约定：`moduleImportNameAtomOwned`、
-   `exportDefaultFunctionNameOwned`）——**只豁免 `borrowed-return`**，
-   且只豁免「转发别人的借用」（helper 结果 / 传染来的局部，静态证不了），
-   **永远不豁免直接返回 token payload 读**，因为那就是 `ada949be` 本身；
-   而且函数体必须真的产出过 owner，否则后缀是空头支票（实测见 §8.4）；
-3. 在该行正上方写 `// borrowed-atom: <理由>`。理由不能为空——写不出理由，
-   说明契约本来就不存在。rule A / B 只认**逃逸那一行**上方的标记；
-   rule C 额外允许写在借用那一行上方（借用点才是说明「这次借用是故意的」
-   的自然位置）。
+1. Take ownership in the escaping expression itself: `.dup(` /
+   `.internString(` / `.newSymbol(` / call some `*Owned(`;
+2. Function name ends in `Owned` (existing convention:
+   `moduleImportNameAtomOwned`, `exportDefaultFunctionNameOwned`) —
+   **exempts only `borrowed-return`**, and only "forwarding someone
+   else's borrow" (a helper result / a contagious local that static
+   analysis cannot prove), **never a direct return of a token-payload
+   read**, because that is `ada949be` itself; the body must actually
+   have produced an owner, or the suffix is an empty check (see §8.4);
+3. Write `// borrowed-atom: <reason>` on the line immediately above.
+   The reason cannot be empty — if you cannot write a reason, the
+   contract does not exist. Rules A / B only honor a mark above the
+   **escape line**; rule C also allows it above the borrow line (that
+   is the natural place to say "this borrow is deliberate").
 
-**allowlist**：字段 `source` / `pattern` / `reason` / `exit_milestone`，
-外加可选的 `fn`（所在函数）与 `contains`（语句子串）选择器。
-每条 entry 必须恰好命中一条 finding；命不中即 stale 报红，命中多条即
-non-unique 报红，两条 entry 抢同一条 finding 即 overlapping 报红。
-上限 16 条，当前 14 条。
+**Allowlist**: fields `source` / `pattern` / `reason` / `exit_milestone`,
+plus optional `fn` (containing function) and `contains` (statement
+substring) selectors. Each entry must hit exactly one finding; a miss is
+stale (red), a multi-hit is non-unique (red), two entries grabbing the
+same finding is overlapping (red). Cap 16 entries; currently 14.
 
-### 8.3 当前 14 条 = 本文 class B 的机器可读形态
+### 8.3 The current 14 entries = the machine-readable form of this document's class B
 
 ```
 src/parser.zig:5273   borrowed-return             labelStartAtom
@@ -594,38 +706,47 @@ src/parser.zig:13366  borrowed-use-after-release  parseForInOf
 src/parser.zig:13699  owned-escape-state-store    parseFunctionDecl
 src/parser.zig:13918  borrowed-use-after-release  parseFunctionParameters
 src/parser.zig:14828  borrowed-use-after-release  parseArrowFunction
-src/parser.zig:16362  borrowed-return             classNameAtom                      <- B-5 根因
-src/parser.zig:17156  borrowed-state-store        parseClass                         <- B-5 字段
+src/parser.zig:16362  borrowed-return             classNameAtom                      <- B-5 root cause
+src/parser.zig:17156  borrowed-state-store        parseClass                         <- B-5 field
 ```
 
-7 条直接落在本文 B-1…B-6 上。**另外 7 条落在 §3.3 的 class A 表里**，这不是
-误报，是本文那几行的判定口径不一致：那些行的安全理由写的是「调用方 advance 前
-dup」「`appendOwnedParserAtom` / `defineVar` 会 dup」——即 owner 在**别处**，
-而 §2 对 class B 的定义正是「存活靠与本站点无关的第三方 owner」。逐条复核过
-（每条 allowlist entry 的 `reason` 写明了那个第三方 owner 是谁）：
+Seven land directly on B-1…B-6 in this document. **The other seven land
+in the §3.3 class A table**; that is not a false positive, it is an
+inconsistent bar in those rows: their safety reasons say "caller dups
+before advance" / "`appendOwnedParserAtom` / `defineVar` will dup" —
+i.e. the owner is **elsewhere**, which is exactly §2's definition of
+class B ("liveness depends on a third-party owner unrelated to this
+site"). Each was re-checked (every allowlist entry's `reason` names that
+third-party owner):
 
-- `labelStartAtom` 转发 `identifierLikeAtom` 的借用 → 与 B-1 同形；
-- `parseAssignExpr2` 的 `direct_lhs_atom` 在 `parseCondExpr` 消费掉 token 之后
-  仍被用于匿名函数命名，靠 `emitScopeGetVar` 发射出的 atom operand、以及
-  direct lvalue 那份 `LValue.name`（`owns_name = true`）撑着；
+- `labelStartAtom` forwards `identifierLikeAtom`'s borrow → same shape
+  as B-1;
+- `parseAssignExpr2`'s `direct_lhs_atom` is still used to name an
+  anonymous function after `parseCondExpr` consumed the token, held up
+  by the atom operand `emitScopeGetVar` emitted and by that direct
+  lvalue's `LValue.name` (`owns_name = true`);
 - `parseUsingDeclaration` / `parseForInOf` / `parseFunctionParameters` /
-  `parseArrowFunction` 四处都是「先让 `defineVar` 或 `appendOwnedParserAtom`
-  建 owner，再 `advance()`，然后继续用借来的 id」——与 B-2 catch 绑定逐字同形；
-- `parseFunctionDecl` 的 `s.last_declared_atom = name_atom` 与 B-6 同形
-  （dup 被本函数出口的 defer 释放，字段却留着那个 id；之后的 owner 是声明
-  var 行与 `FunctionDef.init` 的 `func_name` dup）。
+  `parseArrowFunction` are all "let `defineVar` or
+  `appendOwnedParserAtom` build an owner, then `advance()`, then keep
+  using the borrowed id" — word-for-word the B-2 catch-binding shape;
+- `parseFunctionDecl`'s `s.last_declared_atom = name_atom` is the B-6
+  shape (the dup is released by this function's exit defer, but the
+  field keeps the id; later owners are the declaration var row and
+  `FunctionDef.init`'s `func_name` dup).
 
-结论：这 7 条按本文严口径本就该是 B，登记为 follow-up（§6）而不是违规，
-与 ruling 一致。**没有任何一条 finding 落在真正安全的 class A 站点上**
-（`dupToken` 系列快照、纯比较、predefined、`privateNameAtom` 这类返回 owned 的
-helper、`parseMemberChain` / `parseNewCalleeMemberAccess` 的 `retained_name`
-形态、以及 `*Owned` 三兄弟全部零命中）。
+Conclusion: under this document's strict bar those seven were already B,
+registered as follow-up (§6) rather than violations, matching the
+ruling. **No finding lands on a genuinely safe class A site**
+(`dupToken` snapshot family, pure compares, predefineds,
+`privateNameAtom`-style helpers that return owned,
+`parseMemberChain` / `parseNewCalleeMemberAccess`'s `retained_name`
+shape, and the three `*Owned` siblings are all zero hits).
 
-### 8.4 精度与强度实测
+### 8.4 Precision and strength measurements
 
-**(1) 它抓得住原始缺陷。** 在工作区里临时重建 `ada949be` 之前的形状
-（`exportDefaultClassNameOwned` 改回 `exportDefaultClassName`，去掉 `return`
-里的 `dup`）：
+**(1) It catches the original defect.** Temporarily rebuild the pre-
+`ada949be` shape in the worktree (`exportDefaultClassNameOwned` renamed
+back to `exportDefaultClassName`, `dup` removed from the `return`):
 
 ```
 Borrowed-atom rule violations:
@@ -633,60 +754,74 @@ Borrowed-atom rule violations:
     rule A: a borrowed atom must not be returned (dup it, or name the function ...Owned)
 ```
 
-`git checkout -- src/parser.zig` 之后重新全绿。
+`git checkout -- src/parser.zig` is all green again.
 
-**(2) 合成精度矩阵**（`/tmp` 上的临时 `.zig`，不入库；16 例全部符合预期）：
+**(2) Synthetic precision matrix** (temporary `.zig` under `/tmp`, not
+checked in; all 16 cases matched expectation):
 
-| 形态 | 期望 | 实测 |
+| Shape | Expected | Measured |
 |---|---|---|
-| pre-fix class-C return | 红 | 红 |
-| `return dup(t.payload.ident.atom)` | 绿 | 绿 |
-| 实参位置的读（`atomNameEquals(...)`） | 绿 | 绿 |
-| Zig 多行字符串 `\\` 里的假样本 | 绿 | 绿（起初是误报，`stripCode` 整行丢弃才修掉） |
-| 注释掉的逃逸 | 绿 | 绿 |
-| `advance()` 之后再读借来的局部 | 红 | 红 |
-| `// borrowed-atom:` 标记 | 绿 | 绿 |
-| **混合分支** `return if (c) dup(a) else t.payload...;` | 红 | 红（整句粒度的 owned 判定会漏，改成按位置判定后修掉） |
-| **`Owned` 后缀 + 无关的 dup** | 红 | 红（后缀不豁免直接的 token payload 读） |
-| `return @as(Atom, t.payload...)` | 红 | 红（builtin 透明） |
-| `var nm: Atom = undefined; nm = t.payload...; return nm;` | 红 | 红 |
-| `const hit = nm == other;` 之后用 `hit` | 绿 | 绿（比较结果不是 atom） |
-| 多行 `defer { freeToken(&t); }` 当成行内释放点 | 绿 | 绿 |
-| `nm = atoms.dup(nm);` 之后再用 | 绿 | 绿（owned 重绑定关掉借用窗口） |
-| 单行函数 `fn nothing() void {}` 吃掉下一个函数的体 | 绿 | 绿 |
-| 非 State 结构体自己的 `self.<atom 字段> = ...` | 绿 | 绿 |
+| pre-fix class-C return | red | red |
+| `return dup(t.payload.ident.atom)` | green | green |
+| argument-position read (`atomNameEquals(...)`) | green | green |
+| fake sample inside a Zig multiline `\\` string | green | green (initially a false positive; fixed by dropping the whole line in `stripCode`) |
+| commented-out escape | green | green |
+| read a borrowed local after `advance()` | red | red |
+| `// borrowed-atom:` mark | green | green |
+| **mixed branch** `return if (c) dup(a) else t.payload...;` | red | red (whole-statement owned judgment would miss this; fixed by judging by position) |
+| **`Owned` suffix + an unrelated dup** | red | red (suffix does not exempt a direct token-payload read) |
+| `return @as(Atom, t.payload...)` | red | red (builtin is transparent) |
+| `var nm: Atom = undefined; nm = t.payload...; return nm;` | red | red |
+| use `hit` after `const hit = nm == other;` | green | green (compare result is not an atom) |
+| multiline `defer { freeToken(&t); }` treated as an inline release point | green | green |
+| reuse after `nm = atoms.dup(nm);` | green | green (owned rebind closes the borrow window) |
+| one-line `fn nothing() void {}` eating the next function's body | green | green |
+| a non-State struct's own `self.<atom field> = ...` | green | green |
 
-规模数据（当前 main）：152 个 Zig 文件 / 9187 个函数扫描，
-34 处 token-atom 读、其中 10 处在值位置，26 个借用点被跟踪，
-14 条 escape，14 条全部 allowlisted，0 条违规。两次运行输出逐字节一致。
+Scale (current main): 152 Zig files / 9,187 functions scanned, 34
+token-atom reads of which 10 are in value position, 26 borrow sites
+tracked, 14 escapes, all 14 allowlisted, 0 violations. Two runs produce
+byte-identical output.
 
-### 8.5 怎么跑
+### 8.5 How to run it
 
 ```bash
-mise run checkpoint-check                                # 门禁（含本规则）
-node tools/architecture/check_borrowed_atoms.js          # 只跑这一条
-node tools/architecture/check_borrowed_atoms.js --list   # 逐条列出 finding + 借用 helper 集合
+mise run checkpoint-check                                # the gate (includes this rule)
+node tools/architecture/check_borrowed_atoms.js          # this rule only
+node tools/architecture/check_borrowed_atoms.js --list   # list each finding + the borrowed-helper set
 ```
 
-### 8.6 它抓不到什么（诚实清单）
+### 8.6 What it cannot catch (honest list)
 
-- **参数上的借用**：只跟踪函数体内的绑定。`fn f(s: *State, name: Atom)` 把借来的
-  `name` 存进长命字段、或包进返回的结构体，都不会被抓——
-  `definePatternBindingAtom` 正是这个形状（它把借来的名字包进
-  `PatternTarget.direct_binding.name` 返回；今天靠 `defineVar` 建的 var 行撑着）。
-  连带的后果：把借用当**实参**交给这种包装函数之后，返回值不再被视为借用。
-- **跨文件传播**：借用 helper 集合按文件内定点迭代算，不跨文件、不跨结构体。
-  今天够用（token payload 只在 `src/parser.zig` 里读），换布局要重新评估。
-- **释放点只认字面量**：`advance()` / `freeToken()`。`expectToken` 之类**内部会
-  advance** 的 helper 不算释放点（不做跨函数摘要），也不做路径敏感分析——
-  一个只在某个分支上执行的 `advance()` 对本函数所有后续行都算释放。
-- **块头截断**：多行 `return .{ ... }` / `return switch (...) {` 的返回表达式在
-  `{` 处断句，纯转发包装会漏。这是为精度付的价：宁可漏一个转发层，也不把整个
-  switch 体当成一条 return 表达式去猜。
-- **`Owned` 后缀的强度有限**：能挡「函数体里根本没有 owner」和「直接返回 token
-  payload 读」，挡不住「dup 了另一个 atom，再转发一个借来的 helper 结果」。
-- **运行期才成立的所有权**：sink 是否 dup、第三方 owner 活多久，静态看不出来。
-  这正是 allowlist 每条都必须写 `reason`（谁在持有）和 `exit_milestone`
-  （怎么把它变成本地契约）的原因。
-- **`test` / `comptime` 块不是函数体**，里面的代码不参与分析；扫描范围也不含
-  `src/tests/`。
+- **Borrows on parameters**: only bindings inside the function body are
+  tracked. `fn f(s: *State, name: Atom)` storing a borrowed `name` into
+  a long-lived field, or wrapping it into a returned struct, is not
+  caught — `definePatternBindingAtom` is exactly that shape (it wraps
+  the borrowed name into `PatternTarget.direct_binding.name` and
+  returns it; today it is held up by the var row `defineVar` builds).
+  Consequence: after a borrow is passed as an **argument** to such a
+  wrapper, the return value is no longer treated as borrowed.
+- **Cross-file propagation**: the borrowed-helper set is a per-file
+  fixed point; it does not cross files or structs. That is enough today
+  (token payloads are only read in `src/parser.zig`); a layout change
+  needs a re-evaluation.
+- **Release points are literals only**: `advance()` / `freeToken()`.
+  Helpers such as `expectToken` that **advance internally** are not
+  release points (no interprocedural summary), and there is no
+  path-sensitive analysis — an `advance()` that runs on only one branch
+  counts as a release for every later line in the function.
+- **Block-head truncation**: the return expression of a multiline
+  `return .{ ... }` / `return switch (...) {` is cut at `{`. A pure
+  forwarding wrapper can be missed. That is the precision price: better
+  to miss one forwarding layer than to treat a whole switch body as one
+  return expression.
+- **Limited `Owned` suffix strength**: it can block "the body never
+  produced an owner" and "direct return of a token-payload read"; it
+  cannot block "dup some other atom, then forward a borrowed helper
+  result".
+- **Ownership that only exists at runtime**: whether a sink dups, and
+  how long a third-party owner lives, is not visible statically. That
+  is why every allowlist entry must write `reason` (who is holding it)
+  and `exit_milestone` (how to turn it into a local contract).
+- **`test` / `comptime` blocks are not function bodies**, so their code
+  is not analyzed; the scan range also excludes `src/tests/`.

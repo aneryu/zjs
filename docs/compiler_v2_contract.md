@@ -532,8 +532,8 @@ stale snapshot.
   `return()`-close site's local `std.debug.assert(!(v2_available and
   s.emit_v2))` is gone along with the other eight — `grep -c
   'std.debug.assert(!(v2_available' src/parser.zig` is 0 — because the QCP-1 L3
-  coverage gate (`docs/v2_emission_coverage.md`) replaced them with a strictly
-  stronger construct-naming check.
+  coverage gate (v2 emission coverage report, in git history) replaced them
+  with a strictly stronger construct-naming check.
 - **F-2 — CLOSED (was: logical assignment `&&=` / `||=` / `??=` seam).**
   `emitLogicalAssignLValue` now opens with the standard fork; its v2 arm emits
   `dup` / optional `is_undefined_or_null` / `if_true|if_false` against a
@@ -588,8 +588,8 @@ stale snapshot.
 Re-audit method (L4): each finding was re-checked by reading the cited function
 in `src/parser.zig` on this tree, not by re-running a behaviour test — a green
 test suite is what let these seams hide in the first place. The QCP-1 L3
-coverage gate (`docs/v2_emission_coverage.md`) is the mechanical successor to
-this section: it panics on any legacy emission during a v2 parse, so a *new*
+coverage gate (v2 emission coverage report, in git history) is the mechanical
+successor to this section: it panics on any legacy emission during a v2 parse, so a *new*
 F-1-shaped finding can no longer accumulate silently.
 
 No absolute-PC leak was found in any committed v2 arm: every jump operand in

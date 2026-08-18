@@ -30,306 +30,77 @@ Goals:
 5. C ABI exists only at boundary layers.
 6. Pin Zig 0.16.0; do not mix old tutorials or master API.
 
-### A.1 Type Mapping (C → Zig)
+### A.1 Types
 
-| C form | Zig recommendation | Notes |
-|---|---|---|
-| `char* + len` | `[]const u8` | Byte string / view |
-| mutable buffer | `[]u8` | Writable slice |
-| nullable pointer | `?*T` | May be null |
-| non-null pointer | `*T` / `*const T` | Single non-null object |
-| `void*` | `*anyopaque` / `?*anyopaque` | C boundary only |
-| array pointer + len | `[]T` / `[]const T` | Prefer slices internally |
-| C string | `[:0]const u8` / `[*:0]const u8` | NUL-terminated |
-| ABI struct | `extern struct` | Guarantees C ABI |
-| internal struct | `struct` | Plain Zig struct |
-| bit layout struct | `packed struct` | Only when bit-level layout is required |
+- Prefer slices internally (`[]const u8`, `[]T`); convert C pointer+len at
+  the boundary. Default string parameters to `[]const u8`.
+- Nullable is `?*T`; non-null is `*T` / `*const T`. C strings are
+  `[:0]const u8` / `[*:0]const u8`.
+- Internal structs are plain `struct`. `extern struct` is C ABI only.
+  `packed struct` is only for required bit layout.
+- Do not retain `[*c]T` or propagate `void*` / `anyopaque` internally.
 
-Hard rules:
+### A.2 Memory
 
-- Do not retain `[*c]T` in internal code.
-- Do not propagate `void*` internally.
-- Do not use raw "pointer + length" as the primary internal interface.
-- Convert C pointers to slices as soon as data enters Zig.
-- Default to `[]const u8` for string parameters.
+- Allocating functions take `allocator: std.mem.Allocator`. No hidden or
+  global allocator in library code.
+- `[]u8` is owned (caller frees with the same allocator). `[]const u8` is
+  usually a borrowed view. `*T` / `?*T` lifetime must be documented.
+- Document ownership on every allocating or borrow-returning function.
+- Bind `errdefer` / `defer` immediately after allocation. Free with the
+  same allocator. Never return stack memory. Never disguise arena values as
+  long-lived owned objects.
+- Library code: caller-injected allocator. CLI / short-lived flows: arena.
+  Tests: `std.testing.allocator`.
 
-Recommended:
+### A.3 Errors
 
-```zig
-fn parse(input: []const u8) !Result { ... }
-fn fill(buf: []u8) void { ... }
-fn maybeUse(ptr: ?*Node) void { ... }
-```
-
-### A.2 Memory Management (Core)
-
-Zig does not hide allocation. Every function that may allocate must declare
-its allocator, ownership, and free responsibility.
-
-**A.2.1 Allocation rule.** Functions that allocate must accept
-`allocator: std.mem.Allocator`. Forbidden: secretly picking an allocator,
-binding a global allocator inside a library, or returning memory without
-documenting the free responsibility.
-
-**A.2.2 Ownership.**
-
-| Return type | Meaning |
-|---|---|
-| `[]u8` | owned; caller frees with the same allocator |
-| `[]const u8` | usually borrowed view; not freeable unless documented otherwise |
-| `*T` | lifetime ownership must be documented |
-| `?*T` | same; may be null |
-
-**A.2.3 Documentation.** Every allocating or borrow-returning function
-documents ownership:
-
-```zig
-/// Returns owned memory. Caller must free with the same allocator.
-fn buildMessage(allocator: std.mem.Allocator) ![]u8 { ... }
-
-/// Returns a borrowed slice valid during self lifetime.
-fn name(self: *const User) []const u8 { ... }
-```
-
-**A.2.4 `defer` / `errdefer`.** Bind cleanup immediately after allocation:
-
-```zig
-fn makeBuffer(allocator: std.mem.Allocator, n: usize) ![]u8 {
-    const buf = try allocator.alloc(u8, n);
-    errdefer allocator.free(buf);
-    @memset(buf, 0);
-    return buf;
-}
-```
-
-Caller side:
-
-```zig
-const buf = try makeBuffer(allocator, 4096);
-defer allocator.free(buf);
-```
-
-**A.2.5 Rules.**
-
-- Every `alloc` must have a planned free path.
-- Caller-owned returns must document "caller owns".
-- Free with the same allocator that allocated.
-- Never return slices/pointers into stack memory.
-- Never disguise arena-allocated values as long-lived owned objects.
-
-**A.2.6 Allocator selection.**
-
-| Scenario | Recommended allocator |
-|---|---|
-| Library code | injected by caller |
-| CLI / short-lived flows | arena allocator |
-| Bounded temporary buffer | fixed buffer allocator |
-| C interop | `std.heap.c_allocator` (when needed) |
-| Unit tests | `std.testing.allocator` |
-
-**A.2.7 When emitting code, always state.**
-
-- Where the allocator comes from.
-- Who owns the return value.
-- Who frees it.
-- Whether error paths clean up.
-
-### A.3 Error Handling
-
-Internal Zig code must use `error{...}!T`, not C-style error codes.
-
-**Standard internal form:**
-
-```zig
-const ParseError = error{ InvalidInput, Overflow };
-
-fn parse(input: []const u8) ParseError!Result {
-    if (input.len == 0) return error.InvalidInput;
-    if (input.len > std.math.maxInt(i32)) return error.Overflow;
-    return .{ .value = @intCast(input.len) };
-}
-```
-
-**Hard rules.**
-
-- Internal functions return explicit `error{...}!T`.
-- Avoid `anyerror`; declare specific error sets.
-- Do not use return-code + out-param style internally.
-- Do not use `catch unreachable` without justification.
-
-**Forbidden internal pattern.** `fn parse(input: []const u8, out: *Result) c_int`
-is allowed only at C ABI boundaries.
-
-**C boundary adapter:**
-
-```zig
-fn mapError(err: ParseError) c_int {
-    return switch (err) {
-        error.InvalidInput => -1,
-        error.Overflow => -2,
-    };
-}
-
-export fn parse_c(ptr: ?[*]const u8, len: usize, out: ?*Result) c_int {
-    const p = ptr orelse return -1;
-    const o = out orelse return -1;
-    o.* = parseZig(p[0..len]) catch |err| return mapError(err);
-    return 0;
-}
-```
-
-Summary: explicit error sets internally; error codes only at C boundary;
-C-style error handling does not flow back into Zig.
+- Internal code returns `error{...}!T`, not C error codes or out-params.
+- Avoid `anyerror`. Do not use `catch unreachable` without proven safety.
+- C error codes exist only at the ABI boundary; they do not flow back into
+  Zig.
 
 ### A.4 C Interop
 
-The migration goal is not "half-C/half-Zig everywhere" — it is to *contain*
-the C ABI at a small number of boundary files.
+- Contain `extern` / `export`, C pointer types, errno-style codes, and
+  `anyopaque` in a small boundary layer. Convert all boundary input to Zig
+  types immediately.
+- `translate-c` is for headers, bootstrap, and ABI understanding only;
+  never ship raw output as business code.
+- Macro order: constants → `fn` / `inline fn` → comptime / generics →
+  manual rewrite.
 
-**Recommended layout:**
+### A.5 Zig 0.16.0
 
-```text
-src/
-  core.zig        # Pure Zig business logic
-  memory.zig      # allocator / lifetime logic
-  c_api.zig       # extern / export / C ABI adapters
-  main.zig        # Executable entry
-```
+- Pin **Zig 0.16.0**. Do not copy old blogs or master-doc patterns.
+- Use 0.16.0 I/O (`std.Io`, `main(init: std.process.Init)`). Do not copy
+  old `std.io.getStdOut()` or old managed-container examples.
+- Keep `@cImport` centralized in `build.zig`.
 
-**Boundary layer (`c_api.zig`) owns:** `extern`, `export`, C pointer types,
-C error codes, `void*` / `anyopaque`, ABI-compatible structs.
+### A.6 Build System
 
-**Internal layers own:** slices, allocators, error sets, normal Zig
-structs/enums/unions, resource lifetimes.
-
-**Hard rules.**
-
-- `[*c]T`, `void*`, errno-style codes stay at the boundary only.
-- All boundary input is converted to Zig types as soon as it enters internal code.
-
-**`translate-c` rules.** Use only for: importing headers, bootstrap, ABI
-understanding. Never use raw `translate-c` output as final business code; review
-macros, integer types, pointers, ABI, alignment, and any `[*c]T` it produces.
-
-**Macro migration priority.**
-
-1. Constant macros → `const`.
-2. Simple function-like macros → `fn` or `inline fn`.
-3. Type-related macros → `comptime` parameters or generic functions.
-4. Complex macros that cannot be safely mapped → manual rewrite, no
-   automatic translation.
-
-**ABI struct rules.**
-
-- Public-to-C structs use `extern struct`.
-- Internal structs use plain `struct`.
-- `packed struct` only when strict bit layout is required.
-- Don't make every struct `extern` to "look like C".
-
-### A.5 Zig 0.16.0 Specifics
-
-The biggest migration risk is mixing in old version examples or master API.
-
-**A.5.1 Version pinning.**
-
-- Target: **Zig 0.16.0**.
-- All API usage matches 0.16.0.
-- Do not copy old blogs/issues/answers verbatim.
-- Do not paste master-doc patterns into stable code.
-
-**A.5.2 I/O model.** Use 0.16.0-style I/O; avoid old `std.io` patterns:
-
-```zig
-pub fn main(init: std.process.Init) !void {
-    try std.Io.File.stdout().writeStreamingAll(init.io, "hello world!\n");
-}
-```
-
-- Avoid old `std.io.getStdOut().writer()` unless verified compatible.
-- Functions needing I/O should accept it from `main(init: std.process.Init)`
-  rather than rely on global I/O.
-
-**A.5.3 `@cImport`.** Manage `translate-c` centrally in `build.zig`. Do not
-scatter `@cImport` across business files.
-
-**A.5.4 Containers.** 0.16.0 standard containers trend toward unmanaged /
-explicit allocator forms. Verify the current API before use; do not copy old
-`ArrayList` / map / queue examples.
-
-### A.6 Build System (`build.zig`)
-
-For non-trivial migrations, treat `build.zig` as project infrastructure.
-
-**Responsibilities:** target / optimize, Zig modules, existing C sources,
-include paths, compile flags / macros, libc / system library linkage,
-`translate-c`, test/run/install steps.
-
-**Migration phases.**
-
-| Phase | Goal |
-|---|---|
-| 1 | Zig build owns the build, C sources still present. |
-| 2 | Replace C files with Zig module by module. |
-| 3 | Internal APIs Zig-ified, boundary layer shrinks. |
-| 4 | Remove transitional C shims and `translate-c` artifacts. |
-
-Strategy: get a stable Zig build first, migrate module by module, add tests
-after each migration, layer changes (types → lifetime → errors → API tidy).
+- `build.zig` owns target / optimize, modules, remaining C, flags,
+  `translate-c`, and test / install steps.
+- Migrate module by module; add tests after each step; do not keep
+  transitional C shims longer than needed.
 
 ### A.7 Style
 
-**Naming.**
-
-- Functions: `camelCase`.
-- Types: `TitleCase`.
-- Variables: `snake_case`.
-- Constants: readable per context; avoid blanket all-caps.
-- Don't mechanically prefix private fields with underscores.
-
-**Formatting.**
-
-- 4-space indentation.
-- Braces on the same line.
-- Multi-element lists: one element per line with trailing commas.
-- Always run `zig fmt .`.
-
-**Code organization.**
-
-- Small modules with clear responsibilities.
-- ABI and business logic do not share a large file.
-- Don't sacrifice Zig readability to "look like the original C".
-- Lifetime clarity beats short code.
-
-**Return values.** Zig forces non-`void` values to be used. Discard
-explicitly:
-
-```zig
-_ = someValue;
-```
-
-Never silently discard error returns, allocation results, or container
-operation results.
+- Functions `camelCase`, types `TitleCase`, variables `snake_case`.
+  4-space indent. Always `zig fmt .`.
+- Small modules; ABI and business logic do not share a large file.
+  Lifetime clarity beats short code.
+- Discard unused values with `_ = ...`. Never silently discard errors or
+  allocations.
 
 ### A.8 Safety Rules (Hard)
 
-**Strictly forbidden.**
+**Forbidden.** Stack escapes; implicit error-path leaks; internal `[*c]T`;
+unjustified `catch unreachable`; borrowed data disguised as owned; mixed
+allocators; version-unverified copy-paste.
 
-- Returning stack memory references.
-- Returning slices into local arrays.
-- Implicitly leaking error-path resources.
-- Propagating `[*c]T` in internal code.
-- Using `catch unreachable` without proven safety.
-- Disguising borrowed data as owned.
-- Mixing allocators across alloc/free.
-- Copying Zig examples without confirming the version.
-
-**Special care.**
-
-- Pointer lifetimes.
-- Sentinel-terminated data.
-- ABI alignment and field layout.
-- Integer width differences between C and Zig.
-- Mutable shared buffers under concurrency.
+**Special care.** Pointer lifetimes; sentinels; ABI alignment; C/Zig
+integer widths; mutable shared buffers under concurrency.
 
 **Runtime thread ownership.** A `JSRuntime` is initialized, mutated, collected,
 and destroyed on one owner thread. Context construction/publication/release,
@@ -379,53 +150,14 @@ correctness first, then performance.
 
 ### A.10 Self-Check Before Commit
 
-**Types & interfaces.**
-
-- [ ] ptr+len converted to slices where possible?
-- [ ] nullable / non-null distinguished correctly?
-- [ ] C ABI structs marked `extern struct`?
-- [ ] Internal structs avoid unnecessary `extern`?
-
-**Memory & lifetime.**
-
-- [ ] Allocating functions accept allocator?
-- [ ] Return ownership documented?
-- [ ] Every alloc has a free path?
-- [ ] Error paths use `errdefer`?
-- [ ] No stack memory escaped?
-
-**Error handling.**
-
-- [ ] Explicit error sets used?
-- [ ] No stray `anyerror`?
-- [ ] No internal out-param + error code?
-- [ ] No unjustified `catch unreachable`?
-
-**C interop.**
-
-- [ ] `[*c]T` only at boundary?
-- [ ] No `void*` / `anyopaque` leak into internals?
-- [ ] `translate-c` results reviewed manually?
-- [ ] Macros rewritten safely?
-
-**Version & stdlib.**
-
-- [ ] APIs confirmed for Zig 0.16.0?
-- [ ] No old `std.io` usage?
-- [ ] No outdated container examples?
-
-**Toolchain.**
-
-- [ ] `zig fmt .` ran?
-- [ ] Debug tests pass?
-
-```bash
-zig fmt .
-mise run quick-check
-# handoff: mise run checkpoint-check
-# phase-close tier:
-# zig build test-oom --summary all
-```
+- Slices instead of ptr+len where possible; nullable vs non-null distinct;
+  `extern struct` only at the C ABI.
+- Allocating functions take an allocator; ownership documented; every
+  alloc has a free path and `errdefer` on error; no stack escape.
+- Explicit error sets; no stray `anyerror`; no internal out-param + error
+  code; no unjustified `catch unreachable`.
+- `[*c]T` / `anyopaque` stay at the boundary; APIs confirmed for Zig
+  0.16.0; `zig fmt .` and the relevant Part B.6 tier.
 
 ### A.11 Conclusion
 
@@ -556,14 +288,14 @@ git diff --check
 
 Also run the focused Zig test filter, JS fixture, or `run-test262 -d` / `-f`
 slice that directly reproduces the changed behavior. The explicit `test-core`,
-`test-parser`, `test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`,
-and `test-runner` targets apply compile-time namespace filters and fail if the
-selection becomes empty.
+`test-parser`, `test-bytecode`, `test-compiler-v2`, `test-exec`, `test-builtins`,
+`test-runtime`, and `test-runner` targets apply compile-time namespace filters
+and fail if the selection becomes empty.
 
-After a coherent edit, run `mise run quick-check` for Debug CLI integration
+After a coherent edit, run `mise run quick-gate` for Debug CLI integration
 coverage. For several consecutive edits that all need CLI smoke feedback,
 `mise run quick-watch` keeps the compiler resident; stop the watcher before
-escalating to a broader gate. `quick-check` intentionally does not compile the
+escalating to a broader gate. `quick-gate` intentionally does not compile the
 separate test262 runner.
 
 `build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
@@ -573,13 +305,13 @@ for an explicit randomized validation run.
 **Checkpoint.** Use this before handing off a non-trivial code-bearing change:
 
 ```bash
-mise run checkpoint-check
+mise run checkpoint-gate
 ```
 
 This includes the unified Debug suite, Debug CLI smoke, and source-side
 architecture checks. It does not compile ReleaseFast `zjs`; the
 compiler-stage `nm` check stays on the production gate. Add the relevant focused
-test262 directory or file set; do not run `quick-check` first because
+test262 directory or file set; do not run `quick-gate` first because
 checkpoint already supersedes it.
 
 **Phase close / release.** Use this only for final confirmation, release

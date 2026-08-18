@@ -1,6 +1,8 @@
 # Issue tracker: Local Markdown
 
 Issues and PRDs for this repository live as Markdown files in `.scratch/`.
+`.scratch/` is a gitignored local mechanism (by design); it is not a
+cross-machine collaboration surface.
 
 ## Conventions
 

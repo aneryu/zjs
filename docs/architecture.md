@@ -22,6 +22,15 @@ host      →  src/runtime/  (event loop, plugins)
 loop. `tools/architecture/check_deps.js` enforces that boundary. Checkpoint
 and the production gate both run it.
 
+Three `src/` companions sit beside those layers:
+
+- `simple_token.zig`: parser token kinds for QuickJS `simple_next_token`
+  lookahead; used by `parser.zig` and the CLI.
+- `config_signature.zig`: compile-time configuration-signature attestation
+  (see [qcp1_switch_decision.md](qcp1_switch_decision.md)).
+- `dossier_pad.zig`: layout-lineage padding instrument; `pad=0` emits
+  nothing.
+
 ## Public entry — `src/root.zig`
 
 Embedders import `zjs`. The stable surface is `JSRuntime`, `JSContext`,
@@ -69,14 +78,17 @@ QuickJS ABI.
 `parser.compile` is the compile wrapper. The lexer, TypeScript erasure, and
 QuickJS-aligned parser/emitter live in this one file because QuickJS’s
 `ParseState` is also a single compilation unit. TypeScript support is syntax
-erasure, not a typechecker.
+erasure, not a typechecker. `simple_token.zig` holds the token subset used
+by that lookahead path.
 
 ## Compiler — `src/compiler_v2/`
 
-This is the only compiler. Temporary bytecode uses `LabelId` / `LabelSlot` /
-`RelocEntry` until final layout. `resolve_variables` and `resolve_labels`
-are separate stages. Production layout is `-Dzjs_v2_layout=short`; `plain`
-is an A/B diagnostic.
+This is the only compiler. The "v2" in `compiler_v2` is a historical name —
+the legacy compiler has been deleted; the name is kept because it is already
+in the published configuration-signature string. Temporary bytecode uses
+`LabelId` / `LabelSlot` / `RelocEntry` until final layout.
+`resolve_variables` and `resolve_labels` are separate stages. Production
+layout is `-Dzjs_v2_layout=short`; `plain` is an A/B diagnostic.
 
 | File | Role |
 | --- | --- |
@@ -117,9 +129,12 @@ Promise object state is `src/core/promise.zig`. Job-queue primitives are
 `src/core/jobs.zig`. There is no `src/exec/eval.zig` and no `src/exec/promise.zig`.
 
 The default compiler emits ordinary `call + return`. `test262.conf` skips
-`tail-call-optimization`. Per-opcode profiling build flags still exist; the
-dispatcher does not populate counts. Do not treat `--profile-opcodes` as a
-working profiler.
+`tail-call-optimization`. Per-opcode profiling is a working profiler on the
+`zjs-profile` artifact: profiling builds call `noteDispatch` from `cont` /
+`next` (`src/exec/vm_profile.zig`), `build.zig` ships `zjs-profile` plus
+nine `perf-*-profile` steps with exact opcode pins, and
+`src/tests/smoke_test.zig` asserts `--profile-opcodes` output. The default
+`zjs` binary still fail-closes `--profile-opcodes`.
 
 ## Host runtime — `src/runtime/`
 
@@ -138,6 +153,8 @@ Host functions register through `ExternalHostCall` on the public API
 - `src/libs/`: regexp, unicode, bigint, number formatting
 - `src/cli/`: `zjs` and `run-test262`
 - `src/tests/`: Zig unit and integration entrypoints
-- `tests/zig-smoke/`, `tests/fixtures/`: CLI smoke and snapshots
+- `tests/fixtures/`: plugin fixtures and test262 overrides. CLI smoke
+  coverage lives in `src/tests/smoke_test.zig` (inline scripts, `zig build
+  smoke`), not in a fixture tree.
 
 Layering rules: [api-boundary.md](api-boundary.md).

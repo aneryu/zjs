@@ -5,9 +5,8 @@ const engine = zjs;
 const core = zjs.core;
 const op = zjs.bytecode.opcode.op;
 
-const exec_test = @import("exec.zig");
-const helpers = exec_test.helpers;
-const vm_helpers = exec_test.vm_helpers;
+const helpers = @import("helpers.zig");
+const vm_helpers = helpers.vm_helpers;
 
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;

@@ -4,20 +4,23 @@ This repository uses a single domain-documentation context.
 
 ## Before exploring
 
-- Read `CONTEXT.md` at the repository root when it exists.
-- Read ADRs under `docs/adr/` that touch the area being changed.
+- Read [architecture.md](../architecture.md) for the current source tour and
+  layer map.
+- Read [project-experience.md](project-experience.md) for recurring evidence
+  rules and working methods.
 
-If either location does not exist, proceed silently. Domain documents and ADRs
-are created lazily when terminology or architectural decisions are resolved.
+Those two files are the live domain context. There is no root `CONTEXT.md`
+and no `docs/adr/` tree.
 
 ## Vocabulary
 
-Use the terms defined in `CONTEXT.md` in issue titles, tests, implementation
-notes, and refactoring proposals. If a needed concept is absent, first check
-whether the repository already uses a different term; otherwise record the gap
-for a future documentation session.
+Use the terms already established in `docs/architecture.md`, `AGENTS.md`, and
+`GUIDE.md` in issue titles, tests, implementation notes, and refactoring
+proposals. If a needed concept is absent, first check whether the repository
+already uses a different term; otherwise record the gap for a future
+documentation session.
 
-## ADR conflicts
+## Decision conflicts
 
-Surface any conflict with an existing ADR explicitly instead of silently
-overriding the decision.
+Surface any conflict with an existing architecture or process decision
+explicitly instead of silently overriding it.

@@ -1,14 +1,24 @@
 [tools]
 zig = "0.16.0"
+node = "24"
+bun = "1"
+
+[tasks.quick-gate]
+description = "Run the Debug inner-loop gate once"
+run = "zig build quick-gate --summary all"
+
+[tasks.checkpoint-gate]
+description = "Run the checkpoint gate"
+run = "zig build checkpoint-gate --summary all"
 
 [tasks.quick-check]
-description = "Run the Debug inner-loop gate once"
+description = "DEPRECATED alias of quick-gate (removed next release)"
 run = "zig build quick-check --summary all"
 
 [tasks.checkpoint-check]
-description = "Run the checkpoint gate"
+description = "DEPRECATED alias of checkpoint-gate (removed next release)"
 run = "zig build checkpoint-check --summary all"
 
 [tasks.quick-watch]
-description = "Keep the Debug quick-check compiler alive for faster incremental edit feedback"
-run = "zig build quick-check --watch -fincremental --summary new"
+description = "Keep the Debug quick-gate compiler alive for faster incremental edit feedback"
+run = "zig build quick-gate --watch -fincremental --summary new"

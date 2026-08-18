@@ -1,9 +1,13 @@
-//! Cold opcode handlers for the tail-call dispatcher (TAILCALL-DISPATCH-ONESHOT-
-//! BLUEPRINT.md §5-6). One handler per opcode, transcribed verbatim from
-//! dispatchLoop's slow-path helper calls. `buildTable` assembles the 256-entry
-//! dispatch table (cold handlers here + the special handlers passed in from the
-//! main file). v1: hot ops route through their cold handler too (frame story holds
-//! either way; the frame-zero fast paths are a perf follow-up).
+//! Cold opcode handlers for the tail-call dispatcher. One handler per opcode,
+//! transcribed from the former switch-dispatcher slow-path helper calls.
+//! `buildTable` assembles the 256-entry dispatch table (cold handlers here +
+//! the special handlers passed in from the main file). v1: hot ops route
+//! through their cold handler too (frame story holds either way; the
+//! frame-zero fast paths are a perf follow-up).
+//!
+//! This file has no linksection literal of its own: every handler here lands
+//! in the hot .text.zjs.op_handlers island implicitly via td.coldStd's
+//! linksection wrapper — a grep for linksection will not find this file.
 
 const std = @import("std");
 const core = @import("../core/root.zig");

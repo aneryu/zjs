@@ -1,6 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const zjs = @import("../root.zig");
+const zjs = @import("zjs");
 
 const HostState = struct {
     value: i32,
@@ -399,8 +399,13 @@ test "embedding public API core signatures stay source-compatible" {
     try std.testing.expect(zjs.host.Call == @typeInfo(@typeInfo(zjs.host.Function).pointer.child).@"fn".params[1].type.?);
     try std.testing.expect(zjs.value.Bytes.Store == zjs.JSValue.Bytes.Store);
     try std.testing.expect(@typeInfo(zjs.object.Object) == .@"opaque");
-    try std.testing.expect(!@hasDecl(zjs, "JSBytes"));
-    try std.testing.expect(!@hasDecl(zjs, "JSString"));
-    try std.testing.expect(!@hasDecl(zjs, "PropNameID"));
-    try std.testing.expect(!@hasDecl(zjs, "binding"));
+    // Public-module absences. Unified `zjs` is all_tests (which lifts these
+    // names); the public facade is checked by `test-embedding`, whose `zjs`
+    // is `src/root.zig` and does not export config_signature.
+    if (!@hasDecl(zjs, "config_signature")) {
+        try std.testing.expect(!@hasDecl(zjs, "JSBytes"));
+        try std.testing.expect(!@hasDecl(zjs, "JSString"));
+        try std.testing.expect(!@hasDecl(zjs, "PropNameID"));
+        try std.testing.expect(!@hasDecl(zjs, "binding"));
+    }
 }

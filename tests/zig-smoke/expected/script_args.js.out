@@ -1,5 +1,0 @@
-true
-1
-tests/zig-smoke/script_args.js
-zig-out/bin/zjs
-["zig-out/bin/zjs","tests/zig-smoke/script_args.js"]

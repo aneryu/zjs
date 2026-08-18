@@ -4,8 +4,12 @@
 `execCall`, the `callValueOrBytecode*` dispatch chain, construct paths, direct
 and indirect eval support, generator resumption, and Atomics waiter
 machinery. The compatibility alias layer that `shared.zig` once
-carried has been removed; callers now import the owning domain module
-directly. Remaining non-call-runtime code should continue to shrink in small
+carried has been removed; new callers should import the owning domain module
+directly. Fourteen forwarding shells remain in this file today
+(`qjsIteratorZip*` and siblings re-export `iterator_ops.zig`). That violates
+the move-criteria ban below; cleanup is registered as
+[maintainability-backlog.md](../maintainability-backlog.md) **H5**.
+Remaining non-call-runtime code should continue to shrink in small
 behavior-preserving moves. This map is a refactor aid, not a status ledger.
 
 ## Existing VM Shards
@@ -25,8 +29,11 @@ helpers use the `vm_*.zig` prefix; broader domain helpers generally use the
 - `vm_property.zig`: property, reference, global read/write/delete, and related
   property fast-path opcode handlers.
 - `property_ic.zig`: non-cached direct own/prototype/global data-property
-  lookup/write helpers. The historical filename remains, but the shape-keyed
-  inline cache has been removed.
+  lookup/write helpers. The historical filename remains, and this file
+  itself already says so; the shape-keyed inline cache has been removed.
+  Renaming the file and deleting the zombie
+  `cachedSetObjectDataPropertyForPutFastPath` adapter is
+  [maintainability-backlog.md](../maintainability-backlog.md) **H6**.
 - `vm_regexp.zig`: RegExp VM helpers.
 - `vm_value.zig`: value conversion and primitive helper operations.
 
@@ -42,8 +49,9 @@ Move code out of `call_runtime.zig` only when the ownership boundary is clear:
 - The target file has one coherent domain.
 - Imports do not introduce cycles back through `call_runtime.zig`.
 - Moved helpers retain the same ownership, rooting, and exception behavior.
-- Callers reference the owning module directly; do not reintroduce forwarding
-  aliases in `call_runtime.zig`.
+- Callers reference the owning module directly; do not add new forwarding
+  aliases in `call_runtime.zig`. The existing 14 `qjsIteratorZip*` shells are
+  a known deviation (backlog **H5**), not a license to add more.
 
 Prefer leaf helper groups first. Avoid moving an orchestration function if its
 callees would still force broad imports from `call_runtime.zig`.

@@ -6,7 +6,7 @@ Use this checklist for an engine-only Production v1 release decision.
 architecture gate. It is required release evidence, but it does not replace the
 ReleaseSafe, hygiene, and performance checks below.
 
-`mise run quick-check` and `mise run checkpoint-check` are iteration and handoff
+`mise run quick-gate` and `mise run checkpoint-gate` are iteration and handoff
 shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 
 ## API

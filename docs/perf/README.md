@@ -8,7 +8,6 @@ Current design notes:
 
 - [Zoo status vs Bellard QuickJS](zoo-status.md)
 - [Object and shape implementation](object-shape-design.md)
-- [Retired inline-cache note](inline-cache-design.md)
 - [`exec/call_runtime.zig` decomposition map](shared-vm-decomposition.md)
 - Frozen subsystem baseline (historical):
   [../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
@@ -18,7 +17,7 @@ Current design notes:
 Run the active multi-case self-baseline gate with:
 
 ```sh
-zig build perf-self-check --seed 0 --summary all
+zig build perf-self-check --summary all
 ```
 
 This builds the ReleaseFast `zjs` CLI, records a fresh multi-case report under
@@ -28,7 +27,7 @@ This builds the ReleaseFast `zjs` CLI, records a fresh multi-case report under
 Refresh the checked-in self baseline explicitly with:
 
 ```sh
-zig build perf-self-update-baseline --seed 0 --summary all
+zig build perf-self-update-baseline --summary all
 ```
 
 Only refresh the baseline when an intentional performance change has separate
@@ -37,7 +36,7 @@ semantic validation evidence.
 Run the current repeatable diagnostic benchmark with:
 
 ```sh
-zig build perf-benchmark --seed 0 --summary all
+zig build perf-benchmark --summary all
 ```
 
 This builds the ReleaseFast `zjs` CLI and runs
@@ -115,7 +114,7 @@ qjs/zjs CLI surface and remains covered by `src/tests/exec.zig`.
 Record the full current ReleaseFast diagnostic with:
 
 ```sh
-taskset -c 19 zig build perf-native-callback --seed 0 --summary all
+taskset -c 19 zig build perf-native-callback --summary all
 ```
 
 The step uses five warmups, 30 timed samples, three independent sessions, and
@@ -382,10 +381,9 @@ before concluding that the visible user-space rows are the whole picture.
 
 **Before drawing a conclusion from any two builds**, apply the existing
 discipline: interleaved A/B on fixed binaries (build layout alone moves results
-by up to ±2.8%), and read
-[Zig build bistability](ZIG-BUILD-BISTABILITY-2026-07.md) — independently
-produced binaries alternate between two distinct code states, which contaminates
-any cross-build comparison.
+by up to ±2.8%). Independently produced binaries can alternate between two
+distinct code states, which contaminates any cross-build comparison (the
+2026-07 Zig build bistability investigation; report in git history).
 
 macOS sampling:
 
@@ -401,9 +399,9 @@ xcrun xctrace record \
 Run semantic checks before accepting performance-sensitive changes:
 
 ```sh
-zig build test --seed 0 --summary all
-zig build smoke --seed 0 --summary all
-zig build perf-self-check --seed 0 --summary all
+zig build test --summary all
+zig build smoke --summary all
+zig build perf-self-check --summary all
 ```
 
 Run a relevant test262 subset when the optimization touches observable

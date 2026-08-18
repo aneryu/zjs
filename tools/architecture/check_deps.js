@@ -161,6 +161,19 @@ function violationReason(source, target) {
     return targetStarts(target, disallowed) ? 'binding must not depend on CLI' : null;
   }
 
+  if (source.startsWith('src/compiler_v2/')) {
+    // Observed production import face: core, bytecode, parser, plus
+    // intra-package files. compiler_v2/tests.zig is the in-tree oracle and
+    // additionally imports exec to run compiled bytecode; it still may not
+    // reach cli/runtime/binding.
+    const disallowed = source === 'src/compiler_v2/tests.zig'
+      ? ['src/cli/', 'src/runtime/', 'src/binding/']
+      : ['src/cli/', 'src/runtime/', 'src/exec/', 'src/binding/'];
+    return targetStarts(target, disallowed)
+      ? 'compiler_v2 production files may import core/bytecode/parser/libs only; cli/runtime/exec/binding are forbidden (tests.zig may import exec)'
+      : null;
+  }
+
   return null;
 }
 
@@ -175,6 +188,14 @@ const matchedAllowKeys = new Set();
 
 const files = [];
 walk(path.join(repoRoot, 'src'), files);
+for (const extraDir of ['tools', 'tests']) {
+  const extra = [];
+  walk(path.join(repoRoot, extraDir), extra);
+  for (const file of extra) {
+    const text = fs.readFileSync(path.join(repoRoot, file), 'utf8');
+    if (text.includes('@import("zjs")')) files.push(file);
+  }
+}
 
 // Production-module reachability. The import-edge rules above validate edges
 // that EXIST; they cannot see a module that nothing imports. The 2026-07-31
@@ -193,10 +214,21 @@ const TEST_ROOTS = [
   // Focused-suite and gate roots referenced directly by build.zig.
   'src/exec_tests.zig',
   'src/builtins_tests.zig',
+  'src/core_tests.zig',
+  'src/parser_tests.zig',
+  'src/bytecode_tests.zig',
+  'src/runner_tests.zig',
+  'src/embedding_tests.zig',
   'src/compiler_v2_tests.zig',
   'src/runtime_tests.zig',
   'src/tests/oom.zig',
   'src/tests/smoke_test.zig',
+  // tools/ and tests/ files that import the zjs module (scanned for edges;
+  // they are build-graph roots, not orphans).
+  'tools/perf/same_runtime/zjs_same_runtime.zig',
+  'tools/perf/direct/zjs_direct_bench.zig',
+  'tests/fixtures/runtime_plugin_fixture.zig',
+  'tests/fixtures/runtime_empty_plugin_fixture.zig',
 ];
 const orphanAllowlistPath = path.join(repoRoot, 'tools/architecture/orphan-allowlist.json');
 

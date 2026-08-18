@@ -1,5 +1,7 @@
-//! Native-record glue for Math, Number/BigInt, parseInt/parseFloat, URI, JSON and Date builtins,
-//! plus collections (Map/Set), weak refs/FinalizationRegistry, Symbol registry and DataView.
+//! Native-record glue for Number/BigInt, parseInt/parseFloat, Date, DataView,
+//! collections (Map/Set), WeakRef/FinalizationRegistry, Symbol registry, and
+//! related host/output helpers. Math, URI, and JSON live in math_ops /
+//! uri_ops / json_ops.
 
 const call_mod = @import("call.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");

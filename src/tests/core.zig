@@ -3,14 +3,8 @@ const builtin = @import("builtin");
 const zjs = @import("zjs");
 const engine = zjs;
 
-// QCP-1: this artifact proves its OWN effective configuration at compile time
-// (src/config_signature.zig). Every test artifact attests separately; none
-// borrows the `src/all_tests.zig` root's attestation.
-comptime {
-    zjs.config_signature.attest("test-core");
-}
-
 const core = zjs.core;
+const helpers = @import("helpers.zig");
 
 extern "c" fn tmpfile() ?*std.c.FILE;
 
@@ -1119,25 +1113,7 @@ fn testBacktraceLocationResolver(_: ?*const anyopaque, pc: usize) core.Backtrace
     return .{ .line_num = @intCast(pc), .col_num = @intCast(pc + 10) };
 }
 
-fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void {
-    const key_identity = (try core.Object.weakIdentityFromValue(rt, key.value())) orelse unreachable;
-    rt.retainWeakIdentity(key_identity);
-    errdefer rt.releaseWeakIdentity(key_identity);
-    const entries_slot = collection.weakCollectionEntriesSlot();
-    const index = entries_slot.*.len;
-    const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
-    try rt.registerBorrowedReferenceHolder(collection);
-    errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(collection);
-    try collection.ensureWeakCollectionEntryCapacity(rt, index + 1);
-    const refreshed_entries = collection.weakCollectionEntriesSlot();
-    refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
-    errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-    refreshed_entries.*[index] = .{
-        .key_identity = key_identity,
-        .value = value.dup(),
-    };
-    try rt.registerBorrowedReferenceHolder(collection);
-}
+const appendWeakCollectionEntry = helpers.appendWeakCollectionEntry;
 
 fn appendFinalizationRegistryCell(
     rt: *core.JSRuntime,

@@ -100,7 +100,7 @@ The historical filename `src/exec/property_ic.zig` now owns non-cached helpers:
 - simple ordinary put;
 - computed-property action resolution.
 
-The retained `cachedDataPropertyValueForFastPath` and
+The retained `dataPropertyValueForFastPath` and
 `cachedSetObjectDataPropertyForPutFastPath` signatures always miss and route to
 the authoritative current-state lookup. They do not retain shapes or versions.
 
