@@ -6,6 +6,7 @@
     .dependencies = .{},
     .paths = .{
         "AGENTS.md",
+        "CITATION.cff",
         "CHANGELOG.md",
         "COMPATIBILITY.md",
         "CONTRIBUTING.md",
@@ -18,6 +19,7 @@
         "build.zig.zon",
         "build",
         "docs",
+        "llms.txt",
         "src",
         "test262.conf",
         "tests",

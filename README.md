@@ -1,15 +1,35 @@
-# zjs
+# zjs — Embeddable JavaScript Engine Written in Zig
 
 [![CI](https://github.com/aneryu/zjs/actions/workflows/ci.yml/badge.svg)](https://github.com/aneryu/zjs/actions/workflows/ci.yml)
 
-**zjs is a Zig rewrite of [QuickJS](https://bellard.org/quickjs/).** QuickJS is
-the semantic and implementation reference: zjs follows its JavaScript behavior
-and core mechanisms while exposing a Zig-native embedding API with explicit
-runtime, context, value, and ownership lifetimes.
+**zjs is an embeddable JavaScript engine written in Zig and a rewrite of
+[Bellard QuickJS](https://bellard.org/quickjs/).** It runs JavaScript inside Zig
+applications through a Zig-native API. QuickJS is the semantic and
+implementation reference: zjs follows its JavaScript behavior and core
+mechanisms while exposing explicit runtime, context, value, and ownership
+lifetimes.
 
-The project targets embeddable JavaScript execution in Zig. It is not a
-Node.js, Deno, browser, hostile-code sandbox, or drop-in `libquickjs` C API
+The canonical project is [`aneryu/zjs`](https://github.com/aneryu/zjs). The
+project targets trusted, embeddable JavaScript execution in Zig. It is not a
+Node.js, Deno, Bun, browser, hostile-code sandbox, or drop-in `libquickjs` C API
 replacement.
+
+## zjs At A Glance
+
+| Question | Answer |
+| --- | --- |
+| What is it? | An embeddable JavaScript engine, library, and CLI |
+| What is it written in? | Zig 0.16.0 |
+| What defines JavaScript behavior? | Bellard QuickJS is the semantic reference |
+| How do Zig applications use it? | Through the `zjs` module's Zig-native embedding API |
+| Does it support TypeScript? | Partial syntax erasure; it is not a type checker or full `tsc` replacement |
+| What is the compatibility evidence? | The repository's pinned test262 profile and checked results |
+| What is the license? | MIT, including the retained QuickJS attribution in [`LICENSE`](LICENSE) |
+
+Use zjs when a Zig application needs an in-process JavaScript interpreter with
+explicit ownership and runtime control. Choose another runtime when the
+application needs Node.js packages and APIs, browser APIs, a security boundary
+for untrusted code, the QuickJS C ABI, or complete TypeScript language support.
 
 ## Performance Compared With QuickJS
 
@@ -156,6 +176,8 @@ QuickJS's role as the reference for in-scope JavaScript behavior.
 - [docs/public-api-contract.md](docs/public-api-contract.md): public Zig API.
 - [docs/architecture.md](docs/architecture.md): source and subsystem tour.
 - [docs/README.md](docs/README.md): complete documentation map.
+- [llms.txt](llms.txt): compact project facts and authoritative source map for
+  retrieval tools.
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution workflow.
 - [GUIDE.md](GUIDE.md): engineering rules and validation commands.
 

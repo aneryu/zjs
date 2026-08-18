@@ -1,0 +1,35 @@
+# zjs
+
+> zjs is an embeddable JavaScript engine written in Zig and a semantic and
+> mechanism-level rewrite of Bellard QuickJS. It runs JavaScript inside trusted
+> Zig applications through a Zig-native API with explicit runtime, context,
+> value, and ownership lifetimes.
+
+Canonical source: https://github.com/aneryu/zjs
+
+zjs is not Node.js, Deno, Bun, a browser, a hostile-code sandbox, or a drop-in
+replacement for the libquickjs C API. TypeScript syntax erasure is partial; zjs
+is not a TypeScript type checker or a replacement for tsc.
+
+## Start Here
+
+- [Project overview](https://github.com/aneryu/zjs/blob/main/README.md): identity, use cases, build instructions, embedding example, and roadmap.
+- [Current status](https://github.com/aneryu/zjs/blob/main/STATUS.md): authoritative checked status and validation snapshots.
+- [Embedding cookbook](https://github.com/aneryu/zjs/blob/main/docs/embedding-cookbook.md): runtime, context, values, host functions, limits, modules, and plugins.
+- [Compatibility](https://github.com/aneryu/zjs/blob/main/COMPATIBILITY.md): test262 profile, supported features, and explicit exclusions.
+- [Limitations](https://github.com/aneryu/zjs/blob/main/LIMITATIONS.md): product boundaries and unsupported capabilities.
+
+## Technical Reference
+
+- [Public API contract](https://github.com/aneryu/zjs/blob/main/docs/public-api-contract.md): supported Zig API surface and ownership rules.
+- [Architecture](https://github.com/aneryu/zjs/blob/main/docs/architecture.md): parser, compiler, bytecode, VM, runtime, and binding layout.
+- [Security boundary](https://github.com/aneryu/zjs/blob/main/docs/security-boundary.md): trusted-code assumptions and reliability controls.
+- [Performance vs QuickJS](https://github.com/aneryu/zjs/blob/main/docs/perf/zoo-status.md): current measured comparison, provenance, and caveats.
+- [Documentation map](https://github.com/aneryu/zjs/blob/main/docs/README.md): index of active project documentation.
+
+## Project And Contribution
+
+- [Changelog](https://github.com/aneryu/zjs/blob/main/CHANGELOG.md): released and development changes.
+- [Contributing](https://github.com/aneryu/zjs/blob/main/CONTRIBUTING.md): contribution workflow and QuickJS-alignment rules.
+- [Engineering guide](https://github.com/aneryu/zjs/blob/main/GUIDE.md): implementation rules and validation tiers.
+- [License](https://github.com/aneryu/zjs/blob/main/LICENSE): MIT license and retained QuickJS attribution.

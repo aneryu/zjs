@@ -10,6 +10,8 @@ kept as current status; recover them from git history when needed.
 - [Guide](../GUIDE.md): Zig engineering rules and the validation command ladder.
 - [Compatibility](../COMPATIBILITY.md): test262 validation boundary.
 - [Limitations](../LIMITATIONS.md): runtime and product-scope boundaries.
+- [Retrieval index](../llms.txt): compact project facts and authoritative source
+  map for automated retrieval tools.
 
 ## Architecture And API
 

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use zjs in research or published software, cite it using these metadata."
+type: software
+title: "zjs: An Embeddable JavaScript Engine Written in Zig"
+abstract: >-
+  zjs is an embeddable JavaScript engine written in Zig and a semantic and
+  mechanism-level rewrite of Bellard QuickJS. It exposes a Zig-native API for
+  running JavaScript inside trusted Zig applications.
+authors:
+  - name: "zjs contributors"
+repository-code: "https://github.com/aneryu/zjs"
+url: "https://github.com/aneryu/zjs"
+license: MIT
+keywords:
+  - JavaScript
+  - ECMAScript
+  - Zig
+  - QuickJS
+  - embeddable JavaScript engine
+  - bytecode interpreter
