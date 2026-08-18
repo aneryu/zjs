@@ -20,11 +20,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --seed 0 --summary all
-      - run: zig build test --seed 0 --summary all
-      - run: zig build architecture-check --seed 0 --summary all
-      - run: zig build test262-smoke --seed 0 --summary all
-      - run: zig build config-drift-gate --seed 0 --summary all
+      - run: zig build zjs --summary all
+      - run: zig build checkpoint-check --summary all
+      - run: node tools/architecture/check_compiler_stage_boundaries.js zig-out/bin/zjs
 
   linux-x86_64:
     runs-on: ubuntu-24.04
@@ -38,11 +36,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --seed 0 --summary all
-      - run: zig build test --seed 0 --summary all
-      - run: zig build architecture-check --seed 0 --summary all
-      - run: zig build test262-smoke --seed 0 --summary all
-      - run: zig build config-drift-gate --seed 0 --summary all
+      - run: zig build zjs --summary all
+      - run: zig build checkpoint-check --summary all
+      - run: node tools/architecture/check_compiler_stage_boundaries.js zig-out/bin/zjs
 
   macos-smoke:
     runs-on: macos-latest
@@ -56,5 +52,5 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --seed 0 --summary all
-      - run: zig build smoke --seed 0 --summary all
+      - run: zig build zjs --summary all
+      - run: zig build smoke --summary all

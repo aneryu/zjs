@@ -26,8 +26,14 @@ fn constructCompiledLiteralInRealm(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try core.Object.createRegExpFromShape(rt, initial_shape);
     errdefer core.Object.destroyFromHeader(rt, &object.header);

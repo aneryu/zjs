@@ -14,8 +14,17 @@
  */
 SECTIONS
 {
+  /* Pads must live *inside* the island, after the page-aligned start.
+     A preceding `.text.zjs.layout_pad` output section is absorbed by
+     ALIGN(MAXPAGESIZE): pad=3 (0x174) and pad=7 (0x388) both snapped
+     to the next 64K and produced identical handler/`.text` addresses.
+     Inside the island, pad N shifts every handler VA by a non-page
+     multiple and the island tail pushes `.text` by the same amount.
+     Relative handler offsets (wave-22 / R6-K `.tail`) stay put.
+     At pad=0 there is no `.text.zjs.layout_pad` input; KEEP is a no-op. */
   .text.zjs.op_handlers ALIGN(CONSTANT(MAXPAGESIZE)) :
   {
+    KEEP(*(.text.zjs.layout_pad))
     KEEP(*(.text.zjs.op_handlers))
     KEEP(*(.text.zjs.op_handlers.*))
   }

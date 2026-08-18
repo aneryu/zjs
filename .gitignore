@@ -18,6 +18,22 @@ quickjs/
 __pycache__/
 *.pyc
 
+# Local test262-gate output (`zig build test262-gate` writes -R here)
+reports/test262-latest/
+
+# Local runtime-profile output. Scripts stay tracked; opcode scope is
+# currently disconnected so these artifacts are not a gate.
+reports/perf/current/runtime/
+
+# Dated qjs-align measurement dumps. Living ledgers at this level stay
+# tracked; recover older dated folders from git history. Markdown notes
+# in dated dirs stay trackable — do not ignore the directory itself.
+reports/perf/qjs-align/20*/**/*.json
+reports/perf/qjs-align/20*/**/*.stdout
+reports/perf/qjs-align/20*/**/*.sha256
+reports/perf/qjs-align/20*/**/*.csv
+reports/perf/qjs-align/20*/**/*.log
+
 # P7-70 measurement scratch: independent cold-cache build instances, the
 # task-prescribed TMPDIR and the per-worktree Zig global cache.
 .tmp/

@@ -70,8 +70,14 @@ pub fn runWithOutput(
             .previous = ctx.runtime.active_value_roots,
             .values = &root_values,
         };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = root_frame.previous;
+            }
+        }
         const root_function_object = class_vm.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
         const this_value = if (function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
         return runWithCallEnv(.{
@@ -342,8 +348,14 @@ fn runCanonicalRootWithArgs(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
     const root_object = class_vm.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
 
     return runWithCallEnv(.{

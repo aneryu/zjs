@@ -202,8 +202,14 @@ pub const EventLoop = struct {
                 .previous = rt.active_value_roots,
                 .values = &callback_root_values,
             };
-            rt.active_value_roots = &callback_root_frame;
-            defer rt.active_value_roots = callback_root_frame.previous;
+            if (comptime core.runtime.value_root_frames_enabled) {
+                rt.active_value_roots = &callback_root_frame;
+            }
+            defer {
+                if (comptime core.runtime.value_root_frames_enabled) {
+                    rt.active_value_roots = callback_root_frame.previous;
+                }
+            }
             const timer_id = timer.id;
             const repeats = timer.repeats;
             const delay = timer.delay_ms;

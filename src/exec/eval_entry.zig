@@ -153,8 +153,14 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
     if (module_record == null) {
         if (options.timing) |timing| {
             timing.root_function_publish_ns += elapsedNanosSince(root_function_publish_start);

@@ -234,18 +234,23 @@ pub const Handler = *const fn (pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
 /// (opcodes 33–70) into the address span between `drop` (14) and
 /// `if_false8` (232) and blow the R6-F 27-op page budget. Frequency
 /// order is L-2 and is not approved.
-const op_handler_section = switch (builtin.target.ofmt) {
-    .elf => ".text.zjs.op_handlers",
-    .macho => "__TEXT,__text",
-    else => ".text",
-};
+// Zig rejects empty `linksection`. ELF keeps the custom pin; other
+// formats use their default text section so the function is unpinned
+// (Mach-O LLVM rejects ELF-style `.text`).
+const op_handler_section = if (builtin.target.ofmt == .elf)
+    ".text.zjs.op_handlers"
+else if (builtin.target.ofmt == .macho)
+    "__TEXT,__text"
+else
+    ".text";
 /// Wave-22: new handlers append here so LLVM cannot interleave them into
 /// the established island (ld script KEEP(.op_handlers) then KEEP(.op_handlers.*)).
-const op_handler_section_tail = switch (builtin.target.ofmt) {
-    .elf => ".text.zjs.op_handlers.tail",
-    .macho => "__TEXT,__text",
-    else => ".text",
-};
+const op_handler_section_tail = if (builtin.target.ofmt == .elf)
+    ".text.zjs.op_handlers.tail"
+else if (builtin.target.ofmt == .macho)
+    "__TEXT,__text"
+else
+    ".text";
 
 /// In-hole tombstone (w22R/w26R). Export so LTO cannot fold the keep
 /// flag or DCE the pad. Live hit predicts not-taken (`cbnz`). Tune
@@ -974,8 +979,14 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const stack = vm.stack;
     std.debug.assert(stack.len() >= 2);
@@ -4109,6 +4120,22 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
                 @branchHint(.likely);
             } else if (key.isInt() and core.class.isNumericTypedArrayClass(object.class_id)) {
                 return @call(.always_tail, zjs_op_get_array_el_ta, .{ pc, sp, var_buf, vm });
+            } else if (key.isInt() and object.class_id == core.class.ids.mapped_arguments) {
+                // qjs JS_GetPropertyValue (quickjs.c:9047-9049): class switch
+                // sits beside ARRAY/ARGUMENTS. Mapped slots live in var-ref
+                // cells, so the dense JSValue arm cannot serve them.
+                if (key.asInt32()) |idx| {
+                    if (idx >= 0) {
+                        if (object.mappedArgumentsIntElementDup(@intCast(idx))) |el| {
+                            if (obj.releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(rt)) {
+                                (sp - 1)[0] = el;
+                                return @call(.always_tail, zjs_op_get_array_el_release_receiver_tail, .{ pc, sp, var_buf, vm });
+                            }
+                            (sp - 2)[0] = el;
+                            return cont(pc + 1, sp - 1, var_buf, vm);
+                        }
+                    }
+                }
             }
         }
     }
@@ -4140,7 +4167,9 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // 0x90 tuned after 0xb0 overshot +0x20 (live body 0x1f0 without the
     // in-island release tail).
     if (zjs_f_tombstone_keep != 0) {
-        asm volatile (".space 0x90");
+        // Mapped-arguments arm spent the previous 0x90 pad; keep a stub so
+        // a later shrink cannot slide neighboring island symbols.
+        asm volatile (".space 0x20");
         unreachable;
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -4209,6 +4238,24 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         value.freeDuringActiveBytecode(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
+    }
+    // arguments.length / mappedArguments.length is an own data int32
+    // (ctx->mapped_arguments_shape, quickjs.c:16225). GET_FIELD_INLINE hits
+    // find_own_property before is_exotic (quickjs.c:19123-19134). A dedicated
+    // class gate keeps Arguments off the exotic tail that
+    // classNeedsSlowPropertyAccess would otherwise force after a miss.
+    if (object_ops.objectFromValueTrustedExpression(value)) |object| {
+        if (object.class_id == core.class.ids.mapped_arguments or
+            object.class_id == core.class.ids.arguments)
+        {
+            var slow_property = false;
+            if (object.findOwnDataSlotFast(core.atom.ids.length, &slow_property)) |slot| {
+                const len_val = slot.*;
+                value.freeDuringActiveBytecode(vm.ctx.runtime);
+                (sp - 1)[0] = len_val;
+                return cont(pc + 1, sp, var_buf, vm);
+            }
+        }
     }
     // qjs OP_get_length is the ordinary GET_FIELD_INLINE macro with a constant
     // `length` atom: an Arguments object (and any other ordinary object with an
@@ -4497,8 +4544,11 @@ fn opCompareEq(comptime opc: u8) Handler {
 }
 
 /// No-`bl` mixed body. Int leaf and leftover `eq_if_false8` still `b`
-/// `zjs_cmp_*_mixed` (硬门 #9). Both-string `b`s the framed export
-/// (flatStringsEq / compareStringValues). Last-ref is detected by the
+/// `zjs_cmp_*_mixed` (硬门 #9). Flat×flat same-width string is qjs
+/// `js_strict_eq2` 15799-15801 / `js_string_eq` 4605-4613: length,
+/// identity, then an in-leaf unit scan — no new frame. Rope or
+/// cross-width `b`s the framed export (`js_string_rope_compare` /
+/// mixed-width `js_string_memcmp`). Last-ref is detected by the
 /// existing NeedsDestroy dec (no extra peek): lhs last-ref `b`s framed
 /// with the stack intact; rhs last-ref stores the result then `b`s the
 /// shared destroy sibling. Those `bl`s cannot fold back (export).
@@ -4510,11 +4560,21 @@ fn opCompareEqFast(comptime opc: u8) Handler {
             const lhs = (sp - 2)[0];
             const rhs = (sp - 1)[0];
 
-            if (lhs.isString() and rhs.isString()) {
-                return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
-            }
-
             const resolved: ?bool = blk: {
+                // qjs OP_CMP_STRICT_EQ / OP_CMP_EQ string arm (quickjs.c:20382-20386
+                // and 15794-15801): JS_TAG_STRING × JS_TAG_STRING calls
+                // js_string_eq in the dispatch loop. A rope carries
+                // JS_TAG_STRING_ROPE and never reaches that leaf.
+                if (lhs.tagOf() == core.Tag.string and rhs.tagOf() == core.Tag.string) {
+                    break :blk core.string.flatStringsEqNear(
+                        core.string.String.fromHeader(lhs.stringHeaderAssumeStringLike()),
+                        core.string.String.fromHeader(rhs.stringHeaderAssumeStringLike()),
+                    ) orelse
+                        return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
+                }
+                if (lhs.isString() and rhs.isString()) {
+                    return @call(.always_tail, compareEqFramedExport(opc), .{ pc, sp, var_buf, vm });
+                }
                 if (lhs.asInt32()) |a| {
                     if (rhs.asFloat64()) |d2| break :blk @as(f64, @floatFromInt(a)) == d2;
                     break :blk if (comptime strict) false else null;
@@ -5057,8 +5117,68 @@ noinline fn completeInstanceofSlow(vm: *Vm, has_instance: JSValue) InternalMetho
     return .completed;
 }
 
-pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+/// qjs `JS_IsInstanceOf` probe (quickjs.c:8133-8146 `JS_GetProperty` of
+/// `Symbol.hasInstance`) plus Ordinary walk (8059-8125) when the method is
+/// the realm default `Function.prototype[@@hasInstance]` (41395 / 41379-41383).
+///
+/// q's GetProperty on a function is `find_own_property` miss + one
+/// `p->shape->proto` hop + hit on Function.prototype (8210-8294). z mirrors
+/// that: own-hash miss, one proto hop, slot vs default record. No generic
+/// probe loop, no `isCallableValue` / `getOwnDataObjectBorrowed` (those
+/// `findProperty` outcalls were the leftover ~160 insn). Own or intermediate
+/// custom `@@hasInstance` returns null so the published remainder Calls.
+inline fn tryFastDefaultInstanceof(lhs: JSValue, ctor: *core.Object, vm: *Vm) ?bool {
+    if (ctor.isProxy()) return null;
+    if (ctor.class_id == core.class.ids.bound_function) return null;
+
+    const has_instance_atom = comptime core.atom.predefinedId("Symbol.hasInstance", .symbol).?;
+    var slow = false;
+    const method_slot: *const JSValue = blk: {
+        if (ctor.findOwnDataSlotFast(has_instance_atom, &slow)) |slot| break :blk slot;
+        if (slow or ctor.flags.has_exotic_methods) return null;
+        const proto = ctor.getPrototype() orelse return null;
+        if (proto.flags.has_exotic_methods) return null;
+        slow = false;
+        break :blk proto.findOwnDataSlotFast(has_instance_atom, &slow) orelse return null;
+    };
+    if (slow) return null;
+
+    const method_object = class_vm.objectFromValue(loadValueAsIntPair(method_slot)) orelse return null;
+    if (method_object.class_id != core.class.ids.c_function) return null;
+    const record = method_object.nativeRecordAssumeCFunction() orelse
+        call_vm.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_object) orelse return null;
+    if (!function_ops.recordIsDefaultHasInstance(record)) return null;
+
+    // qjs:8068 `JS_IsFunction` then 8078 `JS_GetProperty(prototype)`.
+    if (!call_runtime.isFunctionLikeClass(ctor.class_id)) return false;
+    var proto_slow = false;
+    const proto_slot = ctor.findOwnDataSlotFast(core.atom.ids.prototype, &proto_slow) orelse return null;
+    if (proto_slow) return null;
+    const proto = class_vm.objectFromValue(loadValueAsIntPair(proto_slot)) orelse return null;
+
+    const start = class_vm.objectFromValue(lhs) orelse return false;
+    if (start.isProxy()) return null;
+    var walk = start.getPrototype();
+    while (walk) |parent| {
+        if (parent.isProxy()) return null;
+        if (parent == proto) return true;
+        walk = parent.getPrototype();
+    }
+    return false;
+}
+
+/// Published remainder of OP_instanceof (quickjs.c:20412 `sf->cur_pc = pc`
+/// then `js_operator_instanceof` 16005-16017). Reached only when the default
+/// hasInstance walk cannot finish in-island: non-object RHS, exotic / Proxy /
+/// bound, missing own-data `.prototype` (auto-init or TypeError), or a
+/// non-default `@@hasInstance`. Island-tail so the hot handler stays a short
+/// walk + one always_tail hop.
+fn op_instanceof_published(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
     const rhs = loadValueAsIntPair(&(sp - 1)[0]);
     const rhs_object = class_vm.objectFromValue(rhs) orelse {
@@ -5116,6 +5236,29 @@ pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         }
     }
     return @call(.always_tail, InternalMethodBoundary.toBooleanOne(), .{ pc + 1, region_start + 3, var_buf, vm });
+}
+
+pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // qjs OP_instanceof (quickjs.c:20412-20417) is `JS_IsInstanceOf` then
+    // in-place free/replace of the two operand slots. The default
+    // Function.prototype[@@hasInstance] walk (qjs:41379-41383 → 8059-8125)
+    // cannot throw for ordinary objects with an own-data object `.prototype`,
+    // so it does not need `sf->cur_pc` publish. Hop to the published remainder
+    // only when the path can throw or must Call a non-default method.
+    const rhs = loadValueAsIntPair(&(sp - 1)[0]);
+    const rhs_object = class_vm.objectFromValue(rhs) orelse
+        return @call(.always_tail, op_instanceof_published, .{ pc, sp, var_buf, vm });
+    if (tryFastDefaultInstanceof((sp - 2)[0], rhs_object, vm)) |hit| {
+        const lhs = (sp - 2)[0];
+        const nsp = sp - 1;
+        (sp - 2)[0] = JSValue.boolean(hit);
+        vm.stack.setTopPtr(nsp);
+        lhs.freeDuringActiveBytecode(vm.rt);
+        rhs.freeDuringActiveBytecode(vm.rt);
+        return cont(pc + 1, nsp, var_buf, vm);
+    }
+    return @call(.always_tail, op_instanceof_published, .{ pc, sp, var_buf, vm });
 }
 
 /// QJS OP_neg's local numeric CASE arms (quickjs.c:19940-19970). Int, bool and

@@ -728,8 +728,14 @@ pub fn createPromiseResolvingState(rt: *core.JSRuntime) !*core.Object {
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     state_val = state.value();
@@ -752,8 +758,14 @@ pub fn createPromiseResolvingPair(rt: *core.JSRuntime, global: *core.Object, pro
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer state_val.free(rt);
     defer resolve_val.free(rt);
@@ -784,8 +796,14 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const function_proto = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
     function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
@@ -921,8 +939,14 @@ pub fn qjsPromiseReactionRecord(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -1145,8 +1169,14 @@ pub fn qjsPreparePromiseReactionJobs(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const jobs = try ctx.runtime.memory.alloc(jobs_mod.Job, reactions.len);
     var prepared = PreparedPromiseReactionJobs{ .jobs = jobs };
@@ -2282,8 +2312,14 @@ pub fn qjsPromiseCapability(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer slot_value.free(ctx.runtime);
     defer executor_value.free(ctx.runtime);
@@ -2343,8 +2379,14 @@ pub fn qjsPromiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *c
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     result_value = result.value();
@@ -2430,8 +2472,14 @@ pub fn qjsPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: 
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -2489,8 +2537,14 @@ pub fn qjsPromiseCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValu
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &state.header);
@@ -3394,8 +3448,14 @@ pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &result.header);
@@ -3667,8 +3727,14 @@ pub fn qjsAsyncFunctionSettle(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const promise_value = continuation.generatorAsyncPromise() orelse return error.TypeError;
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise_value);
@@ -4075,8 +4141,14 @@ pub fn qjsPromiseFinallyCallback(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
     errdefer callback.free(rt);
@@ -4449,8 +4521,14 @@ pub fn settlePendingPromiseReaction(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     try promise.setPromiseReactionCallback(ctx.runtime, null);
     try promise.setPromiseReactionArg(ctx.runtime, null);

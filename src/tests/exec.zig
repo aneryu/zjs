@@ -5823,6 +5823,38 @@ test "mapped arguments named field skips binding alias; computed index stays ali
     _ = result;
 }
 
+test "mapped arguments rest-style 0-formal length and index (sc_list)" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function sc_list() {
+        \\  var a = arguments;
+        \\  assert.sameValue(a.length, 2);
+        \\  assert.sameValue(a[0], "x");
+        \\  assert.sameValue(a[1], 9);
+        \\  a[0] = "y";
+        \\  assert.sameValue(a[0], "y");
+        \\  assert.sameValue(a[2], undefined);
+        \\  return a.length + a[1];
+        \\}
+        \\assert.sameValue(sc_list("x", 9), 11);
+        \\function g(a, b) {
+        \\  assert.sameValue(arguments[0], 1);
+        \\  assert.sameValue(arguments[1], 2);
+        \\  arguments[0] = 3;
+        \\  assert.sameValue(a, 3);
+        \\  a = 4;
+        \\  assert.sameValue(arguments[0], 4);
+        \\  delete arguments[1];
+        \\  assert.sameValue(arguments[1], undefined);
+        \\  assert.sameValue(b, 2);
+        \\}
+        \\g(1, 2);
+    );
+    _ = result;
+}
+
 test "typed array integer get uses class-id arm and qjs tag shape" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -18709,6 +18741,28 @@ test "started generator resumes preserve unmapped arguments from parked locals" 
     try std.testing.expect(result.isUndefined());
 }
 
+test "array named proto field uses ordinary lookup; length and index stay exotic" {
+    // qjs GET_FIELD_INLINE (quickjs.c:19135-19138): Array exotic is index +
+    // length. A named atom such as `push` must resolve on Array.prototype
+    // without changing `length` or dense-element reads.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\const a = [7];
+        \\assert.sameValue(a.push, Array.prototype.push);
+        \\assert.sameValue(a.noSuchNamed, undefined);
+        \\assert.sameValue(a.length, 1);
+        \\assert.sameValue(a[0], 7);
+        \\const mid = Object.create(Array.prototype);
+        \\const b = [];
+        \\Object.setPrototypeOf(b, mid);
+        \\assert.sameValue(b.pop, Array.prototype.pop);
+        \\assert.sameValue(b.length, 0);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "iterator results use ordinary transitions without a sixth realm shape" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -22464,6 +22518,35 @@ test "small-function-inlining L1: replaced Function.prototype.apply misses take"
         \\} finally {
         \\  Function.prototype.apply = saved;
         \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "flat string strict-eq matches content across distinct objects" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const result = try js.eval(
+        \\function check(cond) { if (!cond) throw new Error("streq"); }
+        \\var lit = "k0";
+        \\var made = "k" + 0;
+        \\var other = "k32";
+        \\var empty_a = "";
+        \\var empty_b = "" + "";
+        \\check(lit === made);
+        \\check(made === "k0");
+        \\check(!(lit === other));
+        \\check(lit !== other);
+        \\check(empty_a === empty_b);
+        \\check(!("" === "k0"));
+        \\check(("α" + "") === "α");
+        \\var acc = 0;
+        \\var i = 0;
+        \\while (i < 64) {
+        \\    if (("k" + i) === "k32") acc = acc + 1;
+        \\    i = i + 1;
+        \\}
+        \\check(acc === 1);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());

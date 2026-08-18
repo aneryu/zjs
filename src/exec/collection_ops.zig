@@ -660,8 +660,14 @@ fn collectionIterator(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const realm = try iteratorRealm(rt, ctx, global);
     const prototype = try iteratorPrototype(
@@ -808,8 +814,14 @@ fn iteratorValue(rt: *core.JSRuntime, global: ?*core.Object, class_id: core.Clas
                 .previous = rt.active_value_roots,
                 .values = &root_values,
             };
-            rt.active_value_roots = &root_frame;
-            defer rt.active_value_roots = root_frame.previous;
+            if (comptime core.runtime.value_root_frames_enabled) {
+                rt.active_value_roots = &root_frame;
+            }
+            defer {
+                if (comptime core.runtime.value_root_frames_enabled) {
+                    rt.active_value_roots = root_frame.previous;
+                }
+            }
 
             // qjs js_create_array → JS_NewArray (quickjs.c:9601, 5841): pair proto
             // is the realm Array.prototype, not a null-proto class-name fallback.
@@ -833,8 +845,14 @@ fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JS
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &result.header);
@@ -1372,8 +1390,14 @@ fn appendValue(rt: *core.JSRuntime, values: *[]core.JSValue, value: core.JSValue
         .slices = &root_slices,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const next = try rt.memory.alloc(core.JSValue, values.*.len + 1);
     errdefer rt.memory.free(core.JSValue, next);
@@ -1480,8 +1504,14 @@ fn addGroupedItem(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const index_value = core.JSValue.int32(@intCast(index));
     var callback_args = [_]core.JSValue{ rooted_item, index_value };
@@ -1708,12 +1738,16 @@ const ValueListRoot = struct {
             .previous = rt.active_value_roots,
             .slices = &self.slices,
         };
-        rt.active_value_roots = &self.frame;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = &self.frame;
+        }
     }
 
     fn deinit(self: *ValueListRoot) void {
         const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = self.frame.previous;
+        }
         self.rt = null;
     }
 };

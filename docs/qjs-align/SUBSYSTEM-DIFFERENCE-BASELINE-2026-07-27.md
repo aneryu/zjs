@@ -1064,8 +1064,8 @@ CPU19/PMU 快照；分数比 zjs/qjs（越大越快）为：
 
 `reports/perf/baseline/*-vs-quickjs` 生成于 2026-06-13，参照是 QuickJS-ng
 0.15 + mimalloc，zjs 当时默认 8-byte representation，并含后来已删除的 IC/
-fusion 口径。它们可作历史材料，但不是本文 pinned Bellard QuickJS 的当前
-baseline。后续应：
+fusion 口径。这些文件已移出活动树（git history 仍可取回），不是本文 pinned
+Bellard QuickJS 的当前 baseline。后续应：
 
 - 保留 zjs self-baseline 作为回归门；
 - 为 pinned qjs 重新生成并记录 commit/binary hash/CPU/representation；

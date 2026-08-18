@@ -82,9 +82,9 @@ See `docs/architecture.md`. Short map:
 
 ## Commands
 
-Always pass CLI `--seed 0` to one-shot `zig build` commands. The command
-ladder, focused targets (`test-core`, `test-exec`, …), and test262 slices are
-in `GUIDE.md` Part B.6.
+`build.zig` pins the Zig 0.16 build/test seed to `0`; CLI `--seed` is not
+required. The command ladder, focused targets (`test-core`, `test-exec`, …),
+and test262 slices are in `GUIDE.md` Part B.6.
 
 CLI contract: `zjs -e "<script>"` and `zjs <file.js>`. Missing or invalid
 arguments print usage and exit non-zero.

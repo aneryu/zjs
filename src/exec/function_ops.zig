@@ -27,6 +27,18 @@ pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.host_
     return if (expected) |slot| record == slot else false;
 }
 
+/// qjs compares the C function pointer (`js_function_hasInstance`, 41379).
+/// Same identity as `isDefaultHasInstanceRecord` without the runtime table.
+pub inline fn recordIsDefaultHasInstance(record: *const core.host_function.InternalRecord) bool {
+    const nf = record.native_function orelse return false;
+    return switch (nf) {
+        .generic => |ptr| ptr == defaultHasInstanceNative,
+        else => false,
+    };
+}
+
+const defaultHasInstanceNative: core.host_function.NativeGenericFn = &functionHasInstance;
+
 /// Declaration + dispatch table for the `.function` native-builtin domain
 /// (QuickJS `js_function_proto_funcs` analogue, quickjs.c:41390).
 pub const internal_entries = [_]core.host_function.InternalEntry{
@@ -321,8 +333,14 @@ pub fn sourceFunction(realm: *core.RealmContext, name: []const u8, source: []con
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     errdefer {
         const failed_function = function_value;

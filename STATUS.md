@@ -34,23 +34,22 @@ Measurement contract: `tools/compare/measurement_contract.js` with
 
 | Gate | What it covers | This lane |
 |------|----------------|-----------|
-| `zig build engine-production-gate --seed 0 --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture checks, OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-gate: `0/49775 errors, passed 44581`. smoke, architecture-check, config-drift-gate all success. |
-| `zig build test -Doptimize=ReleaseSafe --seed 0 --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 9/9 steps succeeded. 2266 passed / 1 skipped / 0 failed. |
-| `zig build test-oom --seed 0 --summary all` | corpus × allocation-failure injection plus same-runtime recovery canaries | phase-close tier; not re-run in this packaging lane |
-| `zig build architecture-check --seed 0 --summary all` | dependency rules, public API snapshot, related static checks | included in `engine-production-gate` |
-| `zig build config-drift-gate --seed 0 --summary all` | configuration-signature attestation can still fail | included in `engine-production-gate` |
-| `zig build perf-self-check --seed 0 --summary all` | ZJS self-baseline | driver 在 release 时于测量机执行 |
+| `zig build engine-production-gate --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture lints (including compiler-stage `nm`), OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-gate: `0/49775 errors, passed 44581`. Historical row also named `architecture-check` and `config-drift-gate`; those steps are gone. |
+| `zig build test -Doptimize=ReleaseSafe --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 9/9 steps succeeded. 2266 passed / 1 skipped / 0 failed. |
+| `zig build test-oom --summary all` | corpus × allocation-failure injection plus same-runtime recovery canaries | phase-close tier; not re-run in this packaging lane |
+| `mise run checkpoint-check` | unified Debug suite, Debug CLI smoke, source-side architecture | handoff gate; does not compile ReleaseFast `zjs` |
+| `zig build perf-self-check --summary all` | ZJS self-baseline | driver 在 release 时于测量机执行 |
 
 ## 复现命令
 
 ```sh
-zig build zjs --seed 0 --summary all
-zig build test --seed 0 --summary all
-zig build engine-production-gate --seed 0 --summary all
-zig build test262-gate --seed 0 --summary all
+zig build zjs --summary all
+zig build test --summary all
+zig build engine-production-gate --summary all
+zig build test262-gate --summary all
 ```
 
-Direct test262 runner (after `zig build run-test262 --seed 0 --summary all`):
+Direct test262 runner (after `zig build run-test262 --summary all`):
 
 ```sh
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000

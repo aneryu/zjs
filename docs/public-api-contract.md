@@ -1,8 +1,9 @@
 # Public API Contract
 
 This document is the active public Zig API authority for embedders. Keep it in
-sync with `src/root.zig`, `src/binding/`, `src/runtime/public.zig`, and
-`reports/api/public-symbols.txt`.
+sync with `src/root.zig`, `src/binding/`, and `src/runtime/public.zig`. The
+declaration surface is still moving; do not treat the current root exports as
+a frozen name list.
 
 ## Public Entry
 
@@ -25,8 +26,9 @@ The stable public groups are:
 - `zjs.runtime` for runtime policy helpers and dynamic plugins;
 - `zjs.ffi` for dynamic plugin descriptors and C ABI structures.
 
-The complete declaration snapshot is `reports/api/public-symbols.txt` and is
-checked by `zig build architecture-check --summary all`.
+The intended groups above are the contract. Review `src/root.zig` when a
+change adds or removes a public name; there is no mechanical symbol snapshot
+while the surface is still moving.
 
 ## Compatibility Rules
 
@@ -154,8 +156,6 @@ modules as public contract.
 
 The current public API contract is covered by:
 
-- `reports/api/public-symbols.txt`;
-- `zig build architecture-check --summary all`;
 - `docs/embedding-cookbook.md`;
 - `src/tests/embedding_examples.zig`;
 - public API contract and production failure-path tests in

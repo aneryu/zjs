@@ -100,8 +100,14 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         .slices = &root_slices,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const constructor = try expectConstructor(rooted_callee);
     var owned_prototype_value: ?core.JSValue = null;
@@ -277,8 +283,14 @@ pub fn constructTypedArrayValue(rt: *core.JSRuntime, constructor: *core.Object, 
         .previous = rt.active_value_roots,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const buffer = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.int32(0);
     if (buffer.isObject()) {
@@ -310,8 +322,14 @@ pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: 
         .previous = rt.active_value_roots,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     if (std.mem.eql(u8, name, "AggregateError")) return constructAggregateErrorObject(rt, constructor, prototype, rooted_args);
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
@@ -370,8 +388,14 @@ pub fn constructDOMExceptionObject(rt: *core.JSRuntime, prototype: ?*core.Object
         .previous = rt.active_value_roots,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -495,8 +519,14 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
         .values = &root_values,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer errors_array_val.free(rt);
     defer copied_error_val.free(rt);
@@ -573,8 +603,14 @@ pub fn weakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const instance = try core.Object.create(rt, core.class.ids.weak_ref, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -644,8 +680,14 @@ fn constructPrimitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, 
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const instance = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -740,8 +782,14 @@ fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, 
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer backing_buffer.free(rt);
     defer object_value.free(rt);
@@ -788,8 +836,14 @@ fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Obj
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer backing_buffer.free(rt);
     defer object_value.free(rt);
@@ -831,8 +885,14 @@ fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Obje
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer backing_buffer.free(rt);
     defer object_value.free(rt);

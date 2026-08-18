@@ -29,8 +29,16 @@ side twice therefore does **not** vary layout; it only proves the noise floor.
 
 To vary layout you must hold the source fixed and move the code. That is what
 `-Dzjs_dossier_layout_pad=N` does (`src/dossier_pad.zig`): it emits N non-foldable
-exported bodies into `.text`, displacing everything after them. At `N=0` the binary is
-bit-for-bit what it would be without the file.
+exported bodies. On aarch64 ELF they land in `.text.zjs.layout_pad`, KEEP'd at
+the start of the handler island after its page-aligned origin, so pad N shifts
+handler VAs by a non-page multiple and the island tail pushes `.text`. A
+section before the island is absorbed by `ALIGN(MAXPAGESIZE)` and pad=3/7
+collapse. Other targets keep default `.text` placement. At `N=0` the
+binary is bit-for-bit what it would be without the file.
+
+Rigid translation of one binary is the cheap axis (P4-01c ≤0.24%). The lineages
+exist to sample the A/B × placement interaction: the same source delta can flip
+sign across pads (D10). They do not eliminate the candidate's own size delta.
 
 ## Usage
 
@@ -43,6 +51,9 @@ python3 tools/perf/layout_lineage/run_lineage.py \
     --samples 4 --cpu 6 \
     --output /tmp/<name>-lineage.json
 ```
+
+Dated json dumps are gitignored; markdown notes stay trackable. Older dumps
+through 2026-08-15 remain in git history.
 
 Each pad value gets its own build cache and prefix, so lineages never share objects.
 Both sides are built at every pad, and each lineage is measured as its own paired A/B

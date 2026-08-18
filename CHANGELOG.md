@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Trimmed remaining local report write-outs: disconnected opcode-profile
+  snapshots and `reports/test262-latest/` are gitignored. Dated `qjs-align`
+  dumps stay in git history; new dated dirs keep markdown notes.
+- Removed the public API symbol snapshot. The declaration surface is not
+  frozen yet; `docs/public-api-contract.md` and the embedding tests remain
+  the contract. `architecture-update-api-snapshot` and
+  `tools/architecture/check_public_api.zig` are gone.
+- Dropped the named `architecture-check` step. Checkpoint still runs the
+  source lints (deps, OOM-panic, borrowed-atom, compiler-stage
+  declarations) inline. The production gate adds the ReleaseFast `nm`
+  check that those stage-boundary symbols remain independent.
+- Dropped legacy-pipeline eradication (`check_legacy_pipelines_gone.js`).
+  The remaining gate is `check_compiler_stage_boundaries.js`.
+- Narrowed the OOM-panic lint to OutOfMemory-discard and
+  catch-unreachable-on-alloc. The remaining allowlist entry is the
+  rope-flatten last resort.
+- Dropped redundant CLI `--seed 0` from live build commands and docs.
+  `build.zig` already pins `graph.random_seed` to `0`.
+- Removed `config-drift-gate`, `test262-smoke`, `final-switch-selftest`,
+  and `tools/final-switch/`. Compile-time `attest()` and
+  `config-signature-check` remain.
+- Split validation docs so ReleaseSafe, `test-oom`, `test-altrepr`,
+  force-GC, and ownership-audit are phase-close or change-triggered, not
+  checkpoint or per-commit gates.
+
 ## 0.1.0 - 2026-08-17
 
 First real release, replacing 0.1.0-alpha.1 and 0.1.0-alpha.2. The checked

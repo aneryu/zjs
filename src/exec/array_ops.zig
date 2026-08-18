@@ -269,7 +269,7 @@ pub fn qjsArrayPrototypeNativeRecord(
         @intFromEnum(array_mod.PrototypeMethod.shift) => qjsArrayShiftCall(ctx, output, global, receiver, function_object_nonnull.value()),
         @intFromEnum(array_mod.PrototypeMethod.unshift) => qjsArrayUnshiftCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
         @intFromEnum(array_mod.PrototypeMethod.reverse) => qjsArrayReverseCall(ctx, output, global, receiver, function_object_nonnull.value(), caller_function, caller_frame),
-        @intFromEnum(array_mod.PrototypeMethod.splice) => qjsArraySpliceCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
+        @intFromEnum(array_mod.PrototypeMethod.splice) => qjsArraySpliceCallImpl(ctx, output, global, receiver, args),
         @intFromEnum(array_mod.PrototypeMethod.slice) => qjsArraySliceCall(ctx, output, global, receiver, function_object_nonnull.value(), args),
         @intFromEnum(array_mod.PrototypeMethod.join) => qjsArrayJoinCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame),
         @intFromEnum(array_mod.PrototypeMethod.concat) => qjsArrayConcatCall(ctx, output, global, receiver, function_object_nonnull.value(), args, caller_function, caller_frame),
@@ -348,8 +348,14 @@ pub fn aggregateErrorsIterableToArray(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer iterator_method.free(ctx.runtime);
     defer iterator_value.free(ctx.runtime);
@@ -661,8 +667,14 @@ pub fn qjsTypedArrayConstructArrayLikeVm(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer result_value.free(ctx.runtime);
     defer item.free(ctx.runtime);
@@ -734,8 +746,14 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
     defer item.free(ctx.runtime);
     defer coerced.free(ctx.runtime);
 
@@ -880,8 +898,14 @@ pub fn qjsTypedArrayConstructFromIterable(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer iterator.free(ctx.runtime);
     defer values_value.free(ctx.runtime);
@@ -1870,8 +1894,14 @@ pub fn qjsTypedArrayMapFilter(
         .previous = ctx.runtime.active_value_roots,
         .slices = &root_slices,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     var kept_count: usize = 0;
     errdefer {
@@ -2513,8 +2543,14 @@ pub fn qjsArraySliceCall(
                 .previous = ctx.runtime.active_value_roots,
                 .values = &root_values,
             };
-            ctx.runtime.active_value_roots = &root_frame;
-            defer ctx.runtime.active_value_roots = root_frame.previous;
+            if (comptime core.runtime.value_root_frames_enabled) {
+                ctx.runtime.active_value_roots = &root_frame;
+            }
+            defer {
+                if (comptime core.runtime.value_root_frames_enabled) {
+                    ctx.runtime.active_value_roots = root_frame.previous;
+                }
+            }
 
             if (count > 0) {
                 const elements = try ctx.runtime.memory.alloc(core.JSValue, count);
@@ -2723,12 +2759,10 @@ fn qjsFastDenseArraySplice(
     if (object.hasExoticMethods() or object.proxyTarget() != null) return null;
     if (!object.flags.length_writable or !object.flags.extensible) return null;
     // qjs `can_extend_fast_array` (quickjs.c:9935-9944), the same term its splice
-    // gate carries at quickjs.c:43046.
+    // gate carries at quickjs.c:43046. qjs does not walk the prototype chain
+    // here: defining Array.prototype[i] / Object.prototype[i] already clears
+    // `is_std_array_prototype`, so the one can_extend test is enough.
     if (!object.canExtendFastArray()) return null;
-    // Any inherited indexed property would make the generic [[Set]]/[[Delete]] of
-    // a moved slot observe a prototype accessor; the bulk move skips the
-    // prototype chain, so only proceed when the chain has no indexed props.
-    if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
 
     // Re-read the dense extent AFTER the coercions. Requiring count == length
     // covers both a holey tail (whose holes the generic path must preserve via
@@ -2761,8 +2795,14 @@ fn qjsFastDenseArraySplice(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     if (actual_delete_count > 0) {
         const elements = try rt.memory.alloc(core.JSValue, actual_delete_count);
@@ -2851,7 +2891,16 @@ pub fn qjsArraySpliceCall(
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.splice))) {
         if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "splice")) return null;
     }
+    return qjsArraySpliceCallImpl(ctx, output, global, receiver, args);
+}
 
+pub fn qjsArraySpliceCallImpl(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    args: []const core.JSValue,
+) !?core.JSValue {
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
@@ -3246,6 +3295,29 @@ pub fn qjsArrayPushCall(
     return qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame);
 }
 
+/// qjs `js_array_push` fast case (quickjs.c:42768-42788): one admission
+/// (`ARRAY && fast_array && can_extend && length==count && writable` and
+/// `new_len <= INT32_MAX`), then expand + Dup + write. Returns the new
+/// length, or null so the caller can take the generic ToObject/Set path.
+pub inline fn qjsTryFastArrayPush(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    args: []const core.JSValue,
+) !?i32 {
+    const object = objectFromValue(receiver) orelse return null;
+    if (object.class_id != core.class.ids.array) return null;
+    if (!object.flags.fast_array) return null;
+    if (!object.canExtendFastArray()) return null;
+    if (!object.flags.length_writable) return null;
+    const count = object.u.array.count;
+    if (object.arrayLength() != count) return null;
+    const argc = std.math.cast(u32, args.len) orelse return null;
+    const new_len = std.math.add(u32, count, argc) catch return null;
+    if (new_len > std.math.maxInt(i32)) return null;
+    try object.appendFastArrayPushValues(rt, args);
+    return @intCast(new_len);
+}
+
 pub fn qjsArrayPushCallImpl(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3262,22 +3334,11 @@ pub fn qjsArrayPushCallImpl(
     // qjs `js_array_push` checks the direct Array receiver before JS_ToObject
     // and returns from its fast case without a receiver dup/free. Keep the
     // borrowed receiver rooted by the active call frame and do the same here.
-    // `appendDenseArrayValues` includes qjs's writable/extendable/fully-dense
-    // eligibility checks even for zero arguments; every miss falls through to
-    // the observable property path and performs the required length Set.
-    const direct_object = objectFromValue(receiver);
-    if (direct_object) |object| {
-        if (object.class_id == core.class.ids.array and !object.hasExoticMethods() and object.proxyTarget() == null) {
-            const index = object.arrayLength();
-            if (std.math.cast(u32, args.len)) |argc| {
-                if (std.math.add(u32, index, argc)) |next_length| {
-                    if (next_length <= core.array.max_array_length and try object.appendDenseArrayValues(ctx.runtime, index, args)) {
-                        return lengthIndexValue(next_length);
-                    }
-                } else |_| {}
-            }
-        }
+    if (try qjsTryFastArrayPush(ctx.runtime, receiver, args)) |new_len| {
+        return core.JSValue.int32(new_len);
     }
+
+    const direct_object = objectFromValue(receiver);
 
     const receiver_object_value = if (direct_object != null) receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
@@ -4206,8 +4267,14 @@ fn fromAsyncStart(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
     defer state_val.free(rt);
 
     try fromAsyncStateSet(rt, state, "resolve", resolve);
@@ -4361,8 +4428,14 @@ pub fn qjsArrayFromAsyncContinuationCall(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
     defer state_val.free(rt);
     const state = objectFromValue(state_val) orelse return error.TypeError;
     const rejected = blk: {
@@ -6291,12 +6364,16 @@ pub const ValueSliceRoot = struct {
             .previous = rt.active_value_roots,
             .slices = &self.slices,
         };
-        rt.active_value_roots = &self.frame;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = &self.frame;
+        }
     }
 
     pub fn deinit(self: *ValueSliceRoot) void {
         const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = self.frame.previous;
+        }
         self.rt = null;
     }
 };
@@ -6315,12 +6392,16 @@ pub const CellSliceRoot = struct {
             .previous = rt.active_value_roots,
             .slices = &self.slices,
         };
-        rt.active_value_roots = &self.frame;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = &self.frame;
+        }
     }
 
     pub fn deinit(self: *CellSliceRoot) void {
         const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = self.frame.previous;
+        }
         self.rt = null;
     }
 };
@@ -6645,8 +6726,14 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
         .previous = rt.active_value_roots,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const array = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &array.header);
@@ -6964,8 +7051,14 @@ pub fn qjsObjectEntryArrayValue(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     value = try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame);
 

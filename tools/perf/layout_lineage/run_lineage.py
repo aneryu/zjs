@@ -18,7 +18,10 @@ Two cold builds do NOT separate these. Zig is deterministic for a fixed source, 
 usual "build each side twice" only samples compiler non-determinism, which is nearly
 absent here. What separates them is holding the *source* fixed while forcing the
 *layout* to move -- which is exactly what `-Dzjs_dossier_layout_pad` does
-(see src/dossier_pad.zig: N non-foldable exported bodies, zero bytes emitted at N=0).
+(see src/dossier_pad.zig: N non-foldable exported bodies in
+`.text.zjs.layout_pad` on aarch64 ELF, KEEP'd inside the handler island
+after its page-aligned start so pad N shifts handler VAs; zero bytes
+emitted at N=0).
 
 This runner builds both sides across several pad lineages, measures each lineage as its
 own paired A/B, and reports whether the effect survives the layout change.

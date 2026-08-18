@@ -31,6 +31,19 @@ reserved.
 > recorded in §9. The 2026-08-04 NO-GO remains below as the historical ruling
 > that prevented an unexplained cleanup from shipping.
 
+> **AMENDED 2026-08-17 — `config-drift-gate` and `test262-smoke` removed.**
+> The five-child negative attestation self-test is gone; compile-time
+> `attest()` and `zig build config-signature-check` remain. The 15-file
+> Debug test262 canary is gone; use a focused `-d` / `-f` slice or
+> `test262-gate`. Rows below that name either command are switch-era
+> evidence, not a current command.
+>
+> **AMENDED 2026-08-17 — checkpoint no longer compiles ReleaseFast `zjs`
+> for architecture, and `architecture-check` is no longer a named step.**
+> Handoff runs the source lints inline; the production gate still includes
+> the compiler-stage `nm` check. Rows that name `architecture-check` or
+> legacy-pipeline eradication are switch-era evidence.
+
 ---
 
 ## 0. Headline
@@ -455,7 +468,7 @@ The v2/legacy code-load win is **+25.5%**, and it is 140× the measurement noise
 * The branch's legacy mode reproduces the corrected campaign baseline: **0.4458
   measured (15-bench run) / 0.4449–0.4456 (12-sample rounds) against the
   campaign's 0.4458 and the 0.4448 recorded in
-  `reports/perf/qjs-align/2026-08-02/zoo/zoo-mainfix.json`** — a spread of 0.2%.
+  `reports/perf/qjs-align/2026-08-02/zoo/zoo-mainfix.json` (git history)** — a spread of 0.2%.
   The ruler is calibrated.
 * The previously reported v2 figure 0.5571 was a projection through the
   v2/legacy ratio. The direct measurement confirms it to within 0.4%; the
@@ -1072,7 +1085,6 @@ says `.plain`.
 > zig build zjs -Dzjs_v2_layout=plain             # the A/B diagnostic instrument
 > zig-out/bin/zjs --print-config-signature
 > zig build config-signature-check                # build graph vs shipped binary
-> zig build config-drift-gate                     # can the attestation still fail?
 > ```
 >
 > A signature printed by a `zjs` binary always reads `optimize=ReleaseFast`,
@@ -1113,8 +1125,9 @@ old code"; it was **make V2 the production compiler**, and that is done.
 The gate in force (§0.1.2) is three conditions, jointly. Gate A (`04922a47`)
 adjudicated them on **true production defaults** — the actual shipping
 configuration, not a scratch probe — with four cold binaries and four pairings
-under ABBA sampling. Manifest and per-pairing values: `tools/final-switch/README.md`
-§"Gate A manifest".
+under ABBA sampling. The Gate A orchestration lived in `tools/final-switch/`
+(removed; recover from git history). Per-pairing values are in the table
+below.
 
 | gate | required | measured | state |
 | --- | --- | ---: | --- |
@@ -1329,7 +1342,7 @@ failed**.
 
 The zoo run above is a **standalone** measurement of the release tree against
 pinned qjs. Set beside the frozen reference
-`reports/perf/qjs-align/2026-08-04/dual-closure/zoo/zoo-c1-qjs.json` (candidate
+`reports/perf/qjs-align/2026-08-04/dual-closure/zoo/zoo-c1-qjs.json` (git history; candidate
 C1 at `a9c13b0a`, geomean 0.7126) it reads −0.04% on the geomean, with 13 of 15
 benchmarks inside ±1.7% and **regexp at −2.79%**. That comparison is
 **cross-session** — 2026-08-03T16:16Z against 2026-08-04T14:23Z — so by process

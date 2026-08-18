@@ -41,8 +41,8 @@ internal tests. It is not the public embedding contract.
 - `zjs` and `run-test262` are runtime users. They do not own core concepts.
 - test262-only names and harness shortcuts must stay out of core.
 
-`zig build architecture-check --summary all` enforces the dependency boundary
-and the public API symbol snapshot.
+`tools/architecture/check_deps.js` enforces the dependency boundary. Checkpoint
+and the production gate both run it.
 
 ## Public Shape
 
@@ -68,8 +68,8 @@ zjs.runtime
 Do not introduce a public `Engine` facade as the central API. It hides lifetime
 and dispatch costs that embedders need to control.
 
-Root aliases beyond the current public snapshot are additive only. Do not
-document names as available until they appear in `reports/api/public-symbols.txt`.
+Root aliases are additive only. Do not document names as available until they
+appear in `docs/public-api-contract.md`.
 
 ## Performance Shape
 

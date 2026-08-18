@@ -620,6 +620,20 @@ pub const JSValue = extern struct {
         };
     }
 
+    /// `JS_MarkValue` filter (quickjs.c:6553-6566): OBJECT / FUNCTION_BYTECODE /
+    /// MODULE only. Heap BigInt is refcounted but is not a cycle-list member;
+    /// qjs drops it here with `cmn tag, #3` (tagged tags {-3,-2,-1}).
+    pub inline fn cycleMarkHeader(self: JSValue) ?*gc.Header {
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.deinit_skip_min or p > NanBox.refcount_max) return null;
+            return ptrFromPayload(gc.Header, self.payloadOf());
+        }
+        const tag = self.repr.tag;
+        if (tag > Tag.object or tag < Tag.module) return null;
+        return ptrFromPayload(gc.Header, self.repr.payload);
+    }
+
     pub inline fn dup(self: JSValue) JSValue {
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
@@ -729,6 +743,47 @@ pub const JSValue = extern struct {
         if (hdr.rc == 0) {
             gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
         }
+    }
+
+    /// Property-slot release from `Object.destroyPlainObjectFast`.
+    ///
+    /// The caller has already proved `gc.phase` is neither `.deinit` nor
+    /// `.remove_cycles` (the fast-arm gate in `destroyFromHeader`). That
+    /// matches `free_property` → `JS_FreeValueRT` (quickjs.c:6111 / 697-704):
+    /// the decrement does not reload phase. An object last-ref goes straight
+    /// to the zero-ref queue (`__JS_FreeValueRT` 6471-6483) instead of hopping
+    /// through `JSValue.destroyZeroRef` + `gc.destroyZeroRef`.
+    pub inline fn freeFromPlainObjectDestroy(self: JSValue, rt: anytype) void {
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
+            const hdr = self.refCountWordAssumeRefCounted();
+            std.debug.assert(hdr.rc > 0);
+            hdr.rc -= 1;
+            if (hdr.rc != 0) return;
+            if (p == NanBox.prefixOf(Tag.object)) {
+                // Keep the queue/drain body out of destroyFromHeader
+                // (qjs __JS_FreeValueRT is a separate symbol, 6432).
+                @call(.never_inline, gc.Registry.enqueueZeroRef, .{
+                    &rt.gc, rt, self.refHeaderAssumeObject(),
+                });
+                return;
+            }
+            self.destroyZeroRef(rt);
+            return;
+        }
+        if (!self.requiresRefCount()) return;
+        const hdr = self.refCountWordAssumeRefCounted();
+        std.debug.assert(hdr.rc > 0);
+        hdr.rc -= 1;
+        if (hdr.rc != 0) return;
+        if (self.tagOf() == Tag.object) {
+            @call(.never_inline, gc.Registry.enqueueZeroRef, .{
+                &rt.gc, rt, self.refHeaderAssumeObject(),
+            });
+            return;
+        }
+        self.destroyZeroRef(rt);
     }
 
     /// Read a 16-byte JSValue slot as two 64-bit integer loads (identity under
@@ -1017,6 +1072,24 @@ fn payloadAsI32(payload: u64) i32 {
 fn ptrFromPayload(comptime T: type, payload: u64) ?*T {
     if (payload == 0) return null;
     return @ptrFromInt(payload);
+}
+
+test "cycleMarkHeader matches JS_MarkValue tag set" {
+    const t = std.testing;
+    var dummy: gc.Header = undefined;
+
+    try t.expect(JSValue.int32(1).cycleMarkHeader() == null);
+    try t.expect(JSValue.undefinedValue().cycleMarkHeader() == null);
+    try t.expect(JSValue.nullValue().cycleMarkHeader() == null);
+    try t.expect(JSValue.boolean(true).cycleMarkHeader() == null);
+
+    try t.expectEqual(@as(?*gc.Header, &dummy), JSValue.object(&dummy).cycleMarkHeader());
+    try t.expectEqual(@as(?*gc.Header, &dummy), JSValue.module(&dummy).cycleMarkHeader());
+    try t.expectEqual(@as(?*gc.Header, &dummy), JSValue.functionBytecode(&dummy).cycleMarkHeader());
+
+    // Heap BigInt is refcounted but JS_MarkValue skips it (quickjs.c:6557-6564).
+    try t.expect(JSValue.bigInt(&dummy).cycleMarkHeader() == null);
+    try t.expect(JSValue.bigInt(&dummy).refCountHeader() != null);
 }
 
 test "asInt64 / asUint64 on inline short BigInt and non-BigInt" {

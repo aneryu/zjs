@@ -288,8 +288,14 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
         .previous = rt.active_value_roots,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     _ = try expectObjectArg(rooted_args[0]);
     _ = try expectObjectArg(rooted_args[1]);

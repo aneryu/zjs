@@ -74,8 +74,14 @@ pub fn createForInIterator(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
     defer source_val.free(rt);
 
     const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);

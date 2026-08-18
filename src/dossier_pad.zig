@@ -1,28 +1,38 @@
 //! Layout-lineage padding for the 1A attribution dossier.
 //!
-//! Build layout is not stable enough for a single A/B/C build to settle a
-//! mechanism question: the same source and toolchain can produce `.text`
-//! sections differing by several percent. A dossier therefore samples several
-//! *layout lineages* and treats layout as a blocking factor, so that candidate
-//! effect and codegen effect are estimated separately.
+//! A single A/B does not settle a mechanism question on this host: the same
+//! source delta can flip sign across placements (D10 Zoo +0.53% / −0.58%).
+//! Pads sample that interaction. They are not a shipped layout knob.
 //!
-//! This does not permit padding added to shape one favourable hot layout.
-//! Here padding exists only to sample many layout lineages and average the
-//! lottery out. It is never enabled in a shipped configuration.
+//! Rigid translation of one binary is cheap (P4-01c ≤0.24%). What pads must
+//! still move is the handler island, otherwise an A/B that only changes
+//! dispatch leaves `.text.zjs.op_handlers` nailed and the lineage is blind.
+//! On aarch64 ELF the slots live in `.text.zjs.layout_pad`, KEEP'd at the
+//! start of the island *after* its page-aligned origin so pad N shifts
+//! handler VAs by a non-page multiple. A section *before* the island is
+//! absorbed by ALIGN(MAXPAGESIZE) and pad=3/7 collapse. Other targets
+//! keep the default `.text` placement.
 //!
 //! At `zjs_dossier_layout_pad == 0` this file emits nothing whatsoever, so the
 //! default binary is bit-for-bit what it would be without it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 pub const pad_slots: usize = build_options.zjs_dossier_layout_pad;
+
+const pad_section = switch (builtin.target.ofmt) {
+    .elf => ".text.zjs.layout_pad",
+    .macho => "__TEXT,__text",
+    else => ".text",
+};
 
 comptime {
     if (pad_slots != 0) {
         for (0..pad_slots) |slot| {
             const Slot = struct {
-                fn body(seed: u64) callconv(.c) u64 {
+                fn body(seed: u64) linksection(pad_section) callconv(.c) u64 {
                     // Each slot gets a distinct, non-foldable body so the
                     // linker cannot merge them and every slot really occupies
                     // space in .text.

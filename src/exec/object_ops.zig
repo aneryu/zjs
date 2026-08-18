@@ -503,8 +503,14 @@ fn createBytecodeFunctionObjectInternal(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const fb = functionBytecodeFromValue(rooted_value) orelse return error.InvalidBytecode;
     // qjs `js_closure` (quickjs.c:17369-17417) does not re-validate the
@@ -687,8 +693,14 @@ pub fn constructPrimitiveWrapperWithPrototype(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -747,8 +759,14 @@ pub fn qjsAggregateErrorConstructWithPrototype(
         .values = &root_values,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer cause_val.free(rt);
 
@@ -879,8 +897,14 @@ pub fn qjsSuppressedErrorConstructWithPrototype(
         .previous = rt.active_value_roots,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
@@ -989,8 +1013,14 @@ pub fn qjsErrorConstructWithPrototype(
         .values = &root_values,
         .slices = &root_slices,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     defer cause_val.free(rt);
 
@@ -1803,8 +1833,14 @@ pub fn qjsConstructFinalizationRegistryWithPrototype(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -2118,8 +2154,14 @@ pub fn qjsDestructuringObjectRest(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
     defer value.free(ctx.runtime);
 
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
@@ -2315,8 +2357,14 @@ pub fn createGeneratorObject(
         .values = &root_values,
         .slices = &root_slices,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     // The finalized FB is both the qjs-style execution record and the source
     // of the frame dimensions used for the parameter-prologue allocation.
@@ -2540,6 +2588,51 @@ fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime
     return (if (mapped) ctx.mapped_arguments_shape else ctx.arguments_shape) orelse return error.TypeError;
 }
 
+/// qjs js_build_mapped_arguments (quickjs.c:16215-16266):
+/// `JS_NewObjectFromShape(ctx->mapped_arguments_shape, props)` then one
+/// var-ref table (`get_var_ref` for formals, `js_create_var_ref` for extra
+/// actuals). Kept as its own noinline so the unmapped thrower/accessor
+/// construction does not sit in the sc_list / apply hot I-cache line.
+noinline fn createMappedArgumentsObject(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    args: []core.JSValue,
+) !core.JSValue {
+    const initial_shape = if (ctx.mapped_arguments_shape) |cached|
+        cached
+    else
+        try argumentsPropertyTemplate(ctx.runtime, global, true);
+    const iterator_value = try argumentsIteratorValueOwned(ctx, global);
+    const entries = [_]core.property.Entry{
+        .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
+        .{ .slot = .{ .data = iterator_value } },
+        .{ .slot = .{ .data = frame.current_function.dup() } },
+    };
+    const object = try core.Object.createArgumentsFromShape(
+        ctx.runtime,
+        core.class.ids.mapped_arguments,
+        initial_shape,
+        &entries,
+    );
+    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
+
+    if (args.len == 0) return object.value();
+
+    const refs = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
+    const formal_count = @min(args.len, frame.function.arg_count);
+    var index: usize = 0;
+    while (index < formal_count) : (index += 1) {
+        refs[index] = try frame.captureArg(ctx.runtime, index);
+    }
+    while (index < args.len) : (index += 1) {
+        const initial = value_slot.loadOwned(&args[index]);
+        errdefer initial.free(ctx.runtime);
+        refs[index] = try core.VarRef.createClosed(ctx.runtime, initial);
+    }
+    return object.value();
+}
+
 fn argumentsIteratorValueOwned(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
     // qjs js_build_(mapped_)arguments reads the realm cache with a single
     // `JS_DupValue(ctx, ctx->array_proto_values)` (quickjs.c:16162/16226).
@@ -2581,25 +2674,11 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
         frame.originalArgs()[0..@min(frame.actual_arg_count, frame.originalArgs().len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
+    if (mapped) {
+        return createMappedArgumentsObject(ctx, global, frame, args);
+    }
     const object = blk: {
-        const initial_shape = if (mapped)
-            try argumentsPropertyTemplate(ctx.runtime, global, true)
-        else
-            try argumentsPropertyTemplate(ctx.runtime, global, false);
-        if (mapped) {
-            // qjs js_build_mapped_arguments prop fill (quickjs.c:16225-16227):
-            // int32 length carries no ref, Symbol.iterator and callee
-            // (cur_func) are one JS_DupValue each; the prepared-shape
-            // constructor consumes the cells (owned transfer) instead of
-            // re-dup-ing borrowed slots through the generic path.
-            const iterator_value = try argumentsIteratorValueOwned(ctx, global);
-            const entries = [_]core.property.Entry{
-                .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
-                .{ .slot = .{ .data = iterator_value } },
-                .{ .slot = .{ .data = frame.current_function.dup() } },
-            };
-            break :blk try core.Object.createArgumentsFromShape(ctx.runtime, core.class.ids.mapped_arguments, initial_shape, &entries);
-        }
+        const initial_shape = try argumentsPropertyTemplate(ctx.runtime, global, false);
         // qjs js_build_arguments prop fill (quickjs.c:16161-16164): the callee
         // getset cell owns TWO throw_type_error refs, which
         // fromBorrowedValues' double retain provides; the accessor then
@@ -2617,35 +2696,12 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
     };
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
 
-    if (!mapped) {
-        var dense_elements: []core.JSValue = &.{};
-        if (args.len != 0) {
-            dense_elements = try ctx.runtime.allocRuntime(core.JSValue, args.len);
-            for (args, 0..) |_, index| dense_elements[index] = value_slot.loadOwned(&args[index]);
-        }
-        object.adoptDenseUnmappedArgumentsElementsAssumingEmpty(ctx.runtime, dense_elements);
-        return object.value();
+    var dense_elements: []core.JSValue = &.{};
+    if (args.len != 0) {
+        dense_elements = try ctx.runtime.allocRuntime(core.JSValue, args.len);
+        for (args, 0..) |_, index| dense_elements[index] = value_slot.loadOwned(&args[index]);
     }
-
-    if (args.len > 0) {
-        // qjs fills a local `tab` and installs it once (quickjs.c:16236-16261);
-        // the adopted backing never moves, so derive the typed window once
-        // instead of re-running the bytesAsSlice reinterpret per iteration.
-        const refs = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
-        for (args, 0..) |_, index| {
-            const cell = if (index < frame.function.arg_count) blk: {
-                break :blk try frame.captureArg(ctx.runtime, index);
-            } else blk: {
-                // qjs creates a closed var-ref for each extra actual argument:
-                // it remains mutable through the Arguments object but has no
-                // formal parameter binding in the frame.
-                const initial = value_slot.loadOwned(&args[index]);
-                errdefer initial.free(ctx.runtime);
-                break :blk try core.VarRef.createClosed(ctx.runtime, initial);
-            };
-            refs[index] = cell;
-        }
-    }
+    object.adoptDenseUnmappedArgumentsElementsAssumingEmpty(ctx.runtime, dense_elements);
     return object.value();
 }
 
@@ -3121,8 +3177,14 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const prototype = primitivePrototypeForAccess(rt, global, rooted_primitive) orelse return error.TypeError;
     if (rooted_primitive.isString()) {
@@ -3492,8 +3554,14 @@ pub fn qjsObjectEnumerableOwnPropertiesCall(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     for (keys) |key| {
         if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
@@ -3725,8 +3793,14 @@ pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object,
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -4506,8 +4580,14 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const home = try property_ops.expectObject(rooted_home);
     const brand_atom = try ensureHomeObjectBrand(ctx.runtime, home);
@@ -4631,8 +4711,14 @@ pub noinline fn defineClass(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     if ((flags & 1) != 0) {
         superclass_value = parent_value;
@@ -4794,8 +4880,14 @@ fn defineObjectMethodValue(
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try property_ops.expectObject(obj);
     if (rt.atoms.kind(atom_id) == .private) return error.InvalidBytecode;
@@ -5499,8 +5591,14 @@ pub fn proxyDefineValueForReflectSet(
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
     };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    if (comptime core.runtime.value_root_frames_enabled) {
+        ctx.runtime.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime core.runtime.value_root_frames_enabled) {
+            ctx.runtime.active_value_roots = root_frame.previous;
+        }
+    }
 
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;

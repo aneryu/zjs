@@ -3272,18 +3272,24 @@ pub const Object = extern struct {
         const old_shape_props = object_shape.props()[0..@min(object_shape.prop_count, old_properties.len)];
         self.prop_values = @ptrFromInt(@alignOf(property.Entry));
         for (old_properties, 0..) |entry, index| {
-            const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
-            if (entry_flags.isData()) {
-                entry.slot.data.free(rt);
+            // qjs free_property (quickjs.c:6097-6113): data arm is !TMASK.
+            // kind==data && !deleted is bits 3..5 == 0 (TMASK in 3-4, deleted in 5).
+            const raw_flags: u6 = if (index < old_shape_props.len) old_shape_props[index].flags else 0;
+            if (raw_flags & 0b111000 == 0) {
+                entry.slot.data.freeFromPlainObjectDestroy(rt);
                 continue;
             }
+            const entry_flags = property.Flags.fromBits(raw_flags);
             if (entry_flags.deleted) continue;
             const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
-        @call(.never_inline, shape.Registry.release, .{ &rt.shapes, object_shape });
-        self.shape_ref = finalizingShape();
+        // js_free_shape (quickjs.c:5320-5325): --rc, last-ref outlined.
+        rt.shapes.release(object_shape);
+        // No finalizer on this arm (qjs 6365-6367 is NULL for JS_CLASS_OBJECT).
+        // qjs still writes shape=NULL as a fail-safe before the callback; the
+        // allocation is about to be freed, so the tombstone would be a dead store.
         if (rt.cached_iterator_next_entries.len != 0) {
             @call(.never_inline, Object.clearCachedIteratorNext, .{ self, rt });
         }
@@ -4328,8 +4334,14 @@ pub const Object = extern struct {
             .previous = rt.active_value_roots,
             .values = &root_values,
         };
-        rt.active_value_roots = &root_frame;
-        defer rt.active_value_roots = root_frame.previous;
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime runtime_mod.value_root_frames_enabled) {
+                rt.active_value_roots = root_frame.previous;
+            }
+        }
 
         const target_identity = try weakIdentityFromValue(rt, rooted_target);
         const unregister_token_identity = try weakIdentityFromValue(rt, rooted_unregister_token);
@@ -5184,8 +5196,14 @@ pub const Object = extern struct {
             .previous = rt.active_value_roots,
             .values = &root_values,
         };
-        rt.active_value_roots = &root_frame;
-        defer rt.active_value_roots = root_frame.previous;
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = &root_frame;
+        }
+        defer {
+            if (comptime runtime_mod.value_root_frames_enabled) {
+                rt.active_value_roots = root_frame.previous;
+            }
+        }
 
         const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
         try rt.registerBorrowedReferenceHolder(self);
@@ -5279,9 +5297,17 @@ pub const Object = extern struct {
     /// noinline: this is the rarest of the indexed-read arms, and letting it
     /// inline into `fastDenseArrayElementValue` grew that hot helper enough to
     /// cost 26% cycles on a plain-call benchmark that never touches arguments
-    /// (instructions unchanged — pure layout). Keeping it out of line restores
-    /// the dense arm's code shape.
+    /// (instructions unchanged — pure layout). The hot `OP_get_array_el`
+    /// handler uses `mappedArgumentsIntElementDup` directly (qjs
+    /// JS_GetPropertyValue JS_CLASS_MAPPED_ARGUMENTS, quickjs.c:9047-9049).
     pub noinline fn mappedArgumentsElementDup(self: *const Object, index: u32) ?JSValue {
+        return mappedArgumentsIntElementDup(self, index);
+    }
+
+    /// qjs JS_GetPropertyValue mapped arm (quickjs.c:9047-9049):
+    /// `JS_DupValue(ctx, *p->u.array.u.var_refs[idx]->pvalue)` after
+    /// `idx >= count` reject. Inlined into `op_get_array_el` only.
+    pub inline fn mappedArgumentsIntElementDup(self: *const Object, index: u32) ?JSValue {
         if (self.class_id != class.ids.mapped_arguments) return null;
         const refs = self.argumentsVarRefs();
         if (index >= refs.len) return null;
@@ -7571,7 +7597,199 @@ pub const Object = extern struct {
         return rt.runObjectCycleRemoval();
     }
 
-    fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) align(16) void {
+    /// qjs `JS_MarkFunc` (quickjs.h). Cold-tail walk uses one shared body.
+    const MarkFunc = *const fn (rt: *JSRuntime, header: *gc.Header) void;
+
+    /// Phase selector for the specialized ordinary-object data-slot arm.
+    /// Comptime so Decref / ScanIncref each get a small hot copy with the
+    /// child update inlined (no per-edge `blr`). Rare class-payload tails
+    /// stay in `markChildrenCold`.
+    const MarkMode = enum(u8) { decref, scan_incref, scan_restore };
+
+    inline fn markFuncFor(comptime mode: MarkMode) MarkFunc {
+        return switch (mode) {
+            .decref => gcDecrefChild,
+            .scan_incref => gcScanIncrefChild,
+            .scan_restore => gcScanIncrefChild2,
+        };
+    }
+
+    inline fn isOrdinaryCycleHotObject(self: *const Object) bool {
+        // qjs mark_children OBJECT arm stops after properties when
+        // class_id == JS_CLASS_OBJECT (quickjs.c:6605).
+        return self.class_id == class.ids.object and self.flags.class_payload_kind == .none;
+    }
+
+    /// qjs `gc_decref_child` (quickjs.c:6687-6695).
+    inline fn gcDecrefChildInline(rt: *JSRuntime, p: *gc.Header) void {
+        std.debug.assert(p.meta().rc > 0);
+        p.meta().rc -= 1;
+        if (p.meta().rc == 0 and p.meta().flags.mark) {
+            rt.gc.detachCycleCandidate(p);
+            gc.listAddTail(&rt.gc.tmp_obj_list, p);
+        }
+    }
+
+    fn gcDecrefChild(rt: *JSRuntime, p: *gc.Header) void {
+        gcDecrefChildInline(rt, p);
+    }
+
+    /// qjs `gc_scan_incref_child` (quickjs.c:6719-6728).
+    inline fn gcScanIncrefChildInline(rt: *JSRuntime, p: *gc.Header) void {
+        p.meta().rc += 1;
+        if (p.meta().rc != 1) return;
+        // Unlinked headers are not cycle-list members (heap BigInt used to
+        // reach here via refCountHeader; cycleMarkHeader now matches
+        // JS_MarkValue, but force-GC and mid-construction edges can still
+        // present a non-listed GC header). list_del on prev==null is SEGV.
+        if (p.prev == null) return;
+        gc.listDel(p);
+        rt.gc.restoreCycleCandidate(p);
+        p.meta().flags.mark = false;
+    }
+
+    fn gcScanIncrefChild(rt: *JSRuntime, p: *gc.Header) void {
+        gcScanIncrefChildInline(rt, p);
+    }
+
+    /// qjs `gc_scan_incref_child2` (quickjs.c:6731-6734).
+    inline fn gcScanIncrefChild2Inline(rt: *JSRuntime, p: *gc.Header) void {
+        _ = rt;
+        p.meta().rc += 1;
+    }
+
+    fn gcScanIncrefChild2(rt: *JSRuntime, p: *gc.Header) void {
+        gcScanIncrefChild2Inline(rt, p);
+    }
+
+    inline fn markHeader(rt: *JSRuntime, h: *gc.Header, comptime mode: MarkMode) void {
+        switch (mode) {
+            .decref => gcDecrefChildInline(rt, h),
+            .scan_incref => gcScanIncrefChildInline(rt, h),
+            .scan_restore => gcScanIncrefChild2Inline(rt, h),
+        }
+    }
+
+    const MarkVisitor = struct {
+        rt: *JSRuntime,
+        mark_func: MarkFunc,
+
+        pub fn visitValue(self: MarkVisitor, val: *JSValue) void {
+            // JS_MarkValue (quickjs.c:6553-6566).
+            if (val.cycleMarkHeader()) |h| self.mark_func(self.rt, h);
+        }
+
+        pub fn visitObject(self: MarkVisitor, obj_ptr: *?*Object) void {
+            if (obj_ptr.*) |obj| {
+                if (@intFromPtr(obj) == 0) return;
+                self.mark_func(self.rt, &obj.header);
+            }
+        }
+
+        pub fn visitShape(self: MarkVisitor, shape_ref: *shape.Shape) void {
+            self.mark_func(self.rt, &shape_ref.header);
+        }
+
+        pub fn visitRealm(self: MarkVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
+            if (ctx_ptr.*) |ctx| self.mark_func(self.rt, &ctx.header);
+        }
+
+        pub fn visitModule(self: MarkVisitor, record: *module_mod.ModuleRecord) void {
+            self.mark_func(self.rt, &record.header);
+        }
+
+        pub fn visitWeakCollectionEntry(self: MarkVisitor, entry: *WeakCollectionEntry) void {
+            _ = self;
+            _ = entry;
+        }
+
+        pub fn visitFinalizationCell(self: MarkVisitor, entry: *FinalizationRegistryCell) void {
+            if (entry.keepsHeldValuesAlive()) self.visitValue(&entry.held_value);
+        }
+    };
+
+    fn markUnusualPropertyCold(
+        rt: *JSRuntime,
+        entry: *property.Entry,
+        slot_flags: property.Flags,
+        mark_func: MarkFunc,
+    ) void {
+        const visitor = MarkVisitor{ .rt = rt, .mark_func = mark_func };
+        switch (slot_flags.kind) {
+            .data => unreachable,
+            .accessor => {
+                var getter_value = entry.slot.accessor.getterValue();
+                visitor.visitValue(&getter_value);
+                entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
+                var setter_value = entry.slot.accessor.setterValue();
+                visitor.visitValue(&setter_value);
+                entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
+            },
+            .var_ref => {
+                var cell_value = entry.slot.var_ref.valueRef();
+                visitor.visitValue(&cell_value);
+            },
+            .auto_init => {
+                const realm_header = entry.slot.auto_init.realm_and_id.realmHeader() orelse unreachable;
+                var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
+                visitor.visitRealm(&realm);
+                entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm orelse unreachable).header);
+            },
+        }
+    }
+
+    fn markIteratorNextCacheCold(rt: *JSRuntime, self: *Object, mark_func: MarkFunc) void {
+        const visitor = MarkVisitor{ .rt = rt, .mark_func = mark_func };
+        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
+            if (slot.*) |*stored| visitor.visitValue(stored);
+        }
+    }
+
+    inline fn markPropertyDataSlots(rt: *JSRuntime, self: *Object, comptime mode: MarkMode) void {
+        const traced_prop_count = self.shape_ref.prop_count;
+        for (self.prop_values[0..traced_prop_count], 0..) |*entry, index| {
+            const slot_flags = self.propFlagsAt(index);
+            if (slot_flags.deleted) continue;
+            if (slot_flags.kind == .data) {
+                if (entry.slot.data.cycleMarkHeader()) |h| markHeader(rt, h, mode);
+                continue;
+            }
+            @call(.never_inline, markUnusualPropertyCold, .{ rt, entry, slot_flags, markFuncFor(mode) });
+        }
+    }
+
+    /// Specialized ordinary-object arm (qjs:6572-6603, class_id == OBJECT).
+    /// One small copy per MarkMode so the data-slot `JS_MarkValue` + child
+    /// update inline. Accessor / var_ref / autoinit stay outlined.
+    fn markOrdinaryObjectHot(rt: *JSRuntime, self: *Object, comptime mode: MarkMode) align(16) void {
+        markHeader(rt, &self.shape_ref.header, mode);
+        markPropertyDataSlots(rt, self, mode);
+        if (rt.cached_iterator_next_entries.len != 0) {
+            @call(.never_inline, markIteratorNextCacheCold, .{ rt, self, markFuncFor(mode) });
+        }
+    }
+
+    /// Specialized fast-array arm (qjs js_array_mark, quickjs.c:6204).
+    fn markFastArrayHot(rt: *JSRuntime, self: *Object, comptime mode: MarkMode) align(16) void {
+        markHeader(rt, &self.shape_ref.header, mode);
+        markPropertyDataSlots(rt, self, mode);
+        for (self.arrayElements()) |*stored| {
+            if (stored.cycleMarkHeader()) |h| markHeader(rt, h, mode);
+        }
+    }
+
+    /// Specialized shape arm (qjs:6662-6668).
+    fn markShapeHot(rt: *JSRuntime, header: *gc.Header, comptime mode: MarkMode) align(16) void {
+        const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", header));
+        if (shape_ref.proto) |proto| {
+            if (@intFromPtr(proto) != 0) markHeader(rt, &proto.header, mode);
+        }
+    }
+
+    /// Shared cold walk: non-ordinary objects and non-object GC kinds.
+    /// Single instantiation; visitor is a function pointer.
+    fn markChildrenCold(rt: *JSRuntime, header: *gc.Header, mark_func: MarkFunc) align(16) void {
+        const visitor = MarkVisitor{ .rt = rt, .mark_func = mark_func };
         switch (header.meta().flags.kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
@@ -7607,157 +7825,27 @@ pub const Object = extern struct {
         }
     }
 
-    const DecrefVisitor = struct {
-        registry: *gc.Registry,
-
-        pub fn visitValue(self: DecrefVisitor, val: *JSValue) void {
-            if (val.refCountHeader()) |h| {
-                self.visitHeader(h);
-            }
+    inline fn markOne(rt: *JSRuntime, header: *gc.Header, comptime mode: MarkMode) void {
+        switch (header.meta().flags.kind) {
+            .object => {
+                const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                if (isOrdinaryCycleHotObject(obj)) {
+                    @call(.never_inline, markOrdinaryObjectHot, .{ rt, obj, mode });
+                    return;
+                }
+                if (obj.isArray() and obj.flags.fast_array) {
+                    @call(.never_inline, markFastArrayHot, .{ rt, obj, mode });
+                    return;
+                }
+            },
+            .shape => {
+                @call(.never_inline, markShapeHot, .{ rt, header, mode });
+                return;
+            },
+            else => {},
         }
-
-        pub fn visitObject(self: DecrefVisitor, obj_ptr: *?*Object) void {
-            if (obj_ptr.*) |obj| {
-                if (@intFromPtr(obj) == 0) return;
-                self.visitHeader(&obj.header);
-            }
-        }
-
-        pub fn visitShape(self: DecrefVisitor, shape_ref: *shape.Shape) void {
-            self.visitHeader(&shape_ref.header);
-        }
-
-        pub fn visitRealm(self: DecrefVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
-            if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
-        }
-
-        pub fn visitModule(self: DecrefVisitor, record: *module_mod.ModuleRecord) void {
-            self.visitHeader(&record.header);
-        }
-
-        pub fn visitWeakCollectionEntry(self: DecrefVisitor, entry: *WeakCollectionEntry) void {
-            _ = self;
-            _ = entry;
-        }
-
-        pub fn visitFinalizationCell(self: DecrefVisitor, entry: *FinalizationRegistryCell) void {
-            if (entry.keepsHeldValuesAlive()) self.visitValue(&entry.held_value);
-        }
-
-        fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
-            // Every owned edge contributes one ref, so it cannot already be
-            // zero before its matching trial decrement. QuickJS makes the same
-            // invariant explicit in gc_decref_child and performs the decrement
-            // without a production branch.
-            std.debug.assert(h.meta().rc > 0);
-            h.meta().rc -= 1;
-            // QuickJS gc_decref_child immediately moves an already-scanned
-            // child whose trial refcount reaches zero to tmp_obj_list.
-            if (h.meta().rc == 0 and h.meta().flags.mark) {
-                self.registry.detachCycleCandidate(h);
-                gc.listAddTail(&self.registry.tmp_obj_list, h);
-            }
-        }
-    };
-
-    const ScanIncrefVisitor = struct {
-        registry: *gc.Registry,
-
-        pub fn visitValue(self: ScanIncrefVisitor, val: *JSValue) void {
-            if (val.refCountHeader()) |h| {
-                self.visitHeader(h);
-            }
-        }
-
-        pub fn visitObject(self: ScanIncrefVisitor, obj_ptr: *?*Object) void {
-            if (obj_ptr.*) |obj| {
-                if (@intFromPtr(obj) == 0) return;
-                self.visitHeader(&obj.header);
-            }
-        }
-
-        pub fn visitShape(self: ScanIncrefVisitor, shape_ref: *shape.Shape) void {
-            self.visitHeader(&shape_ref.header);
-        }
-
-        pub fn visitRealm(self: ScanIncrefVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
-            if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
-        }
-
-        pub fn visitModule(self: ScanIncrefVisitor, record: *module_mod.ModuleRecord) void {
-            self.visitHeader(&record.header);
-        }
-
-        pub fn visitWeakCollectionEntry(self: ScanIncrefVisitor, entry: *WeakCollectionEntry) void {
-            _ = self;
-            _ = entry;
-        }
-
-        pub fn visitFinalizationCell(self: ScanIncrefVisitor, entry: *FinalizationRegistryCell) void {
-            if (entry.keepsHeldValuesAlive()) self.visitValue(&entry.held_value);
-        }
-
-        fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
-            // qjs gc_scan_incref_child (quickjs.c:6719-6728):
-            //   rc++; if (rc == 1) { list_del; list_add_tail(gc_obj); mark = 0; }
-            // qjs only feeds this to cycle-list members (JS_MarkValue skips
-            // JS_TAG_BIG_INT). zjs visitValue uses refCountHeader(), so a heap
-            // BigInt is trial-decref'd and can come back rc 0→1 while never
-            // having been linked. Membership is the cyclic list itself (the
-            // former in_cycle_list bit): unlinked nodes have prev == null.
-            // list_del on those is SEGV — the Array.fromAsync
-            // asyncitems-arraylike-promise conformance fixture.
-            h.meta().rc += 1;
-            if (h.meta().rc != 1) return;
-            if (h.prev == null) return;
-            gc.listDel(h);
-            self.registry.restoreCycleCandidate(h);
-            h.meta().flags.mark = false;
-        }
-    };
-
-    const ScanRestoreVisitor = struct {
-        rt: *JSRuntime,
-
-        pub fn visitValue(self: ScanRestoreVisitor, val: *JSValue) void {
-            if (val.refCountHeader()) |h| {
-                self.visitHeader(h);
-            }
-        }
-
-        pub fn visitObject(self: ScanRestoreVisitor, obj_ptr: *?*Object) void {
-            if (obj_ptr.*) |obj| {
-                if (@intFromPtr(obj) == 0) return;
-                self.visitHeader(&obj.header);
-            }
-        }
-
-        pub fn visitShape(self: ScanRestoreVisitor, shape_ref: *shape.Shape) void {
-            self.visitHeader(&shape_ref.header);
-        }
-
-        pub fn visitRealm(self: ScanRestoreVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
-            if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
-        }
-
-        pub fn visitModule(self: ScanRestoreVisitor, record: *module_mod.ModuleRecord) void {
-            self.visitHeader(&record.header);
-        }
-
-        pub fn visitWeakCollectionEntry(self: ScanRestoreVisitor, entry: *WeakCollectionEntry) void {
-            _ = self;
-            _ = entry;
-        }
-
-        pub fn visitFinalizationCell(self: ScanRestoreVisitor, entry: *FinalizationRegistryCell) void {
-            if (entry.keepsHeldValuesAlive()) self.visitValue(&entry.held_value);
-        }
-
-        fn visitHeader(self: ScanRestoreVisitor, h: *gc.Header) void {
-            _ = self;
-            h.meta().rc += 1;
-        }
-    };
+        @call(.never_inline, markChildrenCold, .{ rt, header, markFuncFor(mode) });
+    }
 
     fn gcRemoveWeakObjects(rt: *JSRuntime) ObjectGraphError!void {
         sweepDeadWeakRootSlots(rt);
@@ -7889,13 +7977,11 @@ pub const Object = extern struct {
 
         gc.listInit(&rt.gc.tmp_obj_list);
 
-        // Phase 1: gc_decref
+        // Phase 1: gc_decref (quickjs.c:6697-6717)
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                traceChildren(rt, h, DecrefVisitor{
-                    .registry = &rt.gc,
-                });
+                markOne(rt, h, .decref);
                 // Match qjs gc_decref: mark the current node after visiting
                 // its children, then move it immediately if its trial count
                 // is zero. GcObjectIterator captured `next` before tracing.
@@ -7907,7 +7993,7 @@ pub const Object = extern struct {
             }
         }
 
-        // Phase 2: gc_scan
+        // Phase 2: gc_scan (quickjs.c:6736-6747)
         {
             // Walk the live list dynamically: reviving a trial-zero child moves
             // it from tmp_obj_list to the registry tail, so it is visited without
@@ -7917,19 +8003,18 @@ pub const Object = extern struct {
                 if (h == &rt.gc.gc_obj_list) break;
                 std.debug.assert(h.meta().rc > 0);
                 h.meta().flags.mark = false;
-                traceChildren(rt, h, ScanIncrefVisitor{
-                    .registry = &rt.gc,
-                });
+                markOne(rt, h, .scan_incref);
                 cursor = h.next;
             }
         }
 
-        // Phase 3: restore refcounts of the detached dead-cycle partition.
+        // Phase 3: restore refcounts of the detached dead-cycle partition
+        // (quickjs.c:6749-6753, gc_scan_incref_child2).
         {
             var cursor = rt.gc.tmp_obj_list.next;
             while (cursor) |h| {
                 if (h == &rt.gc.tmp_obj_list) break;
-                traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
+                markOne(rt, h, .scan_restore);
                 cursor = h.next;
             }
         }
@@ -10686,6 +10771,26 @@ pub const Object = extern struct {
         return true;
     }
 
+    /// qjs `js_array_push` store (quickjs.c:42776-42787). Caller already
+    /// proved `JS_CLASS_ARRAY && fast_array && can_extend_fast_array &&
+    /// length==count && writable` and `count + values.len <= INT32_MAX`.
+    /// No named-property scan: qjs writes `u.array.u.values` directly.
+    pub fn appendFastArrayPushValues(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
+        const added: u32 = @intCast(values.len);
+        const new_len = self.u.array.count + added;
+        if (new_len > self.u.array.capacity) {
+            try self.ensureArrayElementCapacity(rt, new_len);
+        }
+        var element_index: usize = @intCast(self.u.array.count);
+        for (values) |item| {
+            self.u.array.values[element_index] = item.dup();
+            element_index += 1;
+        }
+        self.setFastArrayCountAssumeCapacity(new_len);
+        if (new_len > self.u.array.length) self.u.array.length = new_len;
+        if (added != 0) self.markIndexedProperties(rt);
+    }
+
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
         std.debug.assert(self.isArray());
         std.debug.assert(self.u.array.count == 0);
@@ -12996,8 +13101,14 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime runtime_mod.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const arr = try Object.createArray(rt, prototype);
     errdefer Object.destroyFromHeader(rt, &arr.header);
@@ -13027,8 +13138,14 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime runtime_mod.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     const object = try ownEntriesExpectObject(rooted_value);
     const owned_keys = try object.ownKeys(rt);
@@ -13129,8 +13246,14 @@ pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValu
         .previous = rt.active_value_roots,
         .values = &root_values,
     };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+    if (comptime runtime_mod.value_root_frames_enabled) {
+        rt.active_value_roots = &root_frame;
+    }
+    defer {
+        if (comptime runtime_mod.value_root_frames_enabled) {
+            rt.active_value_roots = root_frame.previous;
+        }
+    }
 
     target = try stringIteratorPrimitiveValue(rooted_receiver);
     defer target.free(rt);

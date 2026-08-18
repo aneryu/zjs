@@ -53,7 +53,7 @@ doc comment only. The legacy backend cannot observe it, so the frozen Gate A
 legacy baselines remain ground truth and re-deriving them would only have
 resampled the build lottery.
 
-Raw artifacts, every run in this record:
+Raw artifacts, every run in this record (git history):
 `reports/perf/qjs-align/2026-08-04/dual-closure/` — `zoo/` (6 full-15 runs),
 `code-load/` (10 dedicated 12-sample runs), `test262.log`,
 `zlib-attribution.log`. Each JSON carries both binaries' sha256, the effective

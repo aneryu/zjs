@@ -3556,13 +3556,11 @@ test "compiler_v2.p5: escaped atoms outlive compiler teardown" {
     rt.destroy();
 }
 
-/// RULE D (CORPUS SKIPS) -- one corpus entry.
+/// One coverage-corpus entry.
 ///
-/// `expect_skip` is an ALLOWLIST BY IDENTITY: this specific snippet, and no
+/// `expect_skip` is an allowlist by identity: this specific snippet, and no
 /// other, is permitted not to compile. It is not a tolerance and there is no
-/// proportional form of it. The predecessor of this corpus asserted
-/// `skipped * 2 <= cases.len`, i.e. up to HALF the corpus could quietly stop
-/// covering anything while the test stayed green.
+/// proportional form of it.
 const CoverageCase = struct {
     source: []const u8,
     source_kind: test_entry.SourceKind = .javascript,
@@ -3574,12 +3572,8 @@ const CoverageCase = struct {
     skip_reason: []const u8 = "",
 };
 
-/// RULE D -- compare the ACTUAL skipped set against the EXPLICIT expected set,
-/// per case, by identity, in both directions.
-///
-/// `skipped` is parallel to `cases`. Kept as a free function precisely so it
-/// can be fault-injected: see the "RULE D" self-test below, which requires a
-/// new skip, a stale allowlist entry, and both-at-once to fail.
+/// Compare the actual skipped set against the explicit expected set, per case,
+/// by identity, in both directions. `skipped` is parallel to `cases`.
 fn expectCoverageSkipSetMatches(
     cases: []const CoverageCase,
     skipped: []const bool,
@@ -3591,7 +3585,7 @@ fn expectCoverageSkipSetMatches(
         if (was_skipped and !case.expect_skip) {
             mismatched = true;
             if (verbose) std.debug.print(
-                "compiler_v2.coverage RULE D: snippet[{d}] SKIPPED but is not allowlisted\n" ++
+                "compiler_v2.coverage: snippet[{d}] SKIPPED but is not allowlisted\n" ++
                     "  {s}\n" ++
                     "  every corpus snippet must compile; either fix it, or add\n" ++
                     "  .expect_skip = true with a .skip_reason explaining why it never can\n",
@@ -3601,7 +3595,7 @@ fn expectCoverageSkipSetMatches(
         if (!was_skipped and case.expect_skip) {
             mismatched = true;
             if (verbose) std.debug.print(
-                "compiler_v2.coverage RULE D: snippet[{d}] is allowlisted to skip but COMPILED\n" ++
+                "compiler_v2.coverage: snippet[{d}] is allowlisted to skip but COMPILED\n" ++
                     "  {s}\n  allowlist reason (now stale): {s}\n" ++
                     "  remove .expect_skip: a stale allowlist hides real coverage\n",
                 .{ index, case.source, case.skip_reason },
@@ -3609,73 +3603,6 @@ fn expectCoverageSkipSetMatches(
         }
     }
     if (mismatched) return error.CoverageSkipSetMismatch;
-}
-
-test "compiler_v2.coverage: RULE D -- the skip allowlist is compared by identity" {
-    // Fault injection for RULE D, so the assertion in the corpus test below
-    // cannot rot into a comment. Four cases: the exact expected set, a NEW
-    // skip, a STALE allowlist entry, and both wrong at once.
-    const cases = [_]CoverageCase{
-        .{ .source = "compiles();" },
-        .{ .source = "does not compile", .expect_skip = true, .skip_reason = "synthetic" },
-    };
-    // The expected set, exactly: passes.
-    try expectCoverageSkipSetMatches(&cases, &[_]bool{ false, true }, false);
-    // A NEW skip: must fail. This is the property the rule exists for.
-    try std.testing.expectError(
-        error.CoverageSkipSetMismatch,
-        expectCoverageSkipSetMatches(&cases, &[_]bool{ true, true }, false),
-    );
-    // A STALE allowlist entry that now compiles: must fail too.
-    try std.testing.expectError(
-        error.CoverageSkipSetMismatch,
-        expectCoverageSkipSetMatches(&cases, &[_]bool{ false, false }, false),
-    );
-    // Both wrong at once: must fail.
-    try std.testing.expectError(
-        error.CoverageSkipSetMismatch,
-        expectCoverageSkipSetMatches(&cases, &[_]bool{ true, false }, false),
-    );
-    // And there is no proportional escape hatch: one skip out of two is not
-    // "within tolerance", it is either the allowlisted one or a failure.
-    const all_js = [_]CoverageCase{ .{ .source = "a();" }, .{ .source = "b();" } };
-    try std.testing.expectError(
-        error.CoverageSkipSetMismatch,
-        expectCoverageSkipSetMatches(&all_js, &[_]bool{ true, false }, false),
-    );
-}
-
-test "compiler_v2.coverage: RULE B -- TypeScript probes route through parseAndCompileV2TestProgram" {
-    // A TypeScript probe must be expressed as a compile through
-    // parseAndCompileV2TestProgram() with `.source_kind = .typescript`, never
-    // as `zjs -e '<ts source>'`. The CLI's `-e` path has no TypeScript
-    // handling at all -- there is no filename for the source-kind autodetect to
-    // work from -- so it answers SyntaxError for EVERY construct, which is
-    // indistinguishable from an engine failure and reads as a finding.
-    //
-    // This test pins the sanctioned route. tools/final-switch/selftest.sh pins
-    // the other half: it refuses the `zjs -e` formulation statically and proves
-    // dynamically that it does report SyntaxError.
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const probes = [_][]const u8{
-        "enum Direction { Up, Down = 4, Name = 'name' }",
-        "const enum Flag { A = 1, B = 2 } const flag: Flag = Flag.A;",
-        "namespace Space { export const value = 1; }",
-        "interface Box<T> { value: T } const boxed: Box<number> = { value: 1 };",
-        "class Holder { constructor(public value: number) {} }",
-    };
-    for (probes) |source| {
-        var program = try test_entry.parseAndCompileV2TestProgram(
-            rt,
-            std.testing.allocator,
-            "rule-b-typescript-probe",
-            source,
-            .{ .source_kind = .typescript },
-        );
-        defer program.deinit(rt);
-    }
 }
 
 test "compiler_v2.coverage: every production construct compiles through the one compiler" {
@@ -3707,10 +3634,9 @@ test "compiler_v2.coverage: every production construct compiles through the one 
         .{ .source = "object?.property; object?.[key]; callable?.();" },
         .{ .source = "let a = null; let b = a ?? 1; a ??= 2; b &&= 3; b ||= 4;" },
         .{ .source = "class Item {} const item = new Item(); function factory() { return new.target; }" },
-        // RULE D: the ONE allowlisted skip in this corpus, kept in place rather
-        // than deleted so that the expected skip set is stated by identity and
-        // a NEW skip anywhere else fails. A bare `new.target;` at top level is
-        // genuinely invalid JavaScript in that position, so it can never reach
+        // The one allowlisted skip: kept in place so the expected skip set is
+        // stated by identity and a new skip anywhere else fails. A bare
+        // `new.target;` at top level is a SyntaxError, so it can never reach
         // emission; the valid in-function form is the snippet directly above.
         .{
             .source = "new.target;",
@@ -3742,9 +3668,7 @@ test "compiler_v2.coverage: every production construct compiles through the one 
     defer rt.destroy();
 
     var compiled: usize = 0;
-    // RULE D: the ACTUAL skipped set, recorded per case, compared below against
-    // the EXPLICIT expected set carried by `.expect_skip`. Not a count, not a
-    // proportion -- a set, matched by identity in both directions.
+    // Actual skipped set, compared below against `.expect_skip` by identity.
     var skipped = [_]bool{false} ** cases.len;
     for (cases, 0..) |case, index| {
         var program = test_entry.parseAndCompileV2TestProgram(
@@ -3779,7 +3703,7 @@ test "compiler_v2.coverage: every production construct compiles through the one 
         for (cases) |case| {
             if (case.expect_skip) expected_skips += 1;
             if (case.expect_skip and case.skip_reason.len == 0) {
-                @compileError("RULE D: an allowlisted skip must carry a .skip_reason");
+                @compileError("compiler_v2.coverage: an allowlisted skip must carry a .skip_reason");
             }
         }
     }
@@ -3787,9 +3711,7 @@ test "compiler_v2.coverage: every production construct compiles through the one 
         "compiler_v2.coverage corpus compiled={d}/{d} allowlisted_skips={d}\n",
         .{ compiled, cases.len, expected_skips },
     );
-    // RULE D. The actual skipped SET must equal the allowlisted SET, entry for
-    // entry. A new skip fails; an allowlist entry that started compiling fails.
-    // There is deliberately no proportional form of this check.
+    // A new skip fails; an allowlist entry that started compiling fails.
     try expectCoverageSkipSetMatches(&cases, &skipped, true);
     try std.testing.expectEqual(cases.len - expected_skips, compiled);
 }

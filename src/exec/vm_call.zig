@@ -694,9 +694,12 @@ pub inline fn callResolvedExecDirect(
     );
 }
 
-/// In-hole tombstone (PDFJS-K rework). NMFD body shrank 0x7b4→0x394 when
-/// the assume terminal was outlined; the hole slid w35 off-island helpers.
-/// Never-taken `cbnz` + `.space 0x2a8` restores the 0x7b4 footprint.
+/// In-hole tombstone (PDFJS-K rework). NMFD live body shrank when the
+/// assume terminal was outlined; the hole slid w35 off-island helpers.
+/// Never-taken `cbnz` + `.space 0x294` keeps the bytes *inside this
+/// symbol* (aarch64-linux-musl RF span 0x7cc, next symbol adjacent).
+/// Extracting the pad as a following `export fn` does not work:
+/// Zig/LLVM emit order is not declaration order (pad landed 2MB away).
 export var zjs_nmfd_tombstone_keep: u8 = 0;
 
 /// Outlined native c_function fast dispatch for `op_call_method`.
@@ -718,7 +721,8 @@ pub noinline fn nativeMethodFastDispatch(
     argc: u16,
 ) align(32) !NativeFastDispatchResult {
     if (zjs_nmfd_tombstone_keep != 0) {
-        // Live 0x520 after NativeValue (was 0x50c). 0x520+0x294=0x7b4.
+        // In-symbol hole. Do not extract: a following export is not
+        // the next `.text` symbol.
         asm volatile (".space 0x294");
         unreachable;
     }
@@ -761,7 +765,7 @@ pub noinline fn nativeMethodFastDispatch(
     return .hit;
 }
 
-// Root the NMFD tombstone so LTO cannot strip the pad.
+// Root the NMFD tombstone so LTO cannot strip the in-body pad.
 export const zjs_nmfd_tombstone: *const anyopaque = @ptrCast(&nativeMethodFastDispatch);
 
 /// K1: same terminal as `callResolvedNativeMethod` without repeating the
@@ -769,10 +773,15 @@ export const zjs_nmfd_tombstone: *const anyopaque = @ptrCast(&nativeMethodFastDi
 /// `noinline` keeps NativeCallEnvironment / exec_direct spills out of the
 /// NMFD prologue (0x1c0→0x1d0 constitution lesson). Cold section so this
 /// 0x334 body is not an NMFD neighbor (w35 13-member packing).
-const nmfd_term_section = switch (builtin.target.ofmt) {
-    .elf => ".text.zjs.nmfd_term",
-    else => ".text",
-};
+// Zig rejects empty `linksection`. ELF keeps the custom pin; other
+// formats use their default text section so the function is unpinned
+// (Mach-O LLVM rejects ELF-style `.text`).
+const nmfd_term_section = if (builtin.target.ofmt == .elf)
+    ".text.zjs.nmfd_term"
+else if (builtin.target.ofmt == .macho)
+    "__TEXT,__text"
+else
+    ".text";
 
 noinline fn callResolvedNativeMethodAssumeCFunction(
     ctx: *core.JSContext,
