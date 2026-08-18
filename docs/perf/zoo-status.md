@@ -5,53 +5,83 @@ claim. It is not the `perf-self-check` self-baseline gate.
 
 | Field | Value |
 | --- | --- |
-| Date | 2026-08-18 (r3) |
-| zjs | `main@0280e278` |
+| Date | 2026-08-19 (campaign zoo-r0 close) |
+| zjs | `main@0c32a71c` |
 | Bellard QuickJS | `04be246` |
-| Protocol | official 8-sample zoo, parallel clusters 5-9/15-19 (new baseline protocol; not directly comparable to earlier serial-cpu19 entries) |
-| Geomean (zjs / QuickJS throughput) | **1.0335** |
+| Protocol | **pad0 + parallel clusters 5-9/15-19, 15×8** (standing official protocol per user/driver ruling 2026-08-19; serial CPU-19 retained for adjudication cross-checks) |
+| Measured image | `zjs-r0-headline-final-1bded06a` `.text` `29e0f286…` (bistable build recorded; shipped basin = independent-cold-cache basin) |
+| Geomean (zjs / QuickJS throughput) | **1.0304** |
 | At or above 1.0 | **11 / 15** |
+
+Full provenance, window attestation and the per-round build-bistability
+record: `zoo-r0-measure/headline-r0-final.md` (direct after-vs-qjs sample;
+no synthesized ratios).
+
+## Superseded (do not cite)
+
+| Claim | Number | Why dead |
+| --- | --- | --- |
+| r3 headline (2026-08-18, `0280e278`) | geo 1.0335; pdfjs 0.916; earley-boyer 0.870; box2d 0.950; typescript 0.966 | Contaminated field: two orphaned 100%-CPU `test-exec` processes pinned inside the official cluster (CPUs 17-18) since 2026-08-14. |
+| post-r3 reconciliation | geo 1.0163 (pdfjs 0.809, typescript 1.035) | Same contaminated field; ±11pp swings are not engine. |
+
+The clean-field re-baseline that replaced both is campaign zoo-r0 Gate 0
+(2026-08-18 evening): serial CPU-19 geomean **1.0259**, parallel-calibrated
+**1.0292**, throughput MDE 0.53%, layout geomean band 0.33pp
+(`zoo-r0-measure/BASELINE-R0.md`). The r3 "1.0335" was
+contamination-inflated mainly through pdfjs (0.916 contaminated vs 0.846
+clean, confirmed on both protocols).
 
 Scores are throughput; the ratio is `zjs score / QuickJS score`, so values at
 or above `1.0` indicate that zjs recorded the same or higher score in that
 benchmark.
 
-| Benchmark | QuickJS | zjs | zjs / QuickJS |
-| --- | ---: | ---: | ---: |
-| earley-boyer | 4,435.0 | 3,856.5 | 0.870 |
-| pdfjs | 7,186.0 | 6,581.5 | 0.916 |
-| box2d | 7,227.0 | 6,867.0 | 0.950 |
-| typescript | 21,929.5 | 21,188.5 | 0.966 |
-| splay | 6,714.5 | 6,825.0 | 1.016 |
-| deltablue | 1,405.0 | 1,436.5 | 1.022 |
-| richards | 1,613.5 | 1,686.5 | 1.045 |
-| gbemu | 12,536.0 | 13,355.5 | 1.065 |
-| mandreel | 1,983.0 | 2,128.0 | 1.073 |
-| crypto | 1,843.0 | 1,987.0 | 1.078 |
-| raytrace | 3,313.5 | 3,593.5 | 1.085 |
-| code-load | 31,953.5 | 35,050.0 | 1.097 |
-| zlib | 3,948.5 | 4,347.5 | 1.101 |
-| navier-stokes | 4,174.0 | 4,598.0 | 1.102 |
-| regexp | 794.0 | 921.5 | 1.161 |
-| **Throughput geomean** |  |  | **1.0335** |
+| Benchmark | zjs / QuickJS | vs Gate 0 serial |
+| --- | ---: | ---: |
+| pdfjs | 0.8492 | +0.36pp |
+| earley-boyer | 0.8859 | +0.83pp |
+| box2d | 0.9550 | +0.06pp |
+| typescript | 0.9578 | −0.41pp |
+| splay | 1.0129 | +0.52pp |
+| deltablue | 1.0284 | +0.29pp |
+| richards | 1.0411 | +0.69pp |
+| gbemu | 1.0690 | +1.40pp |
+| crypto | 1.0770 | −0.21pp |
+| mandreel | 1.0911 | +1.25pp |
+| raytrace | 1.0940 | +0.97pp |
+| code-load | 1.0945 | −1.45pp |
+| navier-stokes | 1.1051 | +0.16pp |
+| zlib | 1.1095 | +1.37pp |
+| regexp | 1.1386 | +1.06pp |
+| **Throughput geomean** | **1.0304** | **+0.45pp** |
 
-The suite also reports two latency sub-scores outside the 15-row throughput
-geomean:
+Latency sub-scores (reported, out of headline geomean): SplayLatency 0.993,
+MandreelLatency 1.169.
 
-| Latency sub-score | QuickJS | zjs | zjs / QuickJS |
-| --- | ---: | ---: | ---: |
-| SplayLatency | 15,215.5 | 15,148.5 | 0.996 |
-| MandreelLatency | 13,223.5 | 15,826.0 | 1.197 |
+Geomean parity is the published result. The stricter "every bench ≥ 1.0"
+bar is not met: pdfjs 0.849, earley-boyer 0.886, box2d 0.955,
+typescript 0.958 remain below parity.
 
-2026-08-18 delta over `39b8e894`: three case-derived faithful knives landed —
-ValueRootFrame production gating, `Array.push`/`splice` call-shell alignment
-to `js_call_c_function`/`js_array_push`, and `destroyPlainObjectFast`
-alignment to `free_object`. deltablue and splay crossed 1.0. Second wave
-(r2): Array named-atom fast proto walk, single markChildren body, frameless
-flat string ===. Third wave (r3): in-island default instanceof walk,
-hasInstance probe economics, mapped-arguments create/read slimming. All nine
-knives are folded into `0280e278`. Protocol switched to parallel clusters per
-driver ruling.
+## Campaign zoo-r0 (2026-08-18/19) — what landed and what closed
+
+One product mechanism landed: **island-thin wide `goto`/`goto16`**
+(`main@0c32a71c`, coldStd 51→12 insn, frame 64→0, matching the `goto8`
+template; qjs runs 14 insn in-CASE). Full five-gate chain is in the commit
+message; Earley-Boyer is the main beneficiary (+0.83pp).
+
+Everything else was adjudicated closed with numbers, none by assertion:
+proof-carrying numeric/string opcodes (static proveability 0/1560 TS,
+9/4752 Box2D), `object_from_shape` (eligible literals ≪ G1 bar),
+`get_array_el` read-forwarding Form A (0/3 fixed-work targets; successor
+pairs ≈0 dynamically), frame-prologue slimming (predicted 1.34%, measured
+0.16%), dense-get re-proof (0.16–0.26%), rope/string equality region
+(event ceilings ≤0.36%), `get_field` arms (own-hit already 7 insn cheaper
+than qjs). Per-mechanism verdict pointers:
+`zoo-r0-integration/MECHANISM-LEDGER-R0.md`.
+
+The shared remainder — front-end density/miss tax (2.1–2.4× FE-stall on
+all four laggards) and the +10–12 cyc/call family constant — is documented
+as an architecture-tier evidence pack (`DEFERRED_TO_ARCHITECTURE`). The
+PLAN §10 architecture trigger did not fire this round.
 
 Do not cite the 2026-06-13 QuickJS-ng microbench files or older 0.93 geomean
 handoffs as current. Those artifacts were removed from the active tree; recover
