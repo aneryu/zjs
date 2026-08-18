@@ -5,7 +5,7 @@ const runner_threaded_io: Io = Io.Threaded.global_single_threaded.io();
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const test_fns = builtin.test_functions;
-    var args = std.process.Args.Iterator.init(init.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.args, std.heap.page_allocator);
     defer args.deinit();
     _ = args.skip();
     var filter: ?[]const u8 = null;
