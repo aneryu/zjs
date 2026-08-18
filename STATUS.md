@@ -17,7 +17,7 @@ source-phase imports, and PTC.
 ## 性能
 
 分数的权威来源是 `docs/perf/zoo-status.md`（本页不再自报一套 zoo 数字）。
-当前 headline（zoo-status 2026-08-18 r3，`main@f9446a1d`，官方 8 样本并行
+当前 headline（zoo-status 2026-08-18 r3，`main@0280e278`，官方 8 样本并行
 cluster 协议）：geomean **1.0335**，11/15 项 ≥ 1.0。落后项见 zoo-status
 （pdfjs / earley-boyer / typescript / box2d）。
 
