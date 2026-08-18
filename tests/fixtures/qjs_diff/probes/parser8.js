@@ -1,1 +1,0 @@
-print(typeof async function(){});
