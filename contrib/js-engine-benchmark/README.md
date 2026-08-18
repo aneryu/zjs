@@ -4,11 +4,16 @@
 `ahaoboy/js-engine-setup` (`ei https://github.com/<owner>/<repo>`). Adding
 `zjs` therefore needs two small upstream PRs plus a published CLI archive.
 
-This token cannot fork those repositories. Open the PRs from a GitHub account
-that can, or wait on:
+Opened from the `aneryu` account:
 
-- https://github.com/ahaoboy/js-engine-benchmark/issues/39
-- https://github.com/ahaoboy/js-engine-setup/issues/2
+- https://github.com/ahaoboy/js-engine-setup/pull/3
+- https://github.com/ahaoboy/js-engine-benchmark/pull/40
+
+The matching issues are
+[#2](https://github.com/ahaoboy/js-engine-setup/issues/2) and
+[#39](https://github.com/ahaoboy/js-engine-benchmark/issues/39).
+[#38](https://github.com/ahaoboy/js-engine-benchmark/issues/38) is an
+accidental empty `probe` from `cursor[bot]`; this token cannot close it.
 
 A linux x86_64 nightly archive is already published:
 

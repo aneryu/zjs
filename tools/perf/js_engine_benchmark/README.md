@@ -37,5 +37,8 @@ Checked-in scores live in [docs/perf/js-engine-benchmark.md](../../../docs/perf/
 Dated JSON dumps stay local.
 
 To appear on the published table, publish the CLI archives from
-`.github/workflows/release-cli.yml` and open the two patches under
+`.github/workflows/release-cli.yml`. The listing PRs are
+[js-engine-setup#3](https://github.com/ahaoboy/js-engine-setup/pull/3) and
+[js-engine-benchmark#40](https://github.com/ahaoboy/js-engine-benchmark/pull/40).
+Patches live under
 [`contrib/js-engine-benchmark/`](../../../contrib/js-engine-benchmark/README.md).

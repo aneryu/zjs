@@ -107,8 +107,11 @@ Parser contract: `python3 tools/perf/verify/test_run_js_engine_benchmark.py`.
 ## Upstream listing
 
 The published table is filled by `ahaoboy/js-engine-setup` (`ei`) plus
-`info.json`. Ready-to-open patches live in
+`info.json`. `.github/workflows/release-cli.yml` publishes the stripped
+CLI archives `ei` needs. Listing PRs from the `aneryu` account:
+
+- https://github.com/ahaoboy/js-engine-setup/pull/3
+- https://github.com/ahaoboy/js-engine-benchmark/pull/40
+
+Copy-paste patches remain in
 [`contrib/js-engine-benchmark/`](../../contrib/js-engine-benchmark/README.md).
-`.github/workflows/release-cli.yml` publishes the stripped CLI archives
-`ei` needs. This environment cannot fork `ahaoboy/js-engine-benchmark`, so
-the listing PRs have to be opened from a GitHub account that can.
