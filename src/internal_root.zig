@@ -56,6 +56,12 @@ pub const compiler_v2 = @import("compiler_v2/root.zig");
 /// consumes. Surfaced on the CLI as `zjs --print-config-signature`.
 pub const config_signature = @import("config_signature.zig");
 
+/// Internal CLI probe. The public embedder root does not export this.
+/// Named for what it does (print to stderr); the exec helper is unchanged.
+pub fn printSmallInlineProbe() void {
+    exec.small_inline.writeProbeFile();
+}
+
 test {
     const std = @import("std");
 

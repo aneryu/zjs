@@ -21,10 +21,6 @@ pub const default_gc_threshold = zjs_binding.default_gc_threshold;
 /// closed on --profile-opcodes when false instead of emitting zero counts.
 pub const opcode_profile_build_enabled: bool = @import("build_options").zjs_enable_opcode_profile;
 
-pub fn dumpSmallInlineProbe() void {
-    zjs_exec.small_inline.writeProbeFile();
-}
-
 pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
     zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName);
     return zjs_binding.activateOpcodeProfile(profile);
@@ -34,9 +30,7 @@ pub const value = struct {
     pub const Value = zjs_binding.JSValue;
     pub const Scope = zjs_binding.HandleScope;
     pub const Local = zjs_binding.LocalHandle;
-    pub const Ref = zjs_binding.JSValueHandle;
     pub const Persistent = zjs_binding.JSValueHandle;
-    pub const WeakRef = zjs_binding.WeakPersistentValue;
     pub const Weak = zjs_binding.WeakPersistentValue;
     pub const String = zjs_binding.JSString;
     pub const Bytes = zjs_binding.JSBytes;
@@ -126,7 +120,6 @@ pub const host = struct {
     pub const Function = zjs_binding.ExternalHostCallFn;
     pub const Finalizer = zjs_binding.ExternalHostFinalizer;
     pub const FunctionOptions = zjs_binding.ExternalFunctionOptions;
-    pub const NativeClass = zjs_binding.binding.JSObject;
     pub const NativeBinding = zjs_binding.binding;
     pub const NativeObject = object.Object;
     pub const PropName = zjs_binding.PropNameID;
@@ -191,8 +184,6 @@ pub const host = struct {
 
 pub const object = struct {
     pub const Object = opaque {};
-    pub const Builder = struct {};
-    pub const Template = struct {};
     pub const MemoryAccount = zjs_core.memory.MemoryAccount;
     pub const SharedArrayBufferRef = zjs_binding.SharedArrayBufferRef;
     pub const String = zjs_core.string.String;
@@ -396,8 +387,8 @@ pub const object = struct {
             /// Release every pin held by this guard (idempotent). Called at the
             /// end of the borrow scope (host-call return).
             pub fn release(self: *BorrowGuard) void {
-                if (self.view_pin) |*pin| pin.release();
-                if (self.buffer_pin) |*pin| pin.release();
+                if (self.view_pin) |*pin| pin.deinit();
+                if (self.buffer_pin) |*pin| pin.deinit();
                 self.view_pin = null;
                 self.buffer_pin = null;
             }
@@ -1092,36 +1083,6 @@ pub const module = struct {
             else => err,
         };
     }
-};
-
-pub const compile = struct {
-    pub const SourceKind = module.Host.ModuleKind;
-    pub const Options = struct {};
-    pub const Cache = struct {};
-};
-
-pub const @"error" = struct {
-    pub const Info = struct {
-        message: []const u8,
-        stack: ?[]const u8 = null,
-        path: ?[]const u8 = null,
-        line: ?u32 = null,
-        column: ?u32 = null,
-        kind: Kind = .runtime,
-    };
-    pub const Kind = enum {
-        syntax,
-        reference,
-        type,
-        range,
-        uri,
-        eval,
-        runtime,
-    };
-    pub const Span = struct {
-        start: usize,
-        end: usize,
-    };
 };
 
 pub const job = struct {

@@ -11,6 +11,19 @@ claim. It is not the `perf-self-check` self-baseline gate.
 | Geomean (zjs / QuickJS throughput) | **1.0335** |
 | At or above 1.0 | **11 / 15** |
 
+**Measurement-field advisory (2026-08-18 evening).** A post-campaign
+reconciliation run (identical `.text` to `f9446a1d`, bit-for-bit) returned
+geomean 1.0163 with per-bench swings up to ±11pp in both directions
+(pdfjs 0.809, typescript 1.035, earley-boyer reproduced at 0.869). Root
+cause found afterwards: two orphaned 100%-CPU `test-exec` processes from a
+deleted worktree had been running since 2026-08-14, one pinned to CPUs
+17-18 — inside the official cluster. Both the r3 headline above and the
+reconciliation number were taken with that contamination present. The r3
+figure stays recorded but must be re-established by a clean-field rerun
+before it is cited further. The maintainability campaign itself is
+performance-neutral by construction: its final production `.text` is
+bit-identical to the pre-campaign binary.
+
 Geomean parity is the published result. The project’s stricter “every bench
 ≥ 1.0” bar is not met.
 

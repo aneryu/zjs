@@ -59,7 +59,7 @@ object.free(rt);
 var persistent: zjs.JSValue.Persistent = try rt.createPersistentValue(local.get());
 defer persistent.deinit();
 
-scope.exit();
+scope.deinit();
 
 const answer = try ctx.getProperty(persistent.get(), "answer");
 defer answer.free(rt);

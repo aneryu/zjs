@@ -98,7 +98,7 @@ test "embedding cookbook host-held values example compiles and roots correctly" 
     var persistent: zjs.JSValue.Persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
 
-    scope.exit();
+    scope.deinit();
 
     const answer = try ctx.getProperty(persistent.get(), "answer");
     defer answer.free(rt);
@@ -408,4 +408,295 @@ test "embedding public API core signatures stay source-compatible" {
         try std.testing.expect(!@hasDecl(zjs, "PropNameID"));
         try std.testing.expect(!@hasDecl(zjs, "binding"));
     }
+}
+
+fn NamespaceType(comptime namespace: anytype) type {
+    return switch (@typeInfo(@TypeOf(namespace))) {
+        .type => namespace,
+        else => @TypeOf(namespace),
+    };
+}
+
+fn expectPublicDeclSnapshot(
+    comptime label: []const u8,
+    comptime namespace: anytype,
+    comptime expected: []const []const u8,
+) !void {
+    @setEvalBranchQuota(20000);
+    const decls = @typeInfo(NamespaceType(namespace)).@"struct".decls;
+    var missing: usize = 0;
+    var extra: usize = 0;
+    inline for (expected) |name| {
+        if (!@hasDecl(NamespaceType(namespace), name)) {
+            std.debug.print("{s}: missing public name {s}\n", .{ label, name });
+            missing += 1;
+        }
+    }
+    inline for (decls) |decl| {
+        var found = false;
+        inline for (expected) |name| {
+            if (std.mem.eql(u8, decl.name, name)) found = true;
+        }
+        if (!found) {
+            std.debug.print("{s}: unexpected public name {s}\n", .{ label, decl.name });
+            extra += 1;
+        }
+    }
+    if (missing != 0 or extra != 0) {
+        std.debug.print("{s}: actual names ({d}):\n", .{ label, decls.len });
+        inline for (decls) |decl| std.debug.print("    \"{s}\",\n", .{decl.name});
+        return error.TestExpectedEqual;
+    }
+    try std.testing.expectEqual(expected.len, decls.len);
+}
+
+// Checked-in public-surface names. This is not a frozen API snapshot (the
+// historical check_public_api.zig / architecture-update-api-snapshot step
+// was removed because the surface was not frozen). Adding or removing a
+// public name must update this list in the same commit.
+const public_root_decls = [_][]const u8{
+    "runtime",
+    "JSRuntime",
+    "JSContext",
+    "ffi",
+    "JSValue",
+    "RuntimeOptions",
+    "RuntimeMemoryUsage",
+    "OpcodeProfile",
+    "default_stack_size",
+    "default_gc_threshold",
+    "opcode_profile_build_enabled",
+    "activateOpcodeProfile",
+    "value",
+    "host",
+    "object",
+    "context",
+    "module",
+    "job",
+};
+const public_value_decls = [_][]const u8{
+    "Value",
+    "Scope",
+    "Local",
+    "Persistent",
+    "Weak",
+    "String",
+    "Bytes",
+    "undefinedValue",
+    "nullValue",
+    "boolean",
+    "int32",
+    "float64",
+    "numberFromU64",
+    "numberFromI64",
+    "bigIntFromI64",
+    "bigIntFromU64",
+    "createString",
+    "appendRawString",
+    "appendString",
+    "toOwnedString",
+    "toIntegerOrInfinity",
+    "isTruthy",
+};
+const public_host_decls = [_][]const u8{
+    "Call",
+    "Function",
+    "Finalizer",
+    "FunctionOptions",
+    "NativeBinding",
+    "NativeObject",
+    "PropName",
+    "defineScriptArgs",
+    "defineArgvGlobals",
+    "evalGlobalScriptSource",
+    "evalGlobalScriptValue",
+};
+const public_object_decls = [_][]const u8{
+    "Object",
+    "MemoryAccount",
+    "SharedArrayBufferRef",
+    "String",
+    "toValue",
+    "arrayLength",
+    "promiseResult",
+    "promiseIsRejected",
+    "OwnDataProperty",
+    "forEachOwnDataProperty",
+    "Buffer",
+    "createPlain",
+    "createError",
+    "createArray",
+    "createArrayValue",
+    "createArrayBuffer",
+    "fromValue",
+    "isCallableValue",
+    "isPromiseObject",
+    "isPromiseValue",
+    "isArray",
+    "isArrayBufferObject",
+    "isTypedArrayObject",
+    "typedArrayByteLength",
+    "arrayBufferConstructLength",
+    "typedArrayConstructFullBufferOwned",
+    "getProperty",
+    "getOwnIndexPropertyValue",
+    "defineValueProperty",
+    "defineHiddenValueProperty",
+    "defineAccessorProperty",
+    "defineStringProperty",
+    "defineHiddenStringProperty",
+    "defineIntProperty",
+    "defineHiddenIntProperty",
+    "defineStringArrayGlobal",
+    "constructorPrototypeObject",
+    "appendArrayValue",
+};
+const public_context_decls = [_][]const u8{
+    "Options",
+    "EvalMode",
+    "EvalOptions",
+    "EvalTiming",
+    "DataPropertyOptions",
+    "PropertyAccessOptions",
+    "PropertyDescriptor",
+    "ErrorOptions",
+    "ScriptEvalOptions",
+    "FunctionCallOptions",
+    "globalObject",
+    "callFunction",
+};
+const public_module_decls = [_][]const u8{
+    "Key",
+    "Source",
+    "Host",
+    "ResolveResult",
+    "LoadResult",
+    "evalFileGraphWithHost",
+};
+const public_job_decls = [_][]const u8{
+    "DrainOptions",
+    "DrainResult",
+    "drain",
+};
+const public_runtime_decls = [_][]const u8{
+    "EventLoop",
+    "EventLoopOptions",
+    "EventLoopRunResult",
+    "runUntilIdle",
+    "cleanupAtomicsWaitersForContext",
+    "wakeAtomicsWaitersForRuntimes",
+    "detachArrayBuffer",
+    "evalFileModuleGraphWithOutput",
+    "resolveModuleSpecifier",
+    "Plugin",
+    "PluginInstallOptions",
+};
+const public_ffi_decls = [_][]const u8{
+    "PropNameID",
+    "abi_version",
+    "magic",
+    "supported_features",
+    "Feature",
+    "featureBit",
+    "Endian",
+    "Target",
+    "DescriptorHeader",
+    "ValidationError",
+    "validateHeader",
+    "BorrowedBytes",
+    "MutableBytes",
+    "JSValueSlice",
+    "StringPolicy",
+    "StringLifetime",
+    "StringDescriptor",
+    "stringUtf8",
+    "cString",
+    "BytesPolicy",
+    "BytesDeinitFn",
+    "OwnedBytesOptions",
+    "BytesLifetime",
+    "Bytes",
+    "BytesDescriptor",
+    "bytes",
+    "HostTypeId",
+    "OpaqueHostObject",
+    "HostTraceVisitor",
+    "HostObjectFinalizer",
+    "HostObjectTracer",
+    "HostObjectOwner",
+    "HostObjectOptions",
+    "HostObjectDescriptor",
+    "hostObject",
+    "PropNameDescriptor",
+    "propName",
+    "ResolvedPropNames",
+    "resolvePropNames",
+    "Status",
+    "CreateOpaqueObjectFn",
+    "UnwrapOpaqueObjectFn",
+    "GetPropNameFn",
+    "OpaqueObjectServices",
+    "PropNameServices",
+    "HostServices",
+    "CallFrame",
+    "Trampoline",
+    "DescriptorExport",
+    "descriptor_symbol",
+    "ZigCall",
+    "trampoline",
+    "BindingOptions",
+    "binding",
+    "bindingWithOptions",
+    "BindingDescriptor",
+    "PluginDescriptor",
+    "Plugin",
+    "validatePlugin",
+    "validateHostObject",
+    "validatePropName",
+    "LoadError",
+    "LoadedPlugin",
+    "descriptorFromExport",
+    "statusFromError",
+    "js_value_layout_hash",
+};
+
+test "public API surface snapshot matches the checked-in name lists" {
+    if (@hasDecl(zjs, "config_signature")) return;
+
+    var failed = false;
+    expectPublicDeclSnapshot("zjs", zjs, &public_root_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.value", zjs.value, &public_value_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.host", zjs.host, &public_host_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.object", zjs.object, &public_object_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.context", zjs.context, &public_context_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.module", zjs.module, &public_module_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.job", zjs.job, &public_job_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.runtime", zjs.runtime, &public_runtime_decls) catch {
+        failed = true;
+    };
+    expectPublicDeclSnapshot("zjs.ffi", zjs.ffi, &public_ffi_decls) catch {
+        failed = true;
+    };
+    if (failed) return error.TestExpectedEqual;
+
+    // Known debt (backlog H9): JSValue is the public value type and still
+    // publishes internal helpers. The count is pinned so a leak expansion
+    // is visible; do not call names such as freeObjectAssumeObject*.
+    const jsvalue_decl_count = @typeInfo(zjs.JSValue).@"struct".decls.len;
+    try std.testing.expectEqual(@as(usize, 89), jsvalue_decl_count);
+    try std.testing.expect(@hasDecl(zjs.JSValue, "freeObjectAssumeObjectDuringActiveBytecode"));
 }

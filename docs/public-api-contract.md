@@ -2,8 +2,10 @@
 
 This document is the active public Zig API authority for embedders. Keep it in
 sync with `src/root.zig`, `src/binding/`, and `src/runtime/public.zig`. The
-declaration surface is still moving; do not treat the current root exports as
-a frozen name list.
+name lists in `src/tests/embedding_examples.zig` are the executable check:
+adding or removing a public name must update those arrays in the same
+commit. They are not a freeze of the API, and they are not the removed
+`check_public_api.zig` / `architecture-update-api-snapshot` tool.
 
 ## Public Entry
 
@@ -21,14 +23,14 @@ The stable public groups are:
 - `zjs.object` for low-level object helpers;
 - `zjs.host` for host callbacks, native bindings, native classes, and property
   names;
-- `zjs.context`, `zjs.module`, `zjs.job`, and `zjs.error` for explicit helper
+- `zjs.context`, `zjs.module`, and `zjs.job` for explicit helper
   families;
 - `zjs.runtime` for runtime policy helpers and dynamic plugins;
 - `zjs.ffi` for dynamic plugin descriptors and C ABI structures.
 
-The intended groups above are the contract. Review `src/root.zig` when a
-change adds or removes a public name; there is no mechanical symbol snapshot
-while the surface is still moving.
+The intended groups above are the contract. The embedding snapshot test
+lists every current public declaration on those groups. Update the list when
+the surface changes.
 
 ## Compatibility Rules
 
@@ -45,6 +47,26 @@ are `zjs.value.String` and `zjs.value.Bytes`, with nested aliases on
 `zjs.JSValue`. The public property-name token is `zjs.host.PropName`. Root
 spellings such as `zjs.JSBytes` or `zjs.PropNameID` are intentionally not part
 of the current contract.
+
+## Known surface deviations
+
+These names are on the public module today and are recorded rather than
+hidden:
+
+- `zjs.RuntimeMemoryUsage` is a root export. Embedders read it from
+  `JSRuntime.memoryUsage()`.
+- `zjs.opcode_profile_build_enabled` reports whether the binary was built
+  with per-opcode profiling. The CLI uses it to fail closed on
+  `--profile-opcodes`.
+- `zjs.ffi.PropNameID` is reachable through the plugin ABI even though the
+  embedder root does not export `zjs.PropNameID`. Host Zig code should keep
+  using `zjs.host.PropName`.
+
+`JSValue` currently publishes 89 public declarations, including internal
+helpers such as `freeObjectAssumeObject` and
+`freeObjectAssumeObjectDuringActiveBytecode`. That leak is known debt
+(backlog H9). Cookbook and embedding examples must not call those internal
+names.
 
 ## Runtime And Context
 
@@ -94,6 +116,29 @@ zjs.value.Weak
 
 Do not store raw `JSValue` fields in long-lived host state unless they are
 protected by a persistent handle or another documented public root.
+
+## Ownership verbs
+
+Public lifetime methods use three verbs:
+
+- `deinit` destroys the receiver. Use it for handle scopes, persistent
+  handles, weak handles, and native pins.
+- `take` transfers ownership out of the receiver. `JSValue.Persistent.take`
+  removes the persistent root and returns the rooted `JSValue`.
+- `release` decrements a reference count or drops a borrowed pin. Keep this
+  spelling on `zjs.value.Bytes.Store`, `zjs.object.Buffer.BorrowGuard`, and
+  `zjs.host.PropName`.
+
+`HandleScope.deinit` is idempotent: an early `scope.deinit()` before a
+`defer scope.deinit()` is the supported way to close a scope early.
+
+`JSValue.Persistent.destroy(rt)` is a by-value compatibility wrapper. It
+asserts that `rt` matches the handle's runtime, then drops the root. Prefer
+`deinit` on a mutable handle. It is not a transfer (`take`) and is not
+equivalent to `deinit` as a method signature.
+
+`NativePin` exposes only `deinit`. The previous `NativePin.release`
+self-destruct spelling is gone.
 
 ## Strings, Bytes, And Property Names
 
@@ -157,6 +202,7 @@ modules as public contract.
 The current public API contract is covered by:
 
 - `docs/embedding-cookbook.md`;
-- `src/tests/embedding_examples.zig`;
+- `src/tests/embedding_examples.zig`, including the public-surface name
+  snapshot (active only when `zjs` is the true public facade);
 - public API contract and production failure-path tests in
   `src/tests/engine_production.zig`.

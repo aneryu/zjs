@@ -33,14 +33,21 @@ pub const default_stack_size = core.runtime.default_stack_size;
 pub const default_gc_threshold = core.runtime.default_gc_threshold;
 
 pub const prop_name = @import("prop_name.zig");
-pub const string = @import("string.zig");
-pub const bytes = @import("bytes.zig");
 pub const binding = @import("binding.zig");
 pub const ffi = @import("ffi.zig");
 
 pub const PropNameID = prop_name.PropNameID;
-pub const JSString = string.JSString;
-pub const JSBytes = bytes.JSBytes;
+pub const JSString = core.JSValue.String;
+pub const JSBytes = core.JSValue.Bytes;
+
+pub const string = struct {
+    pub const JSString = core.JSValue.String;
+};
+
+pub const bytes = struct {
+    pub const JSBytes = core.JSValue.Bytes;
+    pub const BytesError = core.JSValue.Bytes.Error;
+};
 
 pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
     return core.profile.activate(profile);
@@ -93,4 +100,14 @@ test "JSValue lifetime names are aliases, not wrappers" {
     try std.testing.expect(!@hasDecl(JSBytes.Store, "borrowed"));
     try std.testing.expect(!@hasDecl(JSBytes.Store, "fromBorrowed"));
     try std.testing.expect(!@hasDecl(ffi, "asyncBinding"));
+}
+
+test "binding JSString is the core JSValue string view" {
+    const std = @import("std");
+    try std.testing.expect(JSString == core.JSValue.String);
+}
+
+test "binding JSBytes is the core JSValue byte view" {
+    const std = @import("std");
+    try std.testing.expect(JSBytes == core.JSValue.Bytes);
 }

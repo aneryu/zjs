@@ -2,10 +2,37 @@
 
 ## Unreleased
 
-Target 0.2.0. Maintainability campaign (2026-08-18): breaking public-API
-cleanup is approved for this cycle; hot-path structural refactors are
-deferred to `docs/maintainability-backlog.md` and land only under the
-refactor-policy gates.
+Target **0.2.0-dev** (unpublished). Maintainability campaign (2026-08-18):
+breaking public-API cleanup is approved for this cycle; hot-path structural
+refactors are deferred to `docs/maintainability-backlog.md` and land only
+under the refactor-policy gates.
+
+### 0.2.0 breaking public API
+
+- Removed empty public shells with no in-tree users:
+  `zjs.object.Builder`, `zjs.object.Template`, the `zjs.compile` namespace
+  (`SourceKind` / `Options` / `Cache`), and the `zjs.error` namespace
+  (`Info` / `Kind` / `Span`). Migration: delete those names; they had no
+  producers.
+- Removed dual handle aliases. `zjs.value.Ref` → `zjs.value.Persistent`;
+  `zjs.value.WeakRef` → `zjs.value.Weak`; `zjs.host.NativeClass` →
+  `zjs.host.NativeBinding.JSObject`.
+- Ownership verbs: `JSValue.Persistent.release()` (transfer) is now
+  `take()`. `HandleScope.exit()` is gone; use `deinit()` (idempotent, so
+  an early close is another `deinit()`). `NativePin.release()` is gone;
+  use `deinit()`. `Persistent.destroy(rt)` remains as a by-value
+  compatibility wrapper. `Store` / `BorrowGuard` / `PropName.release`
+  are unchanged.
+- `dumpSmallInlineProbe` is no longer a public root export. The CLI probe
+  is internal `printSmallInlineProbe`.
+- `PropNameID.getProperty` now returns `GetPropertyError` instead of
+  `DynamicImportError`. The error members are the same.
+- Binding `string.zig` / `bytes.zig` forwarding shells are folded into
+  `binding/root.zig`. Public `JSString` / `JSBytes` names are unchanged.
+- `build.zig.zon` version is `0.2.0-dev`.
+- Embedding tests now carry a same-file public-name list (not a freeze, not
+  the removed `check_public_api.zig` tool). Adding or removing a public
+  name must update that list in the same commit.
 
 - Architecture `check_deps.js` now enforces compiler_v2 layering and scans
   `tools/` / `tests/` files that import the `zjs` module. The duplicate

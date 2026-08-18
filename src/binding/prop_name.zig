@@ -1,6 +1,11 @@
 const std = @import("std");
 const core = @import("../core/root.zig");
 
+/// Errors `PropNameID.getProperty` can return. Same members as the object
+/// getter it forwards to; the name is the property-get operation, not dynamic
+/// import.
+pub const GetPropertyError = @typeInfo(@typeInfo(@TypeOf(core.Object.getProperty)).@"fn".return_type.?).error_union.error_set;
+
 /// Interned property name for binding/install-time dispatch.
 ///
 /// Phase 1 treats this as a long-lived/static name owned by the caller. The
@@ -24,7 +29,7 @@ pub const PropNameID = extern struct {
         try object.defineOwnProperty(rt, raw(self), descriptor);
     }
 
-    pub fn getProperty(self: PropNameID, object: *core.Object) core.context.DynamicImportError!core.JSValue {
+    pub fn getProperty(self: PropNameID, object: *core.Object) GetPropertyError!core.JSValue {
         return object.getProperty(raw(self));
     }
 
@@ -41,7 +46,7 @@ test "PropNameID interns and releases a static property name" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const name = try PropNameID.internStatic(rt, "kernelName");
+    const name = try PropNameID.internStatic(rt, "bindingName");
     defer name.release(rt);
 
     try std.testing.expect(name.eql(name));
@@ -50,5 +55,6 @@ test "PropNameID interns and releases a static property name" {
         .@"struct" => true,
         else => false,
     });
-    try std.testing.expectEqualStrings("kernelName", name.debugName(rt).?);
+    try std.testing.expectEqualStrings("bindingName", name.debugName(rt).?);
+    try std.testing.expect(GetPropertyError == core.context.DynamicImportError);
 }

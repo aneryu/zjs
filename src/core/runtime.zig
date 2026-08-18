@@ -503,14 +503,16 @@ pub const JSValueHandle = struct {
         runtime.destroyPersistentRootSlot(slot);
     }
 
-    /// Compatibility spelling for the previous persistent handle API.
+    /// Compatibility spelling: by-value wrapper that asserts `rt` matches the
+    /// handle's runtime, then drops the root. Prefer `deinit` on a mutable handle.
     pub fn destroy(self: JSValueHandle, rt: *JSRuntime) void {
         if (self.runtime) |runtime| std.debug.assert(runtime == rt);
         var owned = self;
         owned.deinit();
     }
 
-    pub fn release(self: *JSValueHandle) JSValue {
+    /// Transfer ownership of the rooted value out of the handle.
+    pub fn take(self: *JSValueHandle) JSValue {
         const runtime = self.runtime orelse return JSValue.undefinedValue();
         const slot = self.slot orelse return JSValue.undefinedValue();
         const value = runtime.takePersistentRootSlot(slot);
@@ -547,7 +549,10 @@ pub const HandleScope = struct {
     }
 
     pub fn deinit(self: *HandleScope) void {
-        self.exit();
+        if (!self.active) return;
+        std.debug.assert(self.start <= self.runtime.local_root_slots.len);
+        self.runtime.clearLocalRootSlotsFrom(self.start);
+        self.active = false;
     }
 
     /// Takes ownership of `value`.
@@ -563,13 +568,6 @@ pub const HandleScope = struct {
     /// Duplicates `value` before storing it.
     pub fn localDup(self: *HandleScope, value: JSValue) !LocalHandle {
         return self.local(value.dup());
-    }
-
-    pub fn exit(self: *HandleScope) void {
-        if (!self.active) return;
-        std.debug.assert(self.start <= self.runtime.local_root_slots.len);
-        self.runtime.clearLocalRootSlotsFrom(self.start);
-        self.active = false;
     }
 };
 
@@ -627,17 +625,13 @@ pub const NativePin = struct {
     runtime: ?*JSRuntime = null,
     header: ?*gc.Header = null,
 
-    pub fn release(self: *NativePin) void {
+    pub fn deinit(self: *NativePin) void {
         const runtime = self.runtime orelse return;
         const header = self.header orelse return;
         self.runtime = null;
         self.header = null;
         runtime.gc.unpinHeader(header);
         gc.release(runtime, header);
-    }
-
-    pub fn deinit(self: *NativePin) void {
-        self.release();
     }
 };
 
@@ -3550,7 +3544,7 @@ test "value handle uses runtime persistent root slot" {
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
     try std.testing.expect(handle.get().isObject());
 
-    const released = handle.release();
+    const released = handle.take();
     defer released.free(&rt);
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
     try std.testing.expect(released.isObject());

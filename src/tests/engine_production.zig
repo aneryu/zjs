@@ -497,7 +497,7 @@ test "production embedding roots host-held values with public handles" {
     var persistent: zjs.JSValue.Persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
 
-    scope.exit();
+    scope.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
 

@@ -13,6 +13,7 @@ pub const libs = internal.libs;
 pub const runtime = internal.runtime;
 pub const compiler_v2 = internal.compiler_v2;
 pub const config_signature = internal.config_signature;
+pub const printSmallInlineProbe = internal.printSmallInlineProbe;
 
 pub const RuntimeError = internal.RuntimeError;
 pub const HostError = internal.HostError;
@@ -64,8 +65,6 @@ pub const host = internal.public_api.host;
 pub const object = internal.public_api.object;
 pub const context = internal.public_api.context;
 pub const module = internal.public_api.module;
-pub const compile = internal.public_api.compile;
-pub const @"error" = internal.public_api.@"error";
 pub const job = internal.public_api.job;
 
 // QCP-1: the unified suite proves its OWN effective configuration at compile

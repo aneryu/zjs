@@ -6096,7 +6096,7 @@ test "gc heap accounting verifier catches pinned header flag drift" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     const value = obj.value();
     var pin = (try core.runtime.pinValueForNative(rt, value)).?;
-    defer pin.release();
+    defer pin.deinit();
     value.free(rt);
 
     try rt.gc.verifyHeapAccounting(rt);
@@ -6556,7 +6556,7 @@ test "handle scope local keeps object alive until scope exits" {
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
-    scope.exit();
+    scope.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
 
     _ = try rt.tryRunObjectCycleRemoval();
@@ -6582,7 +6582,7 @@ test "handle scope locals do not clear persistent handles created inside scope" 
     try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
 
-    scope.exit();
+    scope.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
 
@@ -6612,12 +6612,12 @@ test "native pin retains direct object and counts nested pins" {
     try std.testing.expectEqual(@as(i32, 2), object.header.meta().rc);
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
-    first_pin.release();
+    first_pin.deinit();
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
     try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
 
-    second_pin.release();
+    second_pin.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pinned_cell_count);
     try expectNoLiveGc(rt);
 }
