@@ -5,6 +5,9 @@ on:
     - cron: "0 18 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 # Performance gates are never run in CI. The measurement contract forbids
 # publishing performance numbers from shared runners.
 
@@ -28,8 +31,6 @@ jobs:
   linux-x86_64:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    # advisory until first green run on x86-64 (never executed on this arch before); driver flips to required
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,12 +43,24 @@ jobs:
           node-version: "24"
       - run: zig build engine-production-gate --summary all
       - run: zig build test -Doptimize=ReleaseSafe --summary all
+      - name: Verify benchmark CLI contract
+        run: |
+          test "$(uname -m)" = "x86_64"
+          expected="zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
+          test "$(zig-out/bin/zjs --print-config-signature)" = "$expected"
+      - name: Package Linux binary
+        run: |
+          mkdir -p release
+          tar -C zig-out/bin -czf release/zjs-x86_64-unknown-linux-gnu.tar.gz zjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zjs-x86_64-unknown-linux-gnu
+          path: release/zjs-x86_64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
 
   macos-smoke:
     runs-on: macos-latest
     timeout-minutes: 60
-    # advisory until first green run on macOS (never executed on this arch before); driver flips to required
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,3 +70,98 @@ jobs:
           version: "0.16.0"
       - run: zig build zjs --summary all
       - run: zig build smoke --summary all
+      - name: Verify benchmark CLI contract
+        run: |
+          test "$(uname -m)" = "arm64"
+          expected="zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
+          test "$(zig-out/bin/zjs --print-config-signature)" = "$expected"
+      - name: Package macOS binary
+        run: |
+          mkdir -p release
+          tar -C zig-out/bin -czf release/zjs-aarch64-apple-darwin.tar.gz zjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zjs-aarch64-apple-darwin
+          path: release/zjs-aarch64-apple-darwin.tar.gz
+          if-no-files-found: error
+
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build zjs --summary all
+      - run: zig build smoke --summary all
+      - name: Verify benchmark CLI contract
+        shell: pwsh
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+            throw "Expected an x86_64 Windows runner, got $env:PROCESSOR_ARCHITECTURE"
+          }
+          $expected = "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
+          $actual = (& .\zig-out\bin\zjs.exe --print-config-signature | Out-String).Trim()
+          if ($actual -ne $expected) {
+            throw "Unexpected zjs configuration signature: $actual"
+          }
+      - name: Package Windows binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path zig-out\bin\zjs.exe -DestinationPath release\zjs-x86_64-pc-windows-msvc.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zjs-x86_64-pc-windows-msvc
+          path: release/zjs-x86_64-pc-windows-msvc.zip
+          if-no-files-found: error
+
+  release:
+    needs: [linux-arm64, linux-x86_64, macos-smoke, windows-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: zjs-x86_64-unknown-linux-gnu
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: zjs-aarch64-apple-darwin
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: zjs-x86_64-pc-windows-msvc
+          path: release
+      - name: Verify release assets
+        run: |
+          expected=(
+            zjs-x86_64-unknown-linux-gnu.tar.gz
+            zjs-aarch64-apple-darwin.tar.gz
+            zjs-x86_64-pc-windows-msvc.zip
+          )
+          for asset in "${expected[@]}"; do
+            test -s "release/$asset"
+          done
+          test "$(find release -maxdepth 1 -type f | wc -l)" -eq "${#expected[@]}"
+          sha256sum release/zjs-* > release/SHA256SUMS
+      - name: Publish nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag --force nightly "$GITHUB_SHA"
+          git push --force origin refs/tags/nightly
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --title "Nightly"
+            gh release upload nightly release/* --clobber
+          else
+            gh release create nightly release/* --title "Nightly" --verify-tag --notes "Automated multi-platform nightly build from $GITHUB_SHA."
+          fi

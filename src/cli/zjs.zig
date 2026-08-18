@@ -482,9 +482,9 @@ fn elapsedNanosSince(start: u64) u64 {
 }
 
 fn monotonicNanos() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const nanos = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    return if (nanos <= 0) 0 else @intCast(nanos);
 }
 
 fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.context.EvalMode) zjs.context.EvalMode {

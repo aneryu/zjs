@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
+const platform_clock = @import("../platform_clock.zig");
 
 const JSRuntime = core.JSRuntime;
 const Object = core.Object;
@@ -41,9 +42,7 @@ fn elapsedNanosSince(start: u64) u64 {
 }
 
 fn monotonicNanos() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    return platform_clock.monotonicNanos();
 }
 
 fn initWithOptionsImpl(

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const platform_clock = @import("../platform_clock.zig");
 
 const memory = @import("memory.zig");
 const atom = @import("atom.zig");
@@ -3624,9 +3625,6 @@ test "external hard memory pressure requests urgent major gc" {
 /// Wall-clock microseconds for the Math.random seed (qjs js_random_init,
 /// quickjs.c:47373, gettimeofday-based). Falls back to 1 on clock failure.
 pub fn newRealmRandomSeed() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 1;
-    const micros = @as(i128, ts.sec) * std.time.us_per_s + @divTrunc(@as(i128, ts.nsec), std.time.ns_per_us);
-    const seed: u64 = @truncate(@as(u128, @bitCast(micros)));
+    const seed: u64 = @bitCast(platform_clock.realtimeMicros());
     return if (seed == 0) 1 else seed;
 }

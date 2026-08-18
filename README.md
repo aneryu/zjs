@@ -90,6 +90,11 @@ not complete support for every ECMAScript or host feature. See
 
 Requires [Zig 0.16.0](https://ziglang.org/download/).
 
+Prebuilt nightly CLIs for Linux x86_64, macOS ARM64, and Windows x86_64 are
+published on the [Nightly release](https://github.com/aneryu/zjs/releases/tag/nightly).
+They are development snapshots; verify downloads against the attached
+`SHA256SUMS` file.
+
 ```sh
 git clone https://github.com/aneryu/zjs.git
 cd zjs

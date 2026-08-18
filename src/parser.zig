@@ -20091,6 +20091,7 @@ pub const parser_core = struct {
 };
 pub const compile_entry = struct {
     const std = @import("std");
+    const platform_clock = @import("platform_clock.zig");
 
     const atom = @import("core/atom.zig");
     const JSRuntime = @import("core/runtime.zig").JSRuntime;
@@ -20369,9 +20370,7 @@ pub const compile_entry = struct {
     }
 
     fn monotonicNanos() u64 {
-        var ts: std.c.timespec = undefined;
-        if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        return platform_clock.monotonicNanos();
     }
 
     fn initCompileCarrier(

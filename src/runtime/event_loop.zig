@@ -1,15 +1,29 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
 const zjs = @import("../binding/root.zig");
 
-const libc = @cImport({
-    @cUndef("_FORTIFY_SOURCE");
-    @cDefine("_FORTIFY_SOURCE", "0");
-    @cInclude("poll.h");
-    @cInclude("signal.h");
-});
+const libc = if (builtin.os.tag == .windows)
+    struct {}
+else
+    @cImport({
+        @cUndef("_FORTIFY_SOURCE");
+        @cDefine("_FORTIFY_SOURCE", "0");
+        @cInclude("poll.h");
+        @cInclude("signal.h");
+    });
+
+const windows_api = struct {
+    const windows = std.os.windows;
+    const std_input_handle: u32 = @bitCast(@as(i32, -10));
+    const infinite: u32 = std.math.maxInt(u32);
+    const wait_object_0: u32 = 0;
+
+    extern "kernel32" fn GetStdHandle(n_std_handle: u32) callconv(.winapi) ?windows.HANDLE;
+    extern "kernel32" fn WaitForSingleObject(handle: windows.HANDLE, milliseconds: u32) callconv(.winapi) u32;
+};
 
 extern "c" fn signal(signum: c_int, handler: usize) usize;
 
@@ -317,6 +331,53 @@ pub const EventLoop = struct {
     }
 
     fn runNextRwHandler(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+        return if (comptime builtin.os.tag == .windows)
+            self.runNextRwHandlerWindows(ctx, output, global)
+        else
+            self.runNextRwHandlerPosix(ctx, output, global);
+    }
+
+    /// QuickJS's Windows event loop waits only for a readable stdin CRT fd;
+    /// arbitrary CRT descriptors are not waitable HANDLEs. Timers and pending
+    /// jobs are handled by the adjacent event-loop arms before this hook.
+    fn runNextRwHandlerWindows(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+        if (self.rw_handlers.len == 0) return false;
+        var callback = zjs.JSValue.nullValue();
+        for (self.rw_handlers) |handler| {
+            if (handler.fd == 0 and !handler.read_callback.isNull()) {
+                callback = handler.read_callback;
+                break;
+            }
+        }
+        if (callback.isNull()) return false;
+
+        const rt = ctx.runtimePtr();
+        var timeout_ms: u32 = 0;
+        const has_pending_jobs = rt.job_queue.jobs.len != 0;
+        const has_pending_host_completion = exec.call_runtime.atomicsRuntimeHasPendingAsyncWaiters(rt);
+        if (!has_pending_jobs and !has_pending_host_completion) {
+            timeout_ms = if (self.timers.len == 0) windows_api.infinite else blk: {
+                const now = nowMs();
+                var next_delay: u64 = std.math.maxInt(u64);
+                for (self.timers) |timer| {
+                    next_delay = @min(next_delay, if (timer.timeout_ms > now) timer.timeout_ms - now else 0);
+                }
+                break :blk @intCast(@min(next_delay, @as(u64, windows_api.infinite - 1)));
+            };
+        }
+
+        const handle = windows_api.GetStdHandle(windows_api.std_input_handle) orelse return false;
+        if (handle == std.os.windows.INVALID_HANDLE_VALUE) return false;
+        if (windows_api.WaitForSingleObject(handle, timeout_ms) != windows_api.wait_object_0) return false;
+
+        const retained_callback = callback.dup();
+        defer retained_callback.free(rt);
+        const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), retained_callback, &.{}, null, null);
+        call_result.free(rt);
+        return true;
+    }
+
+    fn runNextRwHandlerPosix(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
         if (self.rw_handlers.len == 0) return false;
         const rt = ctx.runtimePtr();
         var pollfds = try rt.memory.alloc(libc.struct_pollfd, self.rw_handlers.len);

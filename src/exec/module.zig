@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -1395,9 +1396,9 @@ fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referr
 // import.meta.url synthesis (moved from the VM call runtime).
 
 /// Mirrors qjs `js_module_set_import_meta` (quickjs-libc.c:548): a module
-/// name containing a scheme separator (`:`) is used verbatim; anything else
-/// becomes `file://` + realpath(name), so import.meta.url is an absolute
-/// file:// URL even when the engine was invoked with a relative path.
+/// name containing a scheme separator (`:`) is used verbatim. On POSIX,
+/// anything else becomes `file://` + realpath(name); QuickJS deliberately
+/// skips realpath on Windows and prefixes the module name directly.
 pub fn importMetaUrlValue(rt: *core.JSRuntime, record: *core.module.ModuleRecord) !core.JSValue {
     const name = rt.atoms.name(record.module_name) orelse "";
     if (std.mem.indexOfScalar(u8, name, ':') != null) {
@@ -1406,15 +1407,19 @@ pub fn importMetaUrlValue(rt: *core.JSRuntime, record: *core.module.ModuleRecord
     // Synthetic registry names carry a `#type=` suffix that is not part of
     // the on-disk path; the URL uses the file path portion.
     const file_path = syntheticModuleFilePath(name);
-    const path_z = rt.memory.allocator.dupeZ(u8, file_path) catch return error.OutOfMemory;
-    defer rt.memory.allocator.free(path_z);
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (std.c.realpath(path_z, &resolved_buf)) |resolved| {
-        const resolved_path = std.mem.span(@as([*:0]u8, @ptrCast(resolved)));
-        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{resolved_path});
+    if (builtin.os.tag == .windows) {
+        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{file_path});
         defer rt.memory.allocator.free(url);
         return value_ops.createStringValue(rt, url);
     }
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.Io.Dir.cwd().realPathFile(io, file_path, &resolved_buf)) |resolved_len| {
+        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{resolved_buf[0..resolved_len]});
+        defer rt.memory.allocator.free(url);
+        return value_ops.createStringValue(rt, url);
+    } else |_| {}
     // realpath failure (e.g. "<eval>" pseudo-names): keep the pre-realpath
     // behavior — absolute names still get the file:// scheme, other names are
     // returned verbatim.

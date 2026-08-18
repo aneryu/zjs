@@ -65,8 +65,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
 
     // Production smoke tests retain the ReleaseFast CLI contract.
     const smoke_options = b.addOptions();
-    smoke_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
-    smoke_options.addOption([]const u8, "zjs_profile_executable_path", b.getInstallPath(.bin, "zjs-profile"));
+    smoke_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, artifacts.zjs_exe.out_filename));
+    smoke_options.addOption([]const u8, "zjs_profile_executable_path", b.getInstallPath(.bin, artifacts.zjs_profile_exe.out_filename));
     smoke_options.addOption(bool, "smoke_profile_checks", true);
     const smoke_tests = b.addTest(.{
         .name = "smoke-tests-releasefast",
@@ -96,7 +96,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // The dev inner loop deliberately carries no ReleaseFast engine build;
     // profile-contract smoke checks run in the release smoke tier only.
     const smoke_dev_options = b.addOptions();
-    smoke_dev_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs-dev"));
+    smoke_dev_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, artifacts.zjs_dev_exe.out_filename));
     smoke_dev_options.addOption([]const u8, "zjs_profile_executable_path", "");
     smoke_dev_options.addOption(bool, "smoke_profile_checks", false);
     const smoke_dev_tests = b.addTest(.{

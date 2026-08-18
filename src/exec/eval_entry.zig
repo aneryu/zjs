@@ -3,6 +3,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
+const platform_clock = @import("../platform_clock.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
@@ -382,9 +383,7 @@ fn elapsedNanosSince(start: u64) u64 {
 }
 
 fn monotonicNanos() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    return platform_clock.monotonicNanos();
 }
 
 // Eval compile wrappers (moved from the dissolved exec/eval.zig).

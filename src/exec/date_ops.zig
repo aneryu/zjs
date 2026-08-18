@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -949,8 +950,9 @@ fn parse(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
 
 // --- Host timezone offset (mirrors quickjs.c getTimezoneOffset:47454) -------
 
-/// C `struct tm` (glibc/musl layout; POSIX.1-2024 mandates `tm_gmtoff`).
-const CTm = extern struct {
+/// POSIX C `struct tm` (glibc/musl layout; POSIX.1-2024 mandates
+/// `tm_gmtoff`). Windows uses the nine-field CRT layout below.
+const PosixTm = extern struct {
     tm_sec: c_int,
     tm_min: c_int,
     tm_hour: c_int,
@@ -964,13 +966,41 @@ const CTm = extern struct {
     tm_zone: ?[*:0]const u8,
 };
 
-extern "c" fn localtime_r(timep: *const std.c.time_t, result: *CTm) ?*CTm;
+const WindowsTm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+};
+
+const HostTimeT = if (builtin.os.tag == .windows) i64 else std.c.time_t;
+
+extern "c" fn localtime_r(timep: *const HostTimeT, result: *PosixTm) ?*PosixTm;
+extern "c" fn gmtime(timer: *const HostTimeT) ?*WindowsTm;
+extern "c" fn localtime(timer: *const HostTimeT) ?*WindowsTm;
+extern "c" fn mktime(timeptr: *WindowsTm) HostTimeT;
 
 /// OS dependent. `time` is in ms from 1970. Return the difference between UTC
 /// time and local time at `time`, in minutes (quickjs.c getTimezoneOffset).
 fn getTimezoneOffsetForTime(time_ms: i64) i32 {
     var time = @divTrunc(time_ms, 1000); // convert to seconds (C truncation)
-    if (@sizeOf(std.c.time_t) == 4) {
+    if (comptime builtin.os.tag == .windows) {
+        // Mirrors QuickJS's _WIN32 arm exactly: reinterpret the same instant
+        // once as UTC and once as local time through the Windows CRT, then
+        // compare the two mktime results.
+        var ti: HostTimeT = time;
+        const gm_tm = gmtime(&ti) orelse return 0;
+        const gm_ti = mktime(gm_tm);
+        const local_tm = localtime(&ti) orelse return 0;
+        const local_ti = mktime(local_tm);
+        return @intCast(@divTrunc(gm_ti - local_ti, 60));
+    }
+    if (@sizeOf(HostTimeT) == 4) {
         // On 32-bit systems clamp to the range of `time_t` (qjs does the same).
         if (time < std.math.minInt(i32)) {
             time = std.math.minInt(i32);
@@ -978,8 +1008,8 @@ fn getTimezoneOffsetForTime(time_ms: i64) i32 {
             time = std.math.maxInt(i32);
         }
     }
-    var ti: std.c.time_t = @intCast(time);
-    var tm: CTm = std.mem.zeroes(CTm);
+    var ti: HostTimeT = @intCast(time);
+    var tm: PosixTm = std.mem.zeroes(PosixTm);
     _ = localtime_r(&ti, &tm);
     return @intCast(@divTrunc(-tm.tm_gmtoff, 60));
 }

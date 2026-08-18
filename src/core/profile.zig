@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform_clock = @import("../platform_clock.zig");
 
 pub const max_opcode_count = 256;
 pub const OpcodeNameProvider = *const fn (u8) []const u8;
@@ -203,7 +204,5 @@ pub fn recordSlowPath() void {
 }
 
 pub fn nowNanos() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    return platform_clock.monotonicNanos();
 }

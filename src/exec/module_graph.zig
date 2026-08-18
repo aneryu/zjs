@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const jobs_mod = @import("../core/jobs.zig");
 const parser = @import("../parser.zig");
+const platform_clock = @import("../platform_clock.zig");
 const exec = @import("root.zig");
 const bytecode = @import("../bytecode.zig");
 const frame_mod = @import("frame.zig");
@@ -2204,7 +2205,5 @@ fn wrapSourceByKind(
 }
 
 fn monotonicNanos() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    return platform_clock.monotonicNanos();
 }
