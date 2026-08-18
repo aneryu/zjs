@@ -8,15 +8,16 @@ and is not the `perf-self-check` self-baseline gate.
 | Field | Value |
 | --- | --- |
 | Date | 2026-08-18 |
-| zjs | `main@976e0f41`, `zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off` |
+| zjs | `main@976e0f41` binary, report commit on this branch; `zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off` |
 | Protocol | one bundled `dist/run.js` per engine, official `Name: <int>` parser |
 | Suite | `ahaoboy/js-engine-benchmark@4d1d79e3` (2026-08-18 published table) |
 | Host | 4× Intel Xeon (KVM), Linux 6.12.94+, x86_64 |
-| zjs Score | **1813** (second sample 1810) |
-| Same-host zjs / Bellard QuickJS | **0.971** |
+| zjs Score | **1813 / 1810 / 1797** (three samples; median **1810**) |
+| Same-host zjs / Bellard QuickJS | **0.972 / 0.978** on the two paired samples |
 
 The suite `Score` is the geometric mean of the eight throughput benches.
-Two `zjs` samples agreed to 0.2%.
+This KVM host is noisy (qjs Splay moved 5541 → 4754 across samples). The
+paired ratio stayed in a 0.97–0.98 band.
 
 ## Same-host comparison
 
@@ -25,15 +26,17 @@ Same machine, sequential runs, official binaries for the reference engines:
 | Engine | Richards | DeltaBlue | Crypto | RayTrace | EarleyBoyer | RegExp | Splay | NavierStokes | Score | Time(s) | Exe |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | node 22.14.0 | 48897 | 94707 | 59332 | 87689 | 102058 | 12146 | 39075 | 56279 | 53356 | 20 | 114.6M |
-| qjs 2026-06-04 | 1279 | 1103 | 1591 | 2149 | 2550 | 646 | 5541 | 3325 | 1865 | 30 | 1.0M |
+| qjs 2026-06-04 (run 1) | 1279 | 1103 | 1591 | 2149 | 2550 | 646 | 5541 | 3325 | 1865 | 30 | 1.0M |
+| qjs 2026-06-04 (run 2) | 1274 | 1100 | 1575 | 2328 | 2582 | 630 | 4754 | 3284 | 1838 | 31 | 1.0M |
 | **zjs** (run 1) | 1126 | 1086 | 1510 | 2324 | 2338 | 732 | 4686 | 3393 | **1813** | 30 | 31.6M |
 | zjs (run 2) | 1142 | 1100 | 1515 | 2347 | 2335 | 735 | 4469 | 3361 | 1810 | 30 | 31.6M |
+| zjs (run 3, via runner) | 1059 | 1087 | 1485 | 2392 | 2297 | 736 | 4669 | 3366 | 1797 | 30 | 31.6M |
 | qjs-ng 0.16.1 | 861 | 943 | 507 | 1855 | 2562 | 423 | 4355 | 1582 | 1243 | 39 | 2.5M |
 
 `qjs` is the `ahaoboy/quickjs-build` nightly used by the published table
 (QuickJS 2026-06-04). `qjs-ng` is the v0.16.1 `qjs-linux-x86_64` release.
 
-### zjs / qjs per bench (run 1)
+### zjs / qjs per bench (paired run 1)
 
 | Benchmark | Ratio |
 | --- | ---: |
