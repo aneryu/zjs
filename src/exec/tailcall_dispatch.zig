@@ -5081,8 +5081,40 @@ noinline fn completeInstanceofSlow(vm: *Vm, has_instance: JSValue) InternalMetho
     return .completed;
 }
 
-pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+/// qjs `JS_OrdinaryIsInstanceOf` walk (quickjs.c:8059-8125) for the default
+/// `Function.prototype[@@hasInstance]` record (qjs:41395 / 41379-41383
+/// `js_function_hasInstance`). Ordinary objects read `shape->proto` with no
+/// GetPrototypeOf trap; Proxy / throw-type-error / non-object `.prototype`
+/// (TypeError at 8078-8084) return null so the caller can publish and take
+/// the existing `completeOrdinaryInstanceof` path.
+inline fn tryFastOrdinaryInstanceof(lhs: JSValue, rhs: JSValue, ctor: *core.Object) ?bool {
+    if (ctor.isProxy()) return null;
+    if (ctor.class_id == core.class.ids.bound_function) return null;
+    if (!call_runtime.isCallableValue(rhs)) return false;
+    const proto = ctor.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
+    const start = class_vm.objectFromValue(lhs) orelse return false;
+    if (start.isProxy() or class_vm.isThrowTypeErrorIntrinsicObject(start)) return null;
+    var walk = start.getPrototype();
+    while (walk) |parent| {
+        if (parent.isProxy() or class_vm.isThrowTypeErrorIntrinsicObject(parent)) return null;
+        if (parent == proto) return true;
+        walk = parent.getPrototype();
+    }
+    return false;
+}
+
+/// Published remainder of OP_instanceof (quickjs.c:20412 `sf->cur_pc = pc`
+/// then `js_operator_instanceof` 16005-16017). Reached only when the default
+/// hasInstance walk cannot finish in-island: non-object RHS, exotic / Proxy /
+/// bound, missing own-data `.prototype` (auto-init or TypeError), or a
+/// non-default `@@hasInstance`. Island-tail so the hot handler stays a short
+/// walk + one always_tail hop.
+fn op_instanceof_published(
+    pc: [*]const u8,
+    sp: [*]JSValue,
+    var_buf: [*]JSValue,
+    vm: *Vm,
+) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
     const rhs = loadValueAsIntPair(&(sp - 1)[0]);
     const rhs_object = class_vm.objectFromValue(rhs) orelse {
@@ -5140,6 +5172,40 @@ pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         }
     }
     return @call(.always_tail, InternalMethodBoundary.toBooleanOne(), .{ pc + 1, region_start + 3, var_buf, vm });
+}
+
+pub fn op_instanceof(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // qjs OP_instanceof (quickjs.c:20412-20417) is `JS_IsInstanceOf` then
+    // in-place free/replace of the two operand slots. The default
+    // Function.prototype[@@hasInstance] walk (qjs:41379-41383 → 8059-8125)
+    // cannot throw for ordinary objects with an own-data object `.prototype`,
+    // so it does not need `sf->cur_pc` publish. Hop to the published remainder
+    // only when the path can throw or must Call a non-default method.
+    const rhs = loadValueAsIntPair(&(sp - 1)[0]);
+    const rhs_object = class_vm.objectFromValue(rhs) orelse
+        return @call(.always_tail, op_instanceof_published, .{ pc, sp, var_buf, vm });
+    const has_instance_atom = comptime core.atom.predefinedId("Symbol.hasInstance", .symbol).?;
+    const fast_method = class_vm.probePublicNamedDataPropertyFromObject(rhs_object, has_instance_atom);
+    if (fast_method.slot) |slot| {
+        const has_instance = loadValueAsIntPair(slot);
+        if (class_vm.objectFromValue(has_instance)) |method_object| {
+            if (call_vm.resolvedNativeMethodRecord(vm.ctx, method_object)) |record| {
+                if (function_ops.isDefaultHasInstanceRecord(vm.ctx.runtime, record)) {
+                    if (tryFastOrdinaryInstanceof((sp - 2)[0], rhs, rhs_object)) |hit| {
+                        const lhs = (sp - 2)[0];
+                        const nsp = sp - 1;
+                        (sp - 2)[0] = JSValue.boolean(hit);
+                        vm.stack.setTopPtr(nsp);
+                        lhs.freeDuringActiveBytecode(vm.rt);
+                        rhs.freeDuringActiveBytecode(vm.rt);
+                        return cont(pc + 1, nsp, var_buf, vm);
+                    }
+                }
+            }
+        }
+    }
+    return @call(.always_tail, op_instanceof_published, .{ pc, sp, var_buf, vm });
 }
 
 /// QJS OP_neg's local numeric CASE arms (quickjs.c:19940-19970). Int, bool and
