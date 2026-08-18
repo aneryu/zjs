@@ -1,0 +1,11 @@
+--- a/scripts/update.ts
++++ b/scripts/update.ts
+@@
+   if (cmd === "qjs") {
+     const text = await execCmd(`${cmd} -h`);
+     return text.match(/version (\d{4}-\d{2}-\d{2})/)?.[1].trim();
+   }
++  if (cmd === "zjs") {
++    return (await execCmd(`${cmd} --print-config-signature`)).trim();
++  }
+   if (cmd === "qjs-ng") {

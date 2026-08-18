@@ -35,3 +35,7 @@ python3 tools/perf/verify/test_run_js_engine_benchmark.py
 
 Checked-in scores live in [docs/perf/js-engine-benchmark.md](../../../docs/perf/js-engine-benchmark.md).
 Dated JSON dumps stay local.
+
+To appear on the published table, publish the CLI archives from
+`.github/workflows/release-cli.yml` and open the two patches under
+[`contrib/js-engine-benchmark/`](../../../contrib/js-engine-benchmark/README.md).

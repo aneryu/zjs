@@ -1,0 +1,7 @@
+{
+  "name": "zjs",
+  "description": "A Zig-native JavaScript engine, source-aligned with QuickJS.",
+  "url": "https://github.com/aneryu/zjs",
+  "install": "https://github.com/aneryu/zjs",
+  "lang": "zig"
+}
