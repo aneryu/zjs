@@ -5453,6 +5453,33 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     return cont(jump8Target(pc, vm), sp, var_buf, vm);
 }
+
+/// 16-bit twin of `jump8Target`. Displacement is relative to the operand
+/// byte (`relativePc`), same as `control_vm.jump16` / qjs OP_goto16.
+inline fn jump16Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
+    const operand_pc = @intFromPtr(pc + 1) - @intFromPtr(vm.code_base);
+    const diff = readInt(i16, pc + 1);
+    return vm.code_base + @as(usize, @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff)));
+}
+
+/// D-E4: wide `goto16` on the same thin island as `op_goto8`
+/// (qjs CASE(OP_goto16) quickjs.c:18827-18832). Cadence hit still
+/// re-executes through `cold_table` so the publishing poll stays out
+/// of this body.
+pub fn op_goto16(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    if (vm.ctx.pollInterruptTick())
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    return cont(jump16Target(pc, vm), sp, var_buf, vm);
+}
+
+/// D-E4: wide `goto` (4-byte label). Uses the existing `jump32Target`
+/// already wired for `op_if_false`. Same tick / cold-poll contract as
+/// `op_goto8` (qjs CASE(OP_goto) quickjs.c:18822-18826).
+pub fn op_goto(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
+    if (vm.ctx.pollInterruptTick())
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    return cont(jump32Target(pc, vm), sp, var_buf, vm);
+}
 // The QuickJS immediate-scalar fast path (int/bool/null/undefined) inlines. Values
 // needing JS_ToBoolFree tail through the resident continuation table after the one
 // semantic interrupt tick; the runtime target keeps that body out of this hot

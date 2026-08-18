@@ -957,6 +957,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // fast leg inlines here, a `catch_offset` marker on top falls to the cold shell.
     t[op.drop] = td.op_drop_fast; // catch-marker (finally/catch epilogue) → cold s.op_drop
     t[op.goto8] = td.op_goto8;
+    // D-E4: wide unconditional jumps were left on coldStd after
+    // `519317b8` took only goto8. Same tick + target + cont shape.
+    t[op.goto16] = td.op_goto16;
+    t[op.goto] = td.op_goto;
     t[op.if_false8] = td.op_if_false8;
     t[op.cmp_if_false8] = td.op_cmp_if_false8;
     t[op.eq_if_false8] = td.op_eq_if_false8;
