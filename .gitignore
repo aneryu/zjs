@@ -25,6 +25,9 @@ reports/test262-latest/
 # currently disconnected so these artifacts are not a gate.
 reports/perf/current/runtime/
 
+# Local js-engine-benchmark JSON dumps. The markdown score note stays tracked.
+reports/perf/js-engine-benchmark/*.json
+
 # Dated qjs-align measurement dumps. Living ledgers at this level stay
 # tracked; recover older dated folders from git history. Markdown notes
 # in dated dirs stay trackable — do not ignore the directory itself.

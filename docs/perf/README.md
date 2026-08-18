@@ -7,6 +7,7 @@ it does not require a local C QuickJS binary.
 Current design notes:
 
 - [Zoo status vs Bellard QuickJS](zoo-status.md)
+- [js-engine-benchmark v8-v7 score](js-engine-benchmark.md)
 - [Object and shape implementation](object-shape-design.md)
 - [Retired inline-cache note](inline-cache-design.md)
 - [`exec/call_runtime.zig` decomposition map](shared-vm-decomposition.md)

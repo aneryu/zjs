@@ -28,7 +28,10 @@ groups listed in `test262.conf`), out of 49,775 prepared cases. Details:
 
 **Performance.** **1.01× Bellard QuickJS** on our 15-benchmark zoo (geomean,
 2026-08-17). That is geomean parity, not 15/15. Per-benchmark numbers:
-[docs/perf/zoo-status.md](docs/perf/zoo-status.md).
+[docs/perf/zoo-status.md](docs/perf/zoo-status.md). On the public
+[js-engine-benchmark](https://github.com/ahaoboy/js-engine-benchmark) v8-v7
+protocol, same-host Score is **1813 vs qjs 1865 (0.971×)**:
+[docs/perf/js-engine-benchmark.md](docs/perf/js-engine-benchmark.md).
 
 Authoritative rolling status (gates, latest reports, reproduction commands):
 [STATUS.md](STATUS.md).
