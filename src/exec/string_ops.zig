@@ -210,6 +210,7 @@ const isPsalterPahlaviScriptName = call_runtime.isPsalterPahlaviScriptName;
 const isPunctuationGeneralCategoryName = call_runtime.isPunctuationGeneralCategoryName;
 const isRegExpLineTerminator = regexp_fastpath.isRegExpLineTerminator;
 const isRegExpObservable = regexp_fastpath.isRegExpObservable;
+const isRegExpValue = regexp_fastpath.isRegExpValue;
 const isRejangScriptExtensionsName = call_runtime.isRejangScriptExtensionsName;
 const isRejangScriptName = call_runtime.isRejangScriptName;
 const isRunicScriptExtensionsName = call_runtime.isRunicScriptExtensionsName;
@@ -2608,12 +2609,8 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     try builtin_glue.defineNativeDataMethodWithNativeId(ctx.runtime, global, object, "next", 0, core.function.nativeBuiltinId(.string, @intFromEnum(method_ids.string.PrototypeMethod.iterator_next)));
 
-    const iterator_method = try core.function.nativeFunction(ctx, "[Symbol.iterator]", 0);
-    defer iterator_method.free(ctx.runtime);
-    const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
-    if (!try iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
-    const iterator_atom = (comptime core.atom.predefinedId("Symbol.iterator", .symbol)) orelse return error.TypeError;
-    try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
+    // %StringIteratorPrototype% inherits @@iterator from %IteratorPrototype%.
+    // An own copy would fail the ES6 String iterator prototype-chain test.
 
     if (slot < ctx.class_prototypes.len) {
         const value = object.value();
@@ -2656,7 +2653,20 @@ pub fn qjsStringRegExpCreateAndInvoke(
     const regexp_key = comptime core.atom.predefinedId("RegExp", .string).?;
     const constructor = try global.getProperty(regexp_key);
     defer constructor.free(ctx.runtime);
-    const rx = try qjsRegExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{regexp}, caller_function, caller_frame);
+    // String.prototype.match/search fallback is spec RegExpCreate(P, undefined):
+    // RegExpAlloc + RegExpInitialize, which ToStrings a non-RegExp pattern.
+    // Going through the constructor would also run IsRegExp and Get @@match
+    // a second time (kangax Proxy.get.String.match/search require exactly
+    // [@@match|@@search, @@toPrimitive]).
+    var owned_pattern: ?core.JSValue = null;
+    defer if (owned_pattern) |value| value.free(ctx.runtime);
+    var pattern = regexp;
+    if (pattern.isObject() and !isRegExpValue(pattern)) {
+        const pattern_string = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
+        owned_pattern = pattern_string;
+        pattern = pattern_string;
+    }
+    const rx = try qjsRegExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{pattern}, caller_function, caller_frame);
     defer rx.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, rx, symbol_name, caller_function, caller_frame)) |value| return value;
     // Mirrors js_string_match (quickjs.c:45881): the tail is

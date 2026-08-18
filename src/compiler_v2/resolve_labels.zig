@@ -1191,6 +1191,45 @@ const Resolver = struct {
         return null;
     }
 
+    /// Strict-function PTC variant of `matchReturnAfter`: a plain `call`
+    /// completes a proper tail call when control provably reaches `return`
+    /// next — by falling through (conditional-expression arms converge on a
+    /// shared, bound `return`, so binds do not reject this match) or through
+    /// a short chain of unconditional `goto`s. The rewrite keeps every
+    /// matched instruction in place (`tail_call` plus the surviving `return`
+    /// stub), so jump targets inside the scanned range stay valid. Sloppy
+    /// functions never take this matcher: their observable stack semantics
+    /// must keep matching QuickJS, which grows a frame for every call (see
+    /// LIMITATIONS.md "Proper Tail Calls").
+    fn matchTailReturnAfterStrict(self: *const Resolver, start: u32) Error!?u32 {
+        var position = start;
+        var hops: u8 = 0;
+        while (position < self.product.code_len) {
+            const instruction = try decodeInstruction(self.code, position);
+            if (instruction.op_id == op.line_num) {
+                position += instruction.size;
+                continue;
+            }
+            if (instruction.op_id == op.goto) {
+                if (hops >= 8) return null;
+                hops += 1;
+                const label_index = try readU32At(self.code, position, 1);
+                if (label_index >= self.product.label_len) return error.InvalidBytecode;
+                const slot = self.product.label_slots[label_index];
+                if (!slot.flags.bound or slot.bound_offset == labels.unbound or
+                    slot.bound_offset > self.product.code_len)
+                {
+                    return error.InvalidBytecode;
+                }
+                position = slot.bound_offset;
+                continue;
+            }
+            if (instruction.op_id != op.@"return") return null;
+            return position + instruction.size;
+        }
+        return null;
+    }
+
     /// qjs:33881 code_match, with source markers already out of band. A bind
     /// at any byte boundary in the candidate range rejects the match exactly
     /// as an OP_label byte would have rejected QuickJS's sequential matcher.
@@ -2245,13 +2284,22 @@ const Resolver = struct {
                 // so the QJS-aligned baseline would not emit tail_call into the
                 // then-reuse handler (zjs-only TCO). S4 then skipped this fold
                 // with a stale "zjs emits tail_call directly" comment. H3
-                // (36cf6476) reopened emission; reuse dropped Error.stack and
-                // skipped overflow (−4.46% DB); allow_inline=false (a4a301e0)
-                // broke machine_inits==1. The surviving shape is same-Machine
-                // pushCall plus the leftover return as the shared return stub
-                // (H3 CLOSED "忠实形态"). Do not flip reuse back on.
+                // (36cf6476) reopened emission. Plain `tail_call` in a STRICT
+                // function reuses the caller frame (ES2015 PTC; deliberate
+                // divergence from QuickJS, which grows a frame for every call
+                // — see LIMITATIONS.md). Sloppy plain tails stay ordinary
+                // `call` so Error.stack and overflow keep matching QuickJS.
+                // `tail_call_method` still aliases `call_method` (push) for
+                // both modes. Leave the following `return` as the shared
+                // return stub for native / non-reuse completions.
                 op.call, op.call_method => {
-                    if (try self.matchReturnAfter(position_next)) |_| {
+                    const matched: ?u32 = if (instruction.op_id == op.call_method)
+                        try self.matchReturnAfter(position_next)
+                    else if (self.fd != null and self.fd.?.is_strict_mode)
+                        try self.matchTailReturnAfterStrict(position_next)
+                    else
+                        null;
+                    if (matched) |_| {
                         try self.attachSource();
                         const tail_op: u8 = if (instruction.op_id == op.call)
                             op.tail_call

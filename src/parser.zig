@@ -19213,11 +19213,14 @@ pub const parser_core = struct {
             // qjs js_parse_class: define the declaration's class object
             // with its heritage flag and retained name atom.
             try Emitter.opAtomU8(s, opcode.op.define_class, name_atom, if (class_has_extends) 1 else 0);
-            if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
             // qjs js_parse_class (quickjs.c:25274): the deferred runtime
             // block is spliced after define_class.
             try v2FSpliceSegment(s, &v2_runtime_seg);
+            // ClassElement computed names run while the inner class binding is
+            // still in TDZ (`class C { [C](){} }` must throw). Initialize the
+            // name only after those keys (and method definitions) have run.
+            if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
             try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
             // qjs js_parse_class: drop the prototype after installing the
@@ -19279,11 +19282,13 @@ pub const parser_core = struct {
             // and heritage flag.
             try Emitter.opAtomU8(s, opcode.op.define_class, expr_name_atom, if (class_has_extends) 1 else 0);
             if (class_fields_init_local_idx) |fields_idx| try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
-            if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
             // qjs js_parse_class (quickjs.c:25274): splice the expression's
             // deferred runtime block after define_class.
             try v2FSpliceSegment(s, &v2_runtime_seg);
+            // Same TDZ as the declaration path: computed names in the spliced
+            // body must observe an uninitialized class-name binding.
+            if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             // qjs js_parse_class: drop the prototype while retaining the
             // constructor as the class expression value.
             try Emitter.op(s, opcode.op.drop);

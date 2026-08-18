@@ -6144,6 +6144,86 @@ test "class name binding is in TDZ throughout its heritage expression" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "class computed names observe the class name TDZ" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function expectComputedNameTdz(run) {
+        \\  var threw = false;
+        \\  try { run(); } catch (e) { threw = e instanceof ReferenceError; }
+        \\  assert.sameValue(threw, true);
+        \\}
+        \\expectComputedNameTdz(() => { class C { [C]() {} } });
+        \\expectComputedNameTdz(() => { var B = class C { [C]() {} }; });
+        \\expectComputedNameTdz(() => { class C { static [C]() {} } });
+        \\var named = class C { m() { return C; } };
+        \\assert.sameValue(named.prototype.m(), named);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Array and String iterator prototypes inherit @@iterator from Iterator.prototype" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function expectIteratorChain(iterator) {
+        \\  var proto1 = Object.getPrototypeOf(iterator);
+        \\  var proto2 = Object.getPrototypeOf(proto1);
+        \\  assert.sameValue(proto2.hasOwnProperty(Symbol.iterator), true);
+        \\  assert.sameValue(proto1.hasOwnProperty(Symbol.iterator), false);
+        \\  assert.sameValue(iterator.hasOwnProperty(Symbol.iterator), false);
+        \\  assert.sameValue(iterator[Symbol.iterator](), iterator);
+        \\}
+        \\expectIteratorChain([][Symbol.iterator]());
+        \\expectIteratorChain(""[Symbol.iterator]());
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Object.assign writes through a proxy set trap" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var set = [];
+        \\var p = new Proxy({}, { set: function (o, k, v) { set.push(k); o[k] = v; return true; }});
+        \\Object.assign(p, { foo: 1, bar: 2 });
+        \\assert.sameValue(set + "", "foo,bar");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "String match and search Get a proxy matcher then ToPrimitive" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function expectWellKnownThenToPrimitive(run, wellKnown) {
+        \\  var get = [];
+        \\  var proxied = {};
+        \\  proxied[Symbol.toPrimitive] = Function();
+        \\  var p = new Proxy(proxied, { get: function (o, k) { get.push(k); return o[k]; }});
+        \\  run(p);
+        \\  assert.sameValue(get[0], wellKnown);
+        \\  assert.sameValue(get[1], Symbol.toPrimitive);
+        \\  assert.sameValue(get.length, 2);
+        \\}
+        \\expectWellKnownThenToPrimitive((p) => "".match(p), Symbol.match);
+        \\expectWellKnownThenToPrimitive((p) => "".search(p), Symbol.search);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "class static blocks use their installed receiver as the super home object" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

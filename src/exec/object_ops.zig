@@ -1258,6 +1258,11 @@ pub fn setValuePropertyStrict(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const object = try property_ops.expectObject(object_value);
+    if (object.proxyTarget() != null) {
+        const ok = try proxySetValueProperty(ctx, output, global, object_value, object, atom_id, value, caller_function, caller_frame);
+        if (!ok) return error.TypeError;
+        return;
+    }
     const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
     defer if (!value_to_set.same(value)) value_to_set.free(ctx.runtime);
     if (core.object.isTypedArrayObject(object)) {

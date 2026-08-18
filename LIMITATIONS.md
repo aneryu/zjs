@@ -61,17 +61,24 @@ module loading are not supported.
 
 ## Proper Tail Calls
 
-- The default source compiler emits ordinary `call + return`; it does not
-  perform parser-time proper-tail-call rewriting. Accordingly,
-  `tail-call-optimization` is skipped in `test262.conf`, and deep source-level
-  tail recursion eventually throws catchable `InternalError: stack overflow`.
-- The `tail_call` / `tail_call_method` bytecode ABI and VM frame-reuse machinery
-  remain available for hand-authored bytecode and internal paths. A future PTC
-  product extension must be a default-off, independent post-CFG pass and be
-  A/B-tested separately from the baseline compiler.
-- Note: test262 has no coverage for deep tail recursion in method/arrow
-  position (`tco-member-args.js` actually contains a plain call), so those
-  shapes are guarded by focused Zig regression fixtures.
+- Proper tail calls are **strict-mode only** (per ES2015 14.6) and cover
+  plain-call tails: `return f(...)` directly, and calls whose control flow
+  provably reaches `return` next (conditional-expression arms and short
+  unconditional-jump joins). Those fold to `tail_call` plus a leftover
+  `return` stub and reuse the caller frame — compat-table direct and mutual
+  recursion (1e6) stay in constant stack, and the reused caller drops off
+  `Error.prototype.stack`. This is a deliberate divergence from the pinned
+  QuickJS, which grows a frame for every call.
+- Sloppy-mode code, method tails (`o.m()` / `this.m()`), constructor
+  completions, calls protected by a live `try`, and L0 host entries all
+  still grow a logical frame, exactly like QuickJS: deep recursion there
+  throws catchable `InternalError: stack overflow`.
+- Infinite strict `return f()` therefore does not overflow; a test that
+  needs a catchable overflow must use sloppy mode or a non-tail shape
+  (`return 1 + f()` or `return this.m()`).
+- `tail-call-optimization` remains skipped in `test262.conf` (method-position
+  tails are not proper tail calls here). Method-position deep tails are
+  guarded by focused Zig fixtures (`tco-member-args.js` is a plain call).
 
 ## Performance
 

@@ -73,6 +73,10 @@ fn readInt(comptime T: type, bytes: [*]const u8) T {
 // Outcome — the single u32 (x0) a handler chain returns to the driver
 // ===========================================================================
 
+/// Driver entry mode for a `.tail` outcome. Same storage cost as the bool it
+/// replaced; see `Vm.tail_mode`.
+pub const TailMode = enum(u8) { push, reuse_chain, reuse_release };
+
 pub const Outcome = enum(u32) {
     /// return / return_undef / return_async produced `vm.return_value`.
     returned,
@@ -171,9 +175,13 @@ pub const Vm = struct {
     return_payload: u32 = 0,
     pending_error: HostError = error.OutOfMemory,
     tail_request: call_runtime.InlineCallRequest = undefined,
-    /// On `.tail`: true => `tailCallReuse` (op.tail_call*/eval-tail), false => `pushCall`
-    /// (op.call*/call_method). The driver branches on it.
-    tail_is_reuse: bool = false,
+    /// On `.tail`: how the driver enters the requested frame.
+    /// `.push` (op.call*/call_method) pushes normally. `.reuse_chain`
+    /// (eval-tail) reuses the physical Entry but keeps charging the logical
+    /// tail-chain budget, so budgets and overflow behave as if pushed.
+    /// `.reuse_release` (strict op.tail_call, ES2015 PTC) reuses the Entry
+    /// AND releases the dying frame's logical charge — constant stack.
+    tail_mode: TailMode = .push,
 
     /// syncDown analog: publish the register-resident pc/sp back to frame.pc /
     /// stack.top_ptr so a cold helper sees live state. `pc` points at the opcode byte;
@@ -1613,7 +1621,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
             switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |e| return vm.fail(e)) {
                 .done, .continue_loop => return coldNext(vb, vm),
                 .inline_call => {
-                    vm.tail_is_reuse = false;
+                    vm.tail_mode = .push;
                     return .tail;
                 },
             }
@@ -1641,7 +1649,7 @@ fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) 
     ) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .inline_call => {
-            vm.tail_is_reuse = false;
+            vm.tail_mode = .push;
             return .tail;
         },
         .inline_constructor => {
@@ -1839,7 +1847,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
     switch (call_vm.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .inline_call => {
-            vm.tail_is_reuse = false;
+            vm.tail_mode = .push;
             return .tail;
         },
         .inline_constructor => unreachable,
@@ -2297,14 +2305,47 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
     _ = iter_vm.forOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target) catch |err| return vm.fail(err);
     return coldNext(vb, vm);
 }
-// X-89 rework: the source fold emits tail_call* + leftover `return`
-// (H3 忠实形态). The leftover return is `goto done`; the call itself
-// must take the same admission as op_call* — empty-leaf / exact-args
-// leaf / simple_inline / pushExactSimple / nativeMethodFastDispatch.
-// A separate generic tailCall* path sent those 7M DB method tails down
-// execCall and was the REJECTED-REWORK slowdown. Sharing the function
-// keeps one I-cache copy. Do not restore a handler that skips this chain.
-const op_tail_call = op_call;
+// X-89 history, kept because it prices this handler's shape: the source fold
+// emits tail_call* + leftover `return` (H3 忠实形态). A separate generic
+// tailCall* path once sent 7M DB *method* tails down execCall and was the
+// REJECTED-REWORK slowdown — which is why `tail_call_method` MUST stay an
+// alias of op_call_method (full admission chain: empty-leaf / exact-args leaf
+// / simple_inline / pushExactSimple / nativeMethodFastDispatch), and QuickJS
+// still grows a logical frame for method tails anyway.
+//
+// Plain `tail_call` is different since the strict-only PTC ruling
+// (2026-08-18): the resolver emits it ONLY inside strict functions, as an
+// ES2015 proper tail call — a deliberate, documented divergence from QuickJS
+// (see LIMITATIONS.md). The callee reuses the caller frame via
+// `.reuse_release`, so compat-table `tail-calls.direct` / `mutual` (1e6)
+// stay in constant stack. Native / non-inline callees complete through
+// execCall and the leftover `return` stub. Sloppy streams never contain
+// this opcode, so the X-89 hot shapes never reach this handler.
+// Island-tail section per the wave-22 rule: new handlers must not slide the
+// established `.text.zjs.op_handlers` island.
+fn op_tail_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const argc = readInt(u16, pc + 1);
+    vm.syncPc(pc, 3);
+    vm.stack.setTopPtr(sp);
+    switch (call_runtime.execCall(
+        vm.ctx,
+        vm.stack,
+        vm.function,
+        vm.frame,
+        vm.catch_target,
+        argc,
+        vm.output,
+        vm.global,
+        true,
+        &vm.tail_request,
+    ) catch |e| return vm.fail(e)) {
+        .done, .continue_loop => return coldNext(vb, vm),
+        .inline_call => {
+            vm.tail_mode = .reuse_release;
+            return .tail;
+        },
+    }
+}
 const op_tail_call_method = op_call_method;
 fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     vm.publish(pc, sp);
@@ -2312,7 +2353,7 @@ fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) l
         .done, .continue_loop => return coldNext(vb, vm),
         .tail_inline => |request| {
             vm.tail_request = request;
-            vm.tail_is_reuse = true;
+            vm.tail_mode = .reuse_chain;
             return .tail;
         },
     }
@@ -6322,9 +6363,21 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 // qjs polls at JS_CallInternal entry before the planned-frame
                 // stack guard and before any caller-frame mutation.
                 try exception_ops.pollInterrupt(vm.ctx, vm.global);
-                if (vm.tail_is_reuse and
-                    !(vm.machine.depth > 0 and vm.machine.topEntry().completesConstructor()))
-                {
+                const reuse = switch (vm.tail_mode) {
+                    .push => false,
+                    // eval-tail, pre-PTC behavior unchanged: directEval only
+                    // requests reuse at machine depth > 0; constructor
+                    // completions keep their own frame.
+                    .reuse_chain => !(vm.machine.depth > 0 and
+                        vm.machine.topEntry().completesConstructor()),
+                    // strict PTC additionally requires no live catch handler
+                    // (a protected call is not in tail position) and a real
+                    // machine frame to retire (L0 host entry pushes).
+                    .reuse_release => vm.machine.depth > 0 and
+                        !vm.machine.topEntry().completesConstructor() and
+                        vm.catch_target.* == null,
+                };
+                if (reuse) {
                     _ = vm.machine.tailCallReuse(
                         vm.global,
                         vm.stack,
@@ -6332,6 +6385,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                         req.region_base,
                         req.argc,
                         req.layout,
+                        if (vm.tail_mode == .reuse_release) .release else .chain,
                     ) catch |err| {
                         // Preflight, scratch allocation and the complete target
                         // frame setup all fail while the tail caller is still

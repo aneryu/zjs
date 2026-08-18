@@ -4545,6 +4545,13 @@ pub const Machine = struct {
     /// `[callable, args...]`, or `[receiver, callable, args...]` when
     /// `has_receiver` (a tail-positioned method call, where the receiver
     /// becomes the reused frame's `this`).
+    /// Budget flavor for `tailCallReuse`. `.chain` (eval-tail) keeps the
+    /// pre-PTC contract: the physical Entry is reused but the logical
+    /// tail-chain budget keeps charging, so overflow behaves as if pushed.
+    /// `.release` (strict op.tail_call, ES2015 PTC) retires the dying
+    /// frame's logical charge — the chain occupies one logical unit.
+    pub const TailBudgetMode = enum { chain, release };
+
     pub fn tailCallReuse(
         self: *Machine,
         global: *core.Object,
@@ -4553,6 +4560,7 @@ pub const Machine = struct {
         region_base: usize,
         argc: u16,
         layout: RegionLayout,
+        budget: TailBudgetMode,
     ) HostError!*Entry {
         std.debug.assert(self.depth > 0);
         // Check before moving operands or retiring the caller so overflow is
@@ -4580,6 +4588,10 @@ pub const Machine = struct {
         // Entry. The prepared target temporarily occupies the next slot, but
         // pushFrame does not link it until every fallible setup step succeeds.
         const dying = self.topEntry();
+        const inherited_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
+            dying.tailChainBudgetSlot().*
+        else
+            .{ .extra_depth = 0, .planned_stack_bytes = 0 };
         const dying_prev = dying.prev;
         const dying_arena_mark = dying.arena_mark;
         // Committed charge persisted at construction; the recompute is the
@@ -4590,10 +4602,6 @@ pub const Machine = struct {
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
         ));
-        const inherited_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
-            dying.tailChainBudgetSlot().*
-        else
-            .{ .extra_depth = 0, .planned_stack_bytes = 0 };
 
         const entry = try self.pushFrame(
             .generic,
@@ -4604,20 +4612,32 @@ pub const Machine = struct {
             ArgsSource.initMoved(moved, has_receiver),
         );
         // From here through publication there are no fallible operations.
-        // Fold the caller's continuation, logical budget, arena watermark and
-        // profiling restore level into the target before retiring its values.
+        // Fold the caller's continuation, arena watermark and profiling
+        // restore level into the target before retiring its values.
         var continuation = dying.takeContinuation();
         entry.adoptContinuation(&continuation);
         // Generic setup leaves the dead native-caller slot unspecified. The
-        // default representation overwrites it with TailChainBudget below;
+        // default representation may overwrite it with TailChainBudget below;
         // NaN boxing stores that budget in stride padding, so initialize the
         // remaining field before moving the whole Entry into the reused slot.
         entry.native_caller = core.JSValue.undefinedValue();
-        entry.teardown.tail_chain = true;
-        entry.tailChainBudgetSlot().* = .{
-            .extra_depth = inherited_budget.extra_depth + 1,
-            .planned_stack_bytes = inherited_budget.planned_stack_bytes + dying_stack_bytes,
-        };
+        switch (budget) {
+            .chain => {
+                entry.teardown.tail_chain = true;
+                entry.tailChainBudgetSlot().* = .{
+                    .extra_depth = inherited_budget.extra_depth + 1,
+                    .planned_stack_bytes = inherited_budget.planned_stack_bytes + dying_stack_bytes,
+                };
+            },
+            .release => {
+                // ES2015 PTC (strict op.tail_call): the replacement occupies
+                // one logical unit. Release the dying frame's depth and
+                // planned bytes now so a 1e6 source tail chain stays in
+                // constant stack.
+                vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+                entry.teardown.tail_chain = false;
+            },
+        }
         entry.arena_mark = dying_arena_mark;
         entry.profile_guard.adoptRetiredCaller(dying.profile_guard);
 

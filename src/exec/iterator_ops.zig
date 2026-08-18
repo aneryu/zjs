@@ -1164,12 +1164,9 @@ pub fn arrayIteratorPrototypeFromContext(
     const next_function = property_ops.expectObject(next_value) catch return error.TypeError;
     if (!try next_function.addArrayIteratorNextFunction(ctx.runtime)) return error.TypeError;
 
-    const iterator_method = try core.function.nativeFunction(ctx, "[Symbol.iterator]", 0);
-    defer iterator_method.free(ctx.runtime);
-    const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
-    if (!try iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
-    const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
-    try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
+    // %ArrayIteratorPrototype% inherits @@iterator from %IteratorPrototype%.
+    // Installing an own copy here breaks the ES6 prototype-chain test
+    // (`proto2.hasOwnProperty(@@iterator) && !proto1.hasOwnProperty(@@iterator)`).
 
     if (slot < ctx.class_prototypes.len) {
         const value = object.value();

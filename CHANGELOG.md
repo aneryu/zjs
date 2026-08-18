@@ -34,6 +34,14 @@ under the refactor-policy gates.
   the removed `check_public_api.zig` tool). Adding or removing a public
   name must update that list in the same commit.
 
+- Strict-mode functions now perform proper tail calls (ES2015 14.6): plain
+  `return f(...)` tails — including conditional-expression arms and
+  unconditional-jump joins — reuse the caller frame, so deep strict
+  direct/mutual recursion (1e6) runs in constant stack and the reused
+  caller drops off `Error.prototype.stack`. This is a deliberate,
+  documented divergence from the pinned QuickJS. Sloppy code, method
+  tails, `try`-protected calls, and eval-tails keep QuickJS-aligned
+  frame growth and overflow behavior. See LIMITATIONS.md.
 - Architecture `check_deps.js` now enforces compiler_v2 layering and scans
   `tools/` / `tests/` files that import the `zjs` module. The duplicate
   core-does-not-import-runtime Zig test is gone; the JS linter is the authority.

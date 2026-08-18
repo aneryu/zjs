@@ -11,8 +11,10 @@ performance tax. The rules below are the policy.
    [maintainability-backlog.md](maintainability-backlog.md) and lands only
    item by item under rule 2.
 2. Any split, move, or rename that involves a hot-path file must pass a
-   15-item zoo A/B before merge: at least 3 layout pads, median with no
-   regression.
+   15-item zoo A/B before merge: pad 0 only (the default layout), run under
+   the parallel-cluster protocol (`run_zoo_compare.py --parallel-clusters`,
+   frozen binaries, clean measurement field), median with no regression.
+   (Amended 2026-08-18 by owner ruling; previously ≥3 layout pads.)
 3. Pure test-harness and build-graph splits have no layout risk and are
    exempt from rule 2.
 4. Mechanical identity gates may substitute for the zoo A/B in rule 2,

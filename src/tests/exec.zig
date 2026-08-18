@@ -3161,9 +3161,10 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
     const plain_code = [_]u8{
         op.special_object,
         bytecode.opcode.special_object_subtype.current_function,
-        op.tail_call,
+        op.call,
         0,
         0,
+        op.@"return",
     };
     const method_code = [_]u8{
         op.push_this,
@@ -9804,7 +9805,7 @@ test "pc2line stack locations match QuickJS return and throw matrix" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "X-89 tail_call keeps caller on Error.stack like QuickJS" {
+test "X-89 sloppy and method tails keep the caller like QuickJS; strict tail_call reuses" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -9815,7 +9816,12 @@ test "X-89 tail_call keeps caller on Error.stack like QuickJS" {
         \\try { outer(); } catch (error) { captured = error.stack; }
         \\assert.sameValue(captured.indexOf("at inner") >= 0, true);
         \\assert.sameValue(captured.indexOf("at outer") >= 0, true);
-        \\function methOuter() { return o.m(); }
+        \\function strictOuter() { "use strict"; return strictInner(); }
+        \\function strictInner() { throw new Error("s"); }
+        \\try { strictOuter(); } catch (error) { captured = error.stack; }
+        \\assert.sameValue(captured.indexOf("at strictInner") >= 0, true);
+        \\assert.sameValue(captured.indexOf("at strictOuter") < 0, true);
+        \\function methOuter() { "use strict"; return o.m(); }
         \\var o = { m: function m() { throw new Error("m"); } };
         \\try { methOuter(); } catch (error) { captured = error.stack; }
         \\assert.sameValue(captured.indexOf("at m") >= 0, true);
@@ -9825,14 +9831,31 @@ test "X-89 tail_call keeps caller on Error.stack like QuickJS" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "X-89 tail_call recursion still overflows like QuickJS" {
+test "strict plain tail_call recursion stays in constant stack" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\"use strict";
+        \\function f(n) { if (n <= 0) return "foo"; return f(n - 1); }
+        \\assert.sameValue(f(20000), "foo");
+        \\function even(n) { return n <= 0 ? "foo" : odd(n - 1); }
+        \\function odd(n) { return n <= 0 ? "bar" : even(n - 1); }
+        \\assert.sameValue(even(20000), "foo");
+        \\assert.sameValue(even(20001), "bar");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "sloppy tail recursion still overflows like QuickJS" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
     const result = try js.eval(
         \\function f(n) { if (n <= 0) return 0; return f(n - 1); }
         \\var threw = false;
-        \\try { f(20000); } catch (e) {
+        \\try { f(200000); } catch (e) {
         \\  threw = e instanceof InternalError && String(e.message).indexOf("stack overflow") >= 0;
         \\}
         \\assert.sameValue(threw, true);
@@ -9846,9 +9869,11 @@ test "X-89 frame disasm: return call and method emit tail opcodes" {
     defer helpers.endSharedTest();
 
     const result = try js.eval(
-        \\function tailPlain(x) { return g(x); }
+        \\function tailPlain(x) { "use strict"; return g(x); }
+        \\function sloppyPlain(x) { return g(x); }
         \\function tailMethod(o, x) { return o.m(x); }
-        \\function noFold(p) { return p ? f() : g(); }
+        \\function strictCond(p) { "use strict"; return p ? f() : g(); }
+        \\function sloppyCond(p) { return p ? f() : g(); }
     );
     defer result.free(js.runtime);
 
@@ -9862,6 +9887,16 @@ test "X-89 frame disasm: return call and method emit tail opcodes" {
     try std.testing.expect(std.mem.indexOf(u8, plain_dump, "tail_call_method") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain_dump, ": return\n") != null);
 
+    // Strict-only PTC: a sloppy plain tail stays an ordinary call so its
+    // observable stack semantics keep matching QuickJS.
+    const sloppy = try globalFunctionBytecode(js, "sloppyPlain");
+    var sloppy_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&sloppy_w, sloppy, &js.runtime.atoms, .{});
+    const sloppy_dump = sloppy_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, sloppy_dump, "tail_call") == null);
+
+    // Method folding is mode-independent: tail_call_method aliases
+    // call_method at runtime, so the fold is unobservable.
     const method = try globalFunctionBytecode(js, "tailMethod");
     var method_w = std.Io.Writer.fixed(&buf);
     try bytecode.dump.dumpFunctionBytecode(&method_w, method, &js.runtime.atoms, .{});
@@ -9869,11 +9904,19 @@ test "X-89 frame disasm: return call and method emit tail opcodes" {
     try std.testing.expect(std.mem.indexOf(u8, method_dump, ": tail_call_method ") != null);
     try std.testing.expect(std.mem.indexOf(u8, method_dump, ": return\n") != null);
 
-    const no_fold = try globalFunctionBytecode(js, "noFold");
-    var no_fold_w = std.Io.Writer.fixed(&buf);
-    try bytecode.dump.dumpFunctionBytecode(&no_fold_w, no_fold, &js.runtime.atoms, .{});
-    const no_fold_dump = no_fold_w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, no_fold_dump, "tail_call") == null);
+    // Conditional-expression arms are tail positions in a strict function
+    // (both arms converge on the shared return), but never fold in sloppy.
+    const strict_cond = try globalFunctionBytecode(js, "strictCond");
+    var strict_cond_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&strict_cond_w, strict_cond, &js.runtime.atoms, .{});
+    const strict_cond_dump = strict_cond_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, strict_cond_dump, ": tail_call ") != null);
+
+    const sloppy_cond = try globalFunctionBytecode(js, "sloppyCond");
+    var sloppy_cond_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&sloppy_cond_w, sloppy_cond, &js.runtime.atoms, .{});
+    const sloppy_cond_dump = sloppy_cond_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, sloppy_cond_dump, "tail_call") == null);
 }
 
 test "pc2line malformed transition reports zero location instead of header fallback" {
@@ -16366,19 +16409,18 @@ test "native tail calls preserve iterator and proxy continuation success and thr
     try std.testing.expect(result.isUndefined());
 }
 
-test "ordinary arrow and method recursion exhaust the logical stack budget" {
+test "strict arrow tails stay constant while method recursion exhausts the logical stack budget" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    // X-89 emits tail_call* for `return f()` / `return this.m()` (qjs:34941)
-    // but does not reuse the caller frame. Like QuickJS JS_CallInternal +
-    // goto done, sufficiently deep recursion must still consume the logical
-    // stack budget and surface the catchable stack-overflow error. Exercise
-    // arrows, mutual methods, and a self method, then prove that the same
-    // runtime remains usable after each caught overflow.
+    // In a STRICT script, plain / arrow `return f()` is a proper tail call
+    // and stays in constant stack. Method tails (`return this.m()`) still
+    // grow a logical frame, so deep method recursion remains a catchable
+    // stack overflow. Prove the runtime is usable after each catch.
     const result = try js.evalWithOutput(
+        \\"use strict";
         \\function expectStackOverflow(run) {
         \\  try {
         \\    run();
@@ -16388,7 +16430,7 @@ test "ordinary arrow and method recursion exhaust the logical stack budget" {
         \\  }
         \\}
         \\const arrowRecurse = (n) => n === 0 ? 0 : arrowRecurse(n - 1);
-        \\expectStackOverflow(() => arrowRecurse(40000));
+        \\print("arrow:" + arrowRecurse(40000));
         \\const machine = {
         \\  even(n) { return n === 0 ? "even" : this.odd(n - 1); },
         \\  odd(n) { return n === 0 ? "odd" : this.even(n - 1); },
@@ -16402,7 +16444,7 @@ test "ordinary arrow and method recursion exhaust the logical stack budget" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
-        "InternalError: stack overflow\n" ++
+        "arrow:0\n" ++
             "InternalError: stack overflow\n" ++
             "InternalError: stack overflow\n" ++
             "recovered\n",

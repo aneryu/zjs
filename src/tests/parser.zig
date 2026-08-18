@@ -1504,6 +1504,23 @@ fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.B
     return function;
 }
 
+/// Same single-statement harness, but the synthesized function is strict —
+/// the strict-only PTC fold in resolve_labels keys off `fd.is_strict_mode`.
+fn parseStrictFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    state.return_depth = 1;
+    state.function_def.is_strict_mode = true;
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
+    return function;
+}
+
 fn expectParseStatementError(env: *TestEnv, src: []const u8) !void {
     if (parseStatement(env, src)) |fn_bc_result| {
         var fn_bc = fn_bc_result;
@@ -3662,15 +3679,24 @@ test "F5: return conditional expression folds the then goto to a plain return" {
     try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.@"return"));
 }
 
-test "F5: return call folds to tail_call plus return" {
+test "F5: strict return call folds to tail_call plus return; sloppy stays call" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseFunctionBodyStatement(&env, "return f(\"\");");
-    defer fn_bc.deinit(env.rt);
+    // Strict-only PTC ruling (2026-08-18): the plain-call fold requires a
+    // strict function so sloppy stack semantics keep matching QuickJS.
+    var strict_bc = try parseStrictFunctionBodyStatement(&env, "return f(\"\");");
+    defer strict_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.tail_call));
-    try std.testing.expectEqual(@as(usize, 0), countCalls(fn_bc.code));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(strict_bc.code, op.tail_call));
+    try std.testing.expectEqual(@as(usize, 0), countCalls(strict_bc.code));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(strict_bc.code, op.@"return"));
+
+    var sloppy_bc = try parseFunctionBodyStatement(&env, "return f(\"\");");
+    defer sloppy_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(sloppy_bc.code, op.tail_call));
+    try std.testing.expectEqual(@as(usize, 1), countCalls(sloppy_bc.code));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(sloppy_bc.code, op.@"return"));
 }
 
 test "F5: return method call folds to tail_call_method plus return" {

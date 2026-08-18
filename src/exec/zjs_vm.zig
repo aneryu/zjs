@@ -806,7 +806,7 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .return_action = undefined,
         .return_payload = undefined,
         .pending_error = undefined,
-        .tail_is_reuse = undefined,
+        .tail_mode = undefined,
     };
     return tailcall_dispatch.run(&vm);
 }
