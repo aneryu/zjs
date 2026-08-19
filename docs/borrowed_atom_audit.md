@@ -166,8 +166,8 @@ live in git history. What was established:
   already-checked-in unit tests hit `dup`'s `hasLiveValue` assert on the
   pre-fix tree, and ran all green after the fix (unified suite plus
   ~14,600 test262 cases across the language subtrees; a full-set Debug run
-  is blocked by a pre-existing, audit-unrelated `allocation_count` assert
-  in `src/core/runtime.zig` after ~7,000 cases — run by subtree, §7.3).
+  was blocked at the time by pre-existing, audit-unrelated asserts — see
+  §7.3, where the `allocation_count` one has since been fixed).
 
 ---
 
@@ -244,7 +244,7 @@ landed as `-Dzjs_ownership_audit`, §7.)
 
 Implementation: `src/core/atom.zig` (`AtomTable.OwnershipAuditState` plus
 the reuse arm of `finalizeDeadEntry`); the option is in `build.zig` and uses
-the same option distribution as `zjs_force_gc` / `zjs_nan_boxing`.
+the same option distribution as `zjs_force_gc`.
 
 ### 7.1 What it does
 
@@ -297,10 +297,26 @@ Asserts are live only in Debug / ReleaseSafe (`std.debug.assert`). Turning
 the option on under ReleaseFast is pointless: `dup`'s assert is compiled
 out, and quarantine would only scramble slot assignment for nothing.
 
-**Run test262 by subtree; do not run the full set in one go.** The Debug
-runner hits a pre-existing, audit-unrelated `allocation_count` assert in
-`src/core/runtime.zig` after roughly 7,000 cases (§4). Run with
-`-d test262/test/language/<subtree>` instead.
+**A full-set Debug run is still blocked, but no longer by the leak.** The
+`allocation_count` assert in `src/core/runtime.zig` that used to abort the
+run after roughly 7,000 cases was four independent leaks (parser builder on
+a first-token lex error, the FinalizationRegistry job queue re-grown during
+teardown, a `charCodeAt` receiver ref, and a regexp class-escape range); all
+four are fixed as of 2026-08-19, and the whole 53,572-file set now executes
+without a single hit.
+
+Four *other* pre-existing Debug asserts still abort a whole-set single-process
+run. Each reproduces on a clean tree and is unrelated to this audit:
+
+| Assert | Scope |
+|---|---|
+| `src/core/string.zig:1560` `destroyRope` | 447 files, all `built-ins/RegExp/CharacterClassEscapes/*` |
+| `src/core/runtime.zig` `assert(self.context_head == null)` | 52 files in `staging/sm` (a `JSContext` outliving its runtime) |
+| `src/exec/builtin_dispatch.zig:49` `nativeIsExc` | 19 files in `built-ins/Iterator/{zip,zipKeyed}`. The OOM route into this assert was fixed on 2026-08-19 (and `zig build test-oom` is green again); these files reach it by a different path — a native Iterator helper returns the exception sentinel without a pending exception — so the seam invariant, not the allocator, is what to look at |
+| `src/core/string.zig:686` `releaseFromHeader` | `language/arguments-object/S10.6_A5_T4.js` |
+
+Until those are fixed, run the blocked directories with `-d` per subtree, or
+file-by-file within them.
 
 ### 7.4 It still catches the original defect (reproducible)
 

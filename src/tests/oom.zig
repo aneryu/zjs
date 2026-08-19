@@ -19,7 +19,7 @@
 //! consistent afterwards" contract from eecf6c8.
 //!
 //! Cost note: each snippet sweep re-runs full runtime+context bootstrap per
-//! allocation index, so this is a phase-gate tier command, not part of
+//! allocation index, so this is an instrumentation tier command (nightly), not part of
 //! `zig build test`.
 
 const std = @import("std");
@@ -1185,7 +1185,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         fixture_options.closure_var_count,
         fixture_options.byte_code.len,
     );
-    // Above the slab ceiling in both JSValue representations, so the exact
+    // Above the slab ceiling, so the exact
     // MemoryAccount charge is the one main allocation plus its GC prefix
     // (standalone: request size, no extra MALLOC_OVERHEAD).
     try std.testing.expect(layout.mainPayloadBytes() > 512);

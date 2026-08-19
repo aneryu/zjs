@@ -49,10 +49,10 @@ Measurement contract: `tools/compare/measurement_contract.js` with
 |------|----------------|-----------|
 | `zig build engine-production-gate --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture lints (including compiler-stage `nm`), OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-check: `0/49775 errors, passed 44581`. Historical row also named `architecture-check` and `config-drift-gate`; those steps are gone. |
 | `zig build test -Doptimize=ReleaseSafe --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 9/9 steps succeeded. 2266 passed / 1 skipped / 0 failed. |
-| `zig build test-oom --summary all` | corpus × allocation-failure injection plus same-runtime recovery canaries | phase-close tier; not re-run in this packaging lane |
-| `zig build test-altrepr --summary all` | nan-boxing representation guard | **Known pre-existing failure** (reproduced on main 2026-08-18, unrelated to the maintainability campaign): `tests.exec.test.Engine direct eval shares top-level lexical cells across nested closures` SIGABRTs under nan_boxed (`bytecode.openVarRefCount` / `tailcall_dispatch.run`). Tracked for an independent fix. |
+| `zig build test-oom --summary all` | corpus × allocation-failure injection plus same-runtime recovery canaries | instrumentation tier; runs nightly. 2026-08-19: PASS, 21 passed / 0 failed — after fixing two pre-existing defects this target had been silently failing on (it had not been run in a long time). |
+| `zig build test -Dzjs_ownership_audit=true --summary all` | borrowed-atom use-after-free audit (see `docs/borrowed_atom_audit.md`) | instrumentation tier; runs nightly. 2026-08-19: PASS, 2275 passed / 0 failed. |
 | `mise run checkpoint-gate` | unified Debug suite, Debug CLI smoke, source-side architecture | handoff gate; does not compile ReleaseFast `zjs` |
-| `zig build perf-self-check --summary all` | ZJS self-baseline | run by the maintainer on the measurement machine at release time |
+| `zig build test262-check --summary all` | full test262, zero-failure | runs on every PR (linux-arm64) |
 
 ## Reproduction Commands
 

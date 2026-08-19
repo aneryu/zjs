@@ -17,7 +17,7 @@ quickjs/
 __pycache__/
 *.pyc
 
-# Local test262-gate output (`zig build test262-gate` writes -R here)
+# Local test262 output (`zig build test262-check` writes -R here)
 reports/test262-latest/
 
 # Local runtime-profile output. Scripts stay tracked; opcode scope is

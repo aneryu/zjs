@@ -7,6 +7,131 @@ breaking public-API cleanup is approved for this cycle; hot-path structural
 refactors are deferred to `docs/maintainability-backlog.md` and land only
 under the refactor-policy gates.
 
+- **Fixed four independent memory leaks** that each tripped the
+  `allocation_count == 1` teardown assert in `JSRuntime.deinit`, which had
+  blocked running the Debug test262 suite as one process (it aborted after
+  roughly 7,000 cases; `docs/borrowed_atom_audit.md` carried a standing
+  "run by subtree" workaround). All four were pre-existing and independent:
+  - `src/bytecode.zig`: `FunctionDef.deinitInitFailure` did not free
+    `v2_builder`, which `initRootEmitter` attaches before the first token is
+    lexed — so any lex error on a source's *first* token leaked the builder
+    (`eval("@")`, every hashbang test, the Mongolian-vowel-separator test).
+  - `src/core/runtime.zig`: teardown's cycle removal sweeps dead weak
+    payloads, and a `FinalizationRegistry` whose target died enqueues its
+    cleanup callback — re-growing the job queue's backing block *after*
+    `job_queue.deinit()` had already run. `clearPendingFinalizationJobs`
+    drained the entries but never released the storage.
+  - `src/exec/string_builtin_ops.zig`: `stringCharCodeAtDirectHost` freed the
+    receiver only when it was not already a string, but the coercion helpers
+    dup a string receiver and always return an owned ref.
+  - `src/libs/regexp.zig`: `reParseClassAtomOrRange` took ownership of a
+    class-escape atom's `CharRange` from `getClassAtom` but dropped it on the
+    rejection and rewind legs (`RegExp("[\d-a]","u")`, `RegExp("[a-\d]","")`).
+
+  Verified by executing all 53,572 test262 files under the Debug runner with
+  zero `allocation_count` hits. Four unrelated Debug asserts still block a
+  whole-set single-process run; they are now enumerated in
+  `docs/borrowed_atom_audit.md` §7.3 instead of being folded into one vague
+  workaround.
+- Fixed `zjs --leak-check` crashing on an otherwise clean run: the dynamic
+  import loader scope's `defer` ran after `runtime.deinit()` and touched the
+  destroyed runtime. The scope is now restored before teardown (`restore` is
+  idempotent, so the defer becomes a no-op).
+- **Gate and test audit (2026-08-19).** Reviewed every gate and test target
+  for things that could be dropped or were over-built, then closed the two
+  gaps the audit found.
+
+  Removed:
+  - The **NaN-boxed 8-byte JSValue representation** and everything that
+    served it: `-Dzjs_nan_boxing`, the `NanBox` encoding namespace, the
+    `test-altrepr` nested build, and the per-representation branches through
+    `core/value.zig`, `exec/inline_calls.zig`, `exec/tailcall_dispatch.zig`
+    and `core/jobs.zig`. No shipped platform used it (every release target is
+    64-bit and ships `repr=tagged`), its A/B value was disproved in
+    2026-08-07, and its guard had been a known-red gate since 2026-08-18 — a
+    permanently-failing gate teaches nothing. `JSValue` is now unconditionally
+    16 bytes. The `repr` component stays in the configuration signature, now
+    derived from `@sizeOf(JSValue)`, so recorded signatures keep their meaning
+    and the signature string is unchanged.
+  - The **`perf-self-check` / `perf-self-update-baseline`** self-baseline gate,
+    its checked-in baselines under `reports/perf/baseline/`, and
+    `tools/perf/write_env.js`. Performance verdicts now come from bench-v8
+    (published metric, and the rule-2 instrument) and the zoo (attribution).
+  - The test262 runner's **`--regression-baseline`** flag and its per-directory
+    comparison machinery: dead code with no caller anywhere, whose only tests
+    tested itself, and which — when enabled — *suppressed* the zero-failure
+    gate it was meant to strengthen.
+  - The deprecated aliases `quick-check`, `checkpoint-check`, `test262-gate`,
+    `test-compiler-v2`, and `-Dzjs_v2_layout`, as promised for this release.
+
+  Added:
+  - `test262-check` now runs **on every pull request** (linux-arm64). It is a
+    zero-failure gate, so this is the sharpest semantic-regression signal
+    available; previously a regression could live on `main` for up to a day
+    until the nightly caught it.
+  - `test -Dzjs_ownership_audit=true` now runs **nightly**, and a failing
+    nightly opens or updates a tracking issue. That tier used to depend on a
+    developer remembering to run it, which is exactly how the representation
+    guard rotted unnoticed.
+  - `test-oom` joins it too — but running it first revealed the target had
+    been failing on `main` for a long time, unnoticed precisely because
+    nothing ran it. Four independent pre-existing defects, all fixed:
+    - **The native-call seam could claim an exception nobody installed.** It
+      reports failure by returning the exception sentinel, and `nativeIsExc`
+      asserts sentinel implies a pending exception — but when the heap was
+      exhausted, building the Error object failed, `nativeFromHostError`
+      swallowed that with `catch {}`, and the sentinel went out anyway,
+      tripping the assert. `materializeRuntimeError` now falls back to the
+      Realm's preallocated out-of-memory value, the same allocation-free path
+      VM catch delivery and `throwInterrupted` already use.
+    - **An uncaught out-of-memory reached the embedder as `error.JSException`.**
+      Allocation failure is deliberately catchable (it becomes
+      `InternalError: out of memory`), so the seam collapsed the original
+      `error.OutOfMemory` into the generic JS-exception error and the other
+      half of the contract — "paths without a JS catch handler still surface
+      `error.OutOfMemory` to the embedder" — was not held. The runtime now
+      carries `current_exception_out_of_memory` alongside the existing
+      `current_exception_uncatchable` flag, and the embedder-facing
+      `binding.JSContext` entry points restore `error.OutOfMemory` when the
+      exception was never consumed by JavaScript.
+
+      The restore happens **only** at that boundary. Widening the error inside
+      the engine was tried and reverted: it changed control flow everywhere
+      that treats `error.OutOfMemory` as a pre-user-code allocation failure —
+      the pending exception stopped matching itself and was rebuilt (losing its
+      stack), promise jobs re-queued on it, and module and async-generator
+      paths turned it into a hard error instead of a rejection.
+    - **`error.OutOfMemory` was missing from `errorNameForRuntimeError`**, even
+      though `runtimeErrorInfo` maps it to `InternalError`. Because of the gap
+      `pendingExceptionMatchesError` did not recognize an already-pending
+      out-of-memory exception, so a second materialization cleared it and built
+      a replacement — allocating on an exhausted heap and discarding the
+      original error's stack.
+    - **The for-of iterator-close path dropped exception flags.** It takes the
+      pending exception, closes iterators (which can run user code), then
+      re-throws the same value; `takeException`/`throwValue` reset the flags in
+      between. Uncatchable interrupts already dodged this by returning early —
+      out-of-memory cannot, so the flag is now carried across the round trip.
+
+  Retained deliberately: `-Dzjs_force_gc` (demoted from an expected gate to a
+  diagnostic instrument) and `JSValue.abi_encoding_revision` (fixed at 1;
+  removing it would churn the plugin ABI fingerprint for no gain).
+
+  The engine deletion was verified machine-code-identical under the
+  identity gate. That verification also corrected the gate's own protocol:
+  sampling three incremental rebuilds per source showed that *both* the
+  changed and unchanged trees reach the same two images in arbitrary order,
+  so a single build is not a verdict. `reports/identity/baseline.json` now
+  records the admissible image **set** rather than one hash per build
+  protocol, and `docs/refactor-policy.md` requires set membership.
+- Reinstated **refactor-policy rule 2** (suspended 2026-08-19 for the
+  maintainability campaign, which has closed) with bench-v8 as the measuring
+  instrument in place of the 15-item zoo: it is the metric the project
+  publishes, and its serial protocol costs about an hour per item against the
+  zoo's half day — the cost that drove the gate into suspension. The
+  comparison runner grew an explicit `--baseline` A/B mode that names the
+  reference role in its output and JSON artifact, so a refactor A/B cannot
+  later be misread as a QuickJS comparison.
 - Switched the public performance metric to **bench-v8** (the V8 benchmark
   suite version 7 — the suite upstream QuickJS publishes its scores with)
   and vendored it unmodified under `tools/perf/bench_v8/suite/` (from the

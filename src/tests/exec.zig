@@ -15220,10 +15220,11 @@ test "inline call teardown releases every escaped storage shape" {
 test "inline operand Stack keeps limit and ownership flags in one word" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(engine.exec.stack.Stack));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(inline_calls.Machine.ArgsSource));
-    if (core.value.nan_boxing) {
-        try std.testing.expectEqual(@as(usize, 136), @sizeOf(engine.exec.frame.Frame));
-        try std.testing.expectEqual(@as(usize, 248), @sizeOf(inline_calls.Entry));
-    }
+    // Frame and Entry are layout-sensitive (see the Entry pin in
+    // inline_calls.zig and the QCP-1B note in docs/refactor-policy.md), so pin
+    // both sizes here rather than leaving them to a benchmark to notice.
+    try std.testing.expectEqual(@as(usize, 152), @sizeOf(engine.exec.frame.Frame));
+    try std.testing.expectEqual(@as(usize, 256), @sizeOf(inline_calls.Entry));
 }
 
 test "ordinary root bytecode call carves one operand window" {

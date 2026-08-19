@@ -904,6 +904,17 @@ pub const JSRuntime = struct {
     /// a real pending InternalError but bytecode catch markers must not consume
     /// it. Every ordinary throw resets this flag.
     current_exception_uncatchable: bool = false,
+    /// Set when the pending exception is the engine's own out-of-memory
+    /// InternalError. Allocation failure is deliberately catchable (see
+    /// `exception_ops.runtimeErrorInfo`), which means the native seam turns it
+    /// into a JS exception and the original `error.OutOfMemory` would otherwise
+    /// be lost -- an uncaught OOM would reach the embedder as a plain
+    /// `error.JSException`. This flag lets `nativeHostError` restore the
+    /// specific error, keeping the other half of that contract: JS may catch
+    /// it, but a path with no handler still surfaces `error.OutOfMemory`.
+    /// Reset by every ordinary throw, take, and clear, exactly like the
+    /// uncatchable flag above.
+    current_exception_out_of_memory: bool = false,
     formatting_error_stack: bool = false,
     backtrace_frames: []context_mod.BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
@@ -1077,6 +1088,7 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.current_exception_uncatchable = false;
+        rt.current_exception_out_of_memory = false;
         rt.hot.call_depth = 0;
         rt.hot.native_call_depth = 0;
         rt.hot.active_bytecode_stack_bytes = 0;
@@ -1158,6 +1170,7 @@ pub const JSRuntime = struct {
         const current_exception = self.current_exception;
         self.current_exception = JSValue.uninitialized();
         self.current_exception_uncatchable = false;
+        self.current_exception_out_of_memory = false;
         current_exception.free(self);
         self.job_queue.deinit();
         self.drainDeferredWeakValueFrees();
@@ -1207,6 +1220,13 @@ pub const JSRuntime = struct {
         self.drainDeferredClassPayloadFinalizers();
         self.clearBorrowedWeakCleanupIdentities();
         self.clearPendingFinalizationJobs();
+        // The teardown cycle removals above sweep dead weak payloads, and a
+        // FinalizationRegistry cell whose target died enqueues its cleanup
+        // callback (`Object.sweepDeadWeakPayloadReferences`). That re-grows the
+        // queue's backing block after the `job_queue.deinit()` performed at the
+        // top of teardown, and `clearPendingFinalizationJobs` only drains the
+        // entries. Release the storage once no enqueue site remains reachable.
+        self.job_queue.deinit();
         // Ordinary atom-string caches own an independent string ref and can be
         // released now. Dynamic symbol bodies cannot: their rc also represents
         // property-key atoms held by shapes, which intentionally outlive objects

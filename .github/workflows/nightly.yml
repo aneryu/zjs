@@ -31,6 +31,12 @@ jobs:
           node-version: "24"
       - run: zig build engine-production-gate --summary all
       - run: zig build test -Doptimize=ReleaseSafe --summary all
+      # Instrumentation tiers. These used to depend on a developer remembering
+      # to run them when they touched the matching subsystem; that is how the
+      # nan-boxing guard rotted into a permanent red without anyone noticing.
+      # A machine runs them now.
+      - run: zig build test-oom --summary all
+      - run: zig build test -Dzjs_ownership_audit=true --summary all
 
   linux-x86_64:
     runs-on: ubuntu-24.04
@@ -168,4 +174,36 @@ jobs:
             gh release upload nightly release/* --clobber
           else
             gh release create nightly release/* --title "Nightly" --verify-tag --notes "Automated multi-platform nightly build from $GITHUB_SHA."
+          fi
+
+  # A red gate nobody is told about is not a gate. Every failure lands on one
+  # long-lived issue: the first failure opens it, later ones comment, and a
+  # human closes it when the cause is fixed.
+  notify-failure:
+    needs: [linux-arm64, linux-x86_64, macos-release, windows-release, release]
+    if: failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the nightly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Nightly is failing"
+          body="Nightly run failed for commit \`$GITHUB_SHA\`.
+
+          Run log: $RUN_URL
+
+          Close this issue once the nightly is green again."
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
           fi

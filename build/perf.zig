@@ -77,70 +77,6 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
         perf_runtime_profiles_step.dependOn(profile_step);
     }
 
-    const run_perf_self_current = b.addSystemCommand(&.{
-        "bun",
-        "tools/compare/run_microbench.js",
-        "--zjs-only",
-        "--iters",
-        "30",
-        "--warmup",
-        "5",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs"),
-        "--output",
-        ".zig-cache/perf/current/microbench-zjs-releasefast.json",
-        "--emit-scripts",
-        ".zig-cache/perf/current/scripts",
-    });
-    run_perf_self_current.step.dependOn(&install_zjs.step);
-
-    const run_perf_self_diff = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/diff_report.js",
-        "--warn-case-regressions",
-        "--output",
-        ".zig-cache/perf/current/diff-zjs-self.md",
-        "reports/perf/baseline/microbench-zjs-releasefast.json",
-        ".zig-cache/perf/current/microbench-zjs-releasefast.json",
-    });
-    run_perf_self_diff.step.dependOn(&run_perf_self_current.step);
-    const perf_self_check_step = b.step("perf-self-check", "Compare current zjs microbench timings against the checked-in zjs self baseline");
-    perf_self_check_step.dependOn(&run_perf_self_diff.step);
-
-    const run_perf_self_update = b.addSystemCommand(&.{
-        "bun",
-        "tools/compare/run_microbench.js",
-        "--zjs-only",
-        "--iters",
-        "30",
-        "--warmup",
-        "5",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs"),
-        "--output",
-        "reports/perf/baseline/microbench-zjs-releasefast.json",
-        "--emit-scripts",
-        ".zig-cache/perf/baseline/scripts",
-    });
-    run_perf_self_update.step.dependOn(&install_zjs.step);
-    const run_perf_self_env_update = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/write_env.js",
-        "--iters",
-        "30",
-        "--warmup",
-        "5",
-        "--output",
-        "reports/perf/baseline/env-zjs-self.md",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs"),
-        "--notes",
-        "ZJS self-baseline report; qjs is intentionally not configured for this gate. This 64-bit build uses the default 16-byte JSValue representation.",
-    });
-    run_perf_self_env_update.step.dependOn(&run_perf_self_update.step);
-    const perf_self_update_step = b.step("perf-self-update-baseline", "Refresh the checked-in zjs self performance baseline");
-    perf_self_update_step.dependOn(&run_perf_self_env_update.step);
-
     const run_perf_hotpath = b.addSystemCommand(&.{
         "bun",
         "tools/compare/run_microbench.js",
@@ -266,5 +202,4 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     if (b.args) |args| run_perf_direct.addArgs(args);
     const perf_direct_step = b.step("perf-direct", "Run zjs versus pinned QuickJS direct/core benchmarks");
     perf_direct_step.dependOn(&run_perf_direct.step);
-
 }

@@ -65,10 +65,9 @@ a `VmStackArena` and released with the frame; they are not registered as
 per-frame GC roots. Host values that outlive a call must use public handles,
 not a raw `JSValue`.
 
-`JSValue` has two representations. 64-bit default is 16-byte payload + signed
-tag; `-Dzjs_nan_boxing=true` selects 8-byte encoding. `test-altrepr` guards
-the opposite mode. That mode is a semantic/ownership guard, not a bit-level
-QuickJS ABI.
+`JSValue` has a single representation: a 16-byte struct of payload plus a
+signed 8-byte tag. The alignment with QuickJS is semantic and ownership-level,
+not a bit-level ABI match.
 
 `object.zig` is the large object-model file. For property behavior start at
 `shape.zig` and `property.zig`, then the call site in `src/exec/`.

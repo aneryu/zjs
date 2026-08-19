@@ -4,8 +4,8 @@
 // `if (!x)`, `while (!x)` and `for (; !x; )`. Neither engine folds negation in
 // branch context (P7-60 §2.1), so each of these really does execute the opcode.
 //
-// Printed as a stable table so zjs (default), zjs -Dzjs_nan_boxing=true and the
-// pinned qjs can be diffed byte for byte.
+// Printed as a stable table so zjs and the pinned qjs can be diffed byte for
+// byte.
 const trap = { valueOf() { throw new Error("valueOf ran"); },
                toString() { throw new Error("toString ran"); } };
 const heapBig = 123456789012345678901234567890n;

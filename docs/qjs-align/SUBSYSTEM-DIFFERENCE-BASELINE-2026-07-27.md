@@ -24,6 +24,12 @@
 > - §20：全部性能数字已被后续战役取代；当前口径见
 >   `docs/perf/bench-v8-status.md`（公开指标）与 `docs/perf/zoo-status.md`
 >   （内部诊断）。
+> - §2.1/§19.1：`zig build test262-gate` 已删除，改用 `test262-check`
+>   （2026-08-19 门禁审计）。
+> - §12.2/§19.1：NaN-boxing 的 8 字节 JSValue 表示已整套删除
+>   （`-Dzjs_nan_boxing`、`test-altrepr` 一并消失）。「zjs 永久支持
+>   alternate representation」「触及 value 表示必须跑 test-altrepr」的表述
+>   已作废；`JSValue` 现在只有 16 字节 payload+tag 一种表示。
 > - §1.1 的 zjs 基线 SHA `32e881db` 因 2026-08-18 的历史重写不在 main
 >   谱系上，仅存于侧分支/tag。
 

@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""Fixed bench-v8 comparison between zjs and pinned QuickJS.
+"""Fixed bench-v8 comparison against a reference binary.
 
 This is the V8 benchmark suite version 7 -- the suite Bellard's QuickJS
 publishes its scores with (bellard.org/quickjs/bench.html). The suite is
 vendored unmodified under tools/perf/bench_v8/suite/ (BSD license headers
 retained); only driver.js is ours.
 
-Scores are self-reported and higher-is-better. This tool reports
-ratio = zjs / qjs, so below 1.0 means zjs is slower. The headline is the
-suite's own composite "Score (version 7)" ratio (geometric mean per the
+Two modes, differing only in what the reference binary is:
+
+  * `--qjs`      pinned QuickJS. This is the published metric
+                 (docs/perf/bench-v8-status.md).
+  * `--baseline` a second zjs build. This is the refactor-policy rule 2
+                 A/B: does a hot-path reorganization move the number?
+
+The reference role is named throughout the output and in the JSON artifact,
+so an A/B result can never be misread later as a QuickJS comparison.
+
+Scores are self-reported and higher-is-better. The reported ratio is
+zjs / reference, so below 1.0 means the candidate is slower. The headline is
+the suite's own composite "Score (version 7)" ratio (geometric mean per the
 suite's definition), computed from per-engine median composites.
 
 Discipline (same spirit as tools/perf/zoo/run_zoo_compare.py):
@@ -86,12 +96,18 @@ def run_once(binary: Path, script: Path, cpu: int) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--zjs", required=True)
-    ap.add_argument("--qjs", required=True)
+    ap.add_argument("--zjs", required=True, help="the candidate zjs binary")
+    reference = ap.add_mutually_exclusive_group(required=True)
+    reference.add_argument("--qjs", help="pinned QuickJS binary (published-metric mode)")
+    reference.add_argument("--baseline", help="a second zjs build (refactor-policy rule 2 A/B mode)")
     ap.add_argument("--samples", type=int, default=8, help="samples per engine (default: 8)")
     ap.add_argument("--cpu", type=int, default=19)
     ap.add_argument("--output", help="write the JSON artifact here")
     args = ap.parse_args()
+
+    # The reference role is carried as data, not as a hardcoded "qjs", so the
+    # printed table and the artifact both state which comparison was run.
+    ref_name = "qjs" if args.qjs else "baseline"
 
     affinity = set(os.sched_getaffinity(0))
     if affinity != {args.cpu}:
@@ -104,17 +120,17 @@ def main() -> int:
 
     here = Path(__file__).resolve().parent
     zjs = Path(args.zjs).resolve()
-    qjs = Path(args.qjs).resolve()
+    ref = Path(args.qjs or args.baseline).resolve()
 
     with tempfile.NamedTemporaryFile(suffix=".js", delete=False) as tf:
         combined = Path(tf.name)
     try:
         build_combined(here / "suite", here / "driver.js", combined)
 
-        runs: dict[str, list[dict]] = {"zjs": [], "qjs": []}
-        # ABBA interleave: zq qz zq qz ...
+        runs: dict[str, list[dict]] = {"zjs": [], ref_name: []}
+        # ABBA interleave: AB BA AB BA ...
         for i in range(args.samples):
-            order = [("zjs", zjs), ("qjs", qjs)] if i % 2 == 0 else [("qjs", qjs), ("zjs", zjs)]
+            order = [("zjs", zjs), (ref_name, ref)] if i % 2 == 0 else [(ref_name, ref), ("zjs", zjs)]
             for name, binary in order:
                 runs[name].append(run_once(binary, combined, args.cpu))
                 print(f"sample {i + 1}/{args.samples} {name}: score {runs[name][-1]['score']:.0f}", flush=True)
@@ -125,27 +141,29 @@ def main() -> int:
                 "score": statistics.median(r["score"] for r in runs[eng]),
                 "suites": {s: statistics.median(r["suites"][s] for r in runs[eng]) for s in suite_names},
             }
-            for eng in ("zjs", "qjs")
+            for eng in ("zjs", ref_name)
         }
-        ratios = {s: med["zjs"]["suites"][s] / med["qjs"]["suites"][s] for s in suite_names}
-        headline = med["zjs"]["score"] / med["qjs"]["score"]
+        ratios = {s: med["zjs"]["suites"][s] / med[ref_name]["suites"][s] for s in suite_names}
+        headline = med["zjs"]["score"] / med[ref_name]["score"]
 
-        print("\nper-suite median (zjs / qjs, higher is better):")
+        print(f"\nper-suite median (zjs / {ref_name}, higher is better):")
         for s in suite_names:
-            print(f"  {s:14} {med['zjs']['suites'][s]:8.0f} / {med['qjs']['suites'][s]:8.0f}  ratio {ratios[s]:.4f}")
-        print(f"\ncomposite Score (version 7) medians: zjs {med['zjs']['score']:.0f} / qjs {med['qjs']['score']:.0f}")
-        print(f"headline ratio (zjs/qjs): {headline:.4f}")
+            print(f"  {s:14} {med['zjs']['suites'][s]:8.0f} / {med[ref_name]['suites'][s]:8.0f}  ratio {ratios[s]:.4f}")
+        print(f"\ncomposite Score (version 7) medians: zjs {med['zjs']['score']:.0f} / {ref_name} {med[ref_name]['score']:.0f}")
+        print(f"headline ratio (zjs/{ref_name}): {headline:.4f}")
 
         artifact = {
             "tool": "run_benchv8_compare",
             "suiteVersion": "7",
+            "mode": "published-metric" if args.qjs else "refactor-ab",
+            "referenceRole": ref_name,
             "scoreDirection": "higher-is-better",
-            "ratioDefinition": "zjs / qjs of per-engine median composite Score",
+            "ratioDefinition": f"zjs / {ref_name} of per-engine median composite Score",
             "cpu": args.cpu,
             "samples": args.samples,
             "binaries": {
                 "zjs": {"path": str(zjs), "md5": md5(zjs)},
-                "qjs": {"path": str(qjs), "md5": md5(qjs)},
+                ref_name: {"path": str(ref), "md5": md5(ref)},
             },
             "medians": med,
             "suiteRatios": ratios,

@@ -25,10 +25,8 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     run_test262_exec.addArg("100000");
     run_test262_exec.addArg("-R");
     run_test262_exec.addArg("reports/test262-latest");
-    const test262_check_step = b.step("test262-check", "Run test262 with regression gate");
+    const test262_check_step = b.step("test262-check", "Run the full test262 suite; any failed or newly-fixed case fails the step");
     test262_check_step.dependOn(&run_test262_exec.step);
-    const test262_gate_step = b.step("test262-gate", "DEPRECATED alias of test262-check (removed next release)");
-    test262_gate_step.dependOn(test262_check_step);
 
     const run_architecture_deps = b.addSystemCommand(&.{
         "node",
@@ -91,10 +89,8 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
 
     const quick_gate_step = b.step("quick-gate", "Run the fast inner-loop validation gate");
     quick_gate_step.dependOn(smoke_dev_step);
-    const quick_check_step = b.step("quick-check", "DEPRECATED alias of quick-gate (removed next release)");
-    quick_check_step.dependOn(quick_gate_step);
 
-    const checkpoint_gate_step = b.step("checkpoint-gate", "Run checkpoint validation without the full test262, OOM-injection, alternate-representation, or ReleaseFast binary gates");
+    const checkpoint_gate_step = b.step("checkpoint-gate", "Run checkpoint validation without the full test262, OOM-injection, or ReleaseFast binary gates");
     checkpoint_gate_step.dependOn(test_step);
     checkpoint_gate_step.dependOn(smoke_dev_step);
     // Source-side architecture only. The ReleaseFast compiler-stage `nm`
@@ -103,8 +99,6 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     checkpoint_gate_step.dependOn(&run_architecture_oom_panics.step);
     checkpoint_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
     checkpoint_gate_step.dependOn(&run_architecture_stage_source.step);
-    const checkpoint_check_step = b.step("checkpoint-check", "DEPRECATED alias of checkpoint-gate (removed next release)");
-    checkpoint_check_step.dependOn(checkpoint_gate_step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
@@ -115,5 +109,4 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     engine_production_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
     engine_production_gate_step.dependOn(&run_architecture_stage_boundaries.step);
     engine_production_gate_step.dependOn(test262_check_step);
-
 }

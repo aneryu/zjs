@@ -1,15 +1,21 @@
 {
-  "comment": "Identity-gate baseline registry (refactor-policy rule 4). Stripped whole-image md5 of the ReleaseFast zjs, per build attractor. Update when main moves; a gate check builds the candidate once and compares against these instead of rebuilding the baseline.",
+  "comment": "Identity-gate baseline registry (refactor-policy rule 4). Stripped whole-image md5 of the ReleaseFast zjs. The build is bistable: a given source tree reaches more than one image, and WHICH one is not a function of the build protocol. So this records the SET of images the baseline source is known to produce; a candidate passes when repeated builds land inside this set and never outside it.",
   "target": "aarch64-linux (maintainer measurement machine)",
-  "baseline_commit": "03328070",
+  "baseline_commit": "2a6998ef",
   "verified": "2026-08-19",
-  "attractors": {
-    "incremental_converged": "efb32e60f0b76d06a5ec7d2c91b0b2f3",
-    "cold_cache": "efb32e60f0b76d06a5ec7d2c91b0b2f3"
-  },
-  "notes": "Both attractors measured identical on this tree (the historical bistability collapsed to one image here; earlier trees had two). Prior lineage: b325d7b1 = e93b69e8(incremental)/5df9578f(cold); naming-only = 223fc498/d43abd31; post-dedup = e2d49022.",
+  "admissible_images": [
+    "b79373c2ce00e9dc7213c9c55c4af2e8",
+    "5564b2d87e5b2b21712bf125509f4bf1"
+  ],
   "protocol": {
-    "incremental_converged": "zig build zjs; touch src/internal_root.zig; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
-    "cold_cache": "copy tree without .zig-cache/zig-out, zig build zjs cold, strip, md5sum"
-  }
+    "cold_cache": "copy the tracked tree to a scratch dir; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
+    "incremental_converged": "touch src/internal_root.zig; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
+    "sampling": "Repeat the incremental build at least 3x per source. One build proves nothing: the basin choice varies run to run."
+  },
+  "notes": [
+    "2026-08-19, gates-audit: sampled 3x incremental (b79373c2 / 5564b2d8 / b79373c2) plus one cold build (5564b2d8) on this tree.",
+    "These hashes differ from the previous baseline (efb32e60 / 1e29ac2b at 711cbfc6) because this commit carries real engine changes -- four leak fixes and the out-of-memory contract repair -- not only the machine-code-identical NaN-boxing deletion. That deletion was verified separately against 711cbfc6 and reproduced its image set exactly.",
+    "The schema records an admissible image SET rather than one hash per protocol name. The old shape asserted each protocol yields a fixed image, which sampling falsifies: the same protocol on the same source yields either image. Reading a single incremental build as a verdict fails good changes spuriously.",
+    "Prior lineage (single-sample, per the old schema, so treat as one observation each): 711cbfc6 = {efb32e60, 1e29ac2b}; 03328070 = efb32e60 both; b325d7b1 = e93b69e8(incremental)/5df9578f(cold); naming-only = 223fc498/d43abd31; post-dedup = e2d49022."
+  ]
 }

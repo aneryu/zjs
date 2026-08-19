@@ -384,6 +384,12 @@ pub fn main(init: std.process.Init) !void {
     // allowing the GeneralPurposeAllocator to perform full validation.
     engine.printSmallInlineProbe();
     if (runtime_options.leak_check) {
+        // Restore the loader hook while the runtime it points at is still
+        // alive. The trailing `defer dynamic_import_scope.deinit()` would
+        // otherwise run after `runtime.deinit()` and touch a destroyed
+        // runtime; `restore` is idempotent, so calling it here is safe and
+        // the defer becomes a no-op.
+        dynamic_import_scope.deinit();
         dynamic_import_state.deinit();
         runtime.deinit();
         return;

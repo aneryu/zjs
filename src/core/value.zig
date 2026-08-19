@@ -1,12 +1,8 @@
 const std = @import("std");
-const build_options = @import("build_options");
 
 const bignum = @import("../libs/bigint.zig");
 const gc = @import("gc.zig");
 const string_mod = @import("string.zig");
-
-/// When true, JSValue uses the 8-byte NaN-boxed representation (build -Dzjs_nan_boxing=true).
-pub const nan_boxing: bool = build_options.zjs_nan_boxing;
 
 /// Value-free profile hooks stay off even in `zjs-profile`. Compiling them
 /// into JSValue.free / call-profile guards slid WPO (zlib SIGSEGV, `sp==0`
@@ -33,104 +29,6 @@ pub const Tag = struct {
     pub const float64: i32 = 8;
 };
 
-/// NaN-boxed encoding (see quickjs.h JS_NAN_BOXING): float64 values are stored
-/// directly as their IEEE-754 bit pattern with NaN canonicalized, so every
-/// float bit pattern is <= 0xFFF0_0000_0000_0000 (-Infinity). All other tags
-/// are boxed strictly above that range: a 4-bit dense tag index in bits 51..48
-/// and a 48-bit payload in bits 47..0 (covers aarch64/x86-64 user-space
-/// pointers and sign-extended 48-bit short big ints).
-const NanBox = struct {
-    const payload_bits = 48;
-    const payload_mask: u64 = (@as(u64, 1) << payload_bits) - 1;
-    /// Largest canonical float64 bit pattern (-Infinity).
-    const float_max: u64 = 0xFFF0_0000_0000_0000;
-    const canonical_nan: u64 = 0x7FF8_0000_0000_0000;
-
-    // Preserve QuickJS's semantic tag order inside the dense boxed prefix
-    // space. The two numeric tag runs [-9..-6] and [-3..7] map to prefix
-    // indexes [1..4] and [5..15], respectively, so `tagOf` can invert the
-    // encoding arithmetically instead of loading a tag from a lookup table.
-    // Reference-counted and deinit-skip tags remain contiguous, retaining the
-    // single range checks used by `requiresRefCount`/`dup`/`free`.
-    const boxed_tags = [_]i32{
-        Tag.big_int,
-        Tag.symbol,
-        Tag.string,
-        Tag.string_rope,
-        Tag.module,
-        Tag.function_bytecode,
-        Tag.object,
-        Tag.int,
-        Tag.boolean,
-        Tag.null_value,
-        Tag.undefined_value,
-        Tag.uninitialized,
-        Tag.catch_offset,
-        Tag.exception,
-        Tag.short_big_int,
-    };
-
-    /// Inclusive prefix range of all reference-counted tags.
-    const refcount_min: u64 = prefixOf(Tag.big_int);
-    const refcount_max: u64 = prefixOf(Tag.object);
-    /// Lowest prefix of the deinit-phase skip set {module, object, function_bytecode}.
-    const deinit_skip_min: u64 = prefixOf(Tag.module);
-
-    inline fn prefixBits(bits: u64) u64 {
-        return bits >> payload_bits;
-    }
-
-    const tag_assertions = blk: {
-        // Dense indexes must decode to the semantic QuickJS tags without a
-        // table. This also pins the otherwise-unused -5/-4 holes in the tag
-        // number line between the two runs.
-        for (boxed_tags, 1..) |tag, index| {
-            if (tagFromIndex(index) != tag) @compileError("boxed tag order is not arithmetically decodable");
-        }
-        // Refcounted tags must form the contiguous range [refcount_min, refcount_max].
-        for ([_]i32{ Tag.big_int, Tag.symbol, Tag.string, Tag.string_rope, Tag.module, Tag.object, Tag.function_bytecode }) |tag| {
-            const p = prefixOf(tag);
-            if (p < refcount_min or p > refcount_max) @compileError("refcounted tag escaped the contiguous prefix range");
-        }
-        // Non-refcounted boxed tags must sit OUTSIDE that range.
-        for ([_]i32{ Tag.int, Tag.boolean, Tag.null_value, Tag.undefined_value, Tag.uninitialized, Tag.catch_offset, Tag.exception, Tag.short_big_int }) |tag| {
-            const p = prefixOf(tag);
-            if (p >= refcount_min and p <= refcount_max) @compileError("non-refcounted tag landed inside the refcount prefix range");
-        }
-        // The deinit-skip set must be the contiguous tail [deinit_skip_min, refcount_max].
-        for ([_]i32{ Tag.module, Tag.object, Tag.function_bytecode }) |tag| {
-            const p = prefixOf(tag);
-            if (p < deinit_skip_min or p > refcount_max) @compileError("deinit-skip tag escaped its contiguous range");
-        }
-        // Float canonical range must be strictly below the boxed prefixes.
-        if (refcount_min <= (float_max >> payload_bits)) @compileError("refcount prefixes overlap the float range");
-        break :blk true;
-    };
-
-    /// Dense 1-based tag index; index 0 is reserved so that no boxed encoding
-    /// can collide with the canonical float range.
-    fn indexOf(comptime tag: i32) u64 {
-        return switch (tag) {
-            Tag.big_int...Tag.string_rope => @intCast(tag + 10),
-            Tag.module...Tag.short_big_int => @intCast(tag + 8),
-            else => @compileError("tag is not representable in the NaN-boxed encoding"),
-        };
-    }
-
-    inline fn tagFromIndex(index: u64) i32 {
-        const dense: i32 = @intCast(index);
-        // Indexes 1..4 make `dense - 5` negative; its sign bit restores the
-        // two unused semantic tags before the second run without a branch.
-        const before_second_run: u32 = @bitCast(dense - 5);
-        return dense - 8 - @as(i32, @intCast((before_second_run >> 31) * 2));
-    }
-
-    /// High 16 bits of a boxed encoding for `tag`.
-    fn prefixOf(comptime tag: i32) u64 {
-        return (float_max >> payload_bits) | indexOf(tag);
-    }
-};
-
 pub const JSValue = extern struct {
     pub const Int32Pair = struct {
         lhs: i32,
@@ -145,12 +43,13 @@ pub const JSValue = extern struct {
     pub const Bytes = @import("bytes_view.zig").JSBytes(JSValue);
 
     /// Packed-value encoding revision included in the plugin ABI fingerprint.
-    /// Zero means the field layout fully describes the representation.
-    pub const abi_encoding_revision: u64 = if (nan_boxing) 3 else 1;
+    /// Zero would mean the field layout fully describes the representation.
+    /// Bump this if the meaning of the payload/tag pair ever changes without a
+    /// visible change in field types; plugins compiled against a different
+    /// revision are rejected by the fingerprint.
+    pub const abi_encoding_revision: u64 = 1;
 
-    pub const Repr = if (nan_boxing) extern struct {
-        bits: u64,
-    } else extern struct {
+    pub const Repr = extern struct {
         payload: u64,
         // 8-byte tag (matches QuickJS's `int64_t tag` on 64-bit, not a narrow
         // i32+pad). Critical for codegen: LLVM keeps the 16-byte JSValue in a SIMD
@@ -165,53 +64,29 @@ pub const JSValue = extern struct {
     repr: Repr,
 
     comptime {
-        std.debug.assert(@sizeOf(JSValue) == if (nan_boxing) 8 else 16);
+        std.debug.assert(@sizeOf(JSValue) == 16);
         std.debug.assert(@alignOf(JSValue) == 8);
-        if (nan_boxing) _ = NanBox.tag_assertions;
     }
 
-    /// Number of bits available for the immediate short big int payload.
-    pub const short_big_int_bits: u16 = if (nan_boxing) NanBox.payload_bits else 64;
-    pub const short_big_int_min: i64 = if (nan_boxing) -(@as(i64, 1) << (NanBox.payload_bits - 1)) else std.math.minInt(i64);
-    pub const short_big_int_max: i64 = if (nan_boxing) (@as(i64, 1) << (NanBox.payload_bits - 1)) - 1 else std.math.maxInt(i64);
-    /// Performance capability exposed without leaking representation fields.
-    /// Callers can compile out the attempted fast move when the adapter's normal
-    /// whole-value replacement is already cheaper.
-    pub const has_fast_int32_slot_move: bool = !nan_boxing;
+    /// Number of bits available for the immediate short big int payload. The
+    /// payload word holds the value outright, so this is the full i64 range.
+    pub const short_big_int_bits: u16 = 64;
+    pub const short_big_int_min: i64 = std.math.minInt(i64);
+    pub const short_big_int_max: i64 = std.math.maxInt(i64);
 
     pub inline fn shortBigIntFits(value: i128) bool {
         return value >= short_big_int_min and value <= short_big_int_max;
     }
 
     inline fn make(comptime tag: i32, payload: u64) JSValue {
-        if (comptime nan_boxing) {
-            if (comptime tag == Tag.float64) {
-                // Floats are the one semantic tag that is not boxed. Keep the
-                // unified constructor total over every Tag while preserving
-                // the canonical-NaN invariant that separates raw IEEE values
-                // from the boxed prefix range.
-                if ((payload & 0x7FFF_FFFF_FFFF_FFFF) > 0x7FF0_0000_0000_0000) {
-                    return .{ .repr = .{ .bits = NanBox.canonical_nan } };
-                }
-                return .{ .repr = .{ .bits = payload } };
-            }
-            std.debug.assert(payload <= NanBox.payload_mask);
-            const prefix_bits = comptime (NanBox.prefixOf(tag) << NanBox.payload_bits);
-            return .{ .repr = .{ .bits = prefix_bits | payload } };
-        }
         return .{ .repr = .{ .payload = payload, .tag = tag } };
     }
 
     inline fn hasTag(self: JSValue, comptime tag: i32) bool {
-        if (comptime nan_boxing) {
-            if (comptime tag == Tag.float64) return self.repr.bits <= NanBox.float_max;
-            return (self.repr.bits >> NanBox.payload_bits) == comptime NanBox.prefixOf(tag);
-        }
         return self.repr.tag == tag;
     }
 
     inline fn payloadOf(self: JSValue) u64 {
-        if (comptime nan_boxing) return self.repr.bits & NanBox.payload_mask;
         return self.repr.payload;
     }
 
@@ -238,10 +113,6 @@ pub const JSValue = extern struct {
     }
 
     pub fn shortBigInt(v: i64) JSValue {
-        if (comptime nan_boxing) {
-            std.debug.assert(shortBigIntFits(v));
-            return make(Tag.short_big_int, @as(u64, @bitCast(v)) & NanBox.payload_mask);
-        }
         return make(Tag.short_big_int, @bitCast(v));
     }
 
@@ -294,10 +165,6 @@ pub const JSValue = extern struct {
     }
 
     pub inline fn tagOf(self: JSValue) i32 {
-        if (comptime nan_boxing) {
-            if (self.repr.bits <= NanBox.float_max) return Tag.float64;
-            return NanBox.tagFromIndex((self.repr.bits >> NanBox.payload_bits) & 0xF);
-        }
         return @intCast(self.repr.tag);
     }
 
@@ -362,13 +229,6 @@ pub const JSValue = extern struct {
     }
 
     pub inline fn requiresRefCount(self: JSValue) bool {
-        if (comptime nan_boxing) {
-            // Single prefix range test, no `tag_by_index` table load. Floats
-            // (prefix <= float range) and non-refcounted boxed tags (prefix >
-            // refcount_max) both fall outside [refcount_min, refcount_max].
-            const p = NanBox.prefixBits(self.repr.bits);
-            return p >= NanBox.refcount_min and p <= NanBox.refcount_max;
-        }
         // QuickJS deliberately uses one unsigned range comparison here:
         // negative refcounted tags [-9..-1] (including the unreachable -5/-4
         // holes) compare above every non-negative immediate tag.
@@ -384,27 +244,19 @@ pub const JSValue = extern struct {
 
     /// Replace an already-proven int32 value without changing its semantic tag.
     /// The caller must have classified this exact slot as `Tag.int`. Keeping the
-    /// operation in the JSValue module lets the 16-byte implementation update
-    /// only its payload while the NaN-boxed implementation retains the packed
-    /// constructor/store shape that is fastest for that adapter.
+    /// operation in the JSValue module lets it update only the payload word
+    /// instead of rebuilding the whole value.
     pub inline fn setInt32AssumeInt(self: *JSValue, value: i32) void {
         std.debug.assert(self.hasTag(Tag.int));
-        if (comptime nan_boxing) {
-            self.* = int32(value);
-        } else {
-            self.repr.payload = payloadFromI32(value);
-        }
+        self.repr.payload = payloadFromI32(value);
     }
 
-    /// Try the representation-specific fast form of moving an int32 from one
-    /// live slot into another. The 16-byte adapter can preserve the proven int
-    /// tag and copy only the payload, avoiding an aggregate copy and refcount
-    /// classification. The packed adapter deliberately declines: its generic
-    /// replacement is already a single-register move and an extra tag guard is
-    /// slower. On false, neither slot is modified and the caller must use the
-    /// normal ownership-aware replacement path.
+    /// Fast form of moving an int32 from one live slot into another: when both
+    /// slots already hold `Tag.int`, preserve the proven tag and copy only the
+    /// payload, avoiding an aggregate copy and refcount classification. On
+    /// false, neither slot is modified and the caller must use the normal
+    /// ownership-aware replacement path.
     pub inline fn trySetInt32FromSlot(self: *JSValue, source: *const JSValue) bool {
-        if (comptime !has_fast_int32_slot_move) return false;
         if (comptime Tag.int == 0) {
             if ((self.repr.tag | source.repr.tag) != 0) return false;
         } else {
@@ -415,15 +267,6 @@ pub const JSValue = extern struct {
     }
 
     pub inline fn asInt32Pair(lhs: JSValue, rhs: JSValue) ?Int32Pair {
-        if (comptime nan_boxing) {
-            const int_prefix_bits = comptime NanBox.prefixOf(Tag.int) << NanBox.payload_bits;
-            const tag_mask = comptime ~NanBox.payload_mask;
-            if ((((lhs.repr.bits ^ int_prefix_bits) | (rhs.repr.bits ^ int_prefix_bits)) & tag_mask) != 0) return null;
-            return .{
-                .lhs = payloadAsI32(lhs.repr.bits),
-                .rhs = payloadAsI32(rhs.repr.bits),
-            };
-        }
         if (comptime Tag.int == 0) {
             if ((lhs.repr.tag | rhs.repr.tag) != 0) return null;
         } else {
@@ -436,10 +279,6 @@ pub const JSValue = extern struct {
     }
 
     pub fn asFloat64(self: JSValue) ?f64 {
-        if (comptime nan_boxing) {
-            if (self.repr.bits <= NanBox.float_max) return @bitCast(self.repr.bits);
-            return null;
-        }
         if (self.repr.tag == Tag.float64) return @bitCast(self.repr.payload);
         return null;
     }
@@ -477,11 +316,6 @@ pub const JSValue = extern struct {
 
     pub fn asShortBigInt(self: JSValue) ?i64 {
         if (!self.hasTag(Tag.short_big_int)) return null;
-        if (comptime nan_boxing) {
-            // Sign-extend the 48-bit payload.
-            const shifted: i64 = @bitCast(self.repr.bits << (64 - NanBox.payload_bits));
-            return shifted >> (64 - NanBox.payload_bits);
-        }
         return @bitCast(self.repr.payload);
     }
 
@@ -493,8 +327,8 @@ pub const JSValue = extern struct {
     /// dependency. The public, representation-complete analog of `asShortBigInt`.
     pub fn asInt64(self: JSValue) ?i64 {
         if (!self.isBigInt()) return null;
-        // Fast path: an inline short BigInt always fits i64 by construction (its
-        // payload is at most the 48-bit short window under NaN-boxing).
+        // Fast path: an inline short BigInt always fits i64 by construction --
+        // the payload word holds the value outright.
         if (self.asShortBigInt()) |short| return short;
         var scratch: [2]bignum.Limb = undefined;
         const parts = bigIntParts(self, &scratch) orelse return null;
@@ -624,24 +458,12 @@ pub const JSValue = extern struct {
     /// MODULE only. Heap BigInt is refcounted but is not a cycle-list member;
     /// qjs drops it here with `cmn tag, #3` (tagged tags {-3,-2,-1}).
     pub inline fn cycleMarkHeader(self: JSValue) ?*gc.Header {
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p < NanBox.deinit_skip_min or p > NanBox.refcount_max) return null;
-            return ptrFromPayload(gc.Header, self.payloadOf());
-        }
         const tag = self.repr.tag;
         if (tag > Tag.object or tag < Tag.module) return null;
         return ptrFromPayload(gc.Header, self.repr.payload);
     }
 
     pub inline fn dup(self: JSValue) JSValue {
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p >= NanBox.refcount_min and p <= NanBox.refcount_max) {
-                gc.retain(self.refCountWordAssumeRefCounted());
-            }
-            return self;
-        }
         if (!self.requiresRefCount()) return self;
         gc.retain(self.refCountWordAssumeRefCounted());
         return self;
@@ -650,18 +472,6 @@ pub const JSValue = extern struct {
     pub inline fn free(self: JSValue, rt: anytype) void {
         comptime {
             @setEvalBranchQuota(10_000);
-        }
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
-            // deinit-phase skip for {module, object, function_bytecode} — the
-            // contiguous tail [deinit_skip_min, refcount_max].
-            if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
-            if (comptime value_free_profile) {
-                if (rt.opcode_profile) |prof| prof.recordValueFree();
-            }
-            self.releaseCommonRefCount(rt);
-            return;
         }
         if (!self.requiresRefCount()) return;
         const tag = self.tagOf();
@@ -691,15 +501,6 @@ pub const JSValue = extern struct {
         }
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
-            if (comptime value_free_profile) {
-                if (rt.opcode_profile) |prof| prof.recordValueFree();
-            }
-            self.releaseCommonRefCount(rt);
-            return;
-        }
         if (!self.requiresRefCount()) return;
         if (comptime value_free_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
@@ -754,24 +555,6 @@ pub const JSValue = extern struct {
     /// to the zero-ref queue (`__JS_FreeValueRT` 6471-6483) instead of hopping
     /// through `JSValue.destroyZeroRef` + `gc.destroyZeroRef`.
     pub inline fn freeFromPlainObjectDestroy(self: JSValue, rt: anytype) void {
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
-            const hdr = self.refCountWordAssumeRefCounted();
-            std.debug.assert(hdr.rc > 0);
-            hdr.rc -= 1;
-            if (hdr.rc != 0) return;
-            if (p == NanBox.prefixOf(Tag.object)) {
-                // Keep the queue/drain body out of destroyFromHeader
-                // (qjs __JS_FreeValueRT is a separate symbol, 6432).
-                @call(.never_inline, gc.Registry.enqueueZeroRef, .{
-                    &rt.gc, rt, self.refHeaderAssumeObject(),
-                });
-                return;
-            }
-            self.destroyZeroRef(rt);
-            return;
-        }
         if (!self.requiresRefCount()) return;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
@@ -786,15 +569,14 @@ pub const JSValue = extern struct {
         self.destroyZeroRef(rt);
     }
 
-    /// Read a 16-byte JSValue slot as two 64-bit integer loads (identity under
-    /// the nan-boxed 8-byte repr). Hot property/operand slots are written and
-    /// read across handlers as 64-bit integer halves; letting LLVM lower either
-    /// side as one 128-bit SIMD access breaks store-to-load forwarding against
-    /// the integer half on the other side (double-digit cycles per hit). qjs's
-    /// JSValue moves are integer ldp/stp pairs throughout (e.g. set_value,
-    /// quickjs.c:5091; GET_FIELD_INLINE's val handling, quickjs.c:19131-19158).
+    /// Read a 16-byte JSValue slot as two 64-bit integer loads. Hot
+    /// property/operand slots are written and read across handlers as 64-bit
+    /// integer halves; letting LLVM lower either side as one 128-bit SIMD
+    /// access breaks store-to-load forwarding against the integer half on the
+    /// other side (double-digit cycles per hit). qjs's JSValue moves are
+    /// integer ldp/stp pairs throughout (e.g. set_value, quickjs.c:5091;
+    /// GET_FIELD_INLINE's val handling, quickjs.c:19131-19158).
     pub inline fn loadSlotAsIntPair(slot: *const JSValue) JSValue {
-        if (comptime @sizeOf(JSValue) != 2 * @sizeOf(u64)) return slot.*;
         const words: *const [2]u64 = @ptrCast(@alignCast(slot));
         const lo = words[0];
         const hi = words[1];
@@ -804,10 +586,6 @@ pub const JSValue = extern struct {
     /// Store twin of `loadSlotAsIntPair`: write a JSValue slot as two 64-bit
     /// integer stores so downstream 64-bit readers stay forwarding-eligible.
     pub inline fn storeSlotAsIntPair(slot: *JSValue, value: JSValue) void {
-        if (comptime @sizeOf(JSValue) != 2 * @sizeOf(u64)) {
-            slot.* = value;
-            return;
-        }
         const words: *[2]u64 = @ptrCast(@alignCast(slot));
         const src: [2]u64 = @bitCast(value);
         words[0] = src[0];
@@ -845,19 +623,6 @@ pub const JSValue = extern struct {
     /// callee-saved spill frame. When this returns true the caller must
     /// complete the release exactly once (e.g. `value.free(rt)`).
     pub inline fn releaseRefCountedNeedsDestroy(self: JSValue, rt: anytype) bool {
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return false;
-            if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return false;
-            const hdr = self.refCountWordAssumeRefCounted();
-            std.debug.assert(hdr.rc > 0);
-            if (hdr.rc == 1) return true;
-            if (comptime value_free_profile) {
-                if (rt.opcode_profile) |prof| prof.recordValueFree();
-            }
-            hdr.rc -= 1;
-            return false;
-        }
         if (!self.requiresRefCount()) return false;
         const tag = self.tagOf();
         if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return false;
@@ -894,18 +659,6 @@ pub const JSValue = extern struct {
     pub inline fn releaseRefCountedNeedsDestroyDuringActiveBytecode(self: JSValue, rt: anytype) bool {
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
-        if (comptime nan_boxing) {
-            const p = NanBox.prefixBits(self.repr.bits);
-            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return false;
-            const hdr = self.refCountWordAssumeRefCounted();
-            std.debug.assert(hdr.rc > 0);
-            if (hdr.rc == 1) return true;
-            if (comptime value_free_profile) {
-                if (rt.opcode_profile) |prof| prof.recordValueFree();
-            }
-            hdr.rc -= 1;
-            return false;
-        }
         if (!self.requiresRefCount()) return false;
         const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
@@ -941,11 +694,6 @@ pub const JSValue = extern struct {
     }
 
     pub fn same(self: JSValue, other: JSValue) bool {
-        if (comptime nan_boxing) {
-            // Encodings are canonical (NaN included), so bit equality matches
-            // the tag+payload comparison of the boxed representation.
-            return self.repr.bits == other.repr.bits;
-        }
         if (self.repr.tag != other.repr.tag) return false;
         return switch (self.repr.tag) {
             Tag.null_value, Tag.undefined_value, Tag.uninitialized, Tag.exception => true,
@@ -1101,11 +849,8 @@ test "asInt64 / asUint64 on inline short BigInt and non-BigInt" {
     try t.expectEqual(@as(?i64, null), JSValue.float64(1.5).asInt64());
     try t.expectEqual(@as(?u64, null), JSValue.boolean(true).asUint64());
 
-    // Inline short BigInt across its full representable range. That range is the
-    // NaN-boxed 48-bit window (±2^47) when nan_boxing is on, or the full i64
-    // otherwise — so the test pins to the representation's own bounds. A raw
-    // i64::MAX literal would overflow the 48-bit short payload and trip the
-    // `shortBigInt` construction assert under a NaN-boxed build.
+    // Inline short BigInt across its full representable range: the payload word
+    // holds the value outright, so the bounds are the full i64 range.
     try t.expectEqual(@as(?i64, 0), JSValue.shortBigInt(0).asInt64());
     try t.expectEqual(@as(?i64, 42), JSValue.shortBigInt(42).asInt64());
     try t.expectEqual(@as(?i64, -42), JSValue.shortBigInt(-42).asInt64());

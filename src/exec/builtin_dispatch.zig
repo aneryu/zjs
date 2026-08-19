@@ -61,6 +61,17 @@ pub noinline fn nativeFromHostError(ctx: *core.JSContext, global: ?*core.Object,
 /// Reconstruct the host sentinel at a !JSValue receive. Uncatchable interrupt
 /// keeps `error.Interrupted` (materialize already left the prebuilt pending
 /// InternalError); every other native failure is `error.JSException`.
+///
+/// An allocation failure deliberately does NOT get its own error here, even
+/// though `current_exception_out_of_memory` records it. Inside the engine an
+/// OOM that reached this seam has already become an ordinary catchable JS
+/// exception, and widening the error category would change engine control
+/// flow: `pendingExceptionMatchesError` would stop matching it (rebuilding the
+/// error and losing its stack), promise jobs would re-queue on it, and module
+/// and async-generator paths would turn it into a hard error instead of a
+/// rejection. The flag is read once, at the embedder boundary
+/// (`binding.JSContext.restoreUncaughtOutOfMemory`), where restoring
+/// `error.OutOfMemory` is observable to the host and to nothing else.
 pub inline fn nativeHostError(ctx: *core.JSContext) HostError {
     if (ctx.exceptionIsUncatchable()) return error.Interrupted;
     return error.JSException;
@@ -389,10 +400,32 @@ pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err:
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return;
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return;
     const error_value = exception_ops.createNamedError(ctx, error_global, error_info.name, error_info.message) catch |create_err| {
+        // The native-call seam signals failure by returning the exception
+        // sentinel, and `nativeIsExc` asserts sentinel implies a pending
+        // exception. On an exhausted heap the Error object cannot be built, so
+        // the seam would otherwise claim an exception nobody installed --
+        // `nativeFromHostError` swallows this error and returns the sentinel
+        // regardless. Install the Realm's preallocated OOM value instead, the
+        // same allocation-free fallback VM catch delivery and
+        // `throwInterrupted` use. The error is still returned, so `try`
+        // callers propagate exactly as before.
+        if (create_err == error.OutOfMemory and !ctx.hasException()) {
+            const fallback = if (ctx.preallocated_oom_error) |preallocated|
+                preallocated.dup()
+            else
+                core.JSValue.nullValue();
+            _ = ctx.throwValue(fallback);
+            ctx.markExceptionOutOfMemory();
+        }
         return @as(HostError, @errorCast(create_err));
     };
     if (ctx.hasException()) ctx.clearException();
     _ = ctx.throwValue(error_value);
+    // Allocation failure is catchable, so it becomes a JS exception here and
+    // the `error.OutOfMemory` that caused it is about to be collapsed into
+    // `error.JSException` at the seam. Tag the exception so `nativeHostError`
+    // can restore the specific error if no JavaScript handler consumes it.
+    if (@as(anyerror, err) == error.OutOfMemory) ctx.markExceptionOutOfMemory();
 }
 
 /// Probe the internal-builtin table for `native_ref` and invoke the record.

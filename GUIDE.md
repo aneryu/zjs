@@ -335,6 +335,11 @@ compiler-stage `nm` check stays on the production gate. Add the relevant focused
 test262 directory or file set; do not run `quick-gate` first because
 checkpoint already supersedes it.
 
+The full test262 suite is a zero-failure gate and runs on every PR
+(`zig build test262-check`), so a semantic regression cannot reach `main`.
+Running the focused slice locally is still the fast way to find out; CI is the
+backstop, not the first line.
+
 **Phase close / release.** Use this only for final confirmation, release
 evidence, or CI gates:
 
@@ -343,12 +348,18 @@ zig build engine-production-gate --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
 ```
 
-Run `zig build test-altrepr --summary all` when value representation
-semantics changed, `zig build test-oom --summary all` when allocator/OOM
-behavior changed, `zig build test -Dzjs_force_gc=true` when GC timing changed,
-`zig build test -Dzjs_ownership_audit=true` when atom ownership changed, and
-the performance gate when runtime-sensitive performance changed. Do not treat
-these as checkpoint prerequisites.
+**Instrumentation tiers.** `zig build test-oom --summary all` (allocator / OOM
+behavior) and `zig build test -Dzjs_ownership_audit=true --summary all` (atom
+ownership) run in nightly CI, so they are a machine's job, not a memory test.
+Run them locally *before* a PR when you changed the matching subsystem — that
+is the cheap feedback — but a missed local run is now caught rather than lost.
+
+`zig build test -Dzjs_force_gc=true` is a diagnostic instrument, not a gate:
+reach for it when GC timing is the thing you are debugging.
+
+Hot-path performance changes are priced by [refactor-policy](docs/refactor-policy.md)
+rule 2 (a bench-v8 A/B) rather than by any step in this ladder. Performance is
+never measured in CI.
 
 ### B.7 Durable Lessons
 

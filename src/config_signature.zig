@@ -25,8 +25,8 @@
 //!   * `layout` is `resolve_labels.default_layout` — the exact comptime
 //!     constant `compiler.compileFunctionV2` hands to `resolve_labels.run`
 //!     (compiler/root.zig).
-//!   * `repr` is `core.value.nan_boxing`, the constant JSValue is laid out
-//!     from.
+//!   * `repr` is derived from `@sizeOf(core.value.JSValue)`, the size JSValue
+//!     is actually laid out at.
 //!   * `optimize` is `builtin.mode` of the module this file was compiled
 //!     into — the engine module of the artifact asking. See the note below on
 //!     why the optimize mode belongs in a *correctness* signature at all.
@@ -98,8 +98,12 @@ pub const compiler: []const u8 = "v2";
 /// Final bytecode layout, read off the constant compiler-v2 lowers with.
 pub const layout: []const u8 = @tagName(resolve_labels.default_layout);
 
-/// JSValue representation, read off the constant `core/value.zig` builds from.
-pub const repr: []const u8 = if (core_value.nan_boxing) "nan_boxed" else "tagged";
+/// JSValue representation, read off the size `core/value.zig` actually lays
+/// JSValue out at. The 8-byte NaN-boxed alternative was deleted, so `tagged`
+/// is the only value this can take today — but it is still DERIVED, not
+/// spelled as a literal, so a future change to the layout cannot leave a stale
+/// name behind in the signature.
+pub const repr: []const u8 = if (@sizeOf(core_value.JSValue) == 8) "nan_boxed" else "tagged";
 
 /// Optimize mode of the module this file was compiled into. Read from
 /// `builtin.mode` — the mode the compiler actually used — rather than from

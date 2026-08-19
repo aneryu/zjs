@@ -3326,6 +3326,15 @@ pub const function_def = struct {
             self.atoms.free(func_name);
             self.atoms.free(filename);
             self.atoms.free(script_or_module);
+            // A root emitter attaches its Builder before the first token is
+            // lexed (`ParseState.initRootEmitter`), so an initializer that
+            // fails after that point owns one exactly like a fully built
+            // FunctionDef does. Release it on the same terms as `deinit`.
+            if (self.v2_builder) |v2b| {
+                self.v2_builder = null;
+                v2b.deinit();
+                self.memory.destroy(compiler.Builder, v2b);
+            }
             freeGrowableSlice(VarScope, self.memory, &self.scopes, &self.scopes_capacity);
             self.scope_count = 0;
         }

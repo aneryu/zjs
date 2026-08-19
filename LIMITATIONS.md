@@ -82,13 +82,13 @@ module loading are not supported.
 
 ## Performance
 
-The public QuickJS comparison is the 15-benchmark zoo geomean in
+The public QuickJS comparison is the bench-v8 composite score in
 [docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md). That headline is composite-score
 parity, not every-benchmark parity.
 
-The checked performance gate is a ZJS self-baseline regression check, and
-single-script/runtime-profile artifacts are diagnostic. Do not treat
-external-process microbench timings as a semantic compatibility signal.
+There is no checked performance gate: benchmark, single-script, and
+runtime-profile artifacts are all diagnostic. Do not treat external-process
+microbench timings as a semantic compatibility signal.
 
 Per-opcode profiling requires the dedicated profiling build
 (`zig build zjs-profile`). The default `zjs` binary does not collect opcode

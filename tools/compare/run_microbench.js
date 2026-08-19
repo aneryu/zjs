@@ -129,7 +129,7 @@ function usage() {
 
 Runs zjs-compatible QuickJS microbench-derived cases through both C qjs and zjs.
 Each case is checked for matching stdout, stderr, and exit code before timing.
-Use --zjs-only for self-baseline reports that compare zjs to a checked-in zjs report.
+Use --zjs-only when no C qjs binary is available: the reference column is the zjs binary.
 
 Options:
   --iters N                 Timed iterations per case and binary (default: ${iters})

@@ -16,8 +16,6 @@ pub const Ctx = struct {
     engine_options: *std.Build.Step.Options,
     engine_options_fast: *std.Build.Step.Options,
     engine_options_dev: *std.Build.Step.Options,
-    zjs_test_seed: u32,
-    target_default_nan_boxing: bool,
 };
 
 /// QCP-1 configuration settings, in the canonical order the ruling names them.
@@ -27,7 +25,6 @@ pub const Ctx = struct {
 pub const ConfigSettings = struct {
     compiler: []const u8,
     layout: []const u8,
-    nan_boxing: bool,
     /// Not a performance setting in this context. The optimize mode decides
     /// whether the Debug/ReleaseSafe oracles exist at all -- whether
     /// `std.debug.assert` is live, whether safety checks trap, whether
@@ -48,13 +45,20 @@ pub const ConfigSettings = struct {
 /// `zjs-config-v2` (was v1, which had no `optimize`): the prefix is versioned
 /// so a historical v1 string cannot be read as complete proof now that the
 /// field set has grown, and cannot match a v2 build on its first five fields.
+///
+/// `repr` is fixed at `tagged`, the same way `compiler` is fixed at `v2`: the
+/// 8-byte NaN-boxed alternative was deleted, so there is no longer a choice to
+/// encode, but an artifact must still state the representation it was built
+/// from. The component is kept rather than dropped so recorded v2 signatures
+/// keep their meaning and the negative-drift check keeps a field to falsify --
+/// the engine half of the comparison derives it from `@sizeOf(JSValue)`, not
+/// from a literal.
 pub fn configSignature(b: *std.Build, settings: ConfigSettings) []const u8 {
     return b.fmt(
-        "zjs-config-v2:compiler={s},layout={s},repr={s},optimize={s},force_gc={s},ownership_audit={s}",
+        "zjs-config-v2:compiler={s},layout={s},repr=tagged,optimize={s},force_gc={s},ownership_audit={s}",
         .{
             settings.compiler,
             settings.layout,
-            if (settings.nan_boxing) "nan_boxed" else "tagged",
             @tagName(settings.optimize),
             if (settings.force_gc) "on" else "off",
             if (settings.ownership_audit) "on" else "off",
@@ -101,7 +105,6 @@ pub fn pinnedExpectedConfig(
 /// that legitimately differs between them.
 pub const EngineOptionInputs = struct {
     enable_opcode_profile: bool,
-    nan_boxing: bool,
     compiler_layout: []const u8,
     expect_config: []const u8,
     oom_coverage: bool,
@@ -119,7 +122,6 @@ pub const EngineOptionInputs = struct {
 pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(bool, "zjs_enable_opcode_profile", in.enable_opcode_profile);
-    options.addOption(bool, "zjs_nan_boxing", in.nan_boxing);
     options.addOption([]const u8, "zjs_compiler_layout", in.compiler_layout);
     options.addOption([]const u8, "zjs_expect_config", in.expect_config);
     options.addOption(bool, "zjs_oom_coverage", in.oom_coverage);

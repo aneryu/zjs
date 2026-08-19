@@ -110,16 +110,32 @@ independent Debug `zjs` module rooted at `src/root.zig` and hangs on
 | Suffix | Meaning | Examples |
 |---|---|---|
 | `-gate` | Aggregate validation gate | `quick-gate`, `checkpoint-gate`, `engine-production-gate` |
-| `-check` | Single check | `config-signature-check`, `test262-check`, `perf-self-check` |
+| `-check` | Single check | `config-signature-check`, `test262-check` |
 | (none) | Build or run | `zjs`, `test`, `smoke`, `test-core` |
 
-### Deprecated aliases
+## What CI runs
 
-Removed next release. Each alias `dependOn`s the new step.
+The build graph is the same everywhere; CI only decides which steps a machine
+runs unprompted.
 
-| Old | New |
-|---|---|
-| `quick-check` | `quick-gate` |
-| `checkpoint-check` | `checkpoint-gate` |
-| `test262-gate` | `test262-check` |
-| `test-compiler-v2` | `test-compiler` |
+| Workflow | Primary job | Steps it runs |
+|---|---|---|
+| `ci.yml` (push to `main`, pull requests) | `linux-arm64` | `zjs`, `checkpoint-gate`, the compiler-stage boundary lint, and `test262-check` |
+| `nightly.yml` (scheduled) | `linux-arm64` | `engine-production-gate`, `test -Doptimize=ReleaseSafe`, `test-oom`, and `test -Dzjs_ownership_audit=true` |
+
+`test262-check` is a zero-failure gate — any failed or newly-fixed case fails
+the step — which makes it the sharpest semantic-regression signal available. It
+runs on the primary development platform only: results are
+architecture-independent, so a second copy would buy noise.
+
+The nightly instrumentation tiers used to depend on a developer remembering to
+run them when they touched the matching subsystem. A machine runs them now, and
+a `notify-failure` job opens (or comments on) one long-lived GitHub issue when
+any nightly job fails.
+
+`-Dzjs_force_gc` is not on either list. It is a diagnostic instrument, in the
+same tier as `perf-benchmark`: run it when a GC-shaped question needs it, not
+as a gate.
+
+Performance steps never run in CI; the measurement contract forbids publishing
+performance numbers from shared runners.

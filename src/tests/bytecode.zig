@@ -467,7 +467,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
     );
 }
 
-test "FunctionLayout matches the QJS-order core pack for both JSValue representations" {
+test "FunctionLayout matches the QJS-order core pack" {
     const layout = try bytecode.FunctionLayout.init(
         true,
         true,
@@ -809,19 +809,9 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
     );
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
     const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
-    switch (@sizeOf(core.JSValue)) {
-        16 => {
-            try std.testing.expectEqual(@as(usize, 0x7c), layout.byte_code_end);
-            try std.testing.expectEqual(@as(?usize, 0x7c), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0x7c) + hot_bytes, layout.total_size);
-        },
-        8 => {
-            try std.testing.expectEqual(@as(usize, 0x74), layout.byte_code_end);
-            try std.testing.expectEqual(@as(?usize, 0x74), layout.hot_off);
-            try std.testing.expectEqual(@as(usize, 0x74) + hot_bytes, layout.total_size);
-        },
-        else => return error.TestUnexpectedResult,
-    }
+    try std.testing.expectEqual(@as(usize, 0x7c), layout.byte_code_end);
+    try std.testing.expectEqual(@as(?usize, 0x7c), layout.hot_off);
+    try std.testing.expectEqual(@as(usize, 0x7c) + hot_bytes, layout.total_size);
 }
 
 test "non-empty W1c5 fixture does not force the optional extension" {

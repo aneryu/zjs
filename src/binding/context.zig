@@ -408,7 +408,8 @@ pub const JSContext = struct {
     pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: core.FunctionCallOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
         const this_value = options.this_value orelse JSValue.undefinedValue();
-        return exec.call_runtime.callValueOrBytecodeRoot(self.core, options.output, global, this_value, callee, args, null, null);
+        return exec.call_runtime.callValueOrBytecodeRoot(self.core, options.output, global, this_value, callee, args, null, null) catch |err|
+            self.restoreUncaughtOutOfMemory(err);
     }
 
     pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
@@ -533,13 +534,35 @@ pub const JSContext = struct {
         return try exec.call_runtime.functionRealmGlobal(self.core, function_value);
     }
 
+    /// Restore `error.OutOfMemory` for an allocation failure that no JavaScript
+    /// handler consumed.
+    ///
+    /// Allocation failure is deliberately catchable: it becomes
+    /// `InternalError: out of memory` and then travels the engine as an
+    /// ordinary JS exception, so the native seam reports `error.JSException`
+    /// like any other throw. That is the correct category *inside* the engine,
+    /// and widening it there would change control flow (error rebuilding,
+    /// promise-job re-queue, module and async-generator error handling). At
+    /// this boundary it is the wrong category: the contract on
+    /// `exception_ops.runtimeErrorInfo` is that a path with no JavaScript
+    /// handler still surfaces `error.OutOfMemory` to the embedder. If
+    /// JavaScript did catch it, the exception -- and the flag with it -- was
+    /// already cleared, so `err` passes through unchanged.
+    fn restoreUncaughtOutOfMemory(self: *JSContext, err: anytype) @TypeOf(err) {
+        if (@as(anyerror, err) == error.JSException and self.core.exceptionIsOutOfMemory()) {
+            return error.OutOfMemory;
+        }
+        return err;
+    }
+
     pub fn evalScriptSource(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {
         ensureStandardGlobalsRegistered(self.core.runtime);
         const target = if (options.realm_global) |global|
             self.core.runtime.contextForGlobal(global) orelse return error.TypeError
         else
             self.core;
-        return exec.eval_entry.evalScriptSource(target, source_text, options);
+        return exec.eval_entry.evalScriptSource(target, source_text, options) catch |err|
+            self.restoreUncaughtOutOfMemory(err);
     }
 
     pub fn evalScriptValue(self: *JSContext, source_value: JSValue, options: core.ScriptEvalOptions) !JSValue {
@@ -548,12 +571,14 @@ pub const JSContext = struct {
             self.core.runtime.contextForGlobal(global) orelse return error.TypeError
         else
             self.core;
-        return exec.eval_entry.evalScriptValue(target, source_value, options);
+        return exec.eval_entry.evalScriptValue(target, source_value, options) catch |err|
+            self.restoreUncaughtOutOfMemory(err);
     }
 
     pub fn eval(self: *JSContext, source_text: []const u8, options: core.EvalOptions) !JSValue {
         ensureStandardGlobalsRegistered(self.core.runtime);
-        return exec.eval_entry.eval(self.core, source_text, options);
+        return exec.eval_entry.eval(self.core, source_text, options) catch |err|
+            self.restoreUncaughtOutOfMemory(err);
     }
 
     pub fn runJobs(self: *JSContext, output: ?*std.Io.Writer) !void {

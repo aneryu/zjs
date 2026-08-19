@@ -1,8 +1,13 @@
 # Performance Workflow
 
-This directory contains performance notes and checked performance artifacts for
-`zjs`. The active performance gate is a ZJS self-baseline regression check, so
-it does not require a local C QuickJS binary.
+This directory contains performance notes and the checked performance status
+for `zjs`. No `zig build` step gates on performance, and nothing here runs on
+shared CI runners: every run described below is a local diagnostic governed by
+the measurement contract.
+
+There is one performance *merge* gate, and it is not a build step:
+[refactor-policy](../refactor-policy.md) rule 2 requires a bench-v8 A/B against
+a frozen merge-base build before any hot-path split, move, or rename lands.
 
 Current design notes:
 
@@ -14,25 +19,6 @@ Current design notes:
   [../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md](../qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md)
 
 ## Current Benchmark Entries
-
-Run the active multi-case self-baseline gate with:
-
-```sh
-zig build perf-self-check --summary all
-```
-
-This builds the ReleaseFast `zjs` CLI, records a fresh multi-case report under
-`.zig-cache/perf/current/`, and compares it with
-`reports/perf/baseline/microbench-zjs-releasefast.json`.
-
-Refresh the checked-in self baseline explicitly with:
-
-```sh
-zig build perf-self-update-baseline --summary all
-```
-
-Only refresh the baseline when an intentional performance change has separate
-semantic validation evidence.
 
 Run the current repeatable diagnostic benchmark with:
 
@@ -197,37 +183,27 @@ re-entry cost from the surrounding builtin implementation.
 
 ## Checked-In Artifacts
 
-The active checked-in self baseline is
-`reports/perf/baseline/microbench-zjs-releasefast.json`.
+No benchmark result JSON is checked in.
 
 The 2026-06-13 QuickJS-ng `*-vs-quickjs*` snapshots were removed from the
 active tree. Do not recover them as a current Bellard-QuickJS comparison.
 The public claim is [bench-v8-status.md](bench-v8-status.md); the zoo suite stays as an internal diagnostic ([zoo-status.md](zoo-status.md)).
 
-Its environment note is `reports/perf/baseline/env-zjs-self.md`. Refresh it
-with:
-
-```sh
-node tools/perf/write_env.js \
-  --iters 30 \
-  --warmup 5 \
-  --output reports/perf/baseline/env-zjs-self.md \
-  --notes "ZJS self-baseline report; qjs is intentionally not configured for this gate. This 64-bit build uses the default 16-byte JSValue representation."
-```
-
 Runtime-profile source scripts live in `reports/perf/current/scripts/`;
 profile JSON is written locally under `.zig-cache/perf/` and is not checked
 in.
 
-## Self-Baseline Diffs
+## Report Diffs
 
 Compare two `zjs-microbench` JSON reports:
 
 ```sh
 node tools/perf/diff_report.js \
-  reports/perf/baseline/microbench-zjs-releasefast.json \
-  .zig-cache/perf/current/microbench-zjs-releasefast.json
+  OLD-microbench-zjs-releasefast.json \
+  NEW-microbench-zjs-releasefast.json
 ```
+
+Both paths are yours to choose; no step writes a canonical location any more.
 
 By default, the diff fails when sample settings differ, compatible case count
 drops, unsupported/skipped count increases, geometric mean regresses by more
@@ -405,7 +381,6 @@ Run semantic checks before accepting performance-sensitive changes:
 ```sh
 zig build test --summary all
 zig build smoke --summary all
-zig build perf-self-check --summary all
 ```
 
 Run a relevant test262 subset when the optimization touches observable

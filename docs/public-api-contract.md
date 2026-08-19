@@ -62,7 +62,7 @@ hidden:
   embedder root does not export `zjs.PropNameID`. Host Zig code should keep
   using `zjs.host.PropName`.
 
-`JSValue` currently publishes 89 public declarations, including internal
+`JSValue` currently publishes 88 public declarations, including internal
 helpers such as `freeObjectAssumeObject` and
 `freeObjectAssumeObjectDuringActiveBytecode`. That leak is known debt
 (backlog H9). Cookbook and embedding examples must not call those internal

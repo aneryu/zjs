@@ -1042,6 +1042,7 @@ pub const JSContext = struct {
         const old = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
         self.runtime.current_exception_uncatchable = false;
+        self.runtime.current_exception_out_of_memory = false;
         old.free(self.runtime);
         self.runtime.current_exception = value;
         return JSValue.exception();
@@ -1056,6 +1057,18 @@ pub const JSContext = struct {
         return self.hasException() and self.runtime.current_exception_uncatchable;
     }
 
+    /// Record that the pending exception is the engine's out-of-memory
+    /// InternalError. Call immediately after the `throwValue` that installs
+    /// it: `throwValue` resets the flag, like it does the uncatchable one.
+    pub fn markExceptionOutOfMemory(self: *JSContext) void {
+        std.debug.assert(self.hasException());
+        self.runtime.current_exception_out_of_memory = true;
+    }
+
+    pub fn exceptionIsOutOfMemory(self: JSContext) bool {
+        return self.hasException() and self.runtime.current_exception_out_of_memory;
+    }
+
     pub fn hasException(self: JSContext) bool {
         return !self.runtime.current_exception.isUninitialized();
     }
@@ -1065,6 +1078,7 @@ pub const JSContext = struct {
         const result = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
         self.runtime.current_exception_uncatchable = false;
+        self.runtime.current_exception_out_of_memory = false;
         return result;
     }
 
@@ -1072,6 +1086,7 @@ pub const JSContext = struct {
         const old = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
         self.runtime.current_exception_uncatchable = false;
+        self.runtime.current_exception_out_of_memory = false;
         old.free(self.runtime);
     }
 

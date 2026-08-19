@@ -11,14 +11,6 @@ run = "zig build quick-gate --summary all"
 description = "Run the checkpoint gate"
 run = "zig build checkpoint-gate --summary all"
 
-[tasks.quick-check]
-description = "DEPRECATED alias of quick-gate (removed next release)"
-run = "zig build quick-check --summary all"
-
-[tasks.checkpoint-check]
-description = "DEPRECATED alias of checkpoint-gate (removed next release)"
-run = "zig build checkpoint-check --summary all"
-
 [tasks.quick-watch]
 description = "Keep the Debug quick-gate compiler alive for faster incremental edit feedback"
 run = "zig build quick-gate --watch -fincremental --summary new"

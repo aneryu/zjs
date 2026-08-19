@@ -45,10 +45,8 @@ pub fn main(init: std.process.Init) !void {
 
     dumpHostDispatchStats(init.environ_map);
     try printSummary(io, summary);
-    const baseline_gate = config.regression_baseline != null;
-    const has_unexpected = !baseline_gate and (summary.failed != 0 or summary.fixed != 0);
-    const has_regression = summary.regressions != 0;
-    std.process.exit(if (has_unexpected or has_regression) 1 else 0);
+    const has_unexpected = summary.failed != 0 or summary.fixed != 0;
+    std.process.exit(if (has_unexpected) 1 else 0);
 }
 
 /// The default execution path evaluates tests in-process, so the engine's
@@ -89,8 +87,6 @@ fn printUsage(io: std.Io) !void {
             "                           test262-skipped-features.json under <dir>\n" ++
             "  --engine <path>          run prepared tests with an external qjs-compatible\n" ++
             "                           binary instead of the embedded zjs engine\n" ++
-            "  --regression-baseline F  exit non-zero if any directory's `passed`\n" ++
-            "                           count is lower than F (a previous by-dir.json)\n" ++
             "  --enable-feature <name> temporarily enable a config-skipped feature\n" ++
             "  --skip-feature <name>   temporarily skip a config-enabled feature\n",
         .{},
@@ -122,7 +118,6 @@ fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
     try stdout.print("Result: {d}/{d} errors, passed {d}", .{ summary.failed, summary.selection.selected_tests, summary.passed });
     if (summary.known_failures != 0) try stdout.print(", known {d}", .{summary.known_failures});
     if (summary.fixed != 0) try stdout.print(", fixed {d}", .{summary.fixed});
-    if (summary.regressions != 0) try stdout.print(", regressed {d}", .{summary.regressions});
     try stdout.print("\n", .{});
     try stdout.flush();
 }
@@ -205,13 +200,6 @@ pub const Config = struct {
     /// Optional external qjs-compatible executable. When null, the runner uses
     /// the embedded Zig engine, preserving existing test262 behavior.
     engine_path: ?[]const u8 = null,
-    /// Path to a previously committed `test262-by-dir.json` snapshot.
-    /// When set, after the run completes `runSelectedTests` compares
-    /// per-directory `passed` counts against the baseline; if any
-    /// directory's passed count drops, the run records the regression
-    /// and the CLI exits non-zero. This is the standing anti-regression
-    /// gate for the current test262-driven workflow.
-    regression_baseline: ?[]const u8 = null,
     feature_overrides: BoundedFeatureOverrides = .{},
     start_index: ?usize = null,
     stop_index: ?usize = null,
@@ -292,8 +280,6 @@ pub fn parseArgs(args: []const []const u8) RunnerArgsError!Config {
             config.reports_dir = try nextValue(args, &i);
         } else if (std.mem.eql(u8, arg, "--engine")) {
             config.engine_path = try nextValue(args, &i);
-        } else if (std.mem.eql(u8, arg, "--regression-baseline")) {
-            config.regression_baseline = try nextValue(args, &i);
         } else if (std.mem.eql(u8, arg, "--enable-feature")) {
             try config.feature_overrides.append(.enable, try nextValue(args, &i));
         } else if (std.mem.eql(u8, arg, "--skip-feature")) {
@@ -409,10 +395,6 @@ pub const ExecutionSummary = struct {
     failed: usize = 0,
     known_failures: usize = 0,
     fixed: usize = 0,
-    /// Count of directories whose pass rate regressed against the
-    /// baseline supplied via `--regression-baseline`. Zero when the
-    /// flag is not used or no regressions were detected.
-    regressions: usize = 0,
 
     pub fn deinit(self: *ExecutionSummary, allocator: std.mem.Allocator) void {
         self.selection.deinit(allocator);
@@ -730,125 +712,6 @@ fn lessThanSkippedFeatureEntry(_: void, lhs: Reporter.SkippedFeatureEntry, rhs: 
 
 fn lessThanFailureLogLine(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.lessThan(u8, lhs, rhs);
-}
-
-/// Anti-regression baseline machinery (CC-1 / plan §4).
-///
-/// `BaselineEntry` is the subset of `Reporter.DirEntry` we actually need
-/// for the regression check — only the directory path and the passed
-/// count. Failure / known_failed columns are ignored on purpose: the
-/// gate only fires when `passed` decreases (i.e. a real regression).
-pub const BaselineEntry = struct {
-    dir: []const u8,
-    passed: usize,
-};
-
-/// Parse a `test262-by-dir.json` snapshot in the format produced by
-/// `renderByDirJson`. Returns owned slice of entries; caller frees with
-/// `freeBaseline`. The parser is intentionally tight to that shape
-/// (one entry per non-bracket line) — no attempt is made to handle
-/// arbitrary JSON.
-pub fn parseBaseline(allocator: std.mem.Allocator, bytes: []const u8) ![]BaselineEntry {
-    var list: std.ArrayList(BaselineEntry) = .empty;
-    errdefer freeBaselineList(allocator, &list);
-
-    var line_iter = std.mem.splitScalar(u8, bytes, '\n');
-    while (line_iter.next()) |line_raw| {
-        const line = std.mem.trim(u8, line_raw, " \t\r");
-        if (line.len == 0) continue;
-        if (line[0] != '{') continue; // skip the bracket lines
-        const dir_value = try extractJsonStringField(line, "dir");
-        const passed_value = try extractJsonNumberField(line, "passed");
-        const dir_owned = try allocator.dupe(u8, dir_value);
-        errdefer allocator.free(dir_owned);
-        try list.append(allocator, .{ .dir = dir_owned, .passed = passed_value });
-    }
-    return list.toOwnedSlice(allocator);
-}
-
-pub fn freeBaseline(allocator: std.mem.Allocator, entries: []BaselineEntry) void {
-    for (entries) |entry| allocator.free(entry.dir);
-    allocator.free(entries);
-}
-
-fn freeBaselineList(allocator: std.mem.Allocator, list: *std.ArrayList(BaselineEntry)) void {
-    for (list.items) |entry| allocator.free(entry.dir);
-    list.deinit(allocator);
-}
-
-fn extractJsonStringField(line: []const u8, field: []const u8) ![]const u8 {
-    var name_buf: [64]u8 = undefined;
-    if (field.len + 3 > name_buf.len) return error.InvalidBaseline;
-    name_buf[0] = '"';
-    @memcpy(name_buf[1 .. 1 + field.len], field);
-    name_buf[1 + field.len] = '"';
-    name_buf[2 + field.len] = ':';
-    const needle = name_buf[0 .. field.len + 3];
-    const idx = std.mem.indexOf(u8, line, needle) orelse return error.InvalidBaseline;
-    var pos = idx + needle.len;
-    while (pos < line.len and (line[pos] == ' ' or line[pos] == '\t')) pos += 1;
-    if (pos >= line.len or line[pos] != '"') return error.InvalidBaseline;
-    pos += 1;
-    const start = pos;
-    while (pos < line.len and line[pos] != '"') pos += 1;
-    if (pos >= line.len) return error.InvalidBaseline;
-    return line[start..pos];
-}
-
-fn extractJsonNumberField(line: []const u8, field: []const u8) !usize {
-    var name_buf: [64]u8 = undefined;
-    if (field.len + 3 > name_buf.len) return error.InvalidBaseline;
-    name_buf[0] = '"';
-    @memcpy(name_buf[1 .. 1 + field.len], field);
-    name_buf[1 + field.len] = '"';
-    name_buf[2 + field.len] = ':';
-    const needle = name_buf[0 .. field.len + 3];
-    const idx = std.mem.indexOf(u8, line, needle) orelse return error.InvalidBaseline;
-    var pos = idx + needle.len;
-    while (pos < line.len and (line[pos] == ' ' or line[pos] == '\t')) pos += 1;
-    const start = pos;
-    while (pos < line.len and line[pos] >= '0' and line[pos] <= '9') pos += 1;
-    if (pos == start) return error.InvalidBaseline;
-    return std.fmt.parseInt(usize, line[start..pos], 10) catch error.InvalidBaseline;
-}
-
-pub const RegressionResult = struct {
-    /// Number of directories where `current.passed < baseline.passed`.
-    count: usize,
-    /// Number of baseline directories matched in the current run (used
-    /// by tests to verify the comparison covered the input).
-    matched: usize,
-};
-
-/// Compare the current run's `Reporter.DirEntry` snapshot against a
-/// baseline. Prints one line to stderr per regressed directory. The
-/// CLI uses the returned `count` to decide the exit code.
-pub fn checkRegressions(
-    io: std.Io,
-    reporter: *Reporter,
-    baseline: []const BaselineEntry,
-) !RegressionResult {
-    var result = RegressionResult{ .count = 0, .matched = 0 };
-    for (baseline) |b| {
-        const current = findDirEntry(reporter.by_dir.items, b.dir) orelse continue;
-        result.matched += 1;
-        if (current.passed < b.passed) {
-            result.count += 1;
-            try reporter.lockedPrint(
-                io,
-                "regression: {s} passed {d} -> {d} (-{d})\n",
-                .{ b.dir, b.passed, current.passed, b.passed - current.passed },
-            );
-        }
-    }
-    return result;
-}
-
-fn findDirEntry(entries: []const Reporter.DirEntry, dir: []const u8) ?*const Reporter.DirEntry {
-    for (entries) |*e| {
-        if (std.mem.eql(u8, e.dir, dir)) return e;
-    }
-    return null;
 }
 
 const WorkerResult = struct {
@@ -1286,38 +1149,6 @@ fn runSelectedTestsWithReporterMode(
     }
 
     try reporter.flush(io);
-
-    if (config.regression_baseline) |baseline_path| {
-        const baseline_bytes = std.Io.Dir.cwd().readFileAlloc(
-            io,
-            baseline_path,
-            allocator,
-            .limited(8 * 1024 * 1024),
-        ) catch |err| blk: {
-            try reporter.lockedPrint(
-                io,
-                "regression-baseline: unable to read {s}: {s}\n",
-                .{ baseline_path, @errorName(err) },
-            );
-            break :blk null;
-        };
-        if (baseline_bytes) |bytes| {
-            defer allocator.free(bytes);
-            const entries = parseBaseline(allocator, bytes) catch |err| {
-                try reporter.lockedPrint(
-                    io,
-                    "regression-baseline: parse error in {s}: {s}\n",
-                    .{ baseline_path, @errorName(err) },
-                );
-                prepared.tests.deinit();
-                prepared.skipped_features.deinit();
-                return summary;
-            };
-            defer freeBaseline(allocator, entries);
-            const regression_result = try checkRegressions(io, &reporter, entries);
-            summary.regressions = regression_result.count;
-        }
-    }
 
     prepared.tests.deinit();
     prepared.skipped_features.deinit();
@@ -4313,78 +4144,4 @@ test "test262 module temp path stays beside selected test" {
 
     try std.testing.expect(std.mem.startsWith(u8, path, "test/built-ins/Proxy/.zjs-module-"));
     try std.testing.expect(std.mem.endsWith(u8, path, ".js"));
-}
-
-test "test262 args parse --regression-baseline" {
-    const config = try parseArgs(&.{
-        "-c",                    "test262.conf",
-        "--regression-baseline", "reports/test262-baseline/test262-by-dir.json",
-        "test262/test",
-    });
-    try std.testing.expectEqualStrings(
-        "reports/test262-baseline/test262-by-dir.json",
-        config.regression_baseline.?,
-    );
-}
-
-test "test262 baseline parser reads dir + passed pairs from by-dir.json" {
-    const sample =
-        \\[
-        \\  { "dir": "annexB/built-ins", "passed": 2, "failed": 212, "known_failed": 0 },
-        \\  { "dir": "built-ins/Array", "passed": 233, "failed": 2848, "known_failed": 0 },
-        \\  { "dir": "language/expressions", "passed": 100, "failed": 50, "known_failed": 5 }
-        \\]
-    ;
-    const entries = try parseBaseline(std.testing.allocator, sample);
-    defer freeBaseline(std.testing.allocator, entries);
-
-    try std.testing.expectEqual(@as(usize, 3), entries.len);
-    try std.testing.expectEqualStrings("annexB/built-ins", entries[0].dir);
-    try std.testing.expectEqual(@as(usize, 2), entries[0].passed);
-    try std.testing.expectEqualStrings("built-ins/Array", entries[1].dir);
-    try std.testing.expectEqual(@as(usize, 233), entries[1].passed);
-    try std.testing.expectEqualStrings("language/expressions", entries[2].dir);
-    try std.testing.expectEqual(@as(usize, 100), entries[2].passed);
-}
-
-test "test262 checkRegressions detects passed-count drops" {
-    var reporter = Reporter.initQuiet(std.testing.allocator, null);
-    defer reporter.deinit();
-
-    try reporter.recordResult(std.testing.io, "test/A/x1.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/B/x1.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/B/x2.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/B/x3.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/B/x4.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/B/x5.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/C/x1.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/C/x2.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/C/x3.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/C/x4.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/C/x5.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/C/x6.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/C/x7.js", .passed, "", false);
-
-    const baseline = [_]BaselineEntry{
-        .{ .dir = "test/A", .passed = 2 },
-        .{ .dir = "test/B", .passed = 5 },
-        .{ .dir = "test/C", .passed = 3 },
-        .{ .dir = "test/D", .passed = 9 },
-    };
-    const result = try checkRegressions(std.testing.io, &reporter, &baseline);
-    try std.testing.expectEqual(@as(usize, 1), result.count);
-    try std.testing.expectEqual(@as(usize, 3), result.matched);
-}
-
-test "test262 checkRegressions returns zero when all dirs hold or improve" {
-    var reporter = Reporter.init(std.testing.allocator, null);
-    defer reporter.deinit();
-    try reporter.recordResult(std.testing.io, "test/A/x1.js", .passed, "", false);
-    try reporter.recordResult(std.testing.io, "test/A/x2.js", .passed, "", false);
-    const baseline = [_]BaselineEntry{
-        .{ .dir = "test/A", .passed = 2 },
-    };
-    const result = try checkRegressions(std.testing.io, &reporter, &baseline);
-    try std.testing.expectEqual(@as(usize, 0), result.count);
-    try std.testing.expectEqual(@as(usize, 1), result.matched);
 }

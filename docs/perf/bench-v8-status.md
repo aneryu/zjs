@@ -4,8 +4,8 @@ Checked headline on the V8 benchmark suite version 7 — the suite upstream
 QuickJS publishes its own scores with (bellard.org/quickjs/bench.html).
 This is the public performance claim (owner ruling 2026-08-19; the
 15-benchmark zoo suite remains an internal diagnostic, see
-[zoo-status.md](zoo-status.md)). It is not the `perf-self-check`
-self-baseline gate.
+[zoo-status.md](zoo-status.md)). It is a measurement record, not a
+build-graph gate.
 
 | Field | Value |
 | --- | --- |

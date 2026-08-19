@@ -44,14 +44,14 @@ when needed.
   with) — the single authoritative score source.
 - [Zoo status vs QuickJS](perf/zoo-status.md): internal 15-benchmark
   diagnostic suite (broader coverage; last zoo baseline preserved).
-- [Performance Workflow](perf/README.md): self-baseline gate, measurement
-  contract, profiling, PMU discipline.
+- [Performance Workflow](perf/README.md): measurement contract, diagnostic
+  benchmarks, profiling, PMU discipline.
 - [Object And Shape Implementation](perf/object-shape-design.md): fixed
   layouts, invariants, and the no-inline-cache rule.
 - [Shared VM Decomposition](perf/shared-vm-decomposition.md):
   `call_runtime.zig` split map and move criteria.
 - [Refactor Tax Policy](refactor-policy.md): risk zones and identity gates;
-  hot-path moves need a 15-item zoo A/B.
+  hot-path moves need a bench-v8 A/B.
 - [Maintainability Backlog](maintainability-backlog.md): priced HOT-zone
   refactor queue (H1–H12).
 
@@ -67,7 +67,6 @@ when needed.
 
 These paths are build-graph inputs or local write-outs.
 
-- `reports/perf/baseline/microbench-zjs-releasefast.json`: self-baseline gate.
 - `reports/perf/current/scripts/`: source scripts for optional
   `perf-*-profile` steps. Profile JSON is written under `.zig-cache/perf/`.
 - `reports/test262-latest/`: local test262-check write-out (gitignored).

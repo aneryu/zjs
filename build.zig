@@ -16,13 +16,6 @@ pub fn build(b: *std.Build) void {
     const zjs_test_seed = b.option(u32, "zjs_test_seed", "Seed passed to Zig test runners (defaults to 0 for reproducible cached builds)") orelse 0;
     b.graph.random_seed = zjs_test_seed;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
-    // Match QuickJS's target policy: pointer-width >= 64 uses the canonical
-    // 16-byte payload+tag JSValue; narrower targets use the 8-byte NaN-boxed
-    // representation. The explicit option remains available for parity and
-    // memory-footprint experiments, and `test-altrepr` guards the opposite of
-    // the target default.
-    const target_default_nan_boxing = target.result.ptrBitWidth() < 64;
-    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse target_default_nan_boxing;
     // QCP-1: the engine has exactly one compiler. `-Dzjs_compiler` retired with
     // the legacy production path; the component stays in the configuration
     // signature so an artifact still NAMES the compiler it was built from and
@@ -32,9 +25,7 @@ pub fn build(b: *std.Build) void {
     // configuration, not an optimization knob: the switch measurements were
     // taken against it. `plain` stays reachable as the A/B diagnostic
     // instrument (it is how C2-B artifact residency was localised).
-    // `-Dzjs_v2_layout` is a deprecated alias (removed next release).
-    const zjs_compiler_layout = b.option([]const u8, "zjs_compiler_layout", "compiler final layout: short (default) or plain (diagnostic)") orelse
-        b.option([]const u8, "zjs_v2_layout", "DEPRECATED alias of zjs_compiler_layout (removed next release)") orelse "short";
+    const zjs_compiler_layout = b.option([]const u8, "zjs_compiler_layout", "compiler final layout: short (default) or plain (diagnostic)") orelse "short";
     if (!std.mem.eql(u8, zjs_compiler_layout, "plain") and !std.mem.eql(u8, zjs_compiler_layout, "short")) {
         std.debug.print("error: invalid -Dzjs_compiler_layout value '{s}': expected plain or short\n", .{zjs_compiler_layout});
         std.process.exit(1);
@@ -68,7 +59,7 @@ pub fn build(b: *std.Build) void {
     // This is the build graph's BELIEF about the configuration. The compiled
     // code computes the same string independently, in src/config_signature.zig,
     // from the declarations it actually consumes (resolve_labels.default_layout,
-    // core.value.nan_boxing, builtin.mode,
+    // @sizeOf(core.value.JSValue), builtin.mode,
     // core.memory.force_gc_on_allocation_enabled,
     // core.atom.ownership_audit_enabled) and fails its own COMPILATION when the
     // two disagree (`config_signature.attest`). `zig build
@@ -77,7 +68,6 @@ pub fn build(b: *std.Build) void {
     const config_settings: config.ConfigSettings = .{
         .compiler = compiler_name,
         .layout = zjs_compiler_layout,
-        .nan_boxing = zjs_nan_boxing,
         .optimize = optimize,
         .force_gc = zjs_force_gc,
         .ownership_audit = zjs_ownership_audit,
@@ -91,7 +81,7 @@ pub fn build(b: *std.Build) void {
     // down to the artifacts, where `config_signature.attest` compares it
     // against the declarations the compiled code consumes. A wrong expectation
     // therefore fails the COMPILATION of every engine-bearing artifact.
-    const config_expect_override = b.option([]const u8, "zjs_expect_config", "Fail every engine-bearing artifact unless its effective configuration signature matches exactly (used by nested gate builds such as test-altrepr)");
+    const config_expect_override = b.option([]const u8, "zjs_expect_config", "Fail every engine-bearing artifact unless its effective configuration signature matches exactly (for a parent build asserting what a child `zig build` must resolve)");
     if (config_expect_override) |override| {
         // Shape check only: a value check here would preempt the artifacts.
         if (!std.mem.startsWith(u8, override, "zjs-config-") or
@@ -137,7 +127,6 @@ pub fn build(b: *std.Build) void {
     // field whose correct value depends on the artifact's own optimize mode.
     const engine_option_inputs: config.EngineOptionInputs = .{
         .enable_opcode_profile = zjs_enable_opcode_profile,
-        .nan_boxing = zjs_nan_boxing,
         .compiler_layout = zjs_compiler_layout,
         .expect_config = expect_config,
         .oom_coverage = zjs_oom_coverage,
@@ -165,8 +154,6 @@ pub fn build(b: *std.Build) void {
         .engine_options = engine_options,
         .engine_options_fast = engine_options_fast,
         .engine_options_dev = engine_options_dev,
-        .zjs_test_seed = zjs_test_seed,
-        .target_default_nan_boxing = target_default_nan_boxing,
     };
     const engine_artifacts = artifacts.addEngineArtifacts(ctx);
     const test_graph = tests_graph.addTestGraph(ctx, engine_artifacts);

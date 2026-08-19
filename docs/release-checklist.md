@@ -51,8 +51,9 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 ## Hygiene
 
 - `git diff --check` passes.
-- `zig build perf-self-check --summary all` passes when the release
-  includes performance-sensitive runtime changes.
+- A performance-sensitive release carries local benchmark evidence recorded in
+  the PR or release notes; see `docs/perf/README.md` for the measurement
+  contract. Performance steps never run in CI.
 - No temporary debug output, generated noise, or unrelated refactors are in the
   release diff.
 - Non-trivial validation evidence is in the PR, issue, or release notes.

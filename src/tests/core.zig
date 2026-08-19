@@ -156,10 +156,6 @@ test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
     };
     const pointerPayload = struct {
         fn get(value: core.JSValue) usize {
-            if (@sizeOf(core.JSValue) == @sizeOf(u64)) {
-                const bits: u64 = @bitCast(value);
-                return @intCast(bits & 0x0000_FFFF_FFFF_FFFF);
-            }
             const raw: RawWideValue = @bitCast(value);
             return @intCast(raw.payload);
         }
@@ -322,25 +318,19 @@ test "int32 same-tag update preserves the value representation invariant" {
     try std.testing.expectEqual(@as(?i32, 1234567), value.asInt32());
 }
 
-test "int32 slot move selects only the representation where it removes an aggregate copy" {
+test "int32 slot move copies the payload when both slots already hold ints" {
     var destination = core.JSValue.int32(11);
     const source = core.JSValue.int32(22);
-    const optimized = destination.trySetInt32FromSlot(&source);
 
-    if (core.value.nan_boxing) {
-        try std.testing.expect(!optimized);
-        try std.testing.expectEqual(@as(?i32, 11), destination.asInt32());
-    } else {
-        try std.testing.expect(optimized);
-        try std.testing.expectEqual(@as(?i32, 22), destination.asInt32());
-    }
+    try std.testing.expect(destination.trySetInt32FromSlot(&source));
+    try std.testing.expectEqual(@as(?i32, 22), destination.asInt32());
 
     var non_int = core.JSValue.boolean(false);
     try std.testing.expect(!non_int.trySetInt32FromSlot(&source));
     try std.testing.expectEqual(@as(?bool, false), non_int.asBool());
 }
 
-test "float construction is valid across JSValue representations" {
+test "float construction is valid" {
     const finite = core.JSValue.float64(1.5);
     try std.testing.expectEqual(@as(?f64, 1.5), finite.asFloat64());
 

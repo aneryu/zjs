@@ -645,6 +645,12 @@ fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
         error.URIError, error.InvalidUtf8 => "URIError",
         error.StackOverflow => "InternalError",
         error.StringTooLong => "InternalError",
+        // `runtimeErrorInfo` maps this to InternalError too, so its absence
+        // here was an oversight with teeth: `pendingExceptionMatchesError`
+        // would not recognize an already-pending out-of-memory exception, and
+        // the caller would clear it and build a replacement -- allocating on
+        // an exhausted heap and losing the original error's stack.
+        error.OutOfMemory => "InternalError",
         error.DerivedConstructorReturn, error.TypeError => "TypeError",
         error.DerivedThisUninitialized, error.ReferenceError => "ReferenceError",
         error.InvalidCharacterError => "InvalidCharacterError",

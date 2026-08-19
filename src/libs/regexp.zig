@@ -2984,14 +2984,26 @@ const REParseState = struct {
         const first = try self.getClassAtom();
         if (self.buf_ptr < self.buf_start.len and self.buf_start[self.buf_ptr] == '-' and self.buf_ptr + 1 < self.buf_start.len and self.buf_start[self.buf_ptr + 1] != ']') {
             if (first != .code_point) {
-                if (self.is_unicode) return error.InvalidPattern;
+                // `getClassAtom` hands this frame the owner of a class-escape
+                // atom (`\d` and friends carry a `CharRange`), and the only
+                // consumer is `addAtomToCharRange`. A leg that rejects instead
+                // of consuming has to release it, exactly like the v-mode
+                // operand parser does (`reParseClassSetOperand`).
+                if (self.is_unicode) {
+                    var owned_ranges = first.ranges;
+                    owned_ranges.deinit();
+                    return error.InvalidPattern;
+                }
                 try addAtomToCharRange(&ranges, first, self.ignore_case, self.is_unicode);
                 return ranges;
             }
             const hyphen_index = self.buf_ptr;
             self.buf_ptr += 1;
-            const second = try self.getClassAtom();
+            var second = try self.getClassAtom();
             if (second != .code_point) {
+                // Both legs below drop `second`: the non-unicode one rewinds to
+                // the hyphen so the class escape is re-read as its own atom.
+                second.ranges.deinit();
                 if (self.is_unicode) return error.InvalidPattern;
                 self.buf_ptr = hyphen_index;
                 try addAtomToCharRange(&ranges, first, self.ignore_case, self.is_unicode);

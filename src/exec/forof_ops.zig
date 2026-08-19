@@ -341,6 +341,14 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
     // allow an outer catch/finally to consume it.
     if (ctx.exceptionIsUncatchable()) return;
     _ = frame;
+    // The pending exception is taken and re-thrown unchanged below, so its
+    // category has to survive the round trip: `takeException` and `throwValue`
+    // both reset the exception flags. Uncatchability dodges this by returning
+    // above; out-of-memory cannot (the iterators still have to be closed), so
+    // read the flag here and restore it with the value. Without this an
+    // uncaught OOM inside a for-of body reaches the embedder as a plain
+    // `error.JSException`.
+    const pending_out_of_memory = ctx.exceptionIsOutOfMemory();
     const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
     defer if (pending_exception) |value| value.free(ctx.runtime);
     var before = stack.len();
@@ -356,7 +364,10 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
         if (ctx.hasException()) ctx.clearException();
         before = record_index;
     }
-    if (pending_exception) |value| _ = ctx.throwValue(value.dup());
+    if (pending_exception) |value| {
+        _ = ctx.throwValue(value.dup());
+        if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
+    }
 }
 
 pub fn findTopClosableForOfRecordIndex(stack: *const stack_mod.Stack) ?usize {

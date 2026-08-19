@@ -446,7 +446,13 @@ inline fn stringCharCodeAtDirectHost(
         caller_function,
         caller_frame,
     ) catch |err| return @as(HostError, @errorCast(err));
-    defer if (!this_value.isString()) string_value.free(ctx.runtime);
+    // `toStringCheckObject` always hands back an owned reference — its
+    // `JS_ToString` leg dups a string receiver rather than borrowing it
+    // (`string_ops.toStringForAnnexB`). Releasing it only for non-string
+    // receivers leaked the dup of every string receiver that reached this
+    // coercion path (i.e. every `charCodeAt` whose index argument needs
+    // observable ToNumber).
+    defer string_value.free(ctx.runtime);
     if (string_value.ropeBody()) |node| {
         _ = node.flatten() catch |err| return @as(HostError, @errorCast(err));
     }

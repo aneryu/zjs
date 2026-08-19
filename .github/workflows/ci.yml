@@ -29,6 +29,10 @@ jobs:
       - run: zig build zjs --summary all
       - run: zig build checkpoint-gate --summary all
       - run: node tools/architecture/check_compiler_stage_boundaries.js zig-out/bin/zjs
+      # test262 is a zero-failure gate, so it is the sharpest semantic-regression
+      # signal available. It runs on the primary development platform only:
+      # results are architecture-independent, and a second copy would buy noise.
+      - run: zig build test262-check --summary all
 
   linux-x86_64:
     runs-on: ubuntu-24.04

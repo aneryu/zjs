@@ -16,13 +16,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const engine_option_inputs = ctx.engine_inputs;
     const engine_options = ctx.engine_options;
     const expect_config_debug = ctx.expect_config_debug;
-    const zjs_test_seed = ctx.zjs_test_seed;
-    const target_default_nan_boxing = ctx.target_default_nan_boxing;
-    const zjs_nan_boxing = ctx.settings.nan_boxing;
-    const config_settings = ctx.settings;
     const addEngineOptions = build_config.addEngineOptions;
     const forceLlvmBackendOnDebug = build_config.forceLlvmBackendOnDebug;
-    const configSignature = build_config.configSignature;
     const install_zjs = artifacts.install_zjs;
     const install_zjs_profile = artifacts.install_zjs_profile;
     const install_zjs_dev = artifacts.install_zjs_dev;
@@ -178,10 +173,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         if (b.args) |args| run_scoped_tests.addArgs(args);
         const scoped_step = b.step(config.name, config.description);
         scoped_step.dependOn(&run_scoped_tests.step);
-        if (std.mem.eql(u8, config.name, "test-compiler")) {
-            const legacy_alias = b.step("test-compiler-v2", "DEPRECATED alias of test-compiler (removed next release)");
-            legacy_alias.dependOn(scoped_step);
-        }
     }
 
     // Public-module assembly check. Independent Debug `zjs` module rooted at
@@ -230,7 +221,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // OOM injection suite (`zig build test-oom`): exhaustive allocation
     // failure injection (std.testing.checkAllAllocationFailures) over an
     // embedded JS corpus, plus single-shot fail-at-N recovery canaries.
-    // Cost scales with allocation counts, so this is a phase-gate tier
+    // Cost scales with allocation counts, so this is an instrumentation tier
     // command rather than part of the per-checkpoint `zig build test`.
     // The corpus binary compiles only the engine (internal_root), not the
     // unified test suite.
@@ -260,92 +251,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     };
     const run_oom_tests = b.addRunArtifact(oom_tests);
     if (b.args) |args| run_oom_tests.addArgs(args);
-    const test_oom_step = b.step("test-oom", "Run allocation-failure injection over the embedded OOM corpus plus recovery canaries (phase-gate tier)");
+    const test_oom_step = b.step("test-oom", "Run allocation-failure injection over the embedded OOM corpus plus recovery canaries (instrumentation tier; runs nightly)");
     test_oom_step.dependOn(&run_oom_tests.step);
-
-    // Alternate JSValue representation guard: runs the unified suite with the
-    // opposite of this target's default (a full second build graph, so the
-    // plugin fixtures recompile with a matching ABI fingerprint). Required for
-    // any change touching core/value.zig or value-representation semantics.
-    const altrepr_option = if (target_default_nan_boxing)
-        "-Dzjs_nan_boxing=false"
-    else
-        "-Dzjs_nan_boxing=true";
-    const altrepr_project_seed = b.fmt("-Dzjs_test_seed={d}", .{zjs_test_seed});
-    // The nested build is a separate `zig build` process, so it starts from
-    // the *defaults* for every option the outer invocation was given unless
-    // they are forwarded explicitly. Before this was forwarded, a nested gate
-    // silently resolved the defaults and reported green about a configuration
-    // it never ran.
-    // Forward the whole user option set rather than an enumerated list, so a
-    // newly added -D option cannot silently reopen the same hole. Only the
-    // three settings this step determines for itself are substituted:
-    // the representation (inverted), the project seed, and the optimize mode
-    // (resolved here so both `-Doptimize=` and `--release=` reach the child).
-    const altrepr_forward_skip = [_][]const u8{
-        "zjs_nan_boxing", // inverted below; forwarding it too would duplicate
-        "zjs_test_seed", // passed explicitly as altrepr_project_seed
-        "optimize", // passed explicitly as the resolved optimize mode
-        "zjs_expect_config", // this build's expectation, not the child's
-    };
-    var altrepr_forwarded: std.ArrayList([]const u8) = .empty;
-    var altrepr_user_options = b.user_input_options.iterator();
-    while (altrepr_user_options.next()) |entry| {
-        const name = entry.key_ptr.*;
-        for (altrepr_forward_skip) |skip| {
-            if (std.mem.eql(u8, name, skip)) break;
-        } else switch (entry.value_ptr.value) {
-            .flag => altrepr_forwarded.append(b.allocator, b.fmt("-D{s}", .{name})) catch @panic("OOM"),
-            .scalar => |value| altrepr_forwarded.append(b.allocator, b.fmt("-D{s}={s}", .{ name, value })) catch @panic("OOM"),
-            .list => |values| for (values.items) |value| {
-                altrepr_forwarded.append(b.allocator, b.fmt("-D{s}={s}", .{ name, value })) catch @panic("OOM");
-            },
-            // Command-line -D options only ever produce the three forms
-            // above. Fail loudly instead of dropping the option, because a
-            // dropped option is exactly the defect this forwarding fixes.
-            .map, .lazy_path, .lazy_path_list => {
-                std.debug.print(
-                    "error: cannot forward option '{s}' to the test-altrepr child build\n",
-                    .{name},
-                );
-                std.process.exit(1);
-            },
-        }
-    }
-    // Hash-map iteration order is not part of the contract; sort so the child
-    // command line (and therefore this step's cache key) is deterministic.
-    std.mem.sort([]const u8, altrepr_forwarded.items, {}, struct {
-        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
-            return std.mem.lessThan(u8, lhs, rhs);
-        }
-    }.lessThan);
-    // Belt and braces over the forwarding above: state the exact configuration
-    // this step intends the child to resolve (this build's settings with the
-    // representation inverted). If any option is dropped, ignored, or defaulted
-    // differently on the way down, the child's own signature differs and the
-    // child build FAILS instead of running a different configuration and
-    // reporting green -- which is precisely the defect this step once had.
-    var altrepr_settings = config_settings;
-    altrepr_settings.nan_boxing = !zjs_nan_boxing;
-    const altrepr_expect_config = b.fmt("-Dzjs_expect_config={s}", .{configSignature(b, altrepr_settings)});
-    var altrepr_argv: std.ArrayList([]const u8) = .empty;
-    altrepr_argv.appendSlice(b.allocator, &.{
-        b.graph.zig_exe,
-        "build",
-        "test",
-        altrepr_option,
-        altrepr_project_seed,
-        altrepr_expect_config,
-        b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
-    }) catch @panic("OOM");
-    altrepr_argv.appendSlice(b.allocator, altrepr_forwarded.items) catch @panic("OOM");
-    altrepr_argv.appendSlice(b.allocator, &.{
-        "--summary",
-        "all",
-    }) catch @panic("OOM");
-    const altrepr_tests = b.addSystemCommand(altrepr_argv.items);
-    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the representation opposite the target default");
-    altrepr_step.dependOn(&altrepr_tests.step);
 
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");

@@ -2733,45 +2733,10 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
 /// directly, matching qjs resolve_scope_var.
 /// The checked encodings only exist in the u16 operand form (no short variants —
 /// bytecode.zig:442-445), so one handler per kind covers them.
+/// Checked int-to-int writes preserve the destination tag and move only the
+/// payload; the generic ownership path stays immediately available for every
+/// other tag pair.
 pub fn opLocCheck(comptime kind: LocKind) Handler {
-    if (comptime JSValue.has_fast_int32_slot_move) return opLocCheckWithInt32SlotMove(kind);
-    return opLocCheckGeneric(kind);
-}
-
-/// Keep adapters without a cheaper same-tag move on the original handler body.
-/// This is deliberately a separate instantiation rather than a comptime-false
-/// branch inside the wide handler: even a dead pointer-shaped branch perturbed
-/// the packed adapter's code layout and cost about 2% on the loop control.
-fn opLocCheckGeneric(comptime kind: LocKind) Handler {
-    return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            const idx: u16 = readInt(u16, pc + 1);
-            const old_v = var_buf[idx];
-            if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-            switch (kind) {
-                .get => {
-                    sp[0] = value_slot.loadOwned(&var_buf[idx]);
-                    return cont(pc + 3, sp + 1, var_buf, vm);
-                },
-                .put => {
-                    const value = (sp - 1)[0];
-                    value_slot.replaceOwnedDuringActiveBytecode(vm.ctx.runtime, &var_buf[idx], value);
-                    return cont(pc + 3, sp - 1, var_buf, vm);
-                },
-                .set => {
-                    const value = (sp - 1)[0];
-                    value_slot.replaceBorrowedDuringActiveBytecode(vm.ctx.runtime, &var_buf[idx], value);
-                    return cont(pc + 3, sp, var_buf, vm);
-                },
-            }
-        }
-    }.h;
-}
-
-/// 16-byte adapter specialization: checked int-to-int writes preserve the
-/// destination tag and move only the payload. The generic ownership path stays
-/// immediately available for every other tag pair.
-fn opLocCheckWithInt32SlotMove(comptime kind: LocKind) Handler {
     return struct {
         // I-cache pin (see op_return).
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {

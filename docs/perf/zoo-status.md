@@ -7,8 +7,8 @@
 > internal diagnostic (broader coverage: 15 benchmarks vs 8); the numbers
 > below stay as the last zoo baseline.
 
-Checked headline for the 15-benchmark zoo. It is not the `perf-self-check`
-self-baseline gate.
+Checked headline for the 15-benchmark zoo. It is a measurement record, not a
+build-graph gate.
 
 | Field | Value |
 | --- | --- |
@@ -95,12 +95,7 @@ Do not cite the 2026-06-13 QuickJS-ng microbench files or older 0.93 geomean
 handoffs as current. Those artifacts were removed from the active tree; recover
 them from git history if needed.
 
-The local-handoff regression gate is still the following command (performance
-gates never run in shared-runner CI; the measurement contract forbids it):
-
-```sh
-zig build perf-self-check --summary all
-```
-
-against `reports/perf/baseline/microbench-zjs-releasefast.json`. See
-[README.md](README.md) in this directory for that workflow.
+No build step re-checks these numbers: reproducing them is a local, pinned
+measurement, and performance gates never run in shared-runner CI because the
+measurement contract forbids it. See [README.md](README.md) in this directory
+for that workflow.

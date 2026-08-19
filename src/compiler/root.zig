@@ -18,7 +18,7 @@
 //! With one implementation left there is no second product to compare
 //! against, so correctness rests on V2's OWN invariants — the CFG identity
 //! oracles, boundary uniqueness, the atom-ownership audit and the escape
-//! assertions — plus execution (test262 / force-GC / OOM / altrepr).
+//! assertions — plus execution (test262 / force-GC / OOM).
 
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");

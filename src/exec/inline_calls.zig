@@ -371,11 +371,6 @@ pub const Entry = struct {
     /// dispatches through one `JSFunctionBytecode *b` instead of mirroring it
     /// in an outer frame wrapper.
     frame: frame_mod.Frame,
-    /// Keep Stack and the trailing control fields at their measured offsets
-    /// after moving `new.target` out of the hot Frame. The extra default-repr
-    /// word restores the 248-byte Entry whose closure/negative-control layout
-    /// is stable; a 240-byte layout regressed those probes despite fewer ops.
-    _stride_padding: [if (core.value.nan_boxing) 2 * @sizeOf(usize) else 0]u8 align(if (core.value.nan_boxing) @alignOf(usize) else 1),
     stack: stack_mod.Stack,
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
@@ -440,21 +435,16 @@ pub const Entry = struct {
     }
 
     /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
-    /// storage that is dead for empty-leaf entries. Default repr: the 16-byte
-    /// `native_caller` value is live under `teardown.has_native_caller` or
-    /// `teardown.constructor_completion` (neither can be an empty leaf; every
-    /// reader checks the corresponding flag). Nan-boxed repr:
-    /// `_stride_padding` is pure layout padding. The record holds the
+    /// storage that is dead for empty-leaf entries: the 16-byte `native_caller`
+    /// value is live only under `teardown.has_native_caller` or
+    /// `teardown.constructor_completion`, neither of which can be an empty leaf
+    /// (every reader checks the corresponding flag). The record holds the
     /// caller's {resume pc, resume sp} so the return arm restores them with
     /// one ldp instead of re-deriving them through the
     /// prev→frame.function→code.ptr→(+frame.pc) load chain that feeds the
     /// caller's next dispatch branch. Written once per empty-leaf push by
     /// `finishEmptyLeafFrame` (the single constructor tail for the shape).
     inline fn emptyLeafResumeWords(self: *Entry) *[2]usize {
-        if (comptime core.value.nan_boxing) {
-            comptime std.debug.assert(@sizeOf(@TypeOf(self._stride_padding)) == 2 * @sizeOf(usize));
-            return @ptrCast(@alignCast(&self._stride_padding));
-        }
         comptime std.debug.assert(@sizeOf(core.JSValue) == 2 * @sizeOf(usize));
         return @ptrCast(@alignCast(&self.native_caller));
     }
@@ -483,28 +473,16 @@ pub const Entry = struct {
 
     /// Budgets retained by callers retired through tail-frame reuse. Tail
     /// replacements are generic, non-leaf frames and never own the synthetic
-    /// native Function.call record. The default 16-byte JSValue representation
-    /// uses that dead slot; NaN boxing uses the 16-byte stride padding that is
-    /// otherwise occupied only by leaf resume words. Entry's measured layout
-    /// is unchanged in both representations.
+    /// native Function.call record, so that dead 16-byte slot carries the
+    /// budget and Entry's measured layout is unchanged.
     inline fn tailChainBudgetSlot(self: *Entry) *TailChainBudget {
         std.debug.assert(!self.teardown.has_native_caller);
         std.debug.assert(!self.teardown.empty_leaf);
         std.debug.assert(!self.teardown.exact_args_leaf);
         std.debug.assert(!self.isForwardedLeaf());
-        if (comptime core.value.nan_boxing) {
-            comptime std.debug.assert(@sizeOf(@TypeOf(self._stride_padding)) >= @sizeOf(TailChainBudget));
-            // An array-of-u8's type alignment remains one even when its field
-            // declaration carries stronger alignment. Prove the actual field
-            // address instead of rejecting that deliberately aligned storage.
-            comptime std.debug.assert(@alignOf(Entry) >= @alignOf(TailChainBudget));
-            comptime std.debug.assert(@offsetOf(Entry, "_stride_padding") % @alignOf(TailChainBudget) == 0);
-            return @ptrCast(@alignCast(&self._stride_padding));
-        } else {
-            comptime std.debug.assert(@sizeOf(core.JSValue) >= @sizeOf(TailChainBudget));
-            comptime std.debug.assert(@alignOf(core.JSValue) >= @alignOf(TailChainBudget));
-            return @ptrCast(@alignCast(&self.native_caller));
-        }
+        comptime std.debug.assert(@sizeOf(core.JSValue) >= @sizeOf(TailChainBudget));
+        comptime std.debug.assert(@alignOf(core.JSValue) >= @alignOf(TailChainBudget));
+        return @ptrCast(@alignCast(&self.native_caller));
     }
 
     /// Move post-call work from a retired frame into its tail-call replacement.
@@ -890,7 +868,7 @@ pub const Entry = struct {
 };
 
 comptime {
-    const base_size: usize = if (core.value.nan_boxing) 248 else 256;
+    const base_size: usize = 256;
     const expected_size = base_size + @sizeOf(vm_call.CallProfileGuard);
     if (@sizeOf(Entry) != expected_size) @compileError(std.fmt.comptimePrint(
         "inline Entry layout drifted: expected {d} bytes, found {d}",
@@ -4616,10 +4594,9 @@ pub const Machine = struct {
         // restore level into the target before retiring its values.
         var continuation = dying.takeContinuation();
         entry.adoptContinuation(&continuation);
-        // Generic setup leaves the dead native-caller slot unspecified. The
-        // default representation may overwrite it with TailChainBudget below;
-        // NaN boxing stores that budget in stride padding, so initialize the
-        // remaining field before moving the whole Entry into the reused slot.
+        // Generic setup leaves the dead native-caller slot unspecified, and the
+        // TailChainBudget below may overwrite it. Initialize it first so the
+        // whole Entry is defined before it moves into the reused slot.
         entry.native_caller = core.JSValue.undefinedValue();
         switch (budget) {
             .chain => {

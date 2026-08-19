@@ -3,14 +3,14 @@
 This repository prices file-level reorganization of hot-path code as a real
 performance tax. The rules below are the policy.
 
-> **Temporary suspension (owner ruling, 2026-08-19): the rule-2 zoo A/B
-> requirement is suspended.** Hot-path changes that cannot pass an identity
-> gate may land on the full test ladder alone. The identity gates and the
-> baseline registry remain in force as change-classification instruments
-> (run them and record whether machine code changed), but a failed identity
-> comparison is information, not a merge blocker, while this suspension
-> holds. Reinstate rule 2 before the next official zoo measurement campaign
-> re-baselines the headline.
+> **Rule 2 is back in force (owner ruling, 2026-08-19).** The suspension was
+> granted for the maintainability campaign, which has closed. The measuring
+> instrument changed with it: rule 2 is now a **bench-v8** A/B, not the
+> 15-benchmark zoo. bench-v8 is the published metric, so the gate protects the
+> number the project actually claims, and its serial protocol costs about an
+> hour per item instead of the zoo's half day — the cost that drove the gate
+> into suspension in the first place. The zoo stays as the broader attribution
+> instrument; it is not a merge gate.
 
 1. Maintainability refactors proceed by risk zone. COLD-zone work — docs,
    build graph, test harnesses, tools, dead-asset removal, and files outside
@@ -20,10 +20,24 @@ performance tax. The rules below are the policy.
    [maintainability-backlog.md](maintainability-backlog.md) and lands only
    item by item under rule 2.
 2. Any split, move, or rename that involves a hot-path file must pass a
-   15-item zoo A/B before merge: pad 0 only (the default layout), run under
-   the parallel-cluster protocol (`run_zoo_compare.py --parallel-clusters`,
-   frozen binaries, clean measurement field), median with no regression.
-   (Amended 2026-08-18 by owner ruling; previously ≥3 layout pads.)
+   bench-v8 A/B before merge: the candidate `zjs` against a frozen build of
+   the merge base, medians, no regression on the composite Score.
+
+   ```sh
+   flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
+     python3 tools/perf/bench_v8/run_benchv8_compare.py \
+       --zjs <candidate> --baseline <merge-base build> \
+       --samples 8 --output /tmp/refactor-ab.json
+   ```
+
+   `--baseline` (rather than `--qjs`) is what puts the tool in A/B mode; the
+   printed table and the JSON artifact then name the reference as `baseline`,
+   so the result cannot later be misread as a QuickJS comparison. Both
+   binaries must be frozen before the first sample and the measurement field
+   must be clean (no orphan builds, affinity pinned as the script enforces).
+   (Amended 2026-08-19 by owner ruling: the instrument moved from the 15-item
+   zoo to bench-v8 when bench-v8 became the published metric. Amended
+   2026-08-18: pad 0 only; previously ≥3 layout pads.)
 3. Pure test-harness and build-graph splits have no layout risk and are
    exempt from rule 2.
 4. Mechanical identity gates may substitute for the zoo A/B in rule 2,
@@ -42,32 +56,28 @@ performance tax. The rules below are the policy.
      tables may differ; machine code may not.
    A change that fails its gate is demoted to the backlog; it does not merge
    on a "probably fine" basis.
-   Compare **converged** builds only: the first incremental compile after a
-   merge or branch switch can emit a transiently different image that
-   converges once the root module is actually recompiled (`touch
-   src/internal_root.zig && zig build zjs`, or a clean cache). Observed
-   2026-08-18: a post-merge first build differed, the forced recompile was
-   bit-identical to the baseline.
    Identity-gate protocol under build bistability (tightened 2026-08-19 after
-   the compiler-rename verification):
+   the gates-audit verification):
    - Compare the **stripped whole image**, not `--only-section=.text`. This
      repository's linker script places the opcode handlers in a separate
      `.text.zjs.op_handlers` section, so a `.text`-only extraction silently
      skips the hot island; the stripped image also covers `.rodata` shifts
      from reflected names or embedded paths.
-   - One matching build proves only that the change **can** reproduce the
-     baseline image, not that it **always** does. The build is bistable
-     (known attractors: incremental-converged vs cold-cache). A pass
-     requires closing the attractor set: the changed source and the baseline
-     source must each produce byte-identical images **per attractor**
-     (converged rebuild vs clean-worktree cold build). A first-build
-     mismatch is not a failure verdict by itself — rebuild before
-     concluding, then close both attractors.
-   - **Baseline registry**: `reports/identity/baseline.json` records the
-     verified per-attractor image hashes for the current baseline commit.
-     A gate check builds the candidate and compares against the registry;
-     do not rebuild the baseline each time. Refresh the registry when main
-     moves.
+   - **The build reaches more than one image from one source, and the build
+     protocol does not decide which.** Measured 2026-08-19 on 711cbfc6: three
+     incremental rebuilds of the *unmodified* tree produced two different
+     images, in a different order than three rebuilds of the changed tree
+     produced the same two. So a single build — matching or not — is not a
+     verdict in either direction.
+   - A pass is therefore a **set** comparison, not a hash comparison: sample
+     at least 3 incremental rebuilds per source plus one cold-cache build,
+     and require that the candidate lands only inside the set of images the
+     baseline source produces. A candidate image outside that set is a
+     failure; a candidate that reproduces the set is machine-code-identical.
+   - **Baseline registry**: `reports/identity/baseline.json` records that
+     admissible set for the current baseline commit. A gate check samples the
+     candidate and compares against the registry; do not re-sample the
+     baseline each time. Refresh the registry when main moves.
    - **Batch tier** (owner-approved 2026-08-19): mechanical rename/alias
      campaigns may accumulate on a branch with per-change test evidence
      only, then pass **one** identity closure for the whole batch before
@@ -82,5 +92,5 @@ pointer perturbed Zig 0.16 whole-program native layout and caused a crypto
 regression, even though bytecode and allocation streams stayed identical.
 Benchmark scores in this repository are sensitive to file-level
 reorganization. "Maintainability refactors" carry a real performance tax here
-and must be priced — which is what the risk zones, the zoo A/B, and the
+and must be priced — which is what the risk zones, the bench-v8 A/B, and the
 identity gates do.

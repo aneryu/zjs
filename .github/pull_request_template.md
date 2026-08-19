@@ -16,8 +16,8 @@
 - [ ] `git diff --check`
 - [ ] Relevant test262 slice:
 - [ ] `zig build engine-production-gate --summary all` for phase-close semantic/bytecode evidence.
-- [ ] Triggered only if the changed surface needs them: ReleaseSafe,
-      `test-oom`, `test-altrepr`, force-GC, ownership-audit, perf.
+- [ ] Triggered only if the changed surface needs them: ReleaseSafe, force-GC,
+      perf. (`test-oom` and the ownership-audit build run nightly.)
 - [ ] Perf report paths if this change affects performance:
 
 ## Rollback Notes
