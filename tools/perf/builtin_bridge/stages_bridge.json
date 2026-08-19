@@ -59,7 +59,7 @@
      "hi": 640
     },
     {
-     "file": "src/exec/vm_exception_ops.zig",
+     "file": "src/exec/exception_ops.zig",
      "lo": 380,
      "hi": 400
     },
