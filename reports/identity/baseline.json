@@ -1,7 +1,7 @@
 {
   "comment": "Identity-gate baseline registry (refactor-policy rule 4). Stripped whole-image md5 of the ReleaseFast zjs. The build is bistable: a given source tree reaches more than one image, and WHICH one is not a function of the build protocol. So this records the SET of images the baseline source is known to produce; a candidate passes when repeated builds land inside this set and never outside it.",
   "target": "aarch64-linux (maintainer measurement machine)",
-  "baseline_commit": "2a6998ef",
+  "baseline_commit": "0df866e6",
   "verified": "2026-08-19",
   "admissible_images": [
     "b79373c2ce00e9dc7213c9c55c4af2e8",
