@@ -1,16 +1,13 @@
 {
   "comment": "Identity-gate baseline registry (refactor-policy rule 4). Stripped whole-image md5 of the ReleaseFast zjs, per build attractor. Update when main moves; a gate check builds the candidate once and compares against these instead of rebuilding the baseline.",
   "target": "aarch64-linux (maintainer measurement machine)",
-  "baseline_commit": "b325d7b1",
+  "baseline_commit": "03328070",
   "verified": "2026-08-19",
   "attractors": {
-    "incremental_converged": "e93b69e8427370d0e283fc01692bb44a",
-    "cold_cache": "5df9578f0e63c7c25912f4faf211d117"
+    "incremental_converged": "efb32e60f0b76d06a5ec7d2c91b0b2f3",
+    "cold_cache": "efb32e60f0b76d06a5ec7d2c91b0b2f3"
   },
-  "pending_candidate": {
-    "comment": "2026-08-19 naming campaign + F-5/F-6 dead-code deletion + H4/H5 dedup + qjs-prefix removal (all landed under the zoo-gate suspension). Naming-only state measured 223fc498(A')/d43abd31(B'); intermediate post-dedup e2d49022; latest tree below. Re-close both attractors and promote to `attractors` when the campaign merges.",
-    "post_qjs_strip": "efb32e60f0b76d06a5ec7d2c91b0b2f3"
-  },
+  "notes": "Both attractors measured identical on this tree (the historical bistability collapsed to one image here; earlier trees had two). Prior lineage: b325d7b1 = e93b69e8(incremental)/5df9578f(cold); naming-only = 223fc498/d43abd31; post-dedup = e2d49022.",
   "protocol": {
     "incremental_converged": "zig build zjs; touch src/internal_root.zig; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
     "cold_cache": "copy tree without .zig-cache/zig-out, zig build zjs cold, strip, md5sum"
